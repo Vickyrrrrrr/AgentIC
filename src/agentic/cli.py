@@ -196,6 +196,12 @@ endmodule
     if os.path.exists(template_config) and not os.path.exists(new_config):
         with open(template_config, 'r') as f:
             content = f.read().replace("simple_counter", name)
+        # Fix: Ensure we only synthesize the design, not the testbench
+        if "[glob $::env(DESIGN_DIR)/src/*.v]" in content:
+            content = content.replace(
+                "[glob $::env(DESIGN_DIR)/src/*.v]", 
+                f'"$::env(DESIGN_DIR)/src/{name}.v"'
+            )
         with open(new_config, 'w') as f:
             f.write(content)
         console.print(f"  ✓ Config created from template")

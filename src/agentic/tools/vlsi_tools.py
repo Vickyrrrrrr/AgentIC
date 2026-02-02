@@ -104,6 +104,7 @@ def run_openlane(design_name):
         "-v", f"{PDK_ROOT}:{PDK_ROOT}",
         "-e", f"PDK_ROOT={PDK_ROOT}",
         "-e", "PDK=sky130A",
+        "-e", "PWD=/openlane",
         OPENLANE_IMAGE,
         "./flow.tcl", "-design", design_name, "-tag", "agentrun", "-overwrite"
     ]

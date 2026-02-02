@@ -5,3 +5,6 @@ typer
 rich
 streamlit
 pandas
+streamlit-option-menu
+plotly
+streamlit-ace
