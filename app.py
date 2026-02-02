@@ -138,6 +138,13 @@ with col_h1:
 OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 
+# Deployment Fallback: Use local design/ folder if standard OpenLane path is missing
+if not os.path.exists(DESIGNS_DIR):
+    local_designs = os.path.join(os.getcwd(), "designs")
+    if os.path.exists(local_designs):
+        OPENLANE_ROOT = os.getcwd()
+        DESIGNS_DIR = local_designs
+
 # Sidebar Navigation
 with st.sidebar:
     selected_page = option_menu(
