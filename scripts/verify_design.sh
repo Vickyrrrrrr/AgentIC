@@ -8,7 +8,7 @@ if [ -z "$1" ]; then
 fi
 
 DESIGN=$1
-OPENLANE_ROOT=~/OpenLane
+OPENLANE_ROOT="${OPENLANE_ROOT:-$HOME/OpenLane}"
 DESIGN_DIR=$OPENLANE_ROOT/designs/$DESIGN
 
 echo "========================================"

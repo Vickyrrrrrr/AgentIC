@@ -1,14 +1,12 @@
 # agents/designer.py
 from crewai import Agent
-from ..config import LLM_MODEL
 
-def get_designer_agent():
+def get_designer_agent(llm, goal, verbose=False):
     return Agent(
         role='VLSI Design Engineer',
-        goal='Create optimized Verilog for {design_input}',
-        backstory='Specialist in ECE from Lucknow University. Expert in Sky130 PDK.',
-        # IMPORTANT: Use the "ollama/" prefix so CrewAI doesn't look for OpenAI
-        llm=LLM_MODEL, 
-        verbose=True,
+        goal=goal,
+        backstory='Specialist in ECE from Lucknow University. Expert in digital design with Sky130 PDK experience.',
+        llm=llm, 
+        verbose=verbose,
         allow_delegation=False
     )

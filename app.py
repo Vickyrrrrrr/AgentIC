@@ -412,7 +412,7 @@ elif selected_page == "Design Studio":
                     cmd = ["python3", "AgentIC/main.py", "build", "--name", name.strip().replace(" ", "_"), "--desc", desc]
                     
                     with st.status("🤖 AgentIC is planning silicon...", expanded=True) as status:
-                        st.write("1. Initializing DeepSeek-R1 Agent...")
+                        st.write("1. Initializing AI Agent...")
                         st.write("2. Generating RTL Logic...")
                         
                         try:
@@ -490,7 +490,7 @@ elif selected_page == "Design Studio":
     st.markdown(f"""
     <div class="terminal-window">
     [SYSTEM] Initialized AgentIC Kernel v2.0.<br>
-    [INFO] DeepSeek-R1 Model Loaded (Quantized).<br>
+    [INFO] AI Model Loaded.<br>
     [INFO] Connected to OpenLane Docker Container.<br>
     <span style="color:#00D1FF">vickynishad@agentic:~$</span> Waiting for command...
     </div>
@@ -845,6 +845,6 @@ elif selected_page == "Fabrication":
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #555; font-size: 12px;">
-    AGENTIC FRAMEWORK © 2026 | POWERED BY DEEPSEEK & OPENLANE
+    AGENTIC FRAMEWORK © 2026 | POWERED BY LLM & OPENLANE
 </div>
 """, unsafe_allow_html=True)
