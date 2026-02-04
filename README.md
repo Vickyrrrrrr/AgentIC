@@ -4,7 +4,7 @@
 
 **AgentIC** is an automated, sovereign AI Agent framework that transforms natural language descriptions directly into industry-standard physical chip layouts (GDSII). Designed with the **"Atmanirbhar" (Self-Reliant)** philosophy, it empowers engineers to design secure, custom silicon locally, reducing dependency on foreign EDA tools and supply chains.
 
-It acts as a **"Text-to-Silicon" Compiler**, orchestrating a crew of specialized AI agents to write SystemVerilog RTL, verify it with self-generated testbenches, and harden the design using the OpenLane open-source flow.
+It acts as a **"Text-to-Silicon" Compiler**, orchestrating a crew of specialized AI agents (powered by **Qwen Coder**, Llama 3, etc.) to write SystemVerilog RTL, verify it with self-generated testbenches, and harden the design using the OpenLane open-source flow.
 
 ---
 
@@ -31,6 +31,7 @@ In the context of national defense and critical infrastructure, reliance on clos
     *   **Testbench Agent**: Writes a comprehensive self-checking testbench (`_tb.v`).
     *   **Verifier Agent**: Analyzes simulation logs (Icarus Verilog).
 *   **Auto-Fix**: If the simulation fails, the agents analyze the error, rewrite the RTL/Testbench, and retry automatically until `TEST PASSED`.
+*   **Robust Fallback**: Automatically switches between models (e.g., from Cloud to Local/Qwen) if one provider is unavailable or fails.
 
 ### 🏭 Physical Design Automation
 *   **One-Click Hardening**: Seamless integration with **OpenLane**.
@@ -72,7 +73,7 @@ In the context of national defense and critical infrastructure, reliance on clos
 4.  **Configure Environment**
     Create a `.env` file in the root directory:
     ```env
-    # Choose your provider (NVIDIA, GROQ, or OPENAI)
+    # Choose your provider (NVIDIA, GROQ, orQwen Coder via  OPENAI)
     # Leave empty if using Local LLM (e.g., Ollama)
     OPENAI_API_KEY=sk-...
     NVIDIA_API_KEY=nvapi-...
