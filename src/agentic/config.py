@@ -16,9 +16,9 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 
 # NVIDIA NIM Configuration (Primary)
 NVIDIA_CONFIG = {
-    "model": "openai/qwen/qwen3-coder-480b-a35b-instruct",
-    "base_url": "https://integrate.api.nvidia.com/v1",
-    "api_key": "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"
+    "model": os.environ.get("NVIDIA_MODEL", "openai/qwen/qwen3-coder-480b-a35b-instruct"),
+    "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+    "api_key": os.environ.get("NVIDIA_API_KEY", "")
 }
 
 # Groq Configuration (Fallback)
