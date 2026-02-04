@@ -4,7 +4,7 @@
 **AgentIC: Autonomous Sovereign Silicon Design Framework for Defense Applications**
 
 ## Abstract
-Modern defense systems are critically dependent on advanced semiconductors. However, reliance on foreign EDA tools and fabrication supply chains introduces severe risks, including Hardware Trojans, backdoors, and strategic denial of technology. Validating the "Trust" in hardware is expensive and time-consuming. **AgentIC** is a novel, AI-driven "Text-to-Silicon" framework designed to democratize and accelerate the design of secure, sovereign silicon. By leveraging localized Large Language Models (LLMs) and open-source EDA tools (OpenLane), AgentIC automates the RTL-to-GDSII flow, ensuring design secrecy and reducing the "Time-to-Tactical-Edge" for custom hardware solutions.
+Modern defense systems are critically dependent on advanced semiconductors. However, reliance on foreign EDA tools and fabrication supply chains introduces severe risks, including Hardware Trojans, backdoors, and strategic denial of technology. Validating the "Trust" in hardware is expensive and time-consuming. **AgentIC** is a novel, AI-driven "Text-to-Silicon" framework designed to democratize and accelerate the design of secure, sovereign silicon. By leveraging specialized coding Large Language Models (LLMs) like **Qwen Coder** and open-source EDA tools (OpenLane), AgentIC automates the RTL-to-GDSII flow, ensuring design secrecy and reducing the "Time-to-Tactical-Edge" for custom hardware solutions.
 
 ---
 
@@ -31,7 +31,7 @@ AgentIC serves as a **Sovereign Design Companion**, allowing defense engineers t
 ### Key Pillars:
 1.  **AI-Agent Crew:** Specialized AI agents act as the Design Team (Architect, RTL Coder, Verification Engineer).
 2.  **Self-Correction:** Closed-loop feedback mechanism where agents fix their own compilation and simulation errors.
-3.  **Local & Secure:** Support for on-premises LLM deployment (e.g., Llama 3 on air-gapped servers) ensures **ZERO** data leakage.
+3.  **Local & Resilient:** Support for on-premises LLM deployment (e.g., Qwen Coder on air-gapped servers) with **Robust Fallback** (Cloud → Local) to ensure operational continuity.
 4.  **Open Source Flow:** output is compatible with the OpenLane/SkyWater 130nm PDK, ensuring a fully auditable toolchain.
 
 ---
@@ -49,7 +49,7 @@ AgentIC serves as a **Sovereign Design Companion**, allowing defense engineers t
 5.  **Physical Design:** Automates OpenLane scripts to generate GDSII.
 
 ### Sovereign Tech Stack
-*   **Logic:** Custom AI Agents (CrewAI/LangChain)
+*   **Logic:** Custom AI Agents powered by **Qwen Coder** (Primary) / Llama 3 (Backup)
 *   **Simulation:** Icarus Verilog (Open Source)
 *   **Layout:** OpenLane (Open Source)
 *   **PDK:** SkyWater 130nm (Open Google/SkyWater)
@@ -93,5 +93,5 @@ AgentIC demonstrates that Generative AI can bridge the gap between secure requir
 
 ## References
 1.  *The OpenLane Project Documentation*
-2.  *DeepSeek / Llama 3 Technical Reports*
+2.  *Qwen Coder / Llama 3 Technical Reports*
 3.  *Defense Advanced Research Projects Agency (DARPA) POSH Program*
