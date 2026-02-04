@@ -76,11 +76,11 @@ else
     LVS_RPT=$(find $LATEST_RUN -name "*lvs.log" | head -1)
     if [ -f "$LVS_RPT" ]; then
         echo "    --- LVS Report ($(basename $LVS_RPT)) ---"
-        if grep -q "Total errors = 0" $LVS_RPT; then
+        if grep -q "Total errors = 0" $LVS_RPT || grep -q "Circuits match uniquely" $LVS_RPT; then
             echo "    [PASS] LVS Clean. Layout matches Schematic."
         else
             echo "    [FAIL] LVS Mismatch."
-             grep "Total errors" $LVS_RPT
+            tail -n 3 $LVS_RPT
         fi
     else
          echo "    [WARNING] LVS Report not found."

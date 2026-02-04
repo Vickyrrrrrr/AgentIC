@@ -19,15 +19,19 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from crewai import Agent, Task, Crew, LLM
 
 # Local imports
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY
+from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, GROQ_CONFIG
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
+from .agents.verifier import get_verification_agent, get_error_analyst_agent
 from .tools.vlsi_tools import (
-    write_verilog, 
+    write_verilog,
+    write_config, 
     run_syntax_check,
+    read_file_content,
     run_simulation, 
     run_openlane,
-    run_verification
+    run_verification,
+    SecurityCheck
 )
 
 # --- INITIALIZE ---
@@ -36,7 +40,26 @@ console = Console()
 
 # Setup Brain
 def get_llm():
-    """Returns the LLM instance for agents."""
+    """Returns the LLM instance for agents, with NVIDIA -> Groq fallback."""
+    # 1. Try NVIDIA (Primary)
+    try:
+        return LLM(
+            model=NVIDIA_CONFIG["model"],
+            base_url=NVIDIA_CONFIG["base_url"],
+            api_key=NVIDIA_CONFIG["api_key"]
+        )
+    except Exception as e:
+        console.print(f"[yellow]⚠ NVIDIA Init failed: {e}. Falling back to Groq...[/yellow]")
+    
+    # 2. Fallback to Groq if available
+    if GROQ_CONFIG["api_key"]:
+        return LLM(
+            model=GROQ_CONFIG["model"],
+            base_url=GROQ_CONFIG["base_url"],
+            api_key=GROQ_CONFIG["api_key"]
+        )
+    
+    # 3. Last Resort: Default/Local
     return LLM(
         model=LLM_MODEL,
         base_url=LLM_BASE_URL,
@@ -102,10 +125,21 @@ def harden(
              console.print(f"[bold red]✗ Config not found and template missing.[/bold red]")
              raise typer.Exit(1)
     
-    console.print("  [dim]Running OpenLane (this may take 5-10 minutes)...[/dim]")
-    ol_success, ol_result = run_openlane(name)
+    # Ask for background execution
+    run_bg = typer.confirm("OpenLane hardening can take 10-30+ minutes. Run in background?", default=True)
+    
+    if run_bg:
+        console.print("  [dim]Launching background process...[/dim]")
+    else:
+        console.print("  [dim]Running OpenLane (this may take 10-30 minutes)...[/dim]")
+
+    ol_success, ol_result = run_openlane(name, background=run_bg)
     
     if ol_success:
+        if run_bg:
+             console.print(f"  ✓ [green]{ol_result}[/green]")
+             console.print(f"  [dim]Monitor logs: tail -f {OPENLANE_ROOT}/designs/{name}/harden.log[/dim]")
+             return
         console.print(f"  ✓ GDSII generated: [green]{ol_result}[/green]")
     else:
         console.print(f"[bold red]✗ OpenLane failed[/bold red]")
@@ -117,7 +151,7 @@ def harden(
 def build(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
     desc: str = typer.Option(..., "--desc", "-d", help="Natural language description"),
-    max_retries: int = typer.Option(2, "--max-retries", "-r", min=0, help="Max auto-fix retries for RTL/TB/sim failures"),
+    max_retries: int = typer.Option(5, "--max-retries", "-r", min=0, help="Max auto-fix retries for RTL/TB/sim failures"),
     skip_openlane: bool = typer.Option(False, "--skip-openlane", help="Stop after simulation (no RTL→GDSII hardening)"),
     show_thinking: bool = typer.Option(True, "--show-thinking", help="Print DeepSeek <think> reasoning for each generation/fix step")
 ):
@@ -143,16 +177,18 @@ def build(
         console.print(Panel("\n\n".join(cleaned), title=f"🧠 DeepSeek thinking — {step}", expand=False))
 
     def _fix_with_llm(agent_role: str, goal: str, prompt: str) -> str:
+        # Give the agent TOOLS to self-correct
         fix_agent = Agent(
             role=agent_role,
             goal=goal,
-            backstory='Expert in SystemVerilog and ASIC flows (Sky130/OpenLane).',
+            backstory='Expert in SystemVerilog and ASIC flows (Sky130/OpenLane). I fix compilation errors by analyzing files and checking syntax.',
             llm=llm,
-            verbose=show_thinking
+            verbose=show_thinking,
+            tools=[run_syntax_check, read_file_content]
         )
         
         # Add explicit instruction to avoid dynamic variable names in loops
-        enhanced_prompt = prompt + "\n\nCRITICAL RULE: Do NOT use variable names like 'input_i' or 'wire_j' inside loops. SystemVerilog does not support dynamic variable names. Use arrays (e.g., input[i]) or generate blocks instead."
+        enhanced_prompt = prompt + "\n\nCRITICAL STRATEGY: Use the 'Syntax Checker' tool to verify your code before answering. If you need to check port definitions in other files, use 'File Reader'.\nCRITICAL VERILOG RULE: Do NOT use variable names like 'input_i' or 'wire_j' inside loops."
         
         fix_task = Task(
             description=enhanced_prompt,
@@ -192,6 +228,8 @@ CRITICAL VERILOG RULES (STRICTLY FOLLOW OR COMPILATION WILL FAIL):
      - Use `always_ff @(posedge clk or negedge rst_n)` ONLY for registers/flip-flops.
      - Use `assign` statements for renaming wires or simple math (e.g. `assign opcode = ir[6:0];`).
      - Use `always_comb` ONLY for complex muxing/Next-State-Logic.
+   - **ENUM WIDTHS**: When defining `typedef enum logic [W-1:0] { ... } name_t`, ensure `W` is large enough to hold all enum values. 
+     - Example: 5 states require `logic [2:0]` (3 bits), NOT `logic [1:0]`.
    - **NO CONSTANT SELECTS IN ALWAYS**: Do NOT do `reg_file[ ir[19:15] ]` inside an `always` block. 
      - CORRECT: 
        ```verilog
@@ -242,6 +280,13 @@ endmodule
     rtl_raw = str(rtl_result)
     log_thinking(rtl_raw, step="RTL generation")
 
+    # [1.5] Security Audit
+    is_safe, msg = SecurityCheck(rtl_raw)
+    if not is_safe:
+        console.print(f"[bold red]🛑 SECURITY AUDIT FAILED[/bold red]: {msg}")
+        raise typer.Exit(1)
+    console.print(f"  ✓ Logic Security Check: [green]{msg}[/green]")
+
     rtl_path = write_verilog(name, rtl_raw)
     console.print(f"  ✓ RTL saved to: [green]{rtl_path}[/green]")
 
@@ -260,6 +305,7 @@ CRITICAL FIXING RULES:
    - Good: `wire [4:0] idx = addr[4:0]; always_comb x = reg_file[idx];`
 3. **Loop Syntax**: Use `integer i;` declared outside, and `for(i=0;...)`.
 4. **Logic separation**: Use `always_ff` for registers, `assign` for simple logic.
+5. **Bit Width Mismatches**: Check if you are assigning a value larger than the signal width (e.g. `enum [1:0]` with 5 items). Increase the width if necessary (e.g. `enum [2:0]`).
 
 CRITICAL REQUIREMENTS:
 - Keep module name exactly "{name}"
@@ -286,12 +332,38 @@ Current code:
         console.print(f"[bold red]✗ SYNTAX ERROR:[/bold red]\n{errors}")
         raise typer.Exit(1)
     console.print("  ✓ Verilog syntax is [green]valid[/green]")
-    
-    # ===== STEP 3: Generate Testbench (self-checking) =====
-    console.print("\n[bold yellow]━━━ Step 3/5: Generating Testbench ━━━[/bold yellow]")
 
+    # ===== STEP 2.5: Formal Assertions (SVA) =====
+    console.print("\n[bold yellow]━━━ Step 2.5: Formal Verification Setup ━━━[/bold yellow]")
+    
     with open(rtl_path, 'r') as f:
         rtl_code = f.read()
+
+    verify_agent = get_verification_agent(llm, verbose=show_thinking)
+    sva_task = Task(
+        description=f'''Analyze this RTL and generate a separate SystemVerilog Assertion (SVA) module (`{name}_sva.sv`) to formally verify behavior.
+
+Rules:
+- Module name: `{name}_sva`
+- Bind to target module using `bind {name} {name}_sva inst_sva (.*);`
+- Use `property` and `assert property (@(posedge clk) ...)` 
+- Check resets, state transitions, and critical safety logic.
+
+RTL:
+```verilog
+{rtl_code}
+```
+''',
+        expected_output='SVA module code in markdown fence',
+        agent=verify_agent
+    )
+    # Optional SVA step (non-blocking for now as full formal tools aren't in this Env)
+    # In production, we would run SymbiYosys here.
+    # sva_result = Crew(agents=[verify_agent], tasks=[sva_task]).kickoff()
+    # console.print("  ✓ SVA Assertions generated (Formal verification skipped in MVP)")
+
+    # ===== STEP 3: Generate Testbench (self-checking) =====
+    console.print("\n[bold yellow]━━━ Step 3/5: Generating Testbench ━━━[/bold yellow]")
 
     tb_agent = get_testbench_agent(
         llm=llm,
@@ -383,9 +455,63 @@ Current testbench:
             sim_success, sim_output = run_simulation(name)
             continue
 
-        # 2) If TB ran but failed logically, fix RTL to satisfy TB.
+        # 2) Logic or Runtime Errors
         if "TEST FAILED" in sim_output_text or "TEST PASSED" not in sim_output_text:
-            fix_rtl_prompt = f'''The simulation did not pass. Fix the RTL (module "{name}") so that the testbench passes.
+            
+            # AI-Based Error Classification (Production Grade)
+            analyst = get_error_analyst_agent(llm, verbose=False)
+            analysis_task = Task(
+                description=f'''Analyze this Verification Failure.
+                
+Error Log:
+{sim_output_text}
+
+Is this a:
+A) TESTBENCH_ERROR (Syntax, $monitor usage, race condition, compilation fail)
+B) RTL_LOGIC_ERROR (Mismatch, Wrong State, Functional Failure)
+
+Reply with ONLY "A" or "B".''',
+                expected_output='Single letter A or B',
+                agent=analyst
+            )
+            analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
+            
+            is_tb_issue = "A" in analysis
+
+            if is_tb_issue:
+                 console.print("[yellow]  -> [Analyst] Root Cause: Testbench Error. Fixing TB...[/yellow]")
+                 fix_tb_logic_prompt = f'''Fix the Testbench logic/syntax. The simulation failed or generated runtime errors.
+                 
+CRITICAL FIXING RULES:
+1. **$monitor Limitations**: Do NOT use complex logic (ternary operators, function calls) inside $monitor. Move them to `assign` wires first.
+2. **Race Conditions**: If "TEST FAILED" happens immediately, add delays (`#1`) before sampling or driving signals.
+3. **Format**: Return ONLY corrected testbench code inside ```verilog fences.
+
+Simulation Error/Output:
+{sim_output_text}
+
+Current RTL (Reference):
+```verilog
+{open(rtl_path,'r').read()}
+```
+
+Current Testbench (To Fix):
+```verilog
+{open(tb_path,'r').read()}
+```
+'''
+                 fixed_tb = _fix_with_llm(
+                    agent_role='Verification Engineer',
+                    goal=f'Fix testbench logic for {name}',
+                    prompt=fix_tb_logic_prompt
+                 )
+                 tb_path = write_verilog(name, fixed_tb, is_testbench=True)
+                 sim_success, sim_output = run_simulation(name)
+                 continue
+
+            else:
+                console.print("[yellow]  -> Detecting Design Logic mismatch. Fixing RTL...[/yellow]")
+                fix_rtl_prompt = f'''The simulation did not pass. Fix the RTL (module "{name}") so that the testbench passes.
 
 CRITICAL REQUIREMENTS:
 - Keep module name exactly "{name}"
@@ -406,20 +532,20 @@ Current RTL:
 {open(rtl_path,'r').read()}
 ```
 '''
-            fixed_rtl = _fix_with_llm(
-                agent_role='VLSI Design Engineer',
-                goal=f'Fix RTL behavior for {name}',
-                prompt=fix_rtl_prompt
-            )
-            rtl_path = write_verilog(name, fixed_rtl)
+                fixed_rtl = _fix_with_llm(
+                    agent_role='VLSI Design Engineer',
+                    goal=f'Fix RTL behavior for {name}',
+                    prompt=fix_rtl_prompt
+                )
+                rtl_path = write_verilog(name, fixed_rtl)
 
-            success, errors = run_syntax_check(rtl_path)
-            if not success:
-                sim_output = f"RTL fix introduced syntax error:\n{errors}"
+                success, errors = run_syntax_check(rtl_path)
+                if not success:
+                    sim_output = f"RTL fix introduced syntax error:\n{errors}"
+                    continue
+
+                sim_success, sim_output = run_simulation(name)
                 continue
-
-            sim_success, sim_output = run_simulation(name)
-            continue
 
         # Default: improve TB robustness
         fix_tb_prompt = f'''Improve this Verilog-2005 testbench so it robustly checks the design and prints TEST PASSED/TEST FAILED.
@@ -461,40 +587,77 @@ Current testbench:
         console.print("\n[bold green]✓ Stopped after simulation (--skip-openlane).[/bold green]")
         return
 
-    # ===== STEP 5: Run OpenLane =====
-    console.print("\n[bold yellow]━━━ Step 5/5: Running OpenLane (RTL → GDSII) ━━━[/bold yellow]")
-    console.print("  [dim]This may take 5-10 minutes...[/dim]")
+    # ===== STEP 5: Generate Config =====
+    console.print("\n[bold yellow]━━━ Step 5/6: Generating OpenLane Config ━━━[/bold yellow]")
     
-    # Create/overwrite config.tcl from template (ensure RTL-only synthesis)
-    template_config = f"{OPENLANE_ROOT}/designs/simple_counter/config.tcl"
-    new_config = f"{OPENLANE_ROOT}/designs/{name}/config.tcl"
+    config_agent = get_designer_agent(
+        llm=llm, 
+        goal="Configure OpenLane flow", 
+        verbose=show_thinking
+    )
+    
+    config_task = Task(
+        description=f'''Create the OpenLane `config.tcl` for the design "{name}".
+        
+CRITICAL SETTINGS:
+1. **Design Name**: `set ::env(DESIGN_NAME) "{name}"`
+2. **Source File**: `set ::env(VERILOG_FILES) "$::env(DESIGN_DIR)/src/{name}.v"`
+3. **Clock**:
+   - Check the RTL to find the clock port (usually `clk`, `clock`, or `clk_i`).
+   - `set ::env(CLOCK_PORT) "YOUR_CLOCK_PORT"`
+   - `set ::env(CLOCK_PERIOD) "10.0"`
+4. **Sizing**:
+   - `set ::env(FP_SIZING) relative`
+   - `set ::env(FP_CORE_UTIL) 40`
+   - `set ::env(PL_TARGET_DENSITY) 0.5`
+5. **PDK**:
+   - `set ::env(PDK) "sky130A"`
+   - `set ::env(STD_CELL_LIBRARY) "sky130_fd_sc_hd"`
+   - `set ::env(VDD_NETS) [list {{vccd1}}]`
+   - `set ::env(GND_NETS) [list {{vssd1}}]`
 
-    if os.path.exists(template_config):
-        with open(template_config, 'r') as f:
-            content = f.read().replace("simple_counter", name)
+Output Format:
+Return ONLY valid TCL commands inside ```tcl fences.
+''',
+        expected_output="OpenLane config.tcl content",
+        agent=config_agent
+    )
+    
+    with console.status("[cyan]AI is configuring the backend flow...[/cyan]"):
+        config_result = str(Crew(agents=[config_agent], tasks=[config_task]).kickoff())
+    
+    config_path = write_config(name, config_result)
+    console.print(f"  ✓ Config saved to: [green]{config_path}[/green]")
+    log_thinking(config_result, step="Config generation")
 
-        # Ensure we only synthesize the RTL, not the testbench.
-        # Handle common template patterns.
-        content = content.replace(
-            "set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]",
-            f"set ::env(VERILOG_FILES) \"$::env(DESIGN_DIR)/src/{name}.v\""
-        )
-        content = content.replace(
-            "set ::env(VERILOG_FILES) \"$::env(DESIGN_DIR)/src/simple_counter.v\"",
-            f"set ::env(VERILOG_FILES) \"$::env(DESIGN_DIR)/src/{name}.v\""
-        )
-
-        os.makedirs(os.path.dirname(new_config), exist_ok=True)
-        with open(new_config, 'w') as f:
-            f.write(content)
-        console.print(f"  ✓ Config written: [green]{new_config}[/green]")
+    # ===== STEP 6: Run OpenLane =====
+    console.print("\n[bold yellow]━━━ Step 6/6: Running OpenLane (RTL → GDSII) ━━━[/bold yellow]")
+    
+    run_bg = typer.confirm("OpenLane hardening can take 10-30+ minutes. Run in background?", default=True)
+    
+    if run_bg:
+         console.print("  [dim]Launching background process...[/dim]")
     else:
-        console.print("  [bold red]✗ Missing OpenLane template config (designs/simple_counter/config.tcl)[/bold red]")
-        raise typer.Exit(1)
-    
-    ol_success, ol_result = run_openlane(name)
+         console.print("  [dim]Running OpenLane (this may take 10-30 minutes)...[/dim]")
+
+    ol_success, ol_result = run_openlane(name, background=run_bg)
     
     if ol_success:
+        if run_bg:
+            console.print(f"  ✓ [green]{ol_result}[/green]")
+            console.print(f"  [dim]Monitor with: tail -f {OPENLANE_ROOT}/designs/{name}/harden.log[/dim]")
+            
+            # Print Final Summary immediately for BG case
+            console.print("\n" + "="*50)
+            console.print(Panel(
+                f"[bold green]✓ CHIP GENERATION INITIATED![/bold green]\n\n"
+                f"Design: [cyan]{name}[/cyan]\n"
+                f"Status: [yellow]Hardening in background[/yellow]\n\n"
+                f"Log file: {OPENLANE_ROOT}/designs/{name}/harden.log",
+                title="🚀 Background Job Started"
+            ))
+            return
+
         console.print(f"  ✓ GDSII generated: [green]{ol_result}[/green]")
     else:
         console.print(f"[bold red]✗ OpenLane failed[/bold red]")

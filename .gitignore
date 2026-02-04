@@ -38,5 +38,6 @@ Thumbs.db
 
 # OpenLane outputs (if copied here)
 # Uncomment the line below if you don't want to version control large GDS files
-# *.gds
+*.gds
 temp_*.svg
+designs/*/src/sim

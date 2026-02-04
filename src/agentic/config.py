@@ -13,12 +13,33 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 # To use GROQ (Free Cloud):
 # 1. Get Key from https://console.groq.com
 # 2. export GROQ_API_KEY="gsk_..."
-# 3. export LLM_MODEL="openai/llama-3.3-70b-versatile" (or similar)
-# 4. export LLM_BASE_URL="https://api.groq.com/openai/v1"
 
-LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/deepseek-r1")
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434")
-LLM_API_KEY = os.environ.get("GROQ_API_KEY", os.environ.get("OPENAI_API_KEY", "NA"))
+# NVIDIA NIM Configuration (Primary)
+NVIDIA_CONFIG = {
+    "model": "openai/qwen/qwen3-coder-480b-a35b-instruct",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key": "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"
+}
+
+# Groq Configuration (Fallback)
+GROQ_CONFIG = {
+    "model": "openai/llama-3.3-70b-versatile",
+    "base_url": "https://api.groq.com/openai/v1",
+    "api_key": os.environ.get("GROQ_API_KEY", "")
+}
+
+# Local/Default Configuration
+LOCAL_CONFIG = {
+    "model": os.environ.get("LLM_MODEL", "ollama/deepseek-r1"),
+    "base_url": os.environ.get("LLM_BASE_URL", "http://localhost:11434"),
+    "api_key": os.environ.get("LLM_API_KEY", "NA")
+}
+
+# Expose 'active' config variables for backward compatibility if needed, 
+# but preferably uses will import the CONFIG dicts or use the get_llm logic.
+LLM_MODEL = LOCAL_CONFIG["model"]
+LLM_BASE_URL = LOCAL_CONFIG["base_url"]
+LLM_API_KEY = LOCAL_CONFIG["api_key"]
 
 # Tool Settings
 PDK_ROOT = os.environ.get('PDK_ROOT', os.path.expanduser('~/.ciel'))

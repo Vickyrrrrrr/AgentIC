@@ -15,6 +15,20 @@
     *   **Auto-Fix Loop**: If compilation or simulation fails, the agents read the error logs and patch the code automatically.
 *   **Physical Design (Hardening)**: Integrates directly with [OpenLane](https://github.com/The-OpenROAD-Project/OpenLane) to generate GDSII layouts.
 
+## 🖥️ Web Interface (UI)
+
+AgentIC includes a futuristic "Atmanirbhar" Dashboard for monitoring designs, benchmarking against market standards, and analyzing GDSII layouts.
+
+```bash
+streamlit run AgentIC/app.py
+```
+
+Features:
+*   **Sci-Fi Themed Dashboard**: Premium "Deep Void" visualization.
+*   **Market Benchmarking**: Compare your design's Cost, Power, and Area against imported chips (Nvidia, STM32, etc.).
+*   **Design Studio**: Interactive RTL editor and AI planner.
+*   **GDSII Viewer**: Download and inspect tapeout files.
+
 ---
 
 ## 🛠️ Workflow

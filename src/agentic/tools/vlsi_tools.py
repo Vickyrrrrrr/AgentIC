@@ -1,7 +1,43 @@
 # tools/vlsi_tools.py
 import os
+import re
 import subprocess
+from crewai.tools import tool
 from ..config import OPENLANE_ROOT, SCRIPTS_DIR, PDK_ROOT, OPENLANE_IMAGE
+
+def SecurityCheck(rtl_code: str) -> bool:
+    """
+    Performs a static security analysis on the generated RTL.
+    Returns True if safe, False if malicious patterns detected,
+    """
+    # 1. Blacklist malicious system calls in Verilog 
+    # (Though Icarus usually ignores these in synthesis, they are dangerous in sim)
+    blacklist = [
+        r'\$system', r'\$fopen', r'\$fwrite', r'\$call', 
+        r'\/bin\/sh', r'rm -rf', r'wget', r'curl'
+    ]
+    
+    for pattern in blacklist:
+        if re.search(pattern, rtl_code, re.IGNORECASE):
+            return False, f"Detected potentially malicious pattern: {pattern}"
+            
+    return True, "Safe"
+
+def write_config(design_name, code):
+    """Writes config.tcl to the OpenLane design directory."""
+    path = f"{OPENLANE_ROOT}/designs/{design_name}/config.tcl"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    
+    # Clean output
+    clean_code = code
+    if "```tcl" in clean_code:
+        clean_code = clean_code.split("```tcl")[1].split("```")[0].strip()
+    elif "```" in clean_code:
+        clean_code = clean_code.split("```")[1].split("```")[0].strip()
+        
+    with open(path, "w") as f:
+        f.write(clean_code)
+    return path
 
 def write_verilog(design_name, code, is_testbench=False):
     """Writes Verilog code to the OpenLane design directory."""
@@ -76,13 +112,34 @@ def write_verilog(design_name, code, is_testbench=False):
         f.write(clean_code)
     return path
 
-def run_syntax_check(file_path):
-    """Runs iverilog syntax check."""
+@tool("Syntax Checker")
+def run_syntax_check(file_path: str):
+    """
+    Runs iverilog syntax check on a Verilog file.
+    Returns: (True, "OK") if clean, or (False, "Error message") if failed.
+    Useful for checking if your Verilog code is valid before submitting it.
+    """
     result = subprocess.run(
         ["iverilog", "-g2012", "-t", "null", file_path], 
         capture_output=True, text=True
     )
-    return result.returncode == 0, result.stderr
+    if result.returncode == 0:
+        return True, "Syntax OK"
+    return False, result.stderr
+
+@tool("File Reader")
+def read_file_content(file_path: str):
+    """
+    Reads the content of a file.
+    Useful for reading declarations in other files to fix mismatch errors.
+    """
+    try:
+        if not os.path.exists(file_path):
+             return f"Error: File {file_path} not found."
+        with open(file_path, 'r') as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
 
 def run_simulation(design_name):
     """Compiles and runs the testbench simulation."""
@@ -100,12 +157,16 @@ def run_simulation(design_name):
         return False, f"Compilation failed:\n{compile_result.stderr}"
     
     # Run
-    run_result = subprocess.run(
-        ["vvp", sim_out],
-        capture_output=True,
-        text=True,
-        timeout=30
-    )
+    # Increased timeout to 300s (5 mins) for complex simulations (processors/crypto)
+    try:
+        run_result = subprocess.run(
+            ["vvp", sim_out],
+            capture_output=True,
+            text=True,
+            timeout=300 
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Simulation Timed Out (Exceeded 300 seconds). Logic might be stuck in an infinite loop."
 
     sim_text = (run_result.stdout or "") + ("\n" + run_result.stderr if run_result.stderr else "")
 
@@ -125,13 +186,18 @@ def run_simulation(design_name):
         return False, sim_text
     return False, sim_text
 
-def run_openlane(design_name):
+def run_openlane(design_name, background=False):
     """Triggers the OpenLane flow via Docker."""
     if not PDK_ROOT or not os.path.exists(PDK_ROOT):
         return False, f"PDK_ROOT not found: {PDK_ROOT}. Set PDK_ROOT env var or install Sky130 PDKs."
 
     os.chdir(OPENLANE_ROOT)
     
+    # Ensure design dir exists
+    design_dir = f"{OPENLANE_ROOT}/designs/{design_name}"
+    if not os.path.exists(design_dir):
+        return False, f"Design directory not found: {design_dir}"
+
     # Direct Docker command (non-interactive)
     cmd = [
         "docker", "run", "--rm",
@@ -144,12 +210,30 @@ def run_openlane(design_name):
         "./flow.tcl", "-design", design_name, "-tag", "agentrun", "-overwrite", "-ignore_mismatches"
     ]
     
-    process = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=900  # 15 min timeout
-    )
+    if background:
+        log_file_path = os.path.join(design_dir, "harden.log")
+        try:
+            with open(log_file_path, "w") as f:
+                subprocess.Popen(
+                    cmd,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+            return True, f"Background task started. Logs: {log_file_path}"
+        except Exception as e:
+            return False, f"Failed to start background process: {str(e)}"
+    
+    # Increased timeout to 3600s (1 hour) for complex placement/routing
+    try:
+        process = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=3600 
+        )
+    except subprocess.TimeoutExpired:
+        return False, "OpenLane Hardening Timed Out (Exceeded 60 mins)."
     
     # Check if GDS was created
     gds_path = f"{OPENLANE_ROOT}/designs/{design_name}/runs/agentrun/results/final/gds/{design_name}.gds"
