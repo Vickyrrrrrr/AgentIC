@@ -30,19 +30,30 @@ def write_config(design_name, code):
     
     # Clean output
     clean_code = code
+    # Remove <think> tags if present
+    if "<think>" in clean_code:
+        clean_code = re.sub(r'<think>.*?</think>', '', clean_code, flags=re.DOTALL)
+
     if "```tcl" in clean_code:
         clean_code = clean_code.split("```tcl")[1].split("```")[0].strip()
     elif "```" in clean_code:
         clean_code = clean_code.split("```")[1].split("```")[0].strip()
+    
+    # Remove "Thought:" lines
+    clean_code = re.sub(r'^(Thought|Action|Observation):.*$', '', clean_code, flags=re.MULTILINE)
         
     with open(path, "w") as f:
         f.write(clean_code)
     return path
 
-def write_verilog(design_name, code, is_testbench=False):
+def write_verilog(design_name, code, is_testbench=False, suffix=None, ext=".v"):
     """Writes Verilog code to the OpenLane design directory."""
-    suffix = "_tb" if is_testbench else ""
-    path = f"{OPENLANE_ROOT}/designs/{design_name}/src/{design_name}{suffix}.v"
+    if suffix:
+        file_suffix = suffix
+    else:
+        file_suffix = "_tb" if is_testbench else ""
+        
+    path = f"{OPENLANE_ROOT}/designs/{design_name}/src/{design_name}{file_suffix}{ext}"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     
     # Clean LLM output (remove markdown fences, think tags, etc.)
@@ -95,6 +106,17 @@ def write_verilog(design_name, code, is_testbench=False):
     clean_code = re.sub(r'\(\s*\.\*\s*\)', '', clean_code)
     # Remove any leftover special chars
     clean_code = re.sub(r'[▁｜]', '', clean_code)
+    
+    # Remove "Thought:" or "Action:" lines that might have leaked (common in LangChain/CrewAI raw output)
+    # Be careful not to remove comments, so look for start of line
+    clean_code = re.sub(r'^(Thought|Action|Observation):.*$', '', clean_code, flags=re.MULTILINE)
+
+    # --- VALIDATION ---
+    if "module" not in clean_code:
+        # If we still can't find a module, this is likely garbage text or pure reasoning.
+        # We should NOT write this to the file as it will break simulation.
+        # Instead, we return a special error message that the Agent will see as the tool output.
+        return f"Error: No Verilog 'module' definition found in the provided code. Please ensure you output the full Verilog code inside ```verilog``` fences."
 
     # --- AUTO-FIXES FOR COMPILER COMPATIBILITY ---
     # 1. Fix signed casting: signed'(val) -> $signed(val)
@@ -107,17 +129,26 @@ def write_verilog(design_name, code, is_testbench=False):
     # 3. Remove unsupported SystemVerilog qualifiers for iverilog
     clean_code = re.sub(r'\bunique\s+case\b', 'case', clean_code)
     clean_code = re.sub(r'\bpriority\s+case\b', 'case', clean_code)
+
+    # 4. CRITICAL: Fix "Single Line Output" Bug
+    # Some models dump the entire code on one line. If that line starts with //, 
+    # the whole file is commented out. We MUST enforce newlines.
+    if clean_code.strip().startswith("//") and clean_code.count('\n') < 5:
+        # Heuristic: Inject newlines before 'module', 'endmodule', ';', and after comments
+        clean_code = clean_code.replace(" module ", "\nmodule ")
+        clean_code = clean_code.replace(" endmodule", "\nendmodule")
+        clean_code = clean_code.replace(";", ";\n")
+        clean_code = clean_code.replace(" begin ", " begin\n")
+        clean_code = clean_code.replace(" end ", "\nend ")
     
     with open(path, "w") as f:
         f.write(clean_code)
     return path
 
-@tool("Syntax Checker")
 def run_syntax_check(file_path: str):
     """
     Runs iverilog syntax check on a Verilog file.
     Returns: (True, "OK") if clean, or (False, "Error message") if failed.
-    Useful for checking if your Verilog code is valid before submitting it.
     """
     result = subprocess.run(
         ["iverilog", "-g2012", "-t", "null", file_path], 
@@ -127,11 +158,63 @@ def run_syntax_check(file_path: str):
         return True, "Syntax OK"
     return False, result.stderr
 
-@tool("File Reader")
+@tool("Syntax Checker")
+def syntax_check_tool(file_path: str):
+    """
+    Runs iverilog syntax check on a Verilog file.
+    Useful for checking if your Verilog code is valid before submitting it.
+    Input: file_path (string)
+    """
+    return run_syntax_check(file_path)
+
+def write_sby_config(design_name):
+    """Writes a default SBY config for the design."""
+    path = f"{OPENLANE_ROOT}/designs/{design_name}/src/{design_name}.sby"
+    config = f"""[options]
+mode prove
+
+[engines]
+smtbmc
+
+[script]
+read -formal {design_name}.v
+read -formal {design_name}_sva.sv
+prep -top {design_name}
+
+[files]
+{design_name}.v
+{design_name}_sva.sv
+"""
+    with open(path, "w") as f:
+        f.write(config)
+    return path
+
+def run_formal_verification(design_name):
+    """Runs SymbiYosys (SBY) for formal verification."""
+    design_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
+    sby_file = f"{design_dir}/{design_name}.sby"
+    
+    if not os.path.exists(sby_file):
+        return False, "SBY configuration file not found."
+
+    # Run SBY
+    try:
+        result = subprocess.run(
+            ["sby", "-f", f"{design_name}.sby"],
+            cwd=design_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            return True, f"Formal Verification PASSED.\\n{result.stdout}"
+        else:
+            return False, f"Formal Verification FAILED:\\n{result.stdout}\\n{result.stderr}"
+    except FileNotFoundError:
+        return False, "SymbiYosys (sby) tool not installed/found in path."
+
 def read_file_content(file_path: str):
     """
     Reads the content of a file.
-    Useful for reading declarations in other files to fix mismatch errors.
     """
     try:
         if not os.path.exists(file_path):
@@ -140,6 +223,51 @@ def read_file_content(file_path: str):
             return f.read()
     except Exception as e:
         return f"Error reading file: {str(e)}"
+
+@tool("File Reader")
+def read_file_tool(file_path: str):
+    """
+    Reads the content of a file.
+    Useful for reading declarations in other files to fix mismatch errors.
+    """
+    return read_file_content(file_path)
+
+def check_physical_metrics(design_name):
+    """
+    Parses OpenLane output metrics (Area, Timing, Power).
+    Returns a dictionary of metrics or Error if not found.
+    """
+    import csv
+    metrics_path = f"{OPENLANE_ROOT}/designs/{design_name}/runs/agentrun/reports/metrics.csv"
+    
+    if not os.path.exists(metrics_path):
+        # Fallback: Find latest run
+        runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
+        if os.path.exists(runs_dir):
+            runs = sorted([d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))])
+            if runs:
+                metrics_path = f"{runs_dir}/{runs[-1]}/reports/metrics.csv"
+
+    if not os.path.exists(metrics_path):
+        return None, "Metrics file not found. OpenLane might have failed."
+
+    try:
+        with open(metrics_path, 'r') as f:
+            reader = csv.DictReader(f)
+            data = next(reader) # Only one row usually
+            
+            # Extract key metrics
+            metrics = {
+                "area": float(data.get("Total_Physical_Cells", 0)),
+                "chip_area_um2": float(data.get("DieArea_mm^2", 0)) * 1e6,
+                "timing_tns": float(data.get("timing__tns", 0)), # Total Negative Slack
+                "timing_wns": float(data.get("timing__wns", 0)), # Worst Negative Slack
+                "power_total": float(data.get("power__total", 0)),
+                "utilization": float(data.get("design__instance__utilization", 0))
+            }
+            return metrics, "OK"
+    except Exception as e:
+        return None, f"Error parsing metrics: {str(e)}"
 
 def run_simulation(design_name):
     """Compiles and runs the testbench simulation."""
@@ -188,8 +316,27 @@ def run_simulation(design_name):
 
 def run_openlane(design_name, background=False):
     """Triggers the OpenLane flow via Docker."""
+    
+    # --- Autonomous Environment Fix ---
+    # If PDK_ROOT is not set, try to find it in common locations
+    global PDK_ROOT
     if not PDK_ROOT or not os.path.exists(PDK_ROOT):
-        return False, f"PDK_ROOT not found: {PDK_ROOT}. Set PDK_ROOT env var or install Sky130 PDKs."
+        common_paths = [
+            os.path.expanduser("~/.ciel"),
+            os.path.expanduser("~/.volare"),
+            "/usr/local/pdk",
+            "/opt/pdk",
+            os.path.join(OPENLANE_ROOT, "pdks")
+        ]
+        found = False
+        for path in common_paths:
+            if os.path.exists(path) and os.path.exists(os.path.join(path, "sky130A")):
+                PDK_ROOT = path
+                found = True
+                break
+        
+        if not found:
+            return False, f"PDK_ROOT not found in environment or common paths ({common_paths}). Please set PDK_ROOT."
 
     os.chdir(OPENLANE_ROOT)
     

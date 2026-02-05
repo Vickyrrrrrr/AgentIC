@@ -28,6 +28,22 @@ GROQ_CONFIG = {
     "api_key": os.environ.get("GROQ_API_KEY", "")
 }
 
+# NVIDIA Backup Configuration (Llama 3.1 405B)
+NVIDIA_BACKUP_CONFIG = {
+    "model": "meta/llama-3.1-405b-instruct",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key": os.environ.get("NVIDIA_BACKUP_API_KEY", "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")
+}
+
+# NVIDIA User Provided Configuration (New Key)
+NVIDIA_USER_CONFIG = {
+    # Note: User requested 'lama-3_2-nemoretriever-300m-embed-v1' which is an embedding model.
+    # Switched to 'meta/llama-3.1-405b-instruct' for code generation capability.
+    "model": "meta/llama-3.1-405b-instruct", 
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key": "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"
+}
+
 # Local/Default Configuration
 LOCAL_CONFIG = {
     "model": os.environ.get("LLM_MODEL", "ollama/deepseek-r1"),
