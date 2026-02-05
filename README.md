@@ -1,143 +1,166 @@
 # AgentIC: Sovereign AI-Powered Silicon Design Framework
 
-![Status](https://img.shields.io/badge/Status-Beta-orange) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![OpenLane](https://img.shields.io/badge/OpenLane-Integrated-purple)
+![Status](https://img.shields.io/badge/Status-Beta_v2.0-orange) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![OpenLane](https://img.shields.io/badge/OpenLane-Integrated-purple) ![Verification](https://img.shields.io/badge/Formal_Verification-SVA-red)
 
-**AgentIC** is an automated, sovereign AI Agent framework that transforms natural language descriptions directly into industry-standard physical chip layouts (GDSII). Designed with the **"Atmanirbhar" (Self-Reliant)** philosophy, it empowers engineers to design secure, custom silicon locally, reducing dependency on foreign EDA tools and supply chains.
+**AgentIC** is an automated, sovereign AI Agent framework that transforms natural language descriptions directly into industry-standard physical chip layouts (GDSII). Unlike simple code generators, AgentIC employs a **Self-Correcting Multi-Agent System** that iteratively designs, verifies, fixes, and physically hardens custom silicon.
 
-It acts as a **"Text-to-Silicon" Compiler**, orchestrating a crew of specialized AI agents (powered by **Qwen Coder**, Llama 3, etc.) to write SystemVerilog RTL, verify it with self-generated testbenches, and harden the design using the OpenLane open-source flow.
-
----
-
-## 🛡️ Mission: Sovereign Silicon (Atmanirbhar Bharat)
-In the context of national defense and critical infrastructure, reliance on closed-source foreign chips and tools poses significant risks (Hardware Trojans, Supply Chain Denial, Backdoors). 
-
-**AgentIC addresses these challenges by:**
-1.  **Democratizing Design**: Enabling rapid creation of custom functional blocks without a full design team.
-2.  **Open Source Chain**: Utilizing **OpenLane** and standard PDKs (SkyWater 130nm), ensuring the entire flow is auditable.
-3.  **Data Privacy**: Promoting the use of **Local LLMs** (running on premises) so sensitive design prompts and logical structures never leave the secure environment.
+It acts as a **"Text-to-Silicon" Compiler**, orchestrating a crew of specialized AI agents (Architect, Designer, Verification Engineer, Physical Design Lead) to ensure functional correctness and manufacturability.
 
 ---
 
-## 🚀 Key Capabilities
+## 🌊 The Flow: From Text to GDSII
 
-### 🧠 AI-Driven RTL Design
-*   **Natural Language → SystemVerilog**: Simply describe the module (e.g., "A secure 32-bit RISC-V core with encrypted instruction memory").
-*   **Context-Aware Coding**: Agents use proper `logic`, `always_ff`, and `always_comb` blocks and parameterized widths.
-*   **Flattened I/O**: Generates hardware-ready ports compatible with physical implementation tools.
+AgentIC does not just write code; it follows a rigorous engineering pipeline.
 
-### 🔄 Self-Correcting Verification Loop
-*   **Agent Swarm**:
-    *   **Designer Agent**: Writes the RTL implementation.
-    *   **Testbench Agent**: Writes a comprehensive self-checking testbench (`_tb.v`).
-    *   **Verifier Agent**: Analyzes simulation logs (Icarus Verilog).
-*   **Auto-Fix**: If the simulation fails, the agents analyze the error, rewrite the RTL/Testbench, and retry automatically until `TEST PASSED`.
-*   **Robust Fallback**: Automatically switches between models (e.g., from Cloud to Local/Qwen) if one provider is unavailable or fails.
+```mermaid
+graph TD
+    User([User Input: "Build a Secure Processor"]) --> Architect
+    
+    subgraph "Phase 1: Front-End Design"
+        Architect[Architect Agent] -->|Specs| Designer[Designer Agent]
+        Designer -->|RTL Code| SyntaxCheck{Syntax Check}
+        SyntaxCheck -- Fail --> Fixer[Auto-Fixer]
+        Fixer --> SyntaxCheck
+        SyntaxCheck -- Pass --> QA[Senior Reviewer]
+        QA -- Reject --> Designer
+    end
 
-### 🏭 Physical Design Automation
-*   **One-Click Hardening**: Seamless integration with **OpenLane**.
-*   **GDSII Generation**: Produces the final layout files ready for the foundry.
-*   **Artifacts**: Generates LEF, DEF, GDS, and Mag files automatically.
+    subgraph "Phase 2: Formal & Dynamic Verification"
+        QA -- Approve --> Formal[SVA / SymbiYosys]
+        Formal -->|Mathematical Proof| Testbench[Testbench Agent]
+        Testbench -->|Simulation| Sim{Icarus Verilog}
+        Sim -- Fail --> Debugger[Error Analyst]
+        Debugger -->|Fix Logic| Designer
+        Debugger -->|Fix Test| Testbench
+    end
 
-### 🖥️ Secure "Deep Void" Dashboard
-*   **Streamlit Operations Center**: Monitor the entire design process visually.
-*   **Market Benchmarking**: Compare your design's PPA (Power, Performance, Area) against standard metrics.
-*   **GDS Viewer**: Built-in viewer for finalized layouts.
+    subgraph "Phase 3: Deep Physical Hardening"
+        Sim -- Pass --> OpenLane[OpenLane Flow]
+        OpenLane -->|GDSII| PPA[PPA Analyzer]
+        PPA -- "Timing/Area Violations" --> Optimizer[Backend Engineer]
+        Optimizer -->|Optimize RTL| Designer
+    end
+
+    PPA -- "Metrics OK" --> Tapeout([Final GDSII])
+```
+
+---
+
+## 🚀 Key Capabilities v2.0
+
+### 1. 🛡️ Robust "Anti-Hallucination" Engine
+Traditional LLMs often leak "thought processes" or Markdown artifacts into code, breaking compilers. AgentIC v2.0 features:
+*   **Hardened VLSI Tools**: Custom I/O handlers (`vlsi_tools.py`) that strictly sanitize outputs, stripping "Thought:", "Action:", and non-Verilog artifacts.
+*   **Compiler-Aware Auto-Fix**: Automatically detects and repairs syntax errors (e.g., mismatched port widths, invalid SystemVerilog constructs) without human intervention.
+*   **Filesystem Guard**: Enforces correct file extensions (`.sv`, `.v`, `.tcl`) and prevents file path hallucination.
+
+### 2. 🧠 Autonomous Verification Loop
+*   **Formal Verification (SVA)**: Before simulation, the `Verification Agent` writes **SystemVerilog Assertions** and runs **SymbiYosys** to mathematically prove safety properties (e.g., "Reset must clear registers").
+*   **Dynamic Simulation**: Generates self-checking testbenches, runs `iverilog` simulations, and parses logs.
+*   **Root Cause Analysis**: If a test fails, the `Error Analyst` determines if the bug is in the Design (RTL) or the Testbench, fixing the correct file.
+
+### 3. 🏭 Physical Design Feedback Loop (PPA)
+*   **Beyond Code**: AgentIC checks real-world metrics—**Power, Performance (Timing), and Area**.
+*   **Optimization Cycle**: 
+    *   If **Timing** fails (Negative Slack), the agent inserts pipeline stages.
+    *   If **Area** is too high (Congestion), the agent simplifies logic or increases core size.
+*   **OpenLane Integration**: Full control over `config.tcl` generation and disaster recovery (e.g., loosening density constraints when placement fails).
 
 ---
 
 ## 📦 Installation
 
 ### Prerequisites
-*   Python 3.10+
-*   [OpenLane](https://github.com/The-OpenROAD-Project/OpenLane) (installed and configured via Docker)
-*   Icarus Verilog (`iverilog`)
+*   **Linux/WSL2** (Ubuntu 20.04+ recommended)
+*   **Python 3.10+**
+*   **Docker** (for OpenLane)
+*   **Icarus Verilog** (`sudo apt install iverilog`)
+*   **GTKWave** (optional, for viewing waveforms)
 
 ### Setup
+
 1.  **Clone the Repository**
     ```bash
     git clone https://github.com/Vickyrrrrrr/AgentIC.git
     cd AgentIC
     ```
 
-2.  **Create Virtual Environment**
-    ```bash
-    python -m venv venv
-    source venv/bin/activate
-    ```
-
-3.  **Install Dependencies**
+2.  **Install Dependencies**
     ```bash
     pip install -r requirements.txt
     ```
 
-4.  **Configure Environment**
+3.  **Configure Environment**
     Create a `.env` file in the root directory:
-    ```env
-    # Choose your provider (NVIDIA, GROQ, orQwen Coder via  OPENAI)
-    # Leave empty if using Local LLM (e.g., Ollama)
-    OPENAI_API_KEY=sk-...
-    NVIDIA_API_KEY=nvapi-...
-    GROQ_API_KEY=gsk_...
+    ```bash
+    # LLM Provider (Examples)
+    OPENAI_API_KEY="sk-..."
+    # OR 
+    NVIDIA_API_KEY="nvapi-..."
     
-    # Path to OpenLane
-    OPENLANE_ROOT=/path/to/openlane
-    PDK_ROOT=/path/to/pdk
+    # Tool Paths (Optional, defaults provided)
+    OPENLANE_ROOT="/home/user/OpenLane"
+    PDK_ROOT="/home/user/pdk"
     ```
 
 ---
 
-## 🛠️ Usage
+## 💻 Usage
 
-### 1. Command Line Interface (CLI)
-The fastest way to build a specific module.
+### 1. Build a Chip (The Command Center)
+The `build` command is the main entry point. It runs the full flow: Architecture -> RTL -> Verify -> GDSII.
 
-**Build & Verify (RTL Level):**
 ```bash
-python main.py build --name secure_lock --desc "A 4-digit PIN based electronic lock with a lockout timer after 3 failed attempts."
+python3 AgentIC/main.py build \
+    --name my_processor \
+    --desc "A 5-stage pipelined RISC-V processor with hazard detection and forwarding unit. 32-bit width."
 ```
 
-**Full Flow (RTL + GDSII):**
-*(Ensure OpenLane is running)*
+**Options:**
+*   `--show-thinking`: Displays the raw "Thought Process" (DeepSeek/Qwen CoT) in the terminal.
+*   `--skip-openlane`: Stops after verification (useful for quick RTL iteration).
+*   `--max-retries 5`: Sets how many times the agent can attempt to fix its own errors.
+
+### 2. Manual Simulation & Fix
+If you have existing code and just want the agent to fix bugs:
 ```bash
-python main.py harden --name secure_lock
+python3 AgentIC/main.py simulate --name my_processor
 ```
 
-### 2. Interactive Web Dashboard
-Launch the Mission Control interface.
+### 3. Hardening Only
+To run OpenLane physical design on an existing Verilog file:
 ```bash
-streamlit run app.py
-```
-*   Navigate to **"Design Studio"** to chat with the AI Agents.
-*   Use **"Fabrication"** tab to trigger OpenLane flows.
-*   Check **"GDS Viewer"** to inspect final chips.
-
----
-
-## 📂 Project Structure
-
-```text
-AgentIC/
-├── artifacts/          # Generated VCD waveforms & GDSII layouts
-├── designs/            # Source RTL & Testbenches
-│   ├── minicount/
-│   └── secure_lock/
-├── src/
-│   └── agentic/
-│       ├── agents/     # AI Personas (Designer, Verifier)
-│       └── tools/      # Interfaces for compilers & simulators
-├── app.py              # Streamlit Web Dashboard
-├── main.py             # CLI Entry Point
-└── debug_llm.py        # Utility to check LLM connectivity
+python3 AgentIC/main.py harden --name my_processor
 ```
 
 ---
 
-## 🔮 Roadmap
-*   Support for Analog/Mixed-Signal descriptions.
-*   Integration with open-source FPGA toolchains (Yosys/Nextpnr).
-*   Formal Verification agent integration.
+## 🏗️ Internal Architecture
+
+| Component | Responsibility | Tools Used |
+| :--- | :--- | :--- |
+| **Architect Agent** | Defines Micro-Architecture, States, and Interfaces. | Markdown Spec |
+| **Designer Agent** | Writes Synthesizable SystemVerilog. | `vlsi_tools.write_verilog` |
+| **QA Agent** | "Senior Engineer" that rejects bad coding styles (Latches, Multi-drivers). | Static Analysis |
+| **Verification Agent** | Writes SVA properties and Testbenches. | `sby`, `iverilog` |
+| **Backend Agent** | Configures OpenLane (`config.tcl`) and optimizes for PPA. | OpenLane Docker |
 
 ---
 
-## ⚖️ License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## ❓ Troubleshooting
+
+### "OpenLane Failed / Docker Error"
+*   **Cause**: Docker not running or PDK mismatch.
+*   **Fix**: Ensure `docker ps` works. Check `PDK_ROOT` matches your Sky130 install.
+
+### "Simulation Failed (Compilation Error)"
+*   **Cause**: LLM hallucinated invalid syntax.
+*   **Fix**: AgentIC v2.0 usually fixes this automatically. If it persists, use `--max-retries 10` to give it more attempts.
+
+### "Code contains 'Thought:' lines"
+*   **Status**: **SOLVED**. The new `vlsi_tools.py` regex filters strip these artifacts automatically.
+
+---
+
+## 📜 License
+MIT License. Free for Research and Sovereign Development.
