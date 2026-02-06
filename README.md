@@ -14,7 +14,7 @@ AgentIC does not just write code; it follows a rigorous engineering pipeline.
 
 ```mermaid
 graph TD
-    User([User Input: "Build a Secure Processor"]) --> Architect
+    User(["User Input: 'Build a Secure Processor'"]) --> Architect
     
     subgraph "Phase 1: Front-End Design"
         Architect[Architect Agent] -->|Specs| Designer[Designer Agent]
