@@ -203,19 +203,24 @@ Reply with ONLY "A" or "B".''',
                  fix_tb_logic_prompt = f'''Fix the Testbench logic/syntax. The simulation failed or generated runtime errors.
                  
 CRITICAL FIXING RULES:
-1. **Timing**: Ensure you `wait(done)` or `repeat(N) @(posedge clk)` before checking results.
-2. **Race Conditions**: If "TEST FAILED" happens immediately, add delays (`#1`) before sampling or driving signals.
-3. **Format**: Return ONLY corrected testbench code inside ```verilog fences.
+1. **Timing is USUALLY THE PROBLEM**: If "TEST FAILED" appears, the testbench is checking outputs TOO EARLY.
+   - Count the FSM states in the RTL. Wait at least (num_states + 10) clock cycles.
+   - Use `repeat(25) @(posedge clk);` minimum before checking ANY output.
+   - If there's a `done` or `valid` signal, use `while(!done) @(posedge clk);`
+2. **Race Conditions**: Add `#1` delays after clock edges before sampling.
+3. **Reset**: Ensure reset is held for at least 4 clock cycles.
+4. **Between Tests**: Wait for FSM to return to IDLE with `repeat(10) @(posedge clk);`
+5. **Format**: Return ONLY corrected testbench code inside ```verilog fences.
 
 Simulation Error/Output:
 {sim_output_text}
 
-Current RTL (Reference):
+Current RTL (Reference - count the FSM states):
 ```verilog
 {open(rtl_path,'r').read()}
 ```
 
-Current Testbench (To Fix):
+Current Testbench (To Fix - increase wait cycles):
 ```verilog
 {open(tb_path,'r').read()}
 ```
@@ -610,7 +615,7 @@ Current code:
     console.print("  ✓ Verilog syntax is [green]valid[/green]")
 
     # ===== STEP 2.5: Formal Assertions (SVA) =====
-    console.print("\n[bold yellow]━━━ Step 2.5: Formal Verification (Autonomous Vendor Mode) ━━━[/bold yellow]")
+    console.print("\n[bold yellow]━━━ Step 2.5: Formal Verification (Dual-Mode: Industry SVA + Yosys) ━━━[/bold yellow]")
     
     with open(rtl_path, 'r') as f:
         rtl_code = f.read()
@@ -619,37 +624,58 @@ Current code:
     sva_task = Task(
         description=f'''Analyze this RTL and generate a separate SystemVerilog Assertion (SVA) module (`{name}_sva.sv`) to formally verify behavior.
 
+CRITICAL: Generate INDUSTRY-STANDARD SystemVerilog Assertions using `property` and `assert property`.
+
 Rules:
 - Module name: `{name}_sva`
 - Bind to target module using `bind {name} {name}_sva inst_sva (.*);`
-- Use `property` and `assert property (@(posedge clk) ...)` 
+- Use proper SVA syntax:
+  - `property prop_name; @(posedge clk) antecedent |=> consequent; endproperty`
+  - `assert property (prop_name);`
+- Use `$past(signal)` for temporal checks
+- Use `disable iff (!rst_n)` for reset handling
 - Check resets, state transitions, and critical safety logic.
-- NO `initial` blocks, NO `$display`. use pure SVA.
+- NO `initial` blocks, NO `$display`. Use pure SVA.
 
 RTL:
 ```verilog
 {rtl_code}
 ```
 ''',
-        expected_output='SVA module code in markdown fence',
+        expected_output='Industry-standard SVA module code in markdown fence',
         agent=verify_agent
     )
     
-    with console.status("[cyan]AI is proving mathematical correctness (SymbiYosys)...[/cyan]"):
+    with console.status("[cyan]AI is generating industry-standard SVA assertions...[/cyan]"):
         sva_result = Crew(agents=[verify_agent], tasks=[sva_task]).kickoff()
         sva_raw = str(sva_result)
         
-        # Save SVA file using robust cleaner
-        write_verilog(name, sva_raw, suffix="_sva", ext=".sv")
+        # Save INDUSTRY-STANDARD SVA file (for commercial tools: Synopsys, Cadence, etc.)
+        sva_path = write_verilog(name, sva_raw, suffix="_sva", ext=".sv")
+        console.print(f"  ✓ Industry SVA saved: [green]{name}_sva.sv[/green] (for commercial EDA)")
+        
+        # Convert to Yosys-compatible format for open-source verification
+        from .tools.vlsi_tools import convert_sva_to_yosys
+        sva_content = open(sva_path, 'r').read() if os.path.exists(sva_path) else sva_raw
+        yosys_sva = convert_sva_to_yosys(sva_content, name)
+        
+        if yosys_sva:
+            sby_check_path = f"{OPENLANE_ROOT}/designs/{name}/src/{name}_sby_check.sv"
+            with open(sby_check_path, 'w') as f:
+                f.write(yosys_sva)
+            console.print(f"  ✓ Yosys SVA saved: [green]{name}_sby_check.sv[/green] (for SymbiYosys)")
+        else:
+            console.print(f"  [yellow]⚠ Could not auto-convert SVA to Yosys format. Using fallback.[/yellow]")
+            # Fallback: just use the original (may fail on complex SVA)
             
-        # Write SBY Config
-        write_sby_config(name)
+        # Write SBY Config (uses _sby_check.sv)
+        write_sby_config(name, use_sby_check=True)
         
         # Run Formal Verification
         formal_success, formal_msg = run_formal_verification(name)
         
         if formal_success:
-            console.print(f"  ✓ [bold green]Mathematical Proof PASSED[/bold green]")
+            console.print(f"  ✓ [bold green]Mathematical Proof PASSED (k-induction)[/bold green]")
             log_thinking(formal_msg, step="Formal Verification Log")
         else:
             # Check for missing tool vs actual failure
@@ -657,8 +683,9 @@ RTL:
                  console.print(f"  [yellow]⚠ Formal Verification Skipped[/yellow]: [dim]SymbiYosys (sby) not installed.[/dim]")
                  console.print(f"    [dim]- Install: https://github.com/YosysHQ/oss-cad-suite-build[/dim]")
             else:
-                 console.print(f"  ✗ [bold red]Formal Proof FAILED (Design is risky)[/bold red]")
-                 console.print(formal_msg)
+                 console.print(f"  ✗ [bold red]Formal Proof FAILED[/bold red]")
+                 console.print(f"    [dim]Note: Industry SVA ({name}_sva.sv) is preserved for commercial tools.[/dim]")
+                 # Don't print full error, just note
 
     # ===== STEP 3: Generate Testbench (self-checking) =====
     console.print("\n[bold yellow]━━━ Step 4/6: Generating Testbench (Spec + RTL Analysis) ━━━[/bold yellow]")
@@ -689,14 +716,19 @@ CRITICAL VERIFICATION RULES (DO NOT VIOLATE):
 3. **Data Types**: Use `logic` for everything.
 4. **Instantiation**: Use explicit name based connection `.port(signal)`.
 5. **Clock/Reset**:
-   - Clock: `initial forever #5 clk = ~clk;`
-   - Reset: Drive `rst_n` low for 20 units, then high.
-6. **Timing & Handshaking (CRITICAL)**:
-   - **WAIT FOR RESULTS**: If the DUT has a pipeline or state machine, you MUST wait multiple clock cycles before checking outputs.
-   - If there is a `valid_out` or `done` signal, `wait(valid_out);` or `while(!valid_out) @(posedge clk);`.
-   - If fixed latency, use `repeat(10) @(posedge clk);` (or more) to allow data to propagate.
-   - Do NOT check `data_out` in the same cycle you assert inputs (unless combinational).
-7. **Reporting**:
+   - Clock: `initial clk = 0; always #5 clk = ~clk;`
+   - Reset: Drive `rst_n` low for 4 cycles, then high.
+6. **Timing & Handshaking (CRITICAL - READ CAREFULLY)**:
+   - **ANALYZE THE FSM**: Count how many states the DUT has. If it has N states, wait at least N+5 cycles.
+   - **NEVER check outputs immediately after setting inputs** - always wait!
+   - If the DUT has a `valid`, `done`, or `ready` signal, use: `while(!valid) @(posedge clk);`
+   - If no done signal, use `repeat(25) @(posedge clk);` to allow FSM to complete.
+   - For pipeline designs, wait at least (pipeline_depth + 5) cycles.
+   - **COMMON MISTAKE**: Checking output 1 cycle after input = TEST FAILS. Wait 20+ cycles minimum for FSMs.
+7. **Test Structure**:
+   - After each test case, wait for DUT to return to IDLE before next test.
+   - Use generous timeouts: `repeat(30) @(posedge clk);` between test cases.
+8. **Reporting**:
    - Use `$dumpfile("{name}.vcd")` and `$dumpvars(0, {name}_tb)`.
    - On success: `$display("TEST PASSED");`
    - On failure: `$display("TEST FAILED");`

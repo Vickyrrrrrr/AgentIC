@@ -60,3 +60,7 @@ LLM_API_KEY = LOCAL_CONFIG["api_key"]
 # Tool Settings
 PDK_ROOT = os.environ.get('PDK_ROOT', os.path.expanduser('~/.ciel'))
 OPENLANE_IMAGE = "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-amd64"
+
+# OSS CAD Suite (SymbiYosys, Yosys) - Self-contained within AgentIC
+OSS_CAD_SUITE_ROOT = os.environ.get('OSS_CAD_SUITE_HOME', os.path.join(WORKSPACE_ROOT, 'oss-cad-suite'))
+SBY_BIN = os.path.join(OSS_CAD_SUITE_ROOT, 'bin', 'sby')

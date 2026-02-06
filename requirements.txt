@@ -3,6 +3,7 @@ crewai-tools
 langchain_openai
 typer
 rich
+python-dotenv
 streamlit
 pandas
 streamlit-option-menu

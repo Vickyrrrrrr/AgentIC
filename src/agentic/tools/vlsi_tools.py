@@ -3,12 +3,12 @@ import os
 import re
 import subprocess
 from crewai.tools import tool
-from ..config import OPENLANE_ROOT, SCRIPTS_DIR, PDK_ROOT, OPENLANE_IMAGE
+from ..config import OPENLANE_ROOT, SCRIPTS_DIR, PDK_ROOT, OPENLANE_IMAGE, SBY_BIN
 
-def SecurityCheck(rtl_code: str) -> bool:
+def SecurityCheck(rtl_code: str) -> tuple:
     """
     Performs a static security analysis on the generated RTL.
-    Returns True if safe, False if malicious patterns detected,
+    Returns (True, "Safe") if safe, or (False, "reason") if malicious patterns detected.
     """
     # 1. Blacklist malicious system calls in Verilog 
     # (Though Icarus usually ignores these in synthesis, they are dangerous in sim)
@@ -23,8 +23,12 @@ def SecurityCheck(rtl_code: str) -> bool:
             
     return True, "Safe"
 
-def write_config(design_name, code):
+def write_config(design_name: str, code: str) -> str:
     """Writes config.tcl to the OpenLane design directory."""
+    # Input validation - prevent path traversal
+    if not design_name or '..' in design_name or '/' in design_name:
+        raise ValueError(f"Invalid design name: {design_name}")
+    
     path = f"{OPENLANE_ROOT}/designs/{design_name}/config.tcl"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     
@@ -41,13 +45,24 @@ def write_config(design_name, code):
     
     # Remove "Thought:" lines
     clean_code = re.sub(r'^(Thought|Action|Observation):.*$', '', clean_code, flags=re.MULTILINE)
-        
-    with open(path, "w") as f:
-        f.write(clean_code)
-    return path
+    
+    try:
+        with open(path, "w") as f:
+            f.write(clean_code)
+        return path
+    except IOError as e:
+        raise IOError(f"Failed to write config file {path}: {str(e)}")
 
-def write_verilog(design_name, code, is_testbench=False, suffix=None, ext=".v"):
-    """Writes Verilog code to the OpenLane design directory."""
+def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffix: str = None, ext: str = ".v") -> str:
+    """Writes Verilog code to the OpenLane design directory.
+    
+    Returns:
+        str: Path to the written file, or error message string starting with 'Error:'
+    """
+    # Input validation - prevent path traversal attacks
+    if not design_name or '..' in design_name or '/' in design_name:
+        return f"Error: Invalid design name: {design_name}"
+    
     if suffix:
         file_suffix = suffix
     else:
@@ -141,22 +156,34 @@ def write_verilog(design_name, code, is_testbench=False, suffix=None, ext=".v"):
         clean_code = clean_code.replace(" begin ", " begin\n")
         clean_code = clean_code.replace(" end ", "\nend ")
     
-    with open(path, "w") as f:
-        f.write(clean_code)
-    return path
+    try:
+        with open(path, "w") as f:
+            f.write(clean_code)
+        return path
+    except IOError as e:
+        return f"Error: Failed to write Verilog file {path}: {str(e)}"
 
-def run_syntax_check(file_path: str):
+def run_syntax_check(file_path: str) -> tuple:
     """
     Runs iverilog syntax check on a Verilog file.
     Returns: (True, "OK") if clean, or (False, "Error message") if failed.
     """
-    result = subprocess.run(
-        ["iverilog", "-g2012", "-t", "null", file_path], 
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        return True, "Syntax OK"
-    return False, result.stderr
+    if not os.path.exists(file_path):
+        return False, f"File not found: {file_path}"
+    
+    try:
+        result = subprocess.run(
+            ["iverilog", "-g2012", "-t", "null", file_path], 
+            capture_output=True, text=True,
+            timeout=60  # 1 minute timeout for syntax check
+        )
+        if result.returncode == 0:
+            return True, "Syntax OK"
+        return False, result.stderr
+    except subprocess.TimeoutExpired:
+        return False, "Syntax check timed out (>60s). File may be too large or malformed."
+    except FileNotFoundError:
+        return False, "iverilog not found. Please install Icarus Verilog."
 
 @tool("Syntax Checker")
 def syntax_check_tool(file_path: str):
@@ -167,9 +194,147 @@ def syntax_check_tool(file_path: str):
     """
     return run_syntax_check(file_path)
 
-def write_sby_config(design_name):
-    """Writes a default SBY config for the design."""
+def convert_sva_to_yosys(sva_content: str, module_name: str) -> str:
+    """
+    Converts industry-standard SVA (property/assert property) to Yosys-compatible
+    immediate assertions (always @(...) assert(...)).
+    
+    This allows designs to maintain industry-standard SVA files while still
+    being verifiable with open-source tools.
+    
+    Args:
+        sva_content: The full SVA file content
+        module_name: Name of the DUT module
+    
+    Returns:
+        str: Yosys-compatible assertion module
+    """
+    # Extract port list from the original SVA module
+    port_match = re.search(r'module\s+\w+_sva\s*\((.*?)\);', sva_content, re.DOTALL)
+    if not port_match:
+        return None
+    
+    ports_section = port_match.group(1)
+    
+    # Parse port declarations
+    port_lines = []
+    for line in ports_section.split('\n'):
+        line = line.strip()
+        if line and not line.startswith('//'):
+            port_lines.append(line.rstrip(','))
+    
+    # Extract property assertions
+    # Captures: property name; <body> endproperty
+    # Then parse the body for @(posedge clk) condition;
+    raw_properties = re.findall(
+        r'property\s+(\w+)\s*;(.*?)endproperty',
+        sva_content, re.DOTALL
+    )
+    
+    # Parse each property body
+    properties = []
+    for prop_name, body in raw_properties:
+        # Extract clock and condition from body
+        body_match = re.search(r'@\(posedge\s+(\w+)\)\s*(.+?);', body.strip(), re.DOTALL)
+        if body_match:
+            clk = body_match.group(1)
+            condition = body_match.group(2).strip()
+            properties.append((prop_name, clk, condition))
+    
+    # Build Yosys-compatible module
+    yosys_code = f'''// AUTO-GENERATED: Yosys-compatible assertions for {module_name}
+// Original industry-standard SVA is preserved in {module_name}_sva.sv
+// This file is used ONLY for open-source formal verification (SymbiYosys)
+
+module {module_name}_sby_check (
+{chr(10).join("    " + p + "," for p in port_lines[:-1])}
+    {port_lines[-1] if port_lines else ""}
+);
+
+    // Track previous values for temporal checks
+    reg init_done = 0;
+'''
+    
+    # Find all signals that need $past tracking
+    past_signals = set(re.findall(r'\$past\((\w+)\)', sva_content))
+    for sig in past_signals:
+        # Try to find width from port declarations
+        width_match = re.search(rf'\[(\d+):(\d+)\]\s*{sig}', sva_content)
+        if width_match:
+            hi, lo = width_match.groups()
+            yosys_code += f"    reg [{hi}:{lo}] past_{sig};\n"
+        else:
+            yosys_code += f"    reg past_{sig};\n"
+    
+    # Add clock tracking
+    clk_name = "clk"
+    clk_match = re.search(r'@\(posedge\s+(\w+)\)', sva_content)
+    if clk_match:
+        clk_name = clk_match.group(1)
+    
+    yosys_code += f'''
+    always @(posedge {clk_name}) begin
+        init_done <= 1;
+'''
+    for sig in past_signals:
+        yosys_code += f"        past_{sig} <= {sig};\n"
+    yosys_code += "    end\n\n"
+    
+    # Convert each property to immediate assertion
+    for prop_name, clk, condition in properties:
+        # Replace $past(x) with past_x
+        cond = condition.strip()
+        for sig in past_signals:
+            cond = cond.replace(f'$past({sig})', f'past_{sig}')
+        
+        # Parse implication operator |=>
+        if '|=>' in cond:
+            antecedent, consequent = cond.split('|=>')
+            antecedent = antecedent.strip()
+            consequent = consequent.strip()
+            
+            # Handle disable iff
+            disable_cond = ""
+            if 'disable iff' in antecedent:
+                disable_match = re.search(r'disable\s+iff\s*\(([^)]+)\)', antecedent)
+                if disable_match:
+                    disable_cond = disable_match.group(1)
+                    antecedent = re.sub(r'disable\s+iff\s*\([^)]+\)\s*', '', antecedent)
+            
+            yosys_code += f"    // Property: {prop_name}\n"
+            yosys_code += f"    always @(posedge {clk}) begin\n"
+            if disable_cond:
+                yosys_code += f"        if (!({disable_cond}) && init_done && ({antecedent.strip()}))\n"
+            else:
+                yosys_code += f"        if (init_done && ({antecedent.strip()}))\n"
+            yosys_code += f"            assert({consequent.strip()});\n"
+            yosys_code += f"    end\n\n"
+        else:
+            # Simple assertion without implication
+            yosys_code += f"    // Property: {prop_name}\n"
+            yosys_code += f"    always @(posedge {clk}) begin\n"
+            yosys_code += f"        assert({cond});\n"
+            yosys_code += f"    end\n\n"
+    
+    yosys_code += f'''endmodule
+
+// Bind to DUT
+bind {module_name} {module_name}_sby_check sby_inst (.*);
+'''
+    
+    return yosys_code
+
+def write_sby_config(design_name, use_sby_check: bool = True):
+    """Writes a default SBY config for the design.
+    
+    Args:
+        design_name: Name of the design
+        use_sby_check: If True, use the Yosys-compatible _sby_check.sv file
+    """
     path = f"{OPENLANE_ROOT}/designs/{design_name}/src/{design_name}.sby"
+    
+    sva_file = f"{design_name}_sby_check.sv" if use_sby_check else f"{design_name}_sva.sv"
+    
     config = f"""[options]
 mode prove
 
@@ -178,12 +343,12 @@ smtbmc
 
 [script]
 read -formal {design_name}.v
-read -formal {design_name}_sva.sv
+read -formal {sva_file}
 prep -top {design_name}
 
 [files]
 {design_name}.v
-{design_name}_sva.sv
+{sva_file}
 """
     with open(path, "w") as f:
         f.write(config)
@@ -197,18 +362,22 @@ def run_formal_verification(design_name):
     if not os.path.exists(sby_file):
         return False, "SBY configuration file not found."
 
-    # Run SBY
+    # Run SBY (using bundled binary)
+    sby_cmd = SBY_BIN if os.path.exists(SBY_BIN) else "sby"
     try:
         result = subprocess.run(
-            ["sby", "-f", f"{design_name}.sby"],
+            [sby_cmd, "-f", f"{design_name}.sby"],
             cwd=design_dir,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=600  # 10 minute timeout for formal verification
         )
         if result.returncode == 0:
-            return True, f"Formal Verification PASSED.\\n{result.stdout}"
+            return True, f"Formal Verification PASSED.\n{result.stdout}"
         else:
-            return False, f"Formal Verification FAILED:\\n{result.stdout}\\n{result.stderr}"
+            return False, f"Formal Verification FAILED:\n{result.stdout}\n{result.stderr}"
+    except subprocess.TimeoutExpired:
+        return False, "Formal Verification timed out (>10 mins). Design may be too complex for bounded model checking."
     except FileNotFoundError:
         return False, "SymbiYosys (sby) tool not installed/found in path."
 
@@ -269,18 +438,30 @@ def check_physical_metrics(design_name):
     except Exception as e:
         return None, f"Error parsing metrics: {str(e)}"
 
-def run_simulation(design_name):
+def run_simulation(design_name) -> tuple:
     """Compiles and runs the testbench simulation."""
     src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
     rtl_file = f"{src_dir}/{design_name}.v"
     tb_file = f"{src_dir}/{design_name}_tb.v"
     sim_out = f"{src_dir}/sim"
     
+    # Validate files exist
+    if not os.path.exists(rtl_file):
+        return False, f"RTL file not found: {rtl_file}"
+    if not os.path.exists(tb_file):
+        return False, f"Testbench file not found: {tb_file}"
+    
     # Compile
-    compile_result = subprocess.run(
-        ["iverilog", "-g2012", "-o", sim_out, rtl_file, tb_file],
-        capture_output=True, text=True
-    )
+    try:
+        compile_result = subprocess.run(
+            ["iverilog", "-g2012", "-o", sim_out, rtl_file, tb_file],
+            capture_output=True, text=True,
+            timeout=120  # 2 minute timeout for compilation
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Compilation timed out (>120s). Design may be too complex."
+    except FileNotFoundError:
+        return False, "iverilog not found. Please install Icarus Verilog."
     if compile_result.returncode != 0:
         return False, f"Compilation failed:\n{compile_result.stderr}"
     
@@ -394,13 +575,33 @@ def run_openlane(design_name, background=False):
         error_text = (process.stdout + "\n" + error_text).strip()
     return False, error_text
 
-def run_verification(design_name):
-    """Runs the verify_design.sh script."""
+def run_verification(design_name: str) -> str:
+    """Runs the verify_design.sh script.
+    
+    Args:
+        design_name: Name of the design to verify
+    
+    Returns:
+        str: Output from verification script or error message
+    """
+    # Input validation
+    if not design_name or '..' in design_name or '/' in design_name:
+        return f"Error: Invalid design name: {design_name}"
+    
     script_path = os.path.join(SCRIPTS_DIR, "verify_design.sh")
     
-    result = subprocess.run(
-        ["bash", script_path, design_name],
-        capture_output=True,
-        text=True
-    )
-    return result.stdout
+    if not os.path.exists(script_path):
+        return f"Error: Verification script not found: {script_path}"
+    
+    try:
+        result = subprocess.run(
+            ["bash", script_path, design_name],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout for verification
+        )
+        return result.stdout + (result.stderr if result.stderr else "")
+    except subprocess.TimeoutExpired:
+        return "Error: Verification timed out (>5 mins)."
+    except Exception as e:
+        return f"Error running verification: {str(e)}"

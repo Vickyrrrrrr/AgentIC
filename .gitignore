@@ -32,6 +32,10 @@ runs/
 work/
 transcript
 
+# OSS CAD Suite (large binary toolchain - download separately)
+oss-cad-suite/
+oss-cad-suite-*.tgz
+
 # System
 .DS_Store
 Thumbs.db

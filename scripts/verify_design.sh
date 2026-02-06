@@ -7,6 +7,12 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
+# Auto-load environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/setup_env.sh" ]; then
+    source "$SCRIPT_DIR/setup_env.sh" > /dev/null
+fi
+
 DESIGN=$1
 OPENLANE_ROOT="${OPENLANE_ROOT:-$HOME/OpenLane}"
 DESIGN_DIR=$OPENLANE_ROOT/designs/$DESIGN
@@ -85,6 +91,29 @@ else
     else
          echo "    [WARNING] LVS Report not found."
     fi
+fi
+
+echo ""
+echo "========================================"
+
+# 3. Formal Verification (SymbiYosys)
+echo "[3] Formal Verification (SymbiYosys)"
+if [ -f "$DESIGN_DIR/src/${DESIGN}.sby" ]; then
+    echo "    Found SBY Config: ${DESIGN}.sby"
+    cd $DESIGN_DIR/src
+    if command -v sby &> /dev/null; then
+        sby -f ${DESIGN}.sby
+        if [ $? -eq 0 ]; then
+             echo "    [PASS] Formal Proof Successful."
+        else
+             echo "    [FAIL] Formal Proof Failed."
+        fi
+    else
+        echo "    [WARNING] 'sby' command not found. Skipping Formal Verification."
+    fi
+    cd $OPENLANE_ROOT
+else
+    echo "    [INFO] No SBY config found. Skipping."
 fi
 
 echo "========================================"
