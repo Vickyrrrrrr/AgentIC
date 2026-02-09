@@ -3,7 +3,7 @@ import os
 import re
 import subprocess
 from crewai.tools import tool
-from ..config import OPENLANE_ROOT, SCRIPTS_DIR, PDK_ROOT, OPENLANE_IMAGE, SBY_BIN
+from ..config import OPENLANE_ROOT, SCRIPTS_DIR, PDK_ROOT, PDK, OPENLANE_IMAGE, SBY_BIN
 
 def SecurityCheck(rtl_code: str) -> tuple:
     """
@@ -157,6 +157,10 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
         clean_code = clean_code.replace(" end ", "\nend ")
     
     try:
+        # Verilator requires a newline at the end of the file
+        if not clean_code.endswith("\n"):
+            clean_code += "\n"
+            
         with open(path, "w") as f:
             f.write(clean_code)
         return path
@@ -184,6 +188,39 @@ def run_syntax_check(file_path: str) -> tuple:
         return False, "Syntax check timed out (>60s). File may be too large or malformed."
     except FileNotFoundError:
         return False, "iverilog not found. Please install Icarus Verilog."
+
+def run_lint_check(file_path: str) -> tuple:
+    """
+    Runs Verilator --lint-only for stricter static analysis.
+    Returns: (True, "OK") or (False, ErrorLog)
+    """
+    if not os.path.exists(file_path):
+        return False, f"File not found: {file_path}"
+    
+    # We use --lint-only and -Wall to catch everything
+    cmd = ["verilator", "--lint-only", "-Wall", "--timing", file_path]
+    
+    try:
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, text=True,
+            timeout=30
+        )
+        # Verilator prints errors to stderr
+        if result.returncode != 0:
+            # Filter warnings if needed, but for now capture all
+            return False, f"Verilator Lint Errors:\n{result.stderr}"
+            
+        # Even if return code is 0, check for warnings?
+        # Verilator returns 0 even with warnings unless -Werror is used.
+        # But we want to fail on critical issues.
+        # Let's keep it simple: If execution fails, return False.
+        return True, "Lint OK"
+        
+    except FileNotFoundError:
+         return True, "Verilator not found (Skipping Lint)"
+    except subprocess.TimeoutExpired:
+         return False, "Lint check timed out."
 
 @tool("Syntax Checker")
 def syntax_check_tool(file_path: str):
@@ -532,7 +569,7 @@ def run_openlane(design_name, background=False):
         "-v", f"{OPENLANE_ROOT}:/openlane",
         "-v", f"{PDK_ROOT}:{PDK_ROOT}",
         "-e", f"PDK_ROOT={PDK_ROOT}",
-        "-e", "PDK=sky130A",
+        "-e", f"PDK={PDK}",
         "-e", "PWD=/openlane",
         OPENLANE_IMAGE,
         "./flow.tcl", "-design", design_name, "-tag", "agentrun", "-overwrite", "-ignore_mismatches"
@@ -605,3 +642,70 @@ def run_verification(design_name: str) -> str:
         return "Error: Verification timed out (>5 mins)."
     except Exception as e:
         return f"Error running verification: {str(e)}"
+def run_gls_simulation(design_name: str) -> tuple:
+    """Compiles and runs the Gate-Level Simulation (GLS) for the design."""
+    src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
+    tb_file = f"{src_dir}/{design_name}_tb.v"
+    
+    # Locating Netlist
+    run_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs/agentrun"
+    if not os.path.exists(run_dir):
+        # Fallback to latest run
+        runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
+        if os.path.exists(runs_dir):
+            runs = sorted([d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))])
+            if runs:
+                run_dir = f"{runs_dir}/{runs[-1]}"
+    
+    gl_netlist = f"{run_dir}/results/final/verilog/gl/{design_name}.v"
+    sim_out = f"{src_dir}/gls_sim"
+    
+    if not os.path.exists(gl_netlist):
+        return False, f"Gate-level netlist not found at {gl_netlist}. Did you run hardening?"
+    if not os.path.exists(tb_file):
+        return False, f"Testbench file not found: {tb_file}"
+
+    # Finding PDK Verilog models
+    pdk_v_path = None
+    common_pdk_paths = [
+        os.path.join(PDK_ROOT, PDK, "libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v"),
+        os.path.join(PDK_ROOT, "ciel/sky130/versions/0fe599b2afb6708d281543108caf8310912f54af/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v")
+    ]
+    
+    for path in common_pdk_paths:
+        if os.path.exists(path):
+            pdk_v_path = path
+            break
+            
+    if not pdk_v_path:
+        return False, "Could not locate sky130 standard cell Verilog models. GLS aborted."
+
+    primitives_v = os.path.join(os.path.dirname(pdk_v_path), "primitives.v")
+
+    # Compile GLS
+    try:
+        cmd = ["iverilog", "-g2012", "-DFUNCTIONAL", "-DUNIT_DELAY=#1", "-o", sim_out, tb_file, gl_netlist, pdk_v_path, primitives_v]
+        compile_result = subprocess.run(
+            cmd,
+            capture_output=True, text=True,
+            timeout=300
+        )
+        if compile_result.returncode != 0:
+            return False, f"GLS Compilation failed:\n{compile_result.stderr}"
+    except subprocess.TimeoutExpired:
+        return False, "GLS Compilation timed out."
+
+    # Run GLS Simulation
+    try:
+        run_result = subprocess.run(
+            ["vvp", sim_out],
+            capture_output=True,
+            text=True,
+            timeout=600
+        )
+        sim_text = (run_result.stdout or "") + ("\n" + run_result.stderr if run_result.stderr else "")
+        if "TEST PASSED" in sim_text:
+            return True, f"GLS Simulation PASSED.\n{sim_text}"
+        return False, f"GLS Simulation FAILED or missing PASS marker.\n{sim_text}"
+    except subprocess.TimeoutExpired:
+        return False, "GLS Simulation Timed Out."

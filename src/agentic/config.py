@@ -59,6 +59,7 @@ LLM_API_KEY = LOCAL_CONFIG["api_key"]
 
 # Tool Settings
 PDK_ROOT = os.environ.get('PDK_ROOT', os.path.expanduser('~/.ciel'))
+PDK = os.environ.get('PDK', 'sky130A') # Default to SkyWater 130nm
 OPENLANE_IMAGE = "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-amd64"
 
 # OSS CAD Suite (SymbiYosys, Yosys) - Self-contained within AgentIC
