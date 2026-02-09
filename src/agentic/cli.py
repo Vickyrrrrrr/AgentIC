@@ -37,7 +37,8 @@ from .tools.vlsi_tools import (
     write_sby_config,
     run_formal_verification,
     check_physical_metrics,
-    run_lint_check
+    run_lint_check,
+    run_gls_simulation
 )
 
 # --- INITIALIZE ---
@@ -94,6 +95,16 @@ def get_llm():
         base_url=LLM_BASE_URL,
         api_key=LLM_API_KEY
     )
+
+def get_groq_llm():
+    """Returns the Groq-specific LLM for the terminal assistant."""
+    if GROQ_CONFIG["api_key"]:
+        return LLM(
+            model=GROQ_CONFIG["model"],
+            base_url=GROQ_CONFIG["base_url"],
+            api_key=GROQ_CONFIG["api_key"]
+        )
+    raise ValueError("GROQ_API_KEY not found in environment.")
 
 @app.command()
 def simulate(
@@ -379,6 +390,66 @@ def verify(name: str = typer.Argument(..., help="Design name to verify")):
     output = run_verification(name)
     console.print(output)
 
+
+@app.command()
+def chat():
+    """Interactive VLSI Assistant Chat (Groq-powered)."""
+    console.print(Panel(
+        "[bold cyan]AgentIC Terminal Assistant[/bold cyan]\n"
+        "Powered by [yellow]Groq (Llama 3.3 70B)[/yellow]\n"
+        "I can help you build, simulate, and fix chips interactively.",
+        title="💬 AI Chat Mode"
+    ))
+    
+    try:
+        llm = get_groq_llm()
+    except Exception as e:
+        console.print(f"[bold red]Error initializing Groq LLM: {e}[/bold red]")
+        raise typer.Exit(1)
+
+    from .tools.vlsi_tools import write_verilog, run_simulation, run_gls_simulation, run_openlane, syntax_check_tool, read_file_tool
+    
+    # Create the Assistant Agent
+    assistant = Agent(
+        role='VLSI Junior Engineer',
+        goal='Assist the user with chip design tasks by writing code and running tools.',
+        backstory='''You are an expert VLSI assistant. 
+        You have access to tools for writing Verilog, running simulations (RTL and Gate-Level), 
+        and hardening designs using OpenLane.
+        Always verify your code with syntax checks before running simulations.
+        If a user asks to "build" something, write the Verilog code first.
+        If a user asks to "simulate", ensure the Verilog files exist first.
+        ''',
+        llm=llm,
+        verbose=True,
+        tools=[write_verilog, run_simulation, run_gls_simulation, run_openlane, syntax_check_tool, read_file_tool]
+    )
+
+    while True:
+        try:
+            user_input = console.input("[bold green]You >>> [/bold green]")
+            if user_input.lower() in ["exit", "quit", "bye"]:
+                console.print("[cyan]Goodbye![/cyan]")
+                break
+            
+            if not user_input.strip():
+                continue
+
+            task = Task(
+                description=user_input,
+                expected_output="Final response to user after completing any necessary tool actions.",
+                agent=assistant
+            )
+            
+            with console.status("[cyan]AI is working...[/cyan]"):
+                result = Crew(agents=[assistant], tasks=[task]).kickoff()
+                console.print(f"\n[bold cyan]AI >>>[/bold cyan] {result}\n")
+                
+        except KeyboardInterrupt:
+            console.print("\n[cyan]Chat session ended.[/cyan]")
+            break
+        except Exception as e:
+            console.print(f"[bold red]An error occurred: {e}[/bold red]")
 
 if __name__ == "__main__":
     app()

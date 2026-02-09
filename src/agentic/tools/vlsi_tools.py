@@ -53,6 +53,7 @@ def write_config(design_name: str, code: str) -> str:
     except IOError as e:
         raise IOError(f"Failed to write config file {path}: {str(e)}")
 
+@tool("Verilog Writer")
 def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffix: str = None, ext: str = ".v") -> str:
     """Writes Verilog code to the OpenLane design directory.
     
@@ -475,7 +476,8 @@ def check_physical_metrics(design_name):
     except Exception as e:
         return None, f"Error parsing metrics: {str(e)}"
 
-def run_simulation(design_name) -> tuple:
+@tool("Simulation Runner")
+def run_simulation(design_name: str) -> tuple:
     """Compiles and runs the testbench simulation."""
     src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
     rtl_file = f"{src_dir}/{design_name}.v"
@@ -532,7 +534,8 @@ def run_simulation(design_name) -> tuple:
         return False, sim_text
     return False, sim_text
 
-def run_openlane(design_name, background=False):
+@tool("OpenLane Hardening Tool")
+def run_openlane(design_name: str, background: bool = False):
     """Triggers the OpenLane flow via Docker."""
     
     # --- Autonomous Environment Fix ---
@@ -642,6 +645,8 @@ def run_verification(design_name: str) -> str:
         return "Error: Verification timed out (>5 mins)."
     except Exception as e:
         return f"Error running verification: {str(e)}"
+
+@tool("Gate-Level Simulation (GLS) Tool")
 def run_gls_simulation(design_name: str) -> tuple:
     """Compiles and runs the Gate-Level Simulation (GLS) for the design."""
     src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
