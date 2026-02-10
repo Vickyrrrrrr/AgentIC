@@ -19,3 +19,27 @@ def get_error_analyst_agent(llm, verbose=False):
         verbose=verbose,
         allow_delegation=False
     )
+
+
+def get_regression_agent(llm, goal, verbose=False):
+    """Returns an agent that generates multiple directed test scenarios for regression.
+    
+    This agent analyzes the RTL spec and creates corner-case, edge-case,
+    and stress tests to achieve broader coverage.
+    """
+    return Agent(
+        role='Regression Test Architect',
+        goal=goal,
+        backstory="""You are a senior verification lead who specializes in test planning.
+        You analyze RTL specifications and create comprehensive test plans covering:
+        - Corner cases (min/max values, overflow/underflow)
+        - Reset behavior (async reset during operation, double-reset)
+        - Edge cases (back-to-back operations, simultaneous events)  
+        - Boundary conditions (full FIFO, empty buffer, max count)
+        - Stress tests (rapid toggling, sustained load)
+        You output self-checking Verilog testbenches with clear PASS/FAIL markers.
+        Each test must print "TEST PASSED" on success or "TEST FAILED" on failure.""",
+        llm=llm,
+        verbose=verbose,
+        allow_delegation=False
+    )

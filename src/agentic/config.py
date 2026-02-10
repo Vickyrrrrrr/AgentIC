@@ -32,7 +32,7 @@ GROQ_CONFIG = {
 NVIDIA_BACKUP_CONFIG = {
     "model": "meta/llama-3.1-405b-instruct",
     "base_url": "https://integrate.api.nvidia.com/v1",
-    "api_key": os.environ.get("NVIDIA_BACKUP_API_KEY", "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")
+    "api_key": os.environ.get("NVIDIA_BACKUP_API_KEY", "")
 }
 
 # NVIDIA User Provided Configuration (New Key)
@@ -41,7 +41,7 @@ NVIDIA_USER_CONFIG = {
     # Switched to 'meta/llama-3.1-405b-instruct' for code generation capability.
     "model": "meta/llama-3.1-405b-instruct", 
     "base_url": "https://integrate.api.nvidia.com/v1",
-    "api_key": "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"
+    "api_key": os.environ.get("NVIDIA_USER_API_KEY", "")
 }
 
 # Local/Default Configuration

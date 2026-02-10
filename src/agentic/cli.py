@@ -47,53 +47,46 @@ console = Console()
 
 # Setup Brain
 def get_llm():
-    """Returns the LLM instance for agents, with Nemotron -> Backup -> Groq fallback."""
-    # 1. Try NVIDIA User Config (Primary - Llama 405B)
-    try:
-        return LLM(
-            model=NVIDIA_USER_CONFIG["model"],
-            base_url=NVIDIA_USER_CONFIG["base_url"],
-            api_key=NVIDIA_USER_CONFIG["api_key"]
-        )
-    except Exception as e:
-         console.print(f"[yellow]⚠ NVIDIA User Config Init failed: {e}. Falling back to Backup...[/yellow]")
-
-    # 2. Try NVIDIA Backup (Llama 3.1 405B - Secondary)
-    try:
-        return LLM(
-            model=NVIDIA_BACKUP_CONFIG["model"],
-            base_url=NVIDIA_BACKUP_CONFIG["base_url"],
-            api_key=NVIDIA_BACKUP_CONFIG["api_key"]
-        )
-    except Exception as e:
-         console.print(f"[yellow]⚠ NVIDIA Backup Init failed: {e}. Falling back to Groq...[/yellow]")
-
-    # 3. Try Groq (Tertiary)
-    if GROQ_CONFIG["api_key"]:
-        try:
-            return LLM(
-                model=GROQ_CONFIG["model"],
-                base_url=GROQ_CONFIG["base_url"],
-                api_key=GROQ_CONFIG["api_key"]
-            )
-        except Exception as e:
-            console.print(f"[yellow]⚠ Groq Init failed: {e}. Falling back to NVIDIA...[/yellow]")
-
-    # 3. Try NVIDIA (Tertiary)
-    try:
-        return LLM(
-            model=NVIDIA_CONFIG["model"],
-            base_url=NVIDIA_CONFIG["base_url"],
-            api_key=NVIDIA_CONFIG["api_key"]
-        )
-    except Exception as e:
-        console.print(f"[yellow]⚠ NVIDIA Init failed: {e}. Falling back to Local...[/yellow]")
+    """Returns the LLM instance, checking keys BEFORE constructing to avoid runtime crashes.
     
-    # 4. Last Resort: Default/Local
+    Priority order (only attempts configs with non-empty API keys):
+      1. NVIDIA_CONFIG      (uses NVIDIA_API_KEY from .env)
+      2. NVIDIA_USER_CONFIG (uses NVIDIA_USER_API_KEY from .env)
+      3. NVIDIA_BACKUP      (uses NVIDIA_BACKUP_API_KEY from .env)
+      4. GROQ               (uses GROQ_API_KEY from .env)
+      5. Local/Ollama        (fallback)
+    """
+    configs = [
+        ("NVIDIA Primary",  NVIDIA_CONFIG),
+        ("NVIDIA User",     NVIDIA_USER_CONFIG),
+        ("NVIDIA Backup",   NVIDIA_BACKUP_CONFIG),
+        ("Groq",            GROQ_CONFIG),
+    ]
+    
+    for name, cfg in configs:
+        key = cfg.get("api_key", "")
+        if not key or key.strip() == "":
+            console.print(f"[dim]⏭ {name}: No API key set, skipping.[/dim]")
+            continue
+        try:
+            llm = LLM(
+                model=cfg["model"],
+                base_url=cfg["base_url"],
+                api_key=key,
+                temperature=0.1
+            )
+            console.print(f"[green]✓ Using {name} ({cfg['model']})[/green]")
+            return llm
+        except Exception as e:
+            console.print(f"[yellow]⚠ {name} init failed: {e}[/yellow]")
+    
+    # Last Resort: Default/Local (Ollama)
+    console.print(f"[yellow]⚠ No cloud keys found. Using Local: {LLM_MODEL}[/yellow]")
     return LLM(
         model=LLM_MODEL,
         base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY
+        api_key=LLM_API_KEY,
+        temperature=0.1
     )
 
 def get_groq_llm():
@@ -177,16 +170,20 @@ Simulation output / errors:
 
 Current RTL (do not modify unless absolutely necessary):
 ```verilog
-{open(rtl_path,'r').read()}
+{read_file_content(rtl_path)}
 ```
 
 Current testbench:
 ```verilog
-{open(tb_path,'r').read()}
+{read_file_content(tb_path)}
 ```
 '''
             fixed_tb = _fix_with_llm('Verification Engineer', f'Fix testbench for {name}', fix_tb_prompt)
-            tb_path = write_verilog(name, fixed_tb, is_testbench=True)
+            result_path = write_verilog(name, fixed_tb, is_testbench=True)
+            if isinstance(result_path, str) and result_path.startswith("Error:"):
+                sim_output = f"Failed to write fixed TB: {result_path}"
+                continue
+            tb_path = result_path
             sim_success, sim_output = run_simulation(name)
             continue
 
@@ -229,16 +226,20 @@ Simulation Error/Output:
 
 Current RTL (Reference - count the FSM states):
 ```verilog
-{open(rtl_path,'r').read()}
+{read_file_content(rtl_path)}
 ```
 
 Current Testbench (To Fix - increase wait cycles):
 ```verilog
-{open(tb_path,'r').read()}
+{read_file_content(tb_path)}
 ```
 '''
                  fixed_tb = _fix_with_llm('Verification Engineer', f'Fix testbench logic for {name}', fix_tb_logic_prompt)
-                 tb_path = write_verilog(name, fixed_tb, is_testbench=True)
+                 result_path = write_verilog(name, fixed_tb, is_testbench=True)
+                 if isinstance(result_path, str) and result_path.startswith("Error:"):
+                     sim_output = f"Failed to write fixed TB: {result_path}"
+                     continue
+                 tb_path = result_path
                  sim_success, sim_output = run_simulation(name)
                  continue
 
@@ -262,12 +263,12 @@ Simulation output:
 
 Current testbench (do not change in this step):
 ```verilog
-{open(tb_path,'r').read()}
+{read_file_content(tb_path)}
 ```
 
 Current RTL:
 ```verilog
-{open(rtl_path,'r').read()}
+{read_file_content(rtl_path)}
 ```
 '''
                 fixed_rtl = _fix_with_llm('VLSI Design Engineer', f'Fix RTL behavior for {name}', fix_rtl_prompt)
@@ -291,6 +292,57 @@ Current RTL:
         console.print(f"  [dim]{line}[/dim]")
     console.print("  ✓ Simulation [green]passed[/green]")
 
+
+def _generate_config_tcl(design_name: str, rtl_file: str) -> str:
+    """Auto-generate OpenLane config.tcl based on design complexity.
+    
+    Reads the RTL file to estimate size and generates appropriate
+    die area, clock period, and synthesis settings.
+    """
+    # Estimate design complexity from file size
+    try:
+        with open(rtl_file, 'r') as f:
+            rtl_content = f.read()
+        line_count = len(rtl_content.strip().split('\n'))
+    except IOError:
+        line_count = 100  # Fallback
+
+    # Scale parameters based on complexity
+    if line_count < 100:
+        # Small: counter, shift register, PWM
+        die_size, util, clock_period = 300, 50, "10"
+    elif line_count < 300:
+        # Medium: FIFO, UART, SPI, FSM
+        die_size, util, clock_period = 500, 40, "15"
+    else:
+        # Large: TMR, AES, processors
+        die_size, util, clock_period = 800, 35, "20"
+
+    return f'''# Auto-generated by AgentIC for {design_name}
+set ::env(DESIGN_NAME) "{design_name}"
+set ::env(VERILOG_FILES) "$::env(DESIGN_DIR)/src/{design_name}.v"
+set ::env(CLOCK_PORT) "clk"
+set ::env(CLOCK_PERIOD) "{clock_period}"
+
+# Floorplanning (scaled for ~{line_count} lines of RTL)
+set ::env(FP_SIZING) "absolute"
+set ::env(DIE_AREA) "0 0 {die_size} {die_size}"
+set ::env(FP_CORE_UTIL) {util}
+set ::env(PL_TARGET_DENSITY) {util / 100 + 0.05:.2f}
+
+# Synthesis
+set ::env(SYNTH_STRATEGY) "AREA 0"
+set ::env(MAX_FANOUT_CONSTRAINT) 8
+
+# Routing
+set ::env(GRT_OVERFLOW_ITERS) 64
+
+# PDK
+set ::env(PDK) "sky130A"
+set ::env(STD_CELL_LIBRARY) "sky130_fd_sc_hd"
+'''
+
+
 @app.command()
 def harden(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
@@ -302,31 +354,20 @@ def harden(
         title="🚀 Starting OpenLane"
     ))
     
-    # Check config first
-    template_config = f"{OPENLANE_ROOT}/designs/simple_counter/config.tcl"
     new_config = f"{OPENLANE_ROOT}/designs/{name}/config.tcl"
+    rtl_file = f"{OPENLANE_ROOT}/designs/{name}/src/{name}.v"
 
     if not os.path.exists(new_config):
-        if os.path.exists(template_config):
-            with open(template_config, 'r') as f:
-                content = f.read().replace("simple_counter", name)
-
-            content = content.replace(
-                "set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]",
-                f"set ::env(VERILOG_FILES) \"$::env(DESIGN_DIR)/src/{name}.v\""
-            )
-            content = content.replace(
-                "set ::env(VERILOG_FILES) \"$::env(DESIGN_DIR)/src/simple_counter.v\"",
-                f"set ::env(VERILOG_FILES) \"$::env(DESIGN_DIR)/src/{name}.v\""
-            )
-
-            os.makedirs(os.path.dirname(new_config), exist_ok=True)
-            with open(new_config, 'w') as f:
-                f.write(content)
-            console.print(f"  ✓ Config written: [green]{new_config}[/green]")
-        else:
-             console.print(f"[bold red]✗ Config not found and template missing.[/bold red]")
-             raise typer.Exit(1)
+        if not os.path.exists(rtl_file):
+            console.print(f"[bold red]✗ RTL file not found: {rtl_file}[/bold red]")
+            raise typer.Exit(1)
+        
+        # Auto-generate config.tcl based on design size
+        config_content = _generate_config_tcl(name, rtl_file)
+        os.makedirs(os.path.dirname(new_config), exist_ok=True)
+        with open(new_config, 'w') as f:
+            f.write(config_content)
+        console.print(f"  ✓ Config auto-generated: [green]{new_config}[/green]")
     
     # Ask for background execution
     run_bg = typer.confirm("OpenLane hardening can take 10-30+ minutes. Run in background?", default=True)
@@ -356,10 +397,10 @@ def build(
     desc: str = typer.Option(..., "--desc", "-d", help="Natural language description"),
     max_retries: int = typer.Option(5, "--max-retries", "-r", min=0, help="Max auto-fix retries for RTL/TB/sim failures"),
     skip_openlane: bool = typer.Option(False, "--skip-openlane", help="Stop after simulation (no RTL→GDSII hardening)"),
-    show_thinking: bool = typer.Option(False, "--show-thinking", help="Print DeepSeek <think> reasoning for each generation/fix step")
+    show_thinking: bool = typer.Option(False, "--show-thinking", help="Print DeepSeek <think> reasoning for each generation/fix step"),
+    full_signoff: bool = typer.Option(False, "--full-signoff", help="Run full industry signoff (formal + coverage + regression + DRC/LVS)"),
+    min_coverage: float = typer.Option(80.0, "--min-coverage", help="Minimum line coverage percentage to pass verification")
 ):
-    """Build a chip from natural language description."""
-    
     """Build a chip from natural language description (Autonomous Orchestrator 2.0)."""
     
     from .orchestrator import BuildOrchestrator
@@ -367,7 +408,8 @@ def build(
     console.print(Panel(
         f"[bold cyan]AgentIC: Natural Language → GDSII[/bold cyan]\n"
         f"Design: [yellow]{name}[/yellow]\n"
-        f"Description: {desc}",
+        f"Description: {desc}\n"
+        f"{'[bold green]Full Industry Signoff Enabled[/bold green]' if full_signoff else ''}",
         title="🚀 Starting Autonomous Orchestrator"
     ))
 
@@ -379,10 +421,13 @@ def build(
         llm=llm,
         max_retries=max_retries,
         verbose=show_thinking,
-        skip_openlane=skip_openlane
+        skip_openlane=skip_openlane,
+        full_signoff=full_signoff,
+        min_coverage=min_coverage
     )
     
     orchestrator.run()
+
 @app.command()
 def verify(name: str = typer.Argument(..., help="Design name to verify")):
     """Run verification on an existing design."""
