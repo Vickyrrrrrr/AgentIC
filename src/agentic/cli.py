@@ -19,7 +19,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from crewai import Agent, Task, Crew, LLM
 
 # Local imports
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, GROQ_CONFIG, NVIDIA_BACKUP_CONFIG, NVIDIA_USER_CONFIG
+# Local imports
+from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent
@@ -38,7 +39,8 @@ from .tools.vlsi_tools import (
     run_formal_verification,
     check_physical_metrics,
     run_lint_check,
-    run_gls_simulation
+    run_gls_simulation,
+    signoff_check_tool
 )
 
 # --- INITIALIZE ---
@@ -47,32 +49,29 @@ console = Console()
 
 # Setup Brain
 def get_llm():
-    """Returns the LLM instance, checking keys BEFORE constructing to avoid runtime crashes.
-    
-    Priority order (only attempts configs with non-empty API keys):
-      1. NVIDIA_CONFIG      (uses NVIDIA_API_KEY from .env)
-      2. NVIDIA_USER_CONFIG (uses NVIDIA_USER_API_KEY from .env)
-      3. NVIDIA_BACKUP      (uses NVIDIA_BACKUP_API_KEY from .env)
-      4. GROQ               (uses GROQ_API_KEY from .env)
-      5. Local/Ollama        (fallback)
+    """Returns the LLM instance. Strict 2-Model Policy:
+       1. NVIDIA Qwen Cloud (Primary)
+       2. VeriReason Local (Fallback)
     """
+    
     configs = [
-        ("NVIDIA Primary",  NVIDIA_CONFIG),
-        ("NVIDIA User",     NVIDIA_USER_CONFIG),
-        ("NVIDIA Backup",   NVIDIA_BACKUP_CONFIG),
-        ("Groq",            GROQ_CONFIG),
+        ("NVIDIA Qwen Cloud",  NVIDIA_CONFIG),
+        ("VeriReason Local",   LOCAL_CONFIG),
     ]
     
     for name, cfg in configs:
         key = cfg.get("api_key", "")
-        if not key or key.strip() == "":
-            console.print(f"[dim]⏭ {name}: No API key set, skipping.[/dim]")
-            continue
+        # For Cloud, skip if no key.
+        if "Cloud" in name and (not key or key.strip() == "" or key == "mock-key"):
+             console.print(f"[dim]⏭ {name}: No valid API key set, skipping.[/dim]")
+             continue
+            
         try:
+            console.print(f"[dim]Testing {name}...[/dim]")
             llm = LLM(
                 model=cfg["model"],
                 base_url=cfg["base_url"],
-                api_key=key,
+                api_key=key if key and key != "NA" else "mock-key", # Local LLMs might use mock-key
                 temperature=0.1
             )
             console.print(f"[green]✓ Using {name} ({cfg['model']})[/green]")
@@ -80,24 +79,11 @@ def get_llm():
         except Exception as e:
             console.print(f"[yellow]⚠ {name} init failed: {e}[/yellow]")
     
-    # Last Resort: Default/Local (Ollama)
-    console.print(f"[yellow]⚠ No cloud keys found. Using Local: {LLM_MODEL}[/yellow]")
-    return LLM(
-        model=LLM_MODEL,
-        base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY,
-        temperature=0.1
-    )
+    # Critical Failure if both fail
+    console.print(f"[bold red]CRITICAL: No valid LLM backend found.[/bold red]")
+    console.print(f"Please set [bold]NVIDIA_API_KEY[/bold] for Cloud or configure [bold]LLM_BASE_URL[/bold] for Local.")
+    raise typer.Exit(1)
 
-def get_groq_llm():
-    """Returns the Groq-specific LLM for the terminal assistant."""
-    if GROQ_CONFIG["api_key"]:
-        return LLM(
-            model=GROQ_CONFIG["model"],
-            base_url=GROQ_CONFIG["base_url"],
-            api_key=GROQ_CONFIG["api_key"]
-        )
-    raise ValueError("GROQ_API_KEY not found in environment.")
 
 @app.command()
 def simulate(
@@ -383,8 +369,24 @@ def harden(
         if run_bg:
              console.print(f"  ✓ [green]{ol_result}[/green]")
              console.print(f"  [dim]Monitor logs: tail -f {OPENLANE_ROOT}/designs/{name}/harden.log[/dim]")
+             console.print("  [yellow]Note: Run manual signoff check after background job completes.[/yellow]")
              return
         console.print(f"  ✓ GDSII generated: [green]{ol_result}[/green]")
+        
+        # --- Strict Signoff Check ---
+        console.print(Panel(
+            f"[bold cyan]Running Signoff Checks (STA/Power)...[/bold cyan]",
+            title="🔍 Fabrication Readiness"
+        ))
+        success, report = signoff_check_tool(name)
+        if success:
+            console.print(f"[bold green]✅ SIGNOFF PASSED[/bold green]")
+            console.print(report)
+        else:
+            console.print(f"[bold red]❌ SIGNOFF FAILED[/bold red]")
+            console.print(report)
+            raise typer.Exit(1)
+
     else:
         console.print(f"[bold red]✗ OpenLane failed[/bold red]")
         console.print(f"  Error: {ol_result[:500]}...")
@@ -436,65 +438,6 @@ def verify(name: str = typer.Argument(..., help="Design name to verify")):
     console.print(output)
 
 
-@app.command()
-def chat():
-    """Interactive VLSI Assistant Chat (Groq-powered)."""
-    console.print(Panel(
-        "[bold cyan]AgentIC Terminal Assistant[/bold cyan]\n"
-        "Powered by [yellow]Groq (Llama 3.3 70B)[/yellow]\n"
-        "I can help you build, simulate, and fix chips interactively.",
-        title="💬 AI Chat Mode"
-    ))
-    
-    try:
-        llm = get_groq_llm()
-    except Exception as e:
-        console.print(f"[bold red]Error initializing Groq LLM: {e}[/bold red]")
-        raise typer.Exit(1)
-
-    from .tools.vlsi_tools import write_verilog, run_simulation, run_gls_simulation, run_openlane, syntax_check_tool, read_file_tool
-    
-    # Create the Assistant Agent
-    assistant = Agent(
-        role='VLSI Junior Engineer',
-        goal='Assist the user with chip design tasks by writing code and running tools.',
-        backstory='''You are an expert VLSI assistant. 
-        You have access to tools for writing Verilog, running simulations (RTL and Gate-Level), 
-        and hardening designs using OpenLane.
-        Always verify your code with syntax checks before running simulations.
-        If a user asks to "build" something, write the Verilog code first.
-        If a user asks to "simulate", ensure the Verilog files exist first.
-        ''',
-        llm=llm,
-        verbose=True,
-        tools=[write_verilog, run_simulation, run_gls_simulation, run_openlane, syntax_check_tool, read_file_tool]
-    )
-
-    while True:
-        try:
-            user_input = console.input("[bold green]You >>> [/bold green]")
-            if user_input.lower() in ["exit", "quit", "bye"]:
-                console.print("[cyan]Goodbye![/cyan]")
-                break
-            
-            if not user_input.strip():
-                continue
-
-            task = Task(
-                description=user_input,
-                expected_output="Final response to user after completing any necessary tool actions.",
-                agent=assistant
-            )
-            
-            with console.status("[cyan]AI is working...[/cyan]"):
-                result = Crew(agents=[assistant], tasks=[task]).kickoff()
-                console.print(f"\n[bold cyan]AI >>>[/bold cyan] {result}\n")
-                
-        except KeyboardInterrupt:
-            console.print("\n[cyan]Chat session ended.[/cyan]")
-            break
-        except Exception as e:
-            console.print(f"[bold red]An error occurred: {e}[/bold red]")
 
 if __name__ == "__main__":
     app()

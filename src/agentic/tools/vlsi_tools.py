@@ -126,23 +126,9 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
         # Instead, we return a special error message that the Agent will see as the tool output.
         return f"Error: No Verilog 'module' definition found in the provided code. Please ensure you output the full Verilog code inside ```verilog``` fences."
 
-    # --- AUTO-FIXES FOR COMPILER COMPATIBILITY (iverilog) ---
-    
-    # 1. always_comb / always_ff → always @(*) / always @(...)
-    #    iverilog has a known bug: "constant selects in always_* processes are not currently supported"
-    #    This breaks complex designs. Converting to traditional always blocks fixes it.
-    clean_code = re.sub(r'\balways_comb\b', 'always @(*)', clean_code)
-    clean_code = re.sub(r'\balways_ff\s+@', 'always @', clean_code)
-    
-    # 2. Fix signed casting: signed'(val) -> $signed(val)
-    clean_code = re.sub(r"signed'\s*\((.*?)\)", r"$signed(\1)", clean_code)
-    
-    # 3. Fix enum/type casting: type_name'(val) -> val  (iverilog doesn't support explicit type casts)
-    clean_code = re.sub(r"\b\w+'(\()", r"\1", clean_code)
-    
-    # 4. Remove unsupported SystemVerilog qualifiers for iverilog
-    clean_code = re.sub(r'\bunique\s+case\b', 'case', clean_code)
-    clean_code = re.sub(r'\bpriority\s+case\b', 'case', clean_code)
+    # --- AUTO-FIXES FOR COMPILER COMPATIBILITY ---
+    # Removed legacy iverilog downgrades. Verilator supports full SystemVerilog.
+
 
     # 4. CRITICAL: Fix "Single Line Output" Bug
     # Some models dump the entire code on one line. If that line starts with //, 
@@ -168,25 +154,32 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
 
 def run_syntax_check(file_path: str) -> tuple:
     """
-    Runs iverilog syntax check on a Verilog file.
+    Runs Verilator syntax check (Lint Only).
     Returns: (True, "OK") if clean, or (False, "Error message") if failed.
     """
     if not os.path.exists(file_path):
         return False, f"File not found: {file_path}"
     
     try:
+        # --lint-only: check syntax and basic semantics
+        # --sv: force SystemVerilog parsing
+        # --timing: support delays
+        # -Wno-fatal: don't crash on warnings (unless they are errors)
+        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wno-fatal", file_path]
+        
         result = subprocess.run(
-            ["iverilog", "-g2012", "-t", "null", file_path], 
+            cmd, 
             capture_output=True, text=True,
-            timeout=60  # 1 minute timeout for syntax check
+            timeout=60
         )
+        # Verilator prints errors/warnings to stderr
         if result.returncode == 0:
-            return True, "Syntax OK"
-        return False, result.stderr
+            return True, "Syntax OK (Verilator)"
+        return False, f"Verilator Syntax Errors:\n{result.stderr}"
     except subprocess.TimeoutExpired:
-        return False, "Syntax check timed out (>60s). File may be too large or malformed."
+        return False, "Syntax check timed out (>60s)."
     except FileNotFoundError:
-        return False, "iverilog not found. Please install Icarus Verilog."
+        return False, "Verilator not found. Please install Verilator 5.0+."
 
 def run_lint_check(file_path: str) -> tuple:
     """
@@ -265,29 +258,68 @@ def validate_rtl_for_synthesis(file_path: str) -> tuple:
     if not undriven:
         return False, "Pre-synthesis validation OK: all signals driven."
     
-    # 3. Auto-fix: remove undriven signals or tie to 0
+    # 3. Auto-fix: remove undriven signals or tie to constant
     fixes = []
     for name in undriven:
         # Check if the signal is READ anywhere (used but not driven = real bug)
         # vs never used at all (dead code = safe to remove declaration)
-        read_pattern = rf'(?<![.\w]){re.escape(name)}(?!\w*\s*<?=)(?!\s*;)(?!\s*\[[\d:]+\]\s*;)'
         
-        # Count reads (excluding the declaration line itself)
-        reads = [m for m in re.finditer(read_pattern, code) if m.start() != declared[name]]
+        # Regex to find the name, but exclude:
+        # 1. LHS of assignments: name = ..., name <= ...
+        # 2. Port connections maybe? .name(name) is a read if input, write if output. 
+        #    BUT we assume if it's undriven locally, we want to know if it's CONSUMED.
         
-        if len(reads) > 1:  # More than just declaration — signal is used
-            # Tie to 0 so synthesis doesn't fail
-            fixes.append(f"  // Auto-fix: {name} was used but never driven")
+        # New strategy: Find ALL occurrences, then filter out writes and declaration.
+        # This is safer than a complex negative lookahead regex.
+        all_matches = list(re.finditer(rf'(?<![.\w]){re.escape(name)}(?![.\w])', code))
+        
+        reads = []
+        for m in all_matches:
+            if m.start() == declared[name]:
+                continue # Skip declaration
+            
+            # Check context to see if it's a WRITE (LHS)
+            # Look ahead from m.end()
+            post = code[m.end():]
+            # Skip whitespace/newlines
+            post_stripped = post.lstrip()
+            
+            # If immediately followed by = or <= (allow [index] before equal)
+            # Regex match on the substring is easier
+            if re.match(r'(?:\[[^\]]*\]\s*)?(?:<=|=)', post_stripped):
+                continue # It's a WRITE
+            
+            reads.append(m)
+
+        if len(reads) > 0:  # Signal is CONSUMED/READ at least once
+            # Tie to constant so synthesis doesn't fail
+            # Detect active-low signals (e.g., rst_n, enable_b)
+            is_active_low = any(name.endswith(s) for s in ['_n', '_b', '_bar'])
+            tie_val_bit = "1" if is_active_low else "0"
+            
+            fixes.append(f"  // Auto-fix: {name} was used but never driven. Tied to {tie_val_bit} (Active-{'Low' if is_active_low else 'High'} assumed).")
+            
             # Add assignment after module header
             width_match = re.search(
                 rf'(?:reg|wire|logic)\s+(?:signed\s+)?(\[[\d:]+\])?\s+{re.escape(name)}', code
             )
             width = width_match.group(1) if width_match and width_match.group(1) else ""
-            zero_val = f"{width} 0" if width else "0" 
+            
+            # Construct value: e.g. 8'h0 or 8'hFF ? 
+            # Safe default for active low is all 1s? Or just 1 bit?
+            # If multi-bit active low, usually we want all 1s (e.g. ~0).
+            if width and is_active_low:
+                 # Helper to clear all bits (set to 1s)
+                 val_str = f"{{{(abs(int(width.split(':')[0][1:]) - int(width.split(':')[1][:-1])) + 1)}{{1'b1}}}}"
+            elif width:
+                 val_str = f"{width}'d0"
+            else:
+                 val_str = f"1'b{tie_val_bit}"
+                 
             # Convert to wire + assign for clean synthesis
             code = re.sub(
                 rf'^(\s*(?:reg|wire|logic)\s+(?:signed\s+)?(?:\[[\d:]+\]\s+)?){re.escape(name)}\s*;',
-                rf'\g<1>{name} = {zero_val}; // AUTO-FIX: was undriven',
+                rf'\g<1>{name} = {val_str}; // AUTO-FIX: was undriven',
                 code, count=1, flags=re.MULTILINE
             )
         else:
@@ -557,14 +589,54 @@ def check_physical_metrics(design_name):
             }
             return metrics, "OK"
     except Exception as e:
+            return metrics, "OK"
+    except Exception as e:
         return None, f"Error parsing metrics: {str(e)}"
 
+@tool("Signoff Checker")
+def signoff_check_tool(design_name: str):
+    """
+    Checks if the hardened design meets timing and power constraints.
+    Input: design_name (string)
+    Returns: (True, "Report") or (False, "Violation Report")
+    """
+    metrics, msg = check_physical_metrics(design_name)
+    if not metrics:
+        return False, f"Signoff Failed: {msg}"
+    
+    violations = []
+    # Timing Check: WNS (Worst Negative Slack) must be >= 0
+    # Negative slack means the signal didn't arrive in time.
+    if metrics['timing_wns'] < 0:
+        violations.append(f"TIMING VIOLATION: WNS = {metrics['timing_wns']} ns (Must be >= 0)")
+    
+    # Check for excessive area or utilization if needed (optional)
+    if metrics['utilization'] > 95:
+         violations.append(f"DENSITY WARNING: Utilization is {metrics['utilization']}% (Risk of congestion)")
+
+    report = f"Signoff Report for {design_name}:\n"
+    report += f"  WNS (Timing): {metrics['timing_wns']} ns\n"
+    report += f"  TNS (Timing): {metrics['timing_tns']} ns\n"
+    report += f"  Total Power:  {metrics['power_total']} W\n"
+    report += f"  Chip Area:    {metrics['chip_area_um2']} um^2\n"
+    report += f"  Utilization:  {metrics['utilization']} %\n"
+    
+    if violations:
+        return False, "SIGNOFF FAILED:\n" + "\n".join(violations) + "\n\n" + report
+        
+    return True, "SIGNOFF PASSED:\n" + report
+
 def run_simulation(design_name: str) -> tuple:
-    """Compiles and runs the testbench simulation."""
+    """
+    Compiles and runs the testbench simulation using Verilator (Production Mode).
+    Uses --binary to generate a standoff executable.
+    """
     src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
     rtl_file = f"{src_dir}/{design_name}.v"
     tb_file = f"{src_dir}/{design_name}_tb.v"
-    sim_out = f"{src_dir}/sim"
+    
+    # Verilator specific output dir
+    obj_dir = f"{src_dir}/obj_dir"
     
     # Validate files exist
     if not os.path.exists(rtl_file):
@@ -572,48 +644,62 @@ def run_simulation(design_name: str) -> tuple:
     if not os.path.exists(tb_file):
         return False, f"Testbench file not found: {tb_file}"
     
-    # Compile
+    # Compile & Build using Verilator --binary
+    # --binary: Build a binary executable
+    # -j 0: Use all cores
+    # --timing: Enable timing support (essential for delays like #5)
+    # --assert: Enable assertions
+    cmd = [
+        "verilator",
+        "--binary",
+        "--sv",
+        "-j", "0",
+        "--timing",
+        "--assert",
+        "-Wno-fatal", # Don't error out on warnings
+        rtl_file, tb_file,
+        "--top-module", f"{design_name}_tb",
+        "--Mdir", obj_dir,
+        "-o", "sim_exec"
+    ]
+    
     try:
         compile_result = subprocess.run(
-            ["iverilog", "-g2012", "-o", sim_out, rtl_file, tb_file],
+            cmd,
             capture_output=True, text=True,
-            timeout=120  # 2 minute timeout for compilation
+            timeout=120
         )
     except subprocess.TimeoutExpired:
-        return False, "Compilation timed out (>120s). Design may be too complex."
+        return False, "Compilation timed out (>120s)."
     except FileNotFoundError:
-        return False, "iverilog not found. Please install Icarus Verilog."
+        return False, "Verilator not found. Please install Verilator 5.0+."
+        
     if compile_result.returncode != 0:
-        return False, f"Compilation failed:\n{compile_result.stderr}"
+        return False, f"Verilator Compilation Failed:\n{compile_result.stderr}"
     
-    # Run
-    # Increased timeout to 300s (5 mins) for complex simulations (processors/crypto)
+    # Run the generated binary
+    sim_exec_path = f"{obj_dir}/sim_exec"
     try:
         run_result = subprocess.run(
-            ["vvp", sim_out],
+            [sim_exec_path],
             capture_output=True,
             text=True,
             timeout=300 
         )
     except subprocess.TimeoutExpired:
-        return False, "Simulation Timed Out (Exceeded 300 seconds). Logic might be stuck in an infinite loop."
-
+        return False, "Simulation Timed Out (Exceeded 300s). Infinite loop likely."
+    
     sim_text = (run_result.stdout or "") + ("\n" + run_result.stderr if run_result.stderr else "")
 
-    # Many Verilog testbenches don't set a failing process exit code.
-    # AgentIC requires a clear PASS marker to treat simulation as successful.
-    # If the TB doesn't print TEST PASSED, we'll consider it a failure so the
-    # verification/fix loop can improve the TB.
     if "TEST PASSED" in sim_text:
         return True, sim_text
 
-    # Explicit failure marker
     if "TEST FAILED" in sim_text:
         return False, sim_text
 
-    # Fallback: if vvp itself failed, fail. Otherwise, still fail due to missing PASS.
     if run_result.returncode != 0:
-        return False, sim_text
+        return False, f"Simulation Crashed:\n{sim_text}"
+        
     return False, sim_text
 
 def run_openlane(design_name: str, background: bool = False):
@@ -632,7 +718,8 @@ def run_openlane(design_name: str, background: bool = False):
         ]
         found = False
         for path in common_paths:
-            if os.path.exists(path) and os.path.exists(os.path.join(path, "sky130A")):
+            # Check for generic PDK structure, not just sky130A
+            if os.path.exists(path) and (os.path.exists(os.path.join(path, PDK)) or os.path.exists(os.path.join(path, "sky130A"))):
                 effective_pdk_root = path
                 found = True
                 break
@@ -646,6 +733,7 @@ def run_openlane(design_name: str, background: bool = False):
         return False, f"Design directory not found: {design_dir}"
 
     # Direct Docker command (non-interactive)
+    # Using the configured PDK variable
     cmd = [
         "docker", "run", "--rm",
         "-v", f"{OPENLANE_ROOT}:/openlane",
@@ -750,9 +838,19 @@ def run_gls_simulation(design_name: str) -> tuple:
 
     # Finding PDK Verilog models
     pdk_v_path = None
+    
+    # Determine lib name based on PDK (naive mapping for now)
+    # TODO: Make this part of config or read from PDK config
+    if "sky130" in PDK:
+        lib_name = "sky130_fd_sc_hd"
+    elif "gf180" in PDK:
+        lib_name = "gf180mcu_fd_sc_mcu7t5v0" # Example
+    else:
+        lib_name = "sky130_fd_sc_hd" # Fallback
+        
     common_pdk_paths = [
-        os.path.join(PDK_ROOT, PDK, "libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v"),
-        os.path.join(PDK_ROOT, "ciel/sky130/versions/0fe599b2afb6708d281543108caf8310912f54af/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v")
+        os.path.join(PDK_ROOT, PDK, f"libs.ref/{lib_name}/verilog/{lib_name}.v"),
+        os.path.join(PDK_ROOT, f"ciel/sky130/versions/*/sky130A/libs.ref/{lib_name}/verilog/{lib_name}.v") 
     ]
     
     for path in common_pdk_paths:

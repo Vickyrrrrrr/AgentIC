@@ -2,13 +2,14 @@ import enum
 import time
 import logging
 import os
+import re
 from typing import Optional, Dict, Any, List
 from rich.console import Console
 from rich.panel import Panel
 from crewai import Agent, Task, Crew, LLM
 
 # Local imports
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY
+from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, PDK
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent, get_regression_agent
@@ -206,6 +207,11 @@ Outputs:
             - FSM Rules: MUST use separate `state` (register) and `next_state` (logic) signals. DO NOT assign to `state` inside `always_comb`.
             - Use `enum` for states: `typedef enum logic [1:0] {IDLE, ...} state_t;`
             - Output Style: Use standard indentation (4 spaces). DO NOT minify code into single lines.
+            
+            # STRICT PROHIBITIONS:
+            - **NO PLACEHOLDERS**: Do not write `// Simplified check` or `assign data = 0;`. Implement the ACTUAL LOGIC.
+            - **NO PARTIAL IMPLEMENTATIONS**: If it's a 4x4 array, enable ALL cells.
+            - **NO HARDCODING**: Use `parameter` for widths and depths.
             """
         else:
             return """
@@ -220,11 +226,10 @@ Outputs:
         if self.strategy == BuildStrategy.SV_MODULAR:
             return """Use SystemVerilog Class-Based Verification:
             - Create a `class Transaction` with `rand` fields.
-            - Create a `class Driver` that drives the DUT interface.
-            - Create a `class Monitor` that samples the DUT output.
-            - Create a `class Scoreboard` that checks correctness.
-            - Create a `program` block (or simplified `module`) to run the test.
-            - Instantiate the DUT and the Test in top-level.
+            - Create a `class Driver`, `class Monitor`, `class Scoreboard`.
+            - **CRITICAL FOR VERILATOR:** DO NOT use `program` blocks. Use a standard `module` for the testbench.
+            - Instantiate the DUT in the top-level `module`.
+            - Use `initial` blocks for test sequencing.
             - Ensure randomization and coverage."""
         else:
             return """Use Verilog-2005 Procedural Verification:
@@ -328,7 +333,9 @@ CRITICAL RULES:
 1. Module name must be "{self.name}"
 2. Async active-low reset `rst_n`
 3. Flatten ports (no multi-dim arrays on ports)
-4. Return code in ```verilog fence
+4. **IMPLEMENT EVERYTHING**: Do not leave any logic as "to be implemented" or "simplified".
+5. **VERIFY CONNECTIVITY**: Ensure all sub-modules (if any) are correctly connected.
+6. Return code in ```verilog fence
 """,
                 expected_output='Verilog Code',
                 agent=rtl_agent
@@ -359,7 +366,7 @@ CRITICAL RULES:
         success, errors = run_syntax_check(path)
         
         if success:
-            self.log("Syntax Check Passed (Icarus)", refined=True)
+            self.log("Syntax Check Passed (Verilator)", refined=True)
             
             # --- START VERILATOR LINT CHECK ---
             with console.status("[bold yellow]Running Verilator Lint...[/bold yellow]"):
@@ -391,16 +398,7 @@ CRITICAL RULES:
                 # Fall through to Error Handling Logic below to fix it
 
         # --- AUTONOMOUS SV↔VERILOG COMPATIBILITY FIX ---
-        # Before wasting an LLM call, check if errors are known iverilog↔SV clashes.
-        # If so, apply regex fixes instantly and re-check without calling LLM.
-        sv_fix_applied = self._try_autonomous_sv_fix(errors, path)
-        if sv_fix_applied:
-            self.log("Auto-fixed SystemVerilog → Verilog compatibility (no LLM needed).", refined=True)
-            # Re-read the fixed file into artifacts
-            with open(path, 'r') as f:
-                self.artifacts['rtl_code'] = f.read()
-            # Stay in RTL_FIX to re-check syntax — don't count this as a retry
-            return
+        # LLM-based fix loop follows...
 
         # Handle Syntax/Lint Errors that need LLM
         self.logger.info(f"SYNTAX/LINT ERRORS:\n{errors}")
@@ -429,12 +427,10 @@ CRITICAL RULES:
         
         Strategy: {self.strategy.name} (Keep consistency!)
         
-        IMPORTANT: The compiler is iverilog with -g2012. If you used SystemVerilog
-        constructs that iverilog doesn't support, convert them:
-        - always_comb → always @(*)
-        - always_ff @(...) → always @(...)
-        - type_name'(val) casts → remove the cast
-        - unique case / priority case → case
+        IMPORTANT: The compiler is Verilator 5.0+ (SystemVerilog 2017+).
+        - Use modern SystemVerilog features (`logic`, `always_comb`, `always_ff`).
+        - Ensure strict 2-state logic handling (reset all registers).
+        - Avoid 4-state logic (x/z) reliance as Verilator is 2-state optimized.
         
         Code:
         ```verilog
@@ -471,88 +467,7 @@ CRITICAL RULES:
             self.artifacts['rtl_code'] = f.read()
         # Loop stays in RTL_FIX to re-check syntax
 
-    @staticmethod
-    def _try_autonomous_sv_fix(errors: str, rtl_path: str) -> bool:
-        """Try to fix known iverilog ↔ SystemVerilog compatibility issues WITHOUT calling LLM.
-        
-        Returns True if fixes were applied (caller should re-check syntax).
-        Returns False if errors are unknown and LLM is needed.
-        """
-        import re
-        
-        # Known iverilog error patterns and their regex fixes
-        SV_ERROR_PATTERNS = {
-            r'constant selects in always_\* processes':  'always_comb_fix',
-            r'This assignment requires an explicit cast': 'type_cast_fix',
-            r"sorry:.*always_comb":                       'always_comb_fix',
-            r"sorry:.*always_ff":                         'always_ff_fix',
-            r'unique case':                               'unique_case_fix',
-            r'priority case':                             'priority_case_fix',
-            r"error:.*enum":                              'type_cast_fix',
-            r'Cannot create.*initial value':              'init_fix',
-        }
-        
-        # Check which errors match known SV issues
-        matched_fixes = set()
-        error_lines = [l for l in errors.split('\n') if 'error' in l.lower() or 'sorry' in l.lower()]
-        unmatched_errors = []
-        
-        for line in error_lines:
-            found = False
-            for pattern, fix_type in SV_ERROR_PATTERNS.items():
-                if re.search(pattern, line, re.IGNORECASE):
-                    matched_fixes.add(fix_type)
-                    found = True
-                    break
-            if not found and line.strip():
-                unmatched_errors.append(line)
-        
-        # If there are unknown errors, we can't fully auto-fix — need LLM
-        if unmatched_errors:
-            return False
-        
-        # If no known errors matched either, nothing to fix
-        if not matched_fixes:
-            return False
-        
-        # Apply fixes directly to the file
-        try:
-            with open(rtl_path, 'r') as f:
-                code = f.read()
-        except IOError:
-            return False
-        
-        original = code
-        
-        if 'always_comb_fix' in matched_fixes:
-            code = re.sub(r'\balways_comb\b', 'always @(*)', code)
-        
-        if 'always_ff_fix' in matched_fixes:
-            code = re.sub(r'\balways_ff\s+@', 'always @', code)
-        
-        if 'type_cast_fix' in matched_fixes:
-            # signed'(val) -> $signed(val)
-            code = re.sub(r"signed'\s*\((.*?)\)", r"$signed(\1)", code)
-            # Other type casts: type_name'(val) -> (val)
-            code = re.sub(r"\b[a-zA-Z_]\w*'\s*\(", "(", code)
-        
-        if 'unique_case_fix' in matched_fixes:
-            code = re.sub(r'\bunique\s+case\b', 'case', code)
-        
-        if 'priority_case_fix' in matched_fixes:
-            code = re.sub(r'\bpriority\s+case\b', 'case', code)
-        
-        if 'init_fix' in matched_fixes:
-            # Remove initial values from reg/logic declarations: logic [7:0] x = 0; -> logic [7:0] x;
-            code = re.sub(r'((?:reg|logic|wire)\s+(?:\[.*?\]\s+)?\w+)\s*=\s*[^;]+;', r'\1;', code)
-        
-        # Only write if something actually changed
-        if code == original:
-            return False
-        
-        with open(rtl_path, 'w') as f:
-            f.write(code)
-        return True
+    # _try_autonomous_sv_fix removed (Verilator supports SV natively)
 
     def do_verification(self):
         # 1. Generate Testbench (Only on first run or if missing)
@@ -673,27 +588,7 @@ RULES:
             self.log(f"Sim Failed (Attempt {self.retry_count}). Check log.", refined=True)
             
             # --- AUTONOMOUS FIX: Try to fix compilation errors without LLM ---
-            if "Compilation failed" in output:
-                # It's a syntax/compilation error — try autonomous SV fix first
-                # Detect whether the error is in TB or RTL from the path in the error
-                tb_path = self.artifacts.get('tb_path', '')
-                rtl_path = self.artifacts.get('rtl_path', '')
-                
-                if tb_path and os.path.basename(tb_path) in output:
-                    fixed = self._try_autonomous_sv_fix(output, tb_path)
-                    if fixed:
-                        self.log("Auto-fixed TB compilation error (no LLM needed).", refined=True)
-                        self.retry_count -= 1  # Don't count autonomous fixes
-                        return  # Re-enters do_verification, re-runs simulation
-                
-                if rtl_path and os.path.basename(rtl_path) in output:
-                    fixed = self._try_autonomous_sv_fix(output, rtl_path)
-                    if fixed:
-                        self.log("Auto-fixed RTL compilation error (no LLM needed).", refined=True)
-                        with open(rtl_path, 'r') as f:
-                            self.artifacts['rtl_code'] = f.read()
-                        self.retry_count -= 1
-                        return
+            # Auto-fixes removed (Verilator supports SV natively)
             
             # --- LLM ERROR ANALYSIS (only if autonomous fix didn't work) ---
             analyst = get_error_analyst_agent(self.llm, verbose=self.verbose)
@@ -847,13 +742,17 @@ CRITICAL:
                 
                 Requirements:
                 1. Create a separate SVA module named "{self.name}_sva"
-                2. Include properties for:
-                   - Reset behavior (outputs go to known state)
-                   - Protocol compliance (valid handshakes)
+                2. **CRITICAL FOR SYMBIYOSYS/YOSYS COMPATIBILITY:**
+                   - Use **Concurrent Assertions** (`assert property`) at the **MODULE LEVEL**.
+                   - **DO NOT** wrap assertions inside `always` blocks.
+                   - **DO NOT** use `disable iff` inside procedural code.
+                   - Example of correct style:
+                     `assert property (@(posedge clk) disable iff (!rst_n) req |-> ##1 ack);`
+                3. Include properties for:
+                   - Reset behavior
+                   - Protocol compliance
                    - State machine reachability
-                   - Data integrity (no corruption)
-                3. Use @(posedge clk) for all properties
-                4. Include cover properties for key scenarios
+                4. Include cover properties (`cover property`)
                 5. Return code inside ```verilog fences
                 """,
                 expected_output='SystemVerilog SVA module',
@@ -1100,9 +999,32 @@ CRITICAL:
             
             try:
                 import subprocess
+                
+                # Detect testbench module name
+                tb_module = f"{self.name}_{test_name}"
+                try:
+                    with open(test_path, 'r') as f:
+                        tb_content = f.read()
+                    import re as _re
+                    m = _re.search(r'module\s+(\w+)', tb_content)
+                    if m:
+                        tb_module = m.group(1)
+                except Exception:
+                    pass
+                
+                sim_obj_dir = f"{src_dir}/obj_dir_{test_name}"
+                sim_binary = f"{sim_obj_dir}/V{tb_module}"
+                
                 compile_result = subprocess.run(
-                    ["iverilog", "-g2012", "-o", sim_out, rtl_file, test_path],
-                    capture_output=True, text=True, timeout=120
+                    ["verilator", "--binary", "--timing",
+                     "-Wno-UNUSED", "-Wno-PINMISSING", "-Wno-CASEINCOMPLETE",
+                     "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC", "-Wno-LATCH",
+                     "-Wno-UNOPTFLAT", "-Wno-BLKANDNBLK",
+                     "--top-module", tb_module,
+                     "--Mdir", sim_obj_dir,
+                     "-o", f"V{tb_module}",
+                     rtl_file, test_path],
+                    capture_output=True, text=True, timeout=300
                 )
                 if compile_result.returncode != 0:
                     test_results.append({"test": test_name, "status": "COMPILE_FAIL", "output": compile_result.stderr[:500]})
@@ -1110,7 +1032,7 @@ CRITICAL:
                     continue
                 
                 run_result = subprocess.run(
-                    ["vvp", sim_out],
+                    [sim_binary],
                     capture_output=True, text=True, timeout=300
                 )
                 sim_text = (run_result.stdout or "") + ("\n" + run_result.stderr if run_result.stderr else "")
@@ -1145,26 +1067,88 @@ CRITICAL:
             self.transition(BuildState.HARDENING)
 
     def do_hardening(self):
-        # Run OpenLane
+        # 1. Generate config.tcl (CRITICAL: Required for OpenLane)
+        self.log(f"Generating OpenLane config for {self.name}...", refined=True)
+        
+        # Dynamic Clock Detection
+        rtl_code = self.artifacts.get('rtl_code', '')
+        clock_port = "clk" # Default
+        
+        # Regex to find clock port: input ... clk ... ;
+        # Matches: input clk, input wire clk, input logic clk
+        clk_match = re.search(r'input\s+(?:wire\s+|logic\s+)?(\w*clk\w*)\s*[;,]', rtl_code, re.IGNORECASE)
+        if clk_match:
+            clock_port = clk_match.group(1)
+            self.log(f"Detected Clock Port: {clock_port}", refined=True)
+        
+# Modern OpenLane Config Template
+        # Note: We use GRT_ADJUSTMENT instead of deprecated GLB_RT_ADJUSTMENT
+        
+        # Determine STD_CELL_LIBRARY based on PDK (or default to sky130_fd_sc_hd)
+        # This should ideally come from global config
+        std_cell_lib = "sky130_fd_sc_hd"
+        if "gf180" in PDK:
+            std_cell_lib = "gf180mcu_fd_sc_mcu7t5v0"
+            
+        config_tcl = f"""
+# User config
+set ::env(DESIGN_NAME) "{self.name}"
+
+# PDK Setup
+set ::env(PDK) "{PDK}"
+set ::env(STD_CELL_LIBRARY) "{std_cell_lib}"
+
+# Verilog Files
+set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/{self.name}.v]
+
+# Clock Configuration
+set ::env(CLOCK_PORT) "{clock_port}"
+set ::env(CLOCK_NET) "{clock_port}"
+set ::env(CLOCK_PERIOD) "10.0"
+
+# Synthesis
+set ::env(SYNTH_STRATEGY) "AREA 0"
+set ::env(SYNTH_SIZING) 1
+
+# Floorplanning
+set ::env(FP_SIZING) "relative"
+set ::env(FP_CORE_UTIL) 40
+set ::env(PL_TARGET_DENSITY) 0.55
+
+# Routing
+set ::env(GRT_ADJUSTMENT) 0.15
+
+# Magic
+set ::env(MAGIC_DRC_USE_GDS) 1
+"""
+        from .tools.vlsi_tools import write_config
+        try:
+             write_config(self.name, config_tcl)
+             self.log("OpenLane config.tcl generated successfully.", refined=True)
+        except Exception as e:
+             self.log(f"Failed to generate config.tcl: {e}", refined=True)
+             self.state = BuildState.FAIL
+             return
+
+        # 2. Run OpenLane
         with console.status("[bold blue]Hardening Layout (OpenLane)...[/bold blue]"):
             success, result = run_openlane(self.name, background=False)
             
         if success:
             self.artifacts['gds'] = result
             self.log(f"GDSII generated: {result}", refined=True)
-            if self.full_signoff:
-                self.transition(BuildState.SIGNOFF)
-            else:
-                self.transition(BuildState.SUCCESS)
+            # Always proceed to Signoff for final checks
+            self.transition(BuildState.SIGNOFF)
         else:
             self.log(f"Hardening Failed: {result}")
             self.state = BuildState.FAIL
 
     def do_signoff(self):
-        """Performs DRC/LVS signoff checks and generates documentation."""
-        self.log("Running DRC/LVS Signoff Checks...", refined=True)
+        """Performs full fabrication-readiness signoff: DRC/LVS, timing closure, power analysis."""
+        self.log("Running Fabrication Readiness Signoff...", refined=True)
+        fab_ready = True
         
-        # 1. Parse DRC/LVS reports
+        # ── 1. DRC / LVS ──
         with console.status("[bold blue]Checking DRC/LVS Reports...[/bold blue]"):
             signoff_pass, signoff_details = parse_drc_lvs_reports(self.name)
         
@@ -1175,28 +1159,62 @@ CRITICAL:
         lvs_e = signoff_details.get('lvs_errors', -1)
         ant_v = signoff_details.get('antenna_violations', -1)
         
-        self.log(f"DRC Violations: {drc_v} | LVS Errors: {lvs_e} | Antenna: {ant_v}", refined=True)
+        self.log(f"DRC: {drc_v} violations | LVS: {lvs_e} errors | Antenna: {ant_v}", refined=True)
         
-        if signoff_pass:
-            self.log("DRC/LVS Signoff: CLEAN ✓", refined=True)
+        if not signoff_pass:
+            fab_ready = False
+        
+        # ── 2. TIMING CLOSURE (multi-corner STA) ──
+        self.log("Checking Timing Closure (all corners)...", refined=True)
+        with console.status("[bold blue]Parsing STA Reports...[/bold blue]"):
+            sta = parse_sta_signoff(self.name)
+        
+        self.logger.info(f"STA RESULTS: {sta}")
+        self.artifacts['sta_signoff'] = sta
+        
+        if sta.get('error'):
+            self.log(f"STA: {sta['error']}", refined=True)
         else:
-            self.log("DRC/LVS Signoff: VIOLATIONS FOUND (see log)", refined=True)
-            # Non-blocking for now — in production this would FAIL
+            for c in sta['corners']:
+                status = "✓" if (c['setup_slack'] >= 0 and c['hold_slack'] >= 0) else "✗"
+                self.log(f"  {status} {c['name']}: setup={c['setup_slack']:.2f}ns hold={c['hold_slack']:.2f}ns", refined=True)
+            
+            if sta['timing_met']:
+                self.log(f"Timing Closure: MET ✓ (worst setup={sta['worst_setup']:.2f}ns, hold={sta['worst_hold']:.2f}ns)", refined=True)
+            else:
+                self.log(f"Timing Closure: FAILED ✗ (worst setup={sta['worst_setup']:.2f}ns, hold={sta['worst_hold']:.2f}ns)", refined=True)
+                fab_ready = False
         
-        # 2. Check physical metrics
+        # ── 3. POWER & IR-DROP ──
+        self.log("Analyzing Power & IR-Drop...", refined=True)
+        with console.status("[bold blue]Parsing Power Reports...[/bold blue]"):
+            power = parse_power_signoff(self.name)
+        
+        self.logger.info(f"POWER RESULTS: {power}")
+        self.artifacts['power_signoff'] = power
+        
+        if power['total_power_w'] > 0:
+            power_mw = power['total_power_w'] * 1000
+            self.log(f"Total Power: {power_mw:.3f} mW (Internal {power['internal_power_w']*1000:.3f} + Switching {power['switching_power_w']*1000:.3f} + Leakage {power['leakage_power_w']*1e6:.3f} µW)", refined=True)
+            self.log(f"Breakdown: Sequential {power['sequential_pct']:.1f}% | Combinational {power['combinational_pct']:.1f}%", refined=True)
+            
+            if power['irdrop_max_vpwr'] > 0 or power['irdrop_max_vgnd'] > 0:
+                self.log(f"IR-Drop: VPWR={power['irdrop_max_vpwr']*1000:.1f}mV  VGND={power['irdrop_max_vgnd']*1000:.1f}mV", refined=True)
+                if not power['power_ok']:
+                    self.log("IR-Drop: EXCEEDS 5% VDD THRESHOLD ✗", refined=True)
+                    fab_ready = False
+                else:
+                    self.log("IR-Drop: Within limits ✓", refined=True)
+        
+        # 4. Physical Metrics
         with console.status("[bold blue]Analyzing Physical Metrics...[/bold blue]"):
             metrics, metrics_status = check_physical_metrics(self.name)
         
         if metrics:
             self.artifacts['metrics'] = metrics
-            self.log(f"Area: {metrics.get('chip_area_um2', 'N/A')} µm² | WNS: {metrics.get('timing_wns', 'N/A')} | Power: {metrics.get('power_total', 'N/A')}", refined=True)
-            
-            # Timing signoff check
-            wns = metrics.get('timing_wns', 0)
-            if wns < 0:
-                self.log(f"WARNING: Timing violation detected (WNS = {wns})", refined=True)
+            self.log(f"Area: {metrics.get('chip_area_um2', 'N/A')} µm²", refined=True)
         
-        # 3. Generate documentation
+        # 5. Documentation
         self.log("Generating Design Documentation...", refined=True)
         with console.status("[bold cyan]Auto-generating Datasheet...[/bold cyan]"):
             doc_path = generate_design_doc(
@@ -1208,21 +1226,32 @@ CRITICAL:
         if doc_path and not doc_path.startswith("Error:"):
             self.artifacts['datasheet'] = doc_path
             self.log(f"Datasheet generated: {doc_path}", refined=True)
-        else:
-            self.log(f"Documentation generation failed: {doc_path}", refined=True)
         
-        # Build summary
+        # FINAL VERDICT
+        timing_status = "MET" if sta.get('timing_met') else "FAILED" if not sta.get('error') else "N/A"
+        power_status = f"{power['total_power_w']*1000:.3f} mW" if power['total_power_w'] > 0 else "N/A"
+        irdrop_status = "OK" if power.get('power_ok') else "FAIL (>5% VDD)"
+        
         console.print()
         console.print(Panel(
-            f"[bold cyan]Industry Signoff Summary[/bold cyan]\n\n"
-            f"Formal: {self.artifacts.get('formal_result', 'SKIPPED')}\n"
-            f"CDC: {self.artifacts.get('cdc_result', 'SKIPPED')}\n"
-            f"Coverage: {self.artifacts.get('coverage', {}).get('line_pct', 'N/A')}%\n"
-            f"DRC: {drc_v} violations\n"
-            f"LVS: {lvs_e} errors\n"
-            f"Timing WNS: {metrics.get('timing_wns', 'N/A') if metrics else 'N/A'}",
+            f"[bold cyan]Fabrication Readiness Report[/bold cyan]\n\n"
+            f"DRC:        {drc_v} violations\n"
+            f"LVS:        {lvs_e} errors\n"
+            f"Timing:     {timing_status} (WNS={sta.get('worst_setup', 0):.2f}ns)\n"
+            f"Power:      {power_status}\n"
+            f"IR-Drop:    {irdrop_status}\n"
+            f"Coverage:   {self.artifacts.get('coverage', {}).get('line_pct', 'N/A')}%\n"
+            f"Formal:     {self.artifacts.get('formal_result', 'SKIPPED')}\n\n"
+            f"{'[bold green]FABRICATION READY ✓[/]' if fab_ready else '[bold red]NOT FABRICATION READY ✗[/]'}",
             title="📋 Signoff Report"
         ))
-        
-        self.transition(BuildState.SUCCESS)
 
+        if fab_ready:
+            self.log("✅ SIGNOFF PASSED (Timing Closed, DRC Clean)", refined=True)
+            self.artifacts['signoff_result'] = 'PASS'
+            self.transition(BuildState.SUCCESS)
+        else:
+            self.log("❌ SIGNOFF FAILED (Violations Found)", refined=True)
+            self.artifacts['signoff_result'] = 'FAIL'
+            self.errors.append("Signoff failed (see report).")
+            self.state = BuildState.FAIL

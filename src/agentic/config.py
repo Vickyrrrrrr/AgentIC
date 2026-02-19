@@ -14,45 +14,23 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 # 1. Get Key from https://console.groq.com
 # 2. export GROQ_API_KEY="gsk_..."
 
-# NVIDIA NIM Configuration (Primary)
+# Strict Two-Model Policy:
+# 1. NVIDIA Qwen Cloud (Primary)
 NVIDIA_CONFIG = {
     "model": os.environ.get("NVIDIA_MODEL", "openai/qwen/qwen3-coder-480b-a35b-instruct"),
     "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
     "api_key": os.environ.get("NVIDIA_API_KEY", "")
 }
 
-# Groq Configuration (Fallback)
-GROQ_CONFIG = {
-    "model": "openai/llama-3.3-70b-versatile",
-    "base_url": "https://api.groq.com/openai/v1",
-    "api_key": os.environ.get("GROQ_API_KEY", "")
-}
-
-# NVIDIA Backup Configuration (Llama 3.1 405B)
-NVIDIA_BACKUP_CONFIG = {
-    "model": "meta/llama-3.1-405b-instruct",
-    "base_url": "https://integrate.api.nvidia.com/v1",
-    "api_key": os.environ.get("NVIDIA_BACKUP_API_KEY", "")
-}
-
-# NVIDIA User Provided Configuration (New Key)
-NVIDIA_USER_CONFIG = {
-    # Note: User requested 'lama-3_2-nemoretriever-300m-embed-v1' which is an embedding model.
-    # Switched to 'meta/llama-3.1-405b-instruct' for code generation capability.
-    "model": "meta/llama-3.1-405b-instruct", 
-    "base_url": "https://integrate.api.nvidia.com/v1",
-    "api_key": os.environ.get("NVIDIA_USER_API_KEY", "")
-}
-
-# Local/Default Configuration
+# 2. VeriReason Local (Fallback)
+# Explicitly uses the VeriReason model defined in .env
 LOCAL_CONFIG = {
-    "model": os.environ.get("LLM_MODEL", "ollama/deepseek-r1"),
+    "model": os.environ.get("LLM_MODEL", "ollama/hf.co/mradermacher/VeriReason-Qwen2.5-3b-RTLCoder-Verilog-GRPO-reasoning-tb-GGUF:Q4_K_M"),
     "base_url": os.environ.get("LLM_BASE_URL", "http://localhost:11434"),
     "api_key": os.environ.get("LLM_API_KEY", "NA")
 }
 
-# Expose 'active' config variables for backward compatibility if needed, 
-# but preferably uses will import the CONFIG dicts or use the get_llm logic.
+# Expose 'active' config variables (Defaults to Local if NVIDIA missing, but CLI handles logic)
 LLM_MODEL = LOCAL_CONFIG["model"]
 LLM_BASE_URL = LOCAL_CONFIG["base_url"]
 LLM_API_KEY = LOCAL_CONFIG["api_key"]

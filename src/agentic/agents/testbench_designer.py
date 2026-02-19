@@ -16,16 +16,16 @@ def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         You use `$monitor`, `$display`, and direct signal manipulation.
         Your goal is to verify functional correctness with minimal complexity."""
     else:
-        role = "UVM Verification Expert"
-        backstory = """You are a senior verification engineer specializing in SystemVerilog.
-        You act as a 'UVM-Lite' architect.
-        You ALWAYS design a modular testbench environment using:
-        - `class Transaction`: Randomized inputs
-        - `class Driver`: Drives the DUT interface
-        - `class Monitor`: Samples outputs
-        - `class Scoreboard`: Checks data integrity
-        - `program`: For the test flow
-        You prioritize randomization and self-checking mechanisms."""
+        role = "UVM Verification Lead"
+        backstory = """You are a Senior Verification Engineer at a top semiconductor firm.
+        Your goal is 100% Functional Coverage. You DO NOT write simple directed tests.
+        
+        Your Methodology:
+        1. **Constrained Random Verification**: You use `rand` classes to generate corner-case stimuli.
+        2. **Self-Checking**: You NEVER rely on waveform inspection. The testbench MUST print "TEST PASSED" only if all checks pass.
+        3. **Coverage**: You use `covergroup` and `bins` to ensure all states and transitions are hit.
+        4. **Protocol Compliance**: You strictly adhere to the DUT properties (e.g., AXI handshake rules).
+        """
 
     return Agent(
         role=role,

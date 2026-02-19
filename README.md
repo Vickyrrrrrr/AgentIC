@@ -109,11 +109,12 @@ No manual `config.tcl` needed — the system reads the RTL file, estimates compl
 - **Industry SVA**: Generates `property`/`assert property` assertions for commercial EDA tools
 - **Yosys SVA**: Auto-converts to SymbiYosys format for open-source k-induction proofs
 
-### Resilient LLM Fallback Chain
+### Strict Two-Model Policy
 ```
-NVIDIA Primary (Qwen3-Coder-480B) → NVIDIA Backup → Groq Cloud → Local Ollama
+NVIDIA Cloud (Qwen3-Coder-480B) → Local VeriReason (Privacy/Offline)
 ```
-Supports air-gapped deployment with local models for sovereign/defense applications.
+AgentIC enforces a strict policy: High-performance cloud inference via NVIDIA, or fully offline privacy-preserving inference via VeriReason.
+See [User Guide](docs/USER_GUIDE.md) for switching instructions.
 
 ### Anti-Hallucination Engine
 - Strips `<think>` blocks, `Thought:`/`Action:` lines, markdown fences
@@ -173,6 +174,10 @@ GROQ_API_KEY="gsk_..."           # Fallback
 
 ## Usage
 
+## Usage
+
+> **Full Documentation**: See [User Guide](docs/USER_GUIDE.md) for advanced usage and LLM switching.
+
 ### Build a Chip (Full Pipeline)
 ```bash
 python main.py build \
@@ -204,8 +209,7 @@ python main.py simulate --name my_design --max-retries 10
 # Run OpenLane hardening only (auto-generates config.tcl)
 python main.py harden --name my_design
 
-# Interactive chat with VLSI tools
-python main.py chat
+
 ```
 
 ### CLI Options
