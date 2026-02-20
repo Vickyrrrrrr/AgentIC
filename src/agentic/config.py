@@ -16,18 +16,18 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 # 2. export GROQ_API_KEY="gsk_..."
 
 # Strict Three-Model Policy:
-# 1. Groq Cloud (Ultra-Fast, Qwen 2.5 32B)
-GROQ_CONFIG = {
-    "model": os.environ.get("GROQ_MODEL", "groq/qwen/qwen3-32b"),
-    "base_url": os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-    "api_key": os.environ.get("GROQ_API_KEY", "")
+# 1. Backup GLM5 Cloud
+GLM5_CONFIG = {
+    "model": os.environ.get("BACKUP_MODEL", "openai/z-ai/glm5"),
+    "base_url": os.environ.get("BACKUP_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+    "api_key": os.environ.get("NVIDIA_API_KEY", "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")
 }
 
-# 2. NVIDIA Qwen Cloud (High Performance)
+# 2. NVIDIA Qwen Cloud (High Performance) -> Now nemotron-3-nano
 NVIDIA_CONFIG = {
-    "model": os.environ.get("NVIDIA_MODEL", "openai/z-ai/glm5"),
+    "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"),
     "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("NVIDIA_API_KEY", "")
+    "api_key": os.environ.get("NVIDIA_API_KEY", "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")
 }
 
 # 3. VeriReason Local (Fallback)

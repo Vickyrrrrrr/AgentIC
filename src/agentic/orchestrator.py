@@ -465,6 +465,11 @@ CRITICAL RULES:
         self.logger.info(f"FIXED RTL:\n{new_code}")
         
         new_path = write_verilog(self.name, new_code)
+        if isinstance(new_path, str) and new_path.startswith("Error:"):
+            self.log(f"File Write Error in FIX stage: {new_path}", refined=True)
+            self.state = BuildState.FAIL
+            return
+            
         self.artifacts['rtl_path'] = new_path
         # Read back the CLEANED version, not raw LLM output
         with open(new_path, 'r') as f:
@@ -691,6 +696,10 @@ CRITICAL:
             if not is_tb_issue:
                 # RTL Fix — write cleaned code and read it back
                 path = write_verilog(self.name, fixed_code)
+                if isinstance(path, str) and path.startswith("Error:"):
+                    self.log(f"File Write Error when fixing RTL logic: {path}", refined=True)
+                    self.state = BuildState.FAIL
+                    return
                 self.artifacts['rtl_path'] = path
                 # Read back the CLEANED version, not raw LLM output
                 with open(path, 'r') as f:
@@ -701,6 +710,10 @@ CRITICAL:
             else:
                 # TB Fix
                 path = write_verilog(self.name, fixed_code, is_testbench=True)
+                if isinstance(path, str) and path.startswith("Error:"):
+                    self.log(f"File Write Error when fixing TB logic: {path}", refined=True)
+                    self.state = BuildState.FAIL
+                    return
                 self.artifacts['tb_path'] = path
                 # We update local var tb_code for next loop iteration if we stayed in loop, 
                 # but since we rely on artifacts/re-reading, we should probably just continue the loop.

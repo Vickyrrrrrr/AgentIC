@@ -20,7 +20,7 @@ from crewai import Agent, Task, Crew, LLM
 
 # Local imports
 # Local imports
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG, GROQ_CONFIG, PDK
+from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG, GLM5_CONFIG, PDK
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent
@@ -56,8 +56,8 @@ def get_llm():
     """
     
     configs = [
-        ("NVIDIA Qwen Cloud",  NVIDIA_CONFIG),
-        ("Groq Cloud (Fast)",  GROQ_CONFIG),
+        ("NVIDIA Nemotron Cloud",  NVIDIA_CONFIG),
+        ("Backup GLM5 Cloud",  GLM5_CONFIG),
         ("VeriReason Local",   LOCAL_CONFIG),
     ]
     
@@ -72,7 +72,12 @@ def get_llm():
             console.print(f"[dim]Testing {name}...[/dim]")
             # Add extra parameters if using NVIDIA and GLM5 for reasoning
             extra_t = {}
-            if "NVIDIA" in name and "glm5" in cfg["model"]:
+            if "nemotron" in cfg["model"].lower():
+                extra_t = {
+                    "reasoning_budget": 16384,
+                    "chat_template_kwargs": {"enable_thinking": True}
+                }
+            elif "glm5" in cfg["model"].lower():
                  extra_t = {
                      "chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}
                  }
@@ -81,7 +86,8 @@ def get_llm():
                 model=cfg["model"],
                 base_url=cfg["base_url"],
                 api_key=key if key and key != "NA" else "mock-key", # Local LLMs might use mock-key
-                temperature=0.1,
+                temperature=1.0,
+                top_p=1.0,
                 max_completion_tokens=16384,
                 extra_body=extra_t
             )

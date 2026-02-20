@@ -3,7 +3,7 @@ import sys
 
 # Add src to path to import config
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-from agentic.config import NVIDIA_CONFIG, GROQ_CONFIG, LOCAL_CONFIG
+from agentic.config import NVIDIA_CONFIG, GLM5_CONFIG, LOCAL_CONFIG
 from crewai import LLM
 
 print(f"--- Debugging LLM Flow ---")
@@ -39,9 +39,9 @@ if try_model("NVIDIA (Primary)", NVIDIA_CONFIG):
     print("\n🎉 Verification Complete: Using NVIDIA.")
     sys.exit(0)
 
-# 2. Try Groq
-if try_model("Groq (Fallback)", GROQ_CONFIG):
-    print("\n🎉 Verification Complete: Using Groq.")
+# 2. Try GLM5
+if try_model("GLM5 (Backup)", GLM5_CONFIG):
+    print("\n🎉 Verification Complete: Using GLM5.")
     sys.exit(0)
 
 # 3. Try Local
