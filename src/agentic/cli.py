@@ -20,7 +20,7 @@ from crewai import Agent, Task, Crew, LLM
 
 # Local imports
 # Local imports
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG
+from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG, GROQ_CONFIG, PDK
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent
@@ -49,13 +49,15 @@ console = Console()
 
 # Setup Brain
 def get_llm():
-    """Returns the LLM instance. Strict 2-Model Policy:
-       1. NVIDIA Qwen Cloud (Primary)
-       2. VeriReason Local (Fallback)
+    """Returns the LLM instance. Strict 3-Model Policy:
+       1. Groq Cloud (Ultra-Fast)
+       2. NVIDIA Qwen Cloud (High Perf)
+       3. VeriReason Local (Fallback)
     """
     
     configs = [
         ("NVIDIA Qwen Cloud",  NVIDIA_CONFIG),
+        ("Groq Cloud (Fast)",  GROQ_CONFIG),
         ("VeriReason Local",   LOCAL_CONFIG),
     ]
     
@@ -68,11 +70,20 @@ def get_llm():
             
         try:
             console.print(f"[dim]Testing {name}...[/dim]")
+            # Add extra parameters if using NVIDIA and GLM5 for reasoning
+            extra_t = {}
+            if "NVIDIA" in name and "glm5" in cfg["model"]:
+                 extra_t = {
+                     "chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}
+                 }
+                
             llm = LLM(
                 model=cfg["model"],
                 base_url=cfg["base_url"],
                 api_key=key if key and key != "NA" else "mock-key", # Local LLMs might use mock-key
-                temperature=0.1
+                temperature=0.1,
+                max_completion_tokens=16384,
+                extra_body=extra_t
             )
             console.print(f"[green]✓ Using {name} ({cfg['model']})[/green]")
             return llm
@@ -324,8 +335,7 @@ set ::env(MAX_FANOUT_CONSTRAINT) 8
 set ::env(GRT_OVERFLOW_ITERS) 64
 
 # PDK
-set ::env(PDK) "sky130A"
-set ::env(STD_CELL_LIBRARY) "sky130_fd_sc_hd"
+set ::env(PDK) "{PDK}"
 '''
 
 

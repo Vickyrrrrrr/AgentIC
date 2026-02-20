@@ -1,9 +1,10 @@
 import os
 from dotenv import load_dotenv
 
-# Paths
+# Project Paths
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv(os.path.join(WORKSPACE_ROOT, ".env"))
+load_dotenv()
 
 OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
@@ -14,15 +15,22 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 # 1. Get Key from https://console.groq.com
 # 2. export GROQ_API_KEY="gsk_..."
 
-# Strict Two-Model Policy:
-# 1. NVIDIA Qwen Cloud (Primary)
+# Strict Three-Model Policy:
+# 1. Groq Cloud (Ultra-Fast, Qwen 2.5 32B)
+GROQ_CONFIG = {
+    "model": os.environ.get("GROQ_MODEL", "groq/qwen/qwen3-32b"),
+    "base_url": os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+    "api_key": os.environ.get("GROQ_API_KEY", "")
+}
+
+# 2. NVIDIA Qwen Cloud (High Performance)
 NVIDIA_CONFIG = {
-    "model": os.environ.get("NVIDIA_MODEL", "openai/qwen/qwen3-coder-480b-a35b-instruct"),
+    "model": os.environ.get("NVIDIA_MODEL", "openai/z-ai/glm5"),
     "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
     "api_key": os.environ.get("NVIDIA_API_KEY", "")
 }
 
-# 2. VeriReason Local (Fallback)
+# 3. VeriReason Local (Fallback)
 # Explicitly uses the VeriReason model defined in .env
 LOCAL_CONFIG = {
     "model": os.environ.get("LLM_MODEL", "ollama/hf.co/mradermacher/VeriReason-Qwen2.5-3b-RTLCoder-Verilog-GRPO-reasoning-tb-GGUF:Q4_K_M"),

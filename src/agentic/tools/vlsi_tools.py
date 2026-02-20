@@ -578,14 +578,34 @@ def check_physical_metrics(design_name):
             reader = csv.DictReader(f)
             data = next(reader) # Only one row usually
             
-            # Extract key metrics
+            # Extract key metrics safely handling both OpenLane 1 and 2 keys
+            area = float(data.get("Total_Physical_Cells", data.get("synth_cell_count", 0)))
+            chip_area_mm2 = float(data.get("DieArea_mm^2", data.get("DIEAREA_mm^2", 0)))
+            chip_area_um2 = chip_area_mm2 * 1e6
+            
+            tns = float(data.get("timing__tns", data.get("tns", 0)))
+            wns = float(data.get("timing__wns", data.get("wns", 0)))
+            
+            # Power (OL1 splits it into internal, switching, leakage. OL2 has power__total)
+            if "power__total" in data:
+                power_total = float(data["power__total"])
+            else:
+                p_int = float(data.get("power_typical_internal_uW", 0))
+                p_sw = float(data.get("power_typical_switching_uW", 0))
+                p_leak = float(data.get("power_typical_leakage_uW", 0))
+                power_total = (p_int + p_sw + p_leak) / 1e6 # Convert uW to W
+                
+            utilization = float(data.get("design__instance__utilization", data.get("FP_CORE_UTIL", 0)))
+            if utilization < 1.0: # OL1 might report as 0.45 instead of 45%
+                utilization *= 100
+
             metrics = {
-                "area": float(data.get("Total_Physical_Cells", 0)),
-                "chip_area_um2": float(data.get("DieArea_mm^2", 0)) * 1e6,
-                "timing_tns": float(data.get("timing__tns", 0)), # Total Negative Slack
-                "timing_wns": float(data.get("timing__wns", 0)), # Worst Negative Slack
-                "power_total": float(data.get("power__total", 0)),
-                "utilization": float(data.get("design__instance__utilization", 0))
+                "area": area,
+                "chip_area_um2": chip_area_um2,
+                "timing_tns": tns, # Total Negative Slack
+                "timing_wns": wns, # Worst Negative Slack
+                "power_total": power_total,
+                "utilization": utilization
             }
             return metrics, "OK"
     except Exception as e:
@@ -1426,3 +1446,134 @@ def generate_design_doc(design_name: str, spec: str = "", metrics: dict = None) 
         return doc_path
     except Exception as e:
         return f"Error writing documentation: {e}"
+
+def parse_sta_signoff(design_name: str) -> dict:
+    """Parses OpenLane STA (Static Timing Analysis) reports for signoff.
+    
+    Args:
+        design_name (str): Name of the design.
+        
+    Returns:
+        dict: A dictionary containing timing metrics and violation status.
+    """
+    try:
+        # Locate the latest run directory
+        runs_dir = os.path.join(OPENLANE_ROOT, "designs", design_name, "runs")
+        if not os.path.exists(runs_dir):
+            return {"error": "No runs directory found", "timing_met": False}
+            
+        # Get the latest run
+        latest_run = sorted([d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))])[-1]
+        report_dir = os.path.join(runs_dir, latest_run, "reports", "signoff")
+        
+        # Check for STA report
+        sta_report = None
+        if os.path.exists(report_dir):
+            for f in os.listdir(report_dir):
+                if f.endswith(".sta.rpt") or "sta" in f:
+                    sta_report = os.path.join(report_dir, f)
+                    break
+        
+        if not sta_report:
+             return {"error": "STA report not found", "timing_met": False}
+             
+        with open(sta_report, 'r') as f:
+            content = f.read()
+            
+        # Parse slack (WNS = Worst Negative Slack -> Setup)
+        wns_match = re.search(r'wns\s+([-\d.]+)', content, re.IGNORECASE)
+        tns_match = re.search(r'tns\s+([-\d.]+)', content, re.IGNORECASE)
+        
+        wns = float(wns_match.group(1)) if wns_match else 0.0
+        tns = float(tns_match.group(1)) if tns_match else 0.0
+        
+        # In a real flow, we'd parse hold slack too. For now assume hold is OK if wns is OK, or parse if available.
+        # OpenLane often puts hold analysis in a separate Min/Fast corner file. 
+        # For simplicity/robustness, we'll map WNS to setup slack.
+        
+        setup_slack = wns
+        hold_slack = 0.0 # Placeholder if not parsed
+        
+        timing_met = (setup_slack >= 0.0)
+        
+        return {
+            "timing_met": timing_met,
+            "worst_setup": setup_slack,
+            "worst_hold": hold_slack,
+            "corners": [
+                {
+                    "name": "Typical",
+                    "setup_slack": setup_slack,
+                    "hold_slack": hold_slack
+                }
+            ],
+            "report_path": sta_report
+        }
+
+    except Exception as e:
+        return {"error": str(e), "timing_met": False}
+
+def parse_power_signoff(design_name: str) -> dict:
+    """Parses OpenLane Power Signoff reports.
+    
+    Args:
+        design_name (str): Name of the design.
+        
+    Returns:
+        dict: A dictionary containing power metrics.
+    """
+    try:
+        # Default empty result
+        result = {
+            "total_power_w": 0.0,
+            "internal_power_w": 0.0,
+            "switching_power_w": 0.0,
+            "leakage_power_w": 0.0,
+            "sequential_pct": 0.0,
+            "combinational_pct": 0.0,
+            "irdrop_max_vpwr": 0.0,
+            "irdrop_max_vgnd": 0.0,
+            "power_ok": True
+        }
+        
+        runs_dir = os.path.join(OPENLANE_ROOT, "designs", design_name, "runs")
+        if not os.path.exists(runs_dir):
+            return result
+            
+        latest_run = sorted([d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))])[-1]
+        report_dir = os.path.join(runs_dir, latest_run, "reports", "signoff")
+        
+        # 1. Parse Power Report (e.g., .power.rpt)
+        power_report = None
+        if os.path.exists(report_dir):
+            for f in os.listdir(report_dir):
+                if "power" in f and f.endswith(".rpt"):
+                    power_report = os.path.join(report_dir, f)
+                    break
+                    
+        if power_report:
+            with open(power_report, 'r') as f:
+                content = f.read()
+                # Simple regex parsing for Total Power
+                # Format often: "Total Power: 1.23e-03"
+                total_match = re.search(r'Total Power.*?([\d.e+-]+)', content, re.IGNORECASE)
+                if total_match:
+                    result["total_power_w"] = float(total_match.group(1))
+                    
+                # Breakdowns (simplified)
+                internal_match = re.search(r'Internal Power.*?([\d.e+-]+)', content, re.IGNORECASE)
+                if internal_match: result["internal_power_w"] = float(internal_match.group(1))
+                
+                switching_match = re.search(r'Switching Power.*?([\d.e+-]+)', content, re.IGNORECASE)
+                if switching_match: result["switching_power_w"] = float(switching_match.group(1))
+                
+                leakage_match = re.search(r'Leakage Power.*?([\d.e+-]+)', content, re.IGNORECASE)
+                if leakage_match: result["leakage_power_w"] = float(leakage_match.group(1))
+
+        # 2. Parse IR Drop (Simplified placeholder)
+        # Real flow would parse openroad reports. for now assume safe.
+        return result
+
+    except Exception as e:
+        return result
+

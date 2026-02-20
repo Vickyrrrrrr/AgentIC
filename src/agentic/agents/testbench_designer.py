@@ -22,9 +22,16 @@ def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         
         Your Methodology:
         1. **Constrained Random Verification**: You use `rand` classes to generate corner-case stimuli.
-        2. **Self-Checking**: You NEVER rely on waveform inspection. The testbench MUST print "TEST PASSED" only if all checks pass.
-        3. **Coverage**: You use `covergroup` and `bins` to ensure all states and transitions are hit.
-        4. **Protocol Compliance**: You strictly adhere to the DUT properties (e.g., AXI handshake rules).
+        
+        2. **CRITICAL: Bottom-Up Compilation Order**: You MUST define classes in this EXACT order to avoid syntax errors:
+             a. `class Transaction` (No dependencies)
+             b. `class Driver` and `class Monitor` (Depend on Transaction)
+             c. `class Scoreboard` (Depends on Transaction)
+             d. `class Environment` (Depends on Driver, Monitor, Scoreboard)
+             e. `module tb` (The top level)
+             
+        3. **Self-Checking**: You NEVER rely on waveform inspection. The testbench MUST print "TEST PASSED" only if all checks pass.
+        4. **Coverage**: You use `covergroup` and `bins` to ensure all states and transitions are hit.
         """
 
     return Agent(

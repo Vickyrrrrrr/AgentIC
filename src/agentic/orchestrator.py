@@ -29,6 +29,9 @@ from .tools.vlsi_tools import (
     run_simulation_with_coverage,
     parse_coverage_report,
     parse_drc_lvs_reports,
+    parse_sta_signoff,
+    parse_power_signoff,
+    check_physical_metrics,
     run_cdc_check,
     generate_design_doc,
     convert_sva_to_yosys
@@ -68,8 +71,9 @@ class BuildOrchestrator:
         self.state = BuildState.INIT
         self.strategy = BuildStrategy.SV_MODULAR
         self.retry_count = 0
-        self.artifacts = {}  # Store paths to generated files
+        self.artifacts = {}  # Store paths to gathered files
         self.history = []    # Log of state transitions and errors
+        self.errors = []     # List of error messages
 
     def setup_logger(self):
         """Sets up a file logger for the build process."""
@@ -1215,17 +1219,52 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.log(f"Area: {metrics.get('chip_area_um2', 'N/A')} µm²", refined=True)
         
         # 5. Documentation
-        self.log("Generating Design Documentation...", refined=True)
-        with console.status("[bold cyan]Auto-generating Datasheet...[/bold cyan]"):
-            doc_path = generate_design_doc(
-                self.name, 
-                spec=self.artifacts.get('spec', ''),
-                metrics=metrics
-            )
+        self.log("Generating Design Documentation (AI-Powered)...", refined=True)
         
-        if doc_path and not doc_path.startswith("Error:"):
+        doc_agent = get_doc_agent(self.llm, verbose=self.verbose)
+        
+        doc_task = Task(
+            description=f"""Generate a comprehensive Datasheet (Markdown) for "{self.name}".
+            
+            1. **Architecture Spec**:
+            {self.artifacts.get('spec', 'N/A')}
+            
+            2. **Physical Metrics**:
+            {metrics if metrics else 'N/A'}
+            
+            3. **RTL Source Code**:
+            ```verilog
+            {self.artifacts.get('rtl_code', '')[:15000]} 
+            // ... truncated if too long
+            ```
+            
+            **REQUIREMENTS**:
+            - Title: "{self.name} Datasheet"
+            - Section 1: **Overview** (High-level functionality and design intent).
+            - Section 2: **Block Diagram Description** (Explain the data flow).
+            - Section 3: **Interface** (Table of ports with DETAILED descriptions).
+            - Section 4: **Register Map** (Address, Name, Access Type, Description).
+            - Section 5: **Timing & Performance** (Max Freq, Latency, Throughput).
+            - Section 6: **Integration Guide** (How to instantiate and use it).
+            
+            Return ONLY the Markdown content.
+            """,
+            expected_output='Markdown Datasheet',
+            agent=doc_agent
+        )
+        
+        with console.status("[bold cyan]AI Writing Datasheet...[/bold cyan]"):
+            doc_content = str(Crew(agents=[doc_agent], tasks=[doc_task]).kickoff())
+        
+        # Save to file
+        doc_path = f"{OPENLANE_ROOT}/designs/{self.name}/{self.name}_datasheet.md"
+        try:
+            with open(doc_path, 'w') as f:
+                f.write(doc_content)
             self.artifacts['datasheet'] = doc_path
             self.log(f"Datasheet generated: {doc_path}", refined=True)
+        except Exception as e:
+            self.log(f"Error writing datasheet: {e}", refined=True)
         
         # FINAL VERDICT
         timing_status = "MET" if sta.get('timing_met') else "FAILED" if not sta.get('error') else "N/A"

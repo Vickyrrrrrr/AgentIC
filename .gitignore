@@ -45,3 +45,4 @@ Thumbs.db
 *.gds
 temp_*.svg
 designs/*/src/sim
+.venv-agentic/
