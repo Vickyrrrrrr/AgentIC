@@ -10,12 +10,8 @@ OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane")
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 
-# LLM Configuration
-# To use GROQ (Free Cloud):
-# 1. Get Key from https://console.groq.com
-# 2. export GROQ_API_KEY="gsk_..."
-
 # Strict Three-Model Policy:
+<<<<<<< HEAD
 # 1. Backup GLM5 Cloud
 GLM5_CONFIG = {
     "model": os.environ.get("BACKUP_MODEL", "openai/z-ai/glm5"),
@@ -28,6 +24,20 @@ NVIDIA_CONFIG = {
     "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"),
     "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
     "api_key": os.environ.get("NVIDIA_API_KEY", "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")
+=======
+# 1. NVIDIA Nemotron Cloud (Primary) - Integrated into AgentIC ReAct Loop
+NEMOTRON_CONFIG = {
+    "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"),
+    "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+    "api_key": os.environ.get("NVIDIA_API_KEY") # API Key hidden for security
+}
+
+# 2. Backup GLM5 Cloud
+NVIDIA_CONFIG = {
+    "model": os.environ.get("BACKUP_MODEL", "openai/z-ai/glm5"),
+    "base_url": os.environ.get("BACKUP_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+    "api_key": os.environ.get("NVIDIA_API_KEY") # API Key hidden for security
+>>>>>>> 1e4247e (Update README with VeriReason benchmarks and functioning details)
 }
 
 # 3. VeriReason Local (Fallback)

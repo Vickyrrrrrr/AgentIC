@@ -38,10 +38,15 @@ def write_config(design_name: str, code: str) -> str:
     if "<think>" in clean_code:
         clean_code = re.sub(r'<think>.*?</think>', '', clean_code, flags=re.DOTALL)
 
-    if "```tcl" in clean_code:
-        clean_code = clean_code.split("```tcl")[1].split("```")[0].strip()
-    elif "```" in clean_code:
-        clean_code = clean_code.split("```")[1].split("```")[0].strip()
+    # Extract code from markdown fences robustly
+    blocks = re.findall(r'```(?:tcl)?\s*(.*?)```', clean_code, re.DOTALL | re.IGNORECASE)
+    if blocks:
+        # Use the first block that looks like tcl, or the first block if none are identifiable
+        valid_blocks = [b.strip() for b in blocks if "set ::env" in b]
+        if valid_blocks:
+            clean_code = valid_blocks[0]
+        else:
+            clean_code = blocks[0].strip()
     
     # Remove "Thought:" lines
     clean_code = re.sub(r'^(Thought|Action|Observation):.*$', '', clean_code, flags=re.MULTILINE)
@@ -78,31 +83,32 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
     if "<think>" in clean_code:
         clean_code = re.sub(r'<think>.*?</think>', '', clean_code, flags=re.DOTALL)
     
-    # Extract code from markdown fences
-    if "```verilog" in clean_code:
-        clean_code = clean_code.split("```verilog")[1].split("```")[0].strip()
-    elif "```v" in clean_code:
-        clean_code = clean_code.split("```v")[1].split("```")[0].strip()
-    elif "```" in clean_code:
-        # Find the code block
-        parts = clean_code.split("```")
-        for i, part in enumerate(parts):
-            if i % 2 == 1 and "module" in part:  # Odd indices are inside fences
-                clean_code = part.strip()
-                # Remove language identifier if present
-                lines = clean_code.split('\n')
-                if lines[0].strip() in ['verilog', 'v', 'systemverilog']:
-                    clean_code = '\n'.join(lines[1:])
-                break
+    # Extract code from markdown fences robustly
+    blocks = re.findall(r'```(?:verilog|systemverilog|sv|v)?\s*(.*?)```', clean_code, re.DOTALL | re.IGNORECASE)
+    valid_blocks = [b.strip() for b in blocks if "module" in b and "endmodule" in b]
     
-    # Ensure we have a module
-    if "module" not in clean_code:
-        # Try to find module in original
-        if "module" in code:
-            start = code.find("module")
-            end = code.rfind("endmodule")
-            if end > start:
-                clean_code = code[start:end+9]  # +9 for "endmodule"
+    if valid_blocks:
+        clean_code = "\n\n".join(valid_blocks)
+    elif blocks:
+        clean_code = "\n\n".join([b.strip() for b in blocks])
+        
+    # Industry standard strict filtering: 
+    # To truly prevent LLM reasoning from bleeding into the code, we extract strictly from the 
+    # first Verilog keyword to the last 'endmodule'.
+    match = re.search(r'(`timescale\s|`include\s|`define\s|module\s)', clean_code)
+    if match:
+        start_idx = match.start()
+        end_idx = clean_code.rfind("endmodule")
+        if end_idx != -1 and end_idx >= start_idx:
+            clean_code = clean_code[start_idx:end_idx + 9]  # +9 for "endmodule"
+    else:
+        # Fallback to original raw code if extraction mangled it
+        match = re.search(r'(`timescale\s|`include\s|`define\s|module\s)', code)
+        if match:
+            start_idx = match.start()
+            end_idx = code.rfind("endmodule")
+            if end_idx != -1 and end_idx >= start_idx:
+                clean_code = code[start_idx:end_idx + 9]
     
     # Sanitize model artifacts and fix common issues
     # Remove model tokens like <｜begin▁of▁sentence｜>

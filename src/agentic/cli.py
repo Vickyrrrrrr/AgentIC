@@ -20,7 +20,11 @@ from crewai import Agent, Task, Crew, LLM
 
 # Local imports
 # Local imports
+<<<<<<< HEAD
 from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG, GLM5_CONFIG, PDK
+=======
+from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG, NEMOTRON_CONFIG, PDK
+>>>>>>> 1e4247e (Update README with VeriReason benchmarks and functioning details)
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent
@@ -50,15 +54,21 @@ console = Console()
 # Setup Brain
 def get_llm():
     """Returns the LLM instance. Strict 3-Model Policy:
-       1. Groq Cloud (Ultra-Fast)
+       1. NVIDIA Nemotron Cloud (Primary)
        2. NVIDIA Qwen Cloud (High Perf)
        3. VeriReason Local (Fallback)
     """
     
     configs = [
+<<<<<<< HEAD
         ("NVIDIA Nemotron Cloud",  NVIDIA_CONFIG),
         ("Backup GLM5 Cloud",  GLM5_CONFIG),
         ("VeriReason Local",   LOCAL_CONFIG),
+=======
+        ("NVIDIA Nemotron Cloud", NEMOTRON_CONFIG),   # Primary (Mapped via NEMOTRON_CONFIG in config.py)
+        ("Backup GLM5 Cloud",      NVIDIA_CONFIG), # Backup (Mapped via NVIDIA_CONFIG in config.py)
+        ("VeriReason Local",       LOCAL_CONFIG),
+>>>>>>> 1e4247e (Update README with VeriReason benchmarks and functioning details)
     ]
     
     for name, cfg in configs:
@@ -70,7 +80,7 @@ def get_llm():
             
         try:
             console.print(f"[dim]Testing {name}...[/dim]")
-            # Add extra parameters if using NVIDIA and GLM5 for reasoning
+            # Add extra parameters for reasoning models
             extra_t = {}
             if "nemotron" in cfg["model"].lower():
                 extra_t = {
