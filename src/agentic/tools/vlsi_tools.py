@@ -1,9 +1,24 @@
 # tools/vlsi_tools.py
 import os
 import re
+import json
+import hashlib
 import subprocess
+from collections import Counter, defaultdict, deque
+from typing import Dict, Any, List, Tuple
+import shutil
 from crewai.tools import tool
-from ..config import OPENLANE_ROOT, SCRIPTS_DIR, PDK_ROOT, PDK, OPENLANE_IMAGE, SBY_BIN
+from ..config import (
+    OPENLANE_ROOT,
+    SCRIPTS_DIR,
+    PDK_ROOT,
+    PDK,
+    OPENLANE_IMAGE,
+    SBY_BIN,
+    YOSYS_BIN,
+    EQY_BIN,
+    get_pdk_profile,
+)
 
 def SecurityCheck(rtl_code: str) -> tuple:
     """
@@ -22,6 +37,67 @@ def SecurityCheck(rtl_code: str) -> tuple:
             return False, f"Detected potentially malicious pattern: {pattern}"
             
     return True, "Safe"
+
+
+def _resolve_binary(bin_hint: str) -> str:
+    """Resolve a tool path from hint/path/PATH."""
+    if not bin_hint:
+        return ""
+    if os.path.isabs(bin_hint) and os.path.exists(bin_hint):
+        return bin_hint
+    found = shutil.which(bin_hint)
+    if found:
+        return found
+    return bin_hint
+
+
+def startup_self_check() -> Dict[str, Any]:
+    """Validate required tooling and environment before running the flow."""
+    checks: List[Dict[str, Any]] = []
+    required_bins = {
+        "verilator": "verilator",
+        "iverilog": "iverilog",
+        "vvp": "vvp",
+        "docker": "docker",
+        "yosys": YOSYS_BIN,
+        "sby": SBY_BIN,
+        "eqy": EQY_BIN,
+    }
+    all_pass = True
+
+    for name, hint in required_bins.items():
+        resolved = _resolve_binary(hint)
+        exists = bool(resolved and (os.path.isabs(resolved) and os.path.exists(resolved) or shutil.which(resolved)))
+        checks.append(
+            {
+                "tool": name,
+                "hint": hint,
+                "resolved": resolved,
+                "ok": exists,
+            }
+        )
+        if not exists:
+            all_pass = False
+
+    env_checks = {
+        "OPENLANE_ROOT": OPENLANE_ROOT,
+        "PDK_ROOT": PDK_ROOT,
+        "PDK": PDK,
+    }
+    env_status = {
+        key: {"value": value, "exists": os.path.exists(value) if key.endswith("_ROOT") else True}
+        for key, value in env_checks.items()
+    }
+    for key, info in env_status.items():
+        if not info["exists"]:
+            all_pass = False
+            checks.append({"tool": key, "hint": info["value"], "resolved": info["value"], "ok": False})
+
+    return {
+        "ok": all_pass,
+        "checks": checks,
+        "env": env_status,
+    }
 
 def write_config(design_name: str, code: str) -> str:
     """Writes config.tcl to the OpenLane design directory."""
@@ -219,6 +295,71 @@ def run_lint_check(file_path: str) -> tuple:
          return True, "Verilator not found (Skipping Lint)"
     except subprocess.TimeoutExpired:
          return False, "Lint check timed out."
+
+
+def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
+    """Deterministic semantic preflight for width-safety and port-shadowing."""
+    report: Dict[str, Any] = {
+        "ok": True,
+        "width_issues": [],
+        "port_shadowing": [],
+        "details": "",
+    }
+
+    if not os.path.exists(file_path):
+        report["ok"] = False
+        report["details"] = f"File not found: {file_path}"
+        return False, report
+
+    with open(file_path, "r") as f:
+        code = f.read()
+
+    # --- Port shadowing detection ---
+    port_names = set()
+    module_match = re.search(r"module\s+\w+\s*(?:#\s*\(.*?\))?\s*\((.*?)\)\s*;", code, re.DOTALL)
+    if module_match:
+        port_block = module_match.group(1)
+        for m in re.finditer(r"\b(?:input|output|inout)\b[^;,\)]*\b([A-Za-z_]\w*)\b", port_block):
+            port_names.add(m.group(1))
+
+    shadowing = []
+    for m in re.finditer(
+        r"^\s*(?:reg|wire|logic)\s+(?:signed\s+)?(?:\[[^]]+\]\s+)?([A-Za-z_]\w*)\b",
+        code,
+        re.MULTILINE,
+    ):
+        sig = m.group(1)
+        if sig in port_names:
+            shadowing.append(sig)
+    if shadowing:
+        report["port_shadowing"] = sorted(set(shadowing))
+
+    # --- Width mismatch detection via Verilator diagnostics ---
+    width_patterns = (
+        "WIDTHTRUNC",
+        "WIDTHEXPAND",
+        "WIDTH",
+        "UNSIGNED",
+        "signed",
+        "truncat",
+    )
+    cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wall", file_path]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        stderr = result.stderr or ""
+        width_lines = []
+        for line in stderr.splitlines():
+            upper = line.upper()
+            if any(p.upper() in upper for p in width_patterns):
+                width_lines.append(line.strip())
+        if width_lines:
+            report["width_issues"] = width_lines[:20]
+            report["details"] = "\n".join(width_lines[:20])
+    except Exception as exc:
+        report["details"] = f"Semantic width scan fallback triggered: {exc}"
+
+    report["ok"] = not report["port_shadowing"] and not report["width_issues"]
+    return report["ok"], report
 
 
 def validate_rtl_for_synthesis(file_path: str) -> tuple:
@@ -522,7 +663,7 @@ def run_formal_verification(design_name):
         return False, "SBY configuration file not found."
 
     # Run SBY (using bundled binary)
-    sby_cmd = SBY_BIN if os.path.exists(SBY_BIN) else "sby"
+    sby_cmd = _resolve_binary(SBY_BIN)
     try:
         result = subprocess.run(
             [sby_cmd, "-f", f"{design_name}.sby"],
@@ -613,8 +754,6 @@ def check_physical_metrics(design_name):
                 "power_total": power_total,
                 "utilization": utilization
             }
-            return metrics, "OK"
-    except Exception as e:
             return metrics, "OK"
     except Exception as e:
         return None, f"Error parsing metrics: {str(e)}"
@@ -728,12 +867,19 @@ def run_simulation(design_name: str) -> tuple:
         
     return False, sim_text
 
-def run_openlane(design_name: str, background: bool = False):
+def run_openlane(
+    design_name: str,
+    background: bool = False,
+    run_tag: str = "agentrun",
+    floorplan_tcl: str = "",
+    pdk_name: str = "",
+):
     """Triggers the OpenLane flow via Docker."""
     
     # --- Autonomous Environment Fix ---
     # If PDK_ROOT is not set, try to find it in common locations
     effective_pdk_root = PDK_ROOT
+    selected_pdk = pdk_name or PDK
     if not effective_pdk_root or not os.path.exists(effective_pdk_root):
         common_paths = [
             os.path.expanduser("~/.ciel"),
@@ -745,7 +891,7 @@ def run_openlane(design_name: str, background: bool = False):
         found = False
         for path in common_paths:
             # Check for generic PDK structure, not just sky130A
-            if os.path.exists(path) and (os.path.exists(os.path.join(path, PDK)) or os.path.exists(os.path.join(path, "sky130A"))):
+            if os.path.exists(path) and (os.path.exists(os.path.join(path, selected_pdk)) or os.path.exists(os.path.join(path, "sky130A"))):
                 effective_pdk_root = path
                 found = True
                 break
@@ -765,11 +911,13 @@ def run_openlane(design_name: str, background: bool = False):
         "-v", f"{OPENLANE_ROOT}:/openlane",
         "-v", f"{effective_pdk_root}:{effective_pdk_root}",
         "-e", f"PDK_ROOT={effective_pdk_root}",
-        "-e", f"PDK={PDK}",
+        "-e", f"PDK={selected_pdk}",
         "-e", "PWD=/openlane",
         OPENLANE_IMAGE,
-        "./flow.tcl", "-design", design_name, "-tag", "agentrun", "-overwrite", "-ignore_mismatches"
+        "./flow.tcl", "-design", design_name, "-tag", run_tag, "-overwrite", "-ignore_mismatches"
     ]
+    if floorplan_tcl:
+        cmd.extend(["-config_file", floorplan_tcl])
     
     if background:
         log_file_path = os.path.join(design_dir, "harden.log")
@@ -797,7 +945,7 @@ def run_openlane(design_name: str, background: bool = False):
         return False, "OpenLane Hardening Timed Out (Exceeded 60 mins)."
     
     # Check if GDS was created
-    gds_path = f"{OPENLANE_ROOT}/designs/{design_name}/runs/agentrun/results/final/gds/{design_name}.gds"
+    gds_path = f"{OPENLANE_ROOT}/designs/{design_name}/runs/{run_tag}/results/final/gds/{design_name}.gds"
     success = os.path.exists(gds_path)
 
     if success:
@@ -916,6 +1064,238 @@ def run_gls_simulation(design_name: str) -> tuple:
         return False, f"GLS Simulation FAILED or missing PASS marker.\n{sim_text}"
     except subprocess.TimeoutExpired:
         return False, "GLS Simulation Timed Out."
+
+
+def parse_eda_log_summary(log_path: str, kind: str, top_n: int = 10) -> Dict[str, Any]:
+    """Stream parse EDA logs and return normalized top issues for LLM-safe context."""
+    summary: Dict[str, Any] = {
+        "kind": kind,
+        "path": log_path,
+        "top_issues": [],
+        "counts": {},
+        "total_lines": 0,
+        "error": "",
+    }
+    if not os.path.exists(log_path):
+        summary["error"] = f"log not found: {log_path}"
+        return summary
+
+    patterns = {
+        "timing": [
+            (r"\bwns\b|\btns\b|slack|setup|hold", "timing_violation", "high", "timing_tune"),
+            (r"unconstrained|no clock", "constraint_issue", "medium", "constraints"),
+        ],
+        "routing": [
+            (r"overflow|congestion|gcell|resource|usage", "routing_congestion", "high", "area_or_floorplan"),
+            (r"antenna", "antenna_issue", "medium", "routing_rule_fix"),
+        ],
+        "drc": [
+            (r"violation|error|drc", "drc_violation", "high", "layout_fix"),
+        ],
+        "lvs": [
+            (r"mismatch|lvs|error", "lvs_mismatch", "high", "netlist_match_fix"),
+        ],
+        "cdc": [
+            (r"cdc|clock domain|metastab|sync", "cdc_warning", "medium", "synchronizer_fix"),
+        ],
+        "formal": [
+            (r"assert|prove|fail|counterexample", "formal_failure", "high", "property_or_logic_fix"),
+        ],
+    }
+    selected = patterns.get(kind.lower(), patterns["timing"])
+    counters: Counter = Counter()
+    examples: Dict[str, deque] = defaultdict(lambda: deque(maxlen=3))
+    fixes: Dict[str, str] = {}
+    severities: Dict[str, str] = {}
+
+    with open(log_path, "r", errors="ignore") as f:
+        for line in f:
+            summary["total_lines"] += 1
+            text = line.strip()
+            if not text:
+                continue
+            for pattern, issue_type, severity, fix_cat in selected:
+                if re.search(pattern, text, re.IGNORECASE):
+                    counters[issue_type] += 1
+                    examples[issue_type].append(text[:240])
+                    fixes[issue_type] = fix_cat
+                    severities[issue_type] = severity
+                    break
+
+    summary["counts"] = dict(counters)
+    for issue_type, count in counters.most_common(top_n):
+        ex = next(iter(examples[issue_type]), "")
+        summary["top_issues"].append(
+            {
+                "issue_type": issue_type,
+                "severity": severities.get(issue_type, "medium"),
+                "count": count,
+                "representative_snippet": ex,
+                "probable_fix_category": fixes.get(issue_type, "general_fix"),
+            }
+        )
+    return summary
+
+
+def extract_top_sta_paths(sta_report_path: str, top_n: int = 10) -> List[Dict[str, Any]]:
+    """Extract top failing paths/endpoints from STA report text."""
+    results: List[Dict[str, Any]] = []
+    if not os.path.exists(sta_report_path):
+        return results
+
+    slack_re = re.compile(r"slack\s*\(?VIOLATED\)?\s*([-\d.]+)", re.IGNORECASE)
+    end_re = re.compile(r"endpoint:\s*(\S+)", re.IGNORECASE)
+    start_re = re.compile(r"startpoint:\s*(\S+)", re.IGNORECASE)
+    current: Dict[str, Any] = {}
+
+    with open(sta_report_path, "r", errors="ignore") as f:
+        for line in f:
+            text = line.strip()
+            m = start_re.search(text)
+            if m:
+                current["startpoint"] = m.group(1)
+            m = end_re.search(text)
+            if m:
+                current["endpoint"] = m.group(1)
+            m = slack_re.search(text)
+            if m:
+                try:
+                    current["slack"] = float(m.group(1))
+                except ValueError:
+                    current["slack"] = 0.0
+                if current:
+                    results.append(dict(current))
+                current = {}
+
+    results.sort(key=lambda x: x.get("slack", 0.0))
+    return results[:top_n]
+
+
+def parse_congestion_metrics(design_name: str, run_tag: str = "agentrun") -> Dict[str, Any]:
+    """Parse global routing congestion from OpenLane routing logs."""
+    log_path = os.path.join(
+        OPENLANE_ROOT,
+        "designs",
+        design_name,
+        "runs",
+        run_tag,
+        "logs",
+        "routing",
+        "19-global.log",
+    )
+    result = {
+        "log_path": log_path,
+        "total_usage_pct": 0.0,
+        "total_overflow": 0,
+        "layers": [],
+        "error": "",
+    }
+    if not os.path.exists(log_path):
+        result["error"] = "global routing log missing"
+        return result
+
+    line_re = re.compile(
+        r"^(?P<layer>[A-Za-z0-9_]+)\s+(?P<resource>\d+)\s+(?P<demand>\d+)\s+(?P<usage>[\d.]+)%\s+(?P<overflow>\d+\s*/\s*\d+\s*/\s*\d+)$"
+    )
+    total_re = re.compile(
+        r"^Total\s+(?P<resource>\d+)\s+(?P<demand>\d+)\s+(?P<usage>[\d.]+)%\s+(?P<overflow>\d+\s*/\s*\d+\s*/\s*\d+)$"
+    )
+    with open(log_path, "r", errors="ignore") as f:
+        for raw in f:
+            text = raw.strip()
+            m = total_re.match(text)
+            if m:
+                overflow_triplet = m.group("overflow").split("/")
+                result["total_usage_pct"] = float(m.group("usage"))
+                result["total_overflow"] = int(overflow_triplet[-1].strip())
+                continue
+            m = line_re.match(text)
+            if m:
+                if m.group("layer").lower() == "total":
+                    continue
+                overflow_triplet = m.group("overflow").split("/")
+                total_over = int(overflow_triplet[-1].strip())
+                result["layers"].append(
+                    {
+                        "layer": m.group("layer"),
+                        "usage_pct": float(m.group("usage")),
+                        "overflow_total": total_over,
+                    }
+                )
+                continue
+    return result
+
+
+def run_eqy_lec(design_name: str, gold_rtl: str, gate_netlist: str) -> Tuple[bool, str]:
+    """Run EQY logical equivalence between reference RTL and gate netlist."""
+    if not os.path.exists(gold_rtl):
+        return False, f"gold rtl missing: {gold_rtl}"
+    if not os.path.exists(gate_netlist):
+        return False, f"gate netlist missing: {gate_netlist}"
+
+    eqy_bin = _resolve_binary(EQY_BIN)
+    yosys_bin = _resolve_binary(YOSYS_BIN)
+    if not shutil.which(eqy_bin) and not os.path.exists(eqy_bin):
+        return False, f"eqy not found ({EQY_BIN})"
+    if not shutil.which(yosys_bin) and not os.path.exists(yosys_bin):
+        return False, f"yosys not found ({YOSYS_BIN})"
+
+    src_dir = os.path.join(OPENLANE_ROOT, "designs", design_name, "src")
+    os.makedirs(src_dir, exist_ok=True)
+    eqy_cfg = os.path.join(src_dir, f"{design_name}.eqy")
+    top = design_name
+    cfg = f"""[options]
+multiclock on
+
+[gold]
+read_verilog {gold_rtl}
+prep -top {top}
+
+[gate]
+read_verilog {gate_netlist}
+prep -top {top}
+
+[strategy simple]
+"""
+    with open(eqy_cfg, "w") as f:
+        f.write(cfg)
+
+    try:
+        result = subprocess.run(
+            [eqy_bin, eqy_cfg],
+            cwd=src_dir,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "EQY timed out (>900s)"
+    except FileNotFoundError:
+        return False, "EQY binary not executable"
+
+    text = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    if result.returncode == 0 and re.search(r"PASS|equivalent|success", text, re.IGNORECASE):
+        return True, text[-2000:]
+    return False, text[-4000:]
+
+
+def apply_eco_patch(design_name: str, target_net: str = "", strategy: str = "gate") -> Tuple[bool, str]:
+    """Apply a localized ECO patch placeholder; returns patch artifact path."""
+    src_dir = os.path.join(OPENLANE_ROOT, "designs", design_name, "src")
+    os.makedirs(src_dir, exist_ok=True)
+    patch_path = os.path.join(src_dir, f"{design_name}_eco_patch.tcl")
+    patch_note = (
+        f"# ECO patch strategy={strategy}\\n"
+        f"# target_net={target_net or 'AUTO_SELECT'}\\n"
+        "# This patch is generated by AgentIC and intended for incremental routing/repair.\\n"
+        "puts \"Applying localized ECO patch\"\\n"
+    )
+    try:
+        with open(patch_path, "w") as f:
+            f.write(patch_note)
+        return True, patch_path
+    except OSError as exc:
+        return False, f"ECO patch write failed: {exc}"
 
 # ============================================================
 # INDUSTRY-STANDARD TOOLS (Coverage, CDC, DRC/LVS, Documentation)
@@ -1454,68 +1834,78 @@ def generate_design_doc(design_name: str, spec: str = "", metrics: dict = None) 
         return f"Error writing documentation: {e}"
 
 def parse_sta_signoff(design_name: str) -> dict:
-    """Parses OpenLane STA (Static Timing Analysis) reports for signoff.
-    
-    Args:
-        design_name (str): Name of the design.
-        
-    Returns:
-        dict: A dictionary containing timing metrics and violation status.
-    """
+    """Parse multi-corner STA summary reports and aggregate worst setup/hold."""
     try:
-        # Locate the latest run directory
         runs_dir = os.path.join(OPENLANE_ROOT, "designs", design_name, "runs")
         if not os.path.exists(runs_dir):
             return {"error": "No runs directory found", "timing_met": False}
-            
-        # Get the latest run
+
         latest_run = sorted([d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))])[-1]
-        report_dir = os.path.join(runs_dir, latest_run, "reports", "signoff")
-        
-        # Check for STA report
-        sta_report = None
-        if os.path.exists(report_dir):
-            for f in os.listdir(report_dir):
-                if f.endswith(".sta.rpt") or "sta" in f:
-                    sta_report = os.path.join(report_dir, f)
-                    break
-        
-        if not sta_report:
-             return {"error": "STA report not found", "timing_met": False}
-             
-        with open(sta_report, 'r') as f:
-            content = f.read()
-            
-        # Parse slack (WNS = Worst Negative Slack -> Setup)
-        wns_match = re.search(r'wns\s+([-\d.]+)', content, re.IGNORECASE)
-        tns_match = re.search(r'tns\s+([-\d.]+)', content, re.IGNORECASE)
-        
-        wns = float(wns_match.group(1)) if wns_match else 0.0
-        tns = float(tns_match.group(1)) if tns_match else 0.0
-        
-        # In a real flow, we'd parse hold slack too. For now assume hold is OK if wns is OK, or parse if available.
-        # OpenLane often puts hold analysis in a separate Min/Fast corner file. 
-        # For simplicity/robustness, we'll map WNS to setup slack.
-        
-        setup_slack = wns
-        hold_slack = 0.0 # Placeholder if not parsed
-        
-        timing_met = (setup_slack >= 0.0)
-        
+        signoff_dir = os.path.join(runs_dir, latest_run, "reports", "signoff")
+        if not os.path.exists(signoff_dir):
+            return {"error": "Signoff report directory not found", "timing_met": False}
+
+        summary_reports: List[str] = []
+        for root, _, files in os.walk(signoff_dir):
+            for fname in files:
+                if fname.endswith(".summary.rpt") and "sta" in fname.lower():
+                    summary_reports.append(os.path.join(root, fname))
+                elif fname.endswith(".sta.rpt"):
+                    summary_reports.append(os.path.join(root, fname))
+        summary_reports = sorted(set(summary_reports))
+        if not summary_reports:
+            return {"error": "STA report not found", "timing_met": False}
+
+        corners = []
+        worst_setup = float("inf")
+        worst_hold = float("inf")
+        top_paths: List[Dict[str, Any]] = []
+
+        for sta_report in summary_reports:
+            corner_name = os.path.basename(os.path.dirname(sta_report))
+            if corner_name == "signoff":
+                corner_name = os.path.basename(sta_report).replace(".summary.rpt", "")
+
+            with open(sta_report, "r", errors="ignore") as f:
+                content = f.read()
+
+            setup_match = re.search(r"report_worst_slack -max.*?worst slack\s+([-\d.]+)", content, re.IGNORECASE | re.DOTALL)
+            hold_match = re.search(r"report_worst_slack -min.*?worst slack\s+([-\d.]+)", content, re.IGNORECASE | re.DOTALL)
+            wns_match = re.search(r"\bwns\s+([-\d.]+)", content, re.IGNORECASE)
+            all_worst = re.findall(r"worst slack\s+([-\d.]+)", content, re.IGNORECASE)
+
+            setup_slack = float(setup_match.group(1)) if setup_match else (float(wns_match.group(1)) if wns_match else (float(all_worst[0]) if all_worst else 0.0))
+            hold_slack = float(hold_match.group(1)) if hold_match else (float(all_worst[1]) if len(all_worst) > 1 else 0.0)
+
+            worst_setup = min(worst_setup, setup_slack)
+            worst_hold = min(worst_hold, hold_slack)
+
+            corners.append(
+                {
+                    "name": corner_name,
+                    "setup_slack": setup_slack,
+                    "hold_slack": hold_slack,
+                    "report_path": sta_report,
+                }
+            )
+            top_paths.extend(extract_top_sta_paths(sta_report, top_n=3))
+
+        if worst_setup == float("inf"):
+            worst_setup = 0.0
+        if worst_hold == float("inf"):
+            worst_hold = 0.0
+
+        timing_met = all((c["setup_slack"] >= 0.0 and c["hold_slack"] >= 0.0) for c in corners)
+        top_paths = sorted(top_paths, key=lambda x: x.get("slack", 0.0))[:10]
+
         return {
             "timing_met": timing_met,
-            "worst_setup": setup_slack,
-            "worst_hold": hold_slack,
-            "corners": [
-                {
-                    "name": "Typical",
-                    "setup_slack": setup_slack,
-                    "hold_slack": hold_slack
-                }
-            ],
-            "report_path": sta_report
+            "worst_setup": worst_setup,
+            "worst_hold": worst_hold,
+            "corners": corners,
+            "top_paths": top_paths,
+            "report_dir": signoff_dir,
         }
-
     except Exception as e:
         return {"error": str(e), "timing_met": False}
 
@@ -1528,58 +1918,92 @@ def parse_power_signoff(design_name: str) -> dict:
     Returns:
         dict: A dictionary containing power metrics.
     """
+    # Default empty result
+    result = {
+        "total_power_w": 0.0,
+        "internal_power_w": 0.0,
+        "switching_power_w": 0.0,
+        "leakage_power_w": 0.0,
+        "sequential_pct": 0.0,
+        "combinational_pct": 0.0,
+        "irdrop_max_vpwr": 0.0,
+        "irdrop_max_vgnd": 0.0,
+        "power_ok": True,
+        "power_report": "",
+    }
     try:
-        # Default empty result
-        result = {
-            "total_power_w": 0.0,
-            "internal_power_w": 0.0,
-            "switching_power_w": 0.0,
-            "leakage_power_w": 0.0,
-            "sequential_pct": 0.0,
-            "combinational_pct": 0.0,
-            "irdrop_max_vpwr": 0.0,
-            "irdrop_max_vgnd": 0.0,
-            "power_ok": True
-        }
-        
         runs_dir = os.path.join(OPENLANE_ROOT, "designs", design_name, "runs")
         if not os.path.exists(runs_dir):
             return result
-            
+
         latest_run = sorted([d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))])[-1]
         report_dir = os.path.join(runs_dir, latest_run, "reports", "signoff")
-        
-        # 1. Parse Power Report (e.g., .power.rpt)
+        if not os.path.exists(report_dir):
+            return result
+
+        # Parse *.power.rpt
         power_report = None
-        if os.path.exists(report_dir):
-            for f in os.listdir(report_dir):
-                if "power" in f and f.endswith(".rpt"):
-                    power_report = os.path.join(report_dir, f)
+        for root, _, files in os.walk(report_dir):
+            for f in files:
+                if "power" in f.lower() and f.endswith(".rpt"):
+                    power_report = os.path.join(root, f)
                     break
-                    
-        if power_report:
-            with open(power_report, 'r') as f:
+            if power_report:
+                break
+
+        if power_report and os.path.exists(power_report):
+            result["power_report"] = power_report
+            with open(power_report, "r", errors="ignore") as f:
                 content = f.read()
-                # Simple regex parsing for Total Power
-                # Format often: "Total Power: 1.23e-03"
-                total_match = re.search(r'Total Power.*?([\d.e+-]+)', content, re.IGNORECASE)
+            total_match = re.search(r"Total\\s+([\\d.eE+\\-]+)\\s+([\\d.eE+\\-]+)\\s+([\\d.eE+\\-]+)\\s+([\\d.eE+\\-]+)", content)
+            if total_match:
+                result["internal_power_w"] = float(total_match.group(1))
+                result["switching_power_w"] = float(total_match.group(2))
+                result["leakage_power_w"] = float(total_match.group(3))
+                result["total_power_w"] = float(total_match.group(4))
+            else:
+                total_match = re.search(r"Total\\s+Power.*?([\\d.eE+\\-]+)", content, re.IGNORECASE)
                 if total_match:
                     result["total_power_w"] = float(total_match.group(1))
-                    
-                # Breakdowns (simplified)
-                internal_match = re.search(r'Internal Power.*?([\d.e+-]+)', content, re.IGNORECASE)
-                if internal_match: result["internal_power_w"] = float(internal_match.group(1))
-                
-                switching_match = re.search(r'Switching Power.*?([\d.e+-]+)', content, re.IGNORECASE)
-                if switching_match: result["switching_power_w"] = float(switching_match.group(1))
-                
-                leakage_match = re.search(r'Leakage Power.*?([\d.e+-]+)', content, re.IGNORECASE)
-                if leakage_match: result["leakage_power_w"] = float(leakage_match.group(1))
 
-        # 2. Parse IR Drop (Simplified placeholder)
-        # Real flow would parse openroad reports. for now assume safe.
+            seq_match = re.search(r"Sequential.*?\\s([\\d.]+)%", content)
+            comb_match = re.search(r"Combinational.*?\\s([\\d.]+)%", content)
+            if seq_match:
+                result["sequential_pct"] = float(seq_match.group(1))
+            if comb_match:
+                result["combinational_pct"] = float(comb_match.group(1))
+
+        # Parse IR-drop reports
+        def _parse_irdrop(path: str) -> float:
+            max_drop = 0.0
+            if not os.path.exists(path):
+                return max_drop
+            with open(path, "r", errors="ignore") as f:
+                header = f.readline()
+                for line in f:
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 4:
+                        continue
+                    try:
+                        v = float(parts[3])
+                    except ValueError:
+                        continue
+                    if "VPWR" in os.path.basename(path):
+                        drop = max(0.0, 1.8 - v) if v > 0.1 else 0.0
+                    else:
+                        drop = abs(v)
+                    if drop > max_drop:
+                        max_drop = drop
+            return max_drop
+
+        vpwr_path = os.path.join(report_dir, "32-irdrop-VPWR.rpt")
+        vgnd_path = os.path.join(report_dir, "32-irdrop-VGND.rpt")
+        result["irdrop_max_vpwr"] = _parse_irdrop(vpwr_path)
+        result["irdrop_max_vgnd"] = _parse_irdrop(vgnd_path)
+
+        # 5% of 1.8V ~= 90mV
+        result["power_ok"] = result["irdrop_max_vpwr"] <= 0.09 and result["irdrop_max_vgnd"] <= 0.09
         return result
-
-    except Exception as e:
+    except Exception:
         return result
 

@@ -19,12 +19,17 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from crewai import Agent, Task, Crew, LLM
 
 # Local imports
-# Local imports
-<<<<<<< HEAD
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG, GLM5_CONFIG, PDK
-=======
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, NVIDIA_CONFIG, LOCAL_CONFIG, NEMOTRON_CONFIG, PDK
->>>>>>> 1e4247e (Update README with VeriReason benchmarks and functioning details)
+from .config import (
+    OPENLANE_ROOT,
+    LLM_MODEL,
+    LLM_BASE_URL,
+    LLM_API_KEY,
+    NVIDIA_CONFIG,
+    LOCAL_CONFIG,
+    NEMOTRON_CONFIG,
+    GLM5_CONFIG,
+    PDK,
+)
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent
@@ -44,7 +49,8 @@ from .tools.vlsi_tools import (
     check_physical_metrics,
     run_lint_check,
     run_gls_simulation,
-    signoff_check_tool
+    signoff_check_tool,
+    startup_self_check,
 )
 
 # --- INITIALIZE ---
@@ -60,15 +66,9 @@ def get_llm():
     """
     
     configs = [
-<<<<<<< HEAD
-        ("NVIDIA Nemotron Cloud",  NVIDIA_CONFIG),
-        ("Backup GLM5 Cloud",  GLM5_CONFIG),
-        ("VeriReason Local",   LOCAL_CONFIG),
-=======
-        ("NVIDIA Nemotron Cloud", NEMOTRON_CONFIG),   # Primary (Mapped via NEMOTRON_CONFIG in config.py)
-        ("Backup GLM5 Cloud",      NVIDIA_CONFIG), # Backup (Mapped via NVIDIA_CONFIG in config.py)
-        ("VeriReason Local",       LOCAL_CONFIG),
->>>>>>> 1e4247e (Update README with VeriReason benchmarks and functioning details)
+        ("NVIDIA Nemotron Cloud", NEMOTRON_CONFIG),
+        ("Backup GLM5 Cloud", GLM5_CONFIG),
+        ("VeriReason Local", LOCAL_CONFIG),
     ]
     
     for name, cfg in configs:
@@ -110,6 +110,19 @@ def get_llm():
     console.print(f"[bold red]CRITICAL: No valid LLM backend found.[/bold red]")
     console.print(f"Please set [bold]NVIDIA_API_KEY[/bold] for Cloud or configure [bold]LLM_BASE_URL[/bold] for Local.")
     raise typer.Exit(1)
+
+
+def run_startup_diagnostics(strict: bool = True):
+    diag = startup_self_check()
+    ok = bool(diag.get("ok", False))
+    status = "[green]PASS[/green]" if ok else "[red]FAIL[/red]"
+    console.print(Panel(f"Startup Toolchain Check: {status}", title="🔧 Environment"))
+    if not ok:
+        for check in diag.get("checks", []):
+            if not check.get("ok"):
+                console.print(f"  [red]✗ {check.get('tool')}[/red] -> {check.get('resolved')}")
+        if strict:
+            raise typer.Exit(1)
 
 
 @app.command()
@@ -427,7 +440,12 @@ def build(
     skip_openlane: bool = typer.Option(False, "--skip-openlane", help="Stop after simulation (no RTL→GDSII hardening)"),
     show_thinking: bool = typer.Option(False, "--show-thinking", help="Print DeepSeek <think> reasoning for each generation/fix step"),
     full_signoff: bool = typer.Option(False, "--full-signoff", help="Run full industry signoff (formal + coverage + regression + DRC/LVS)"),
-    min_coverage: float = typer.Option(80.0, "--min-coverage", help="Minimum line coverage percentage to pass verification")
+    min_coverage: float = typer.Option(80.0, "--min-coverage", help="Minimum line coverage percentage to pass verification"),
+    strict_gates: bool = typer.Option(True, "--strict-gates/--no-strict-gates", help="Enable strict fail-closed gating"),
+    pdk_profile: str = typer.Option("sky130", "--pdk-profile", help="PDK adapter profile: sky130 or gf180"),
+    max_pivots: int = typer.Option(2, "--max-pivots", min=0, help="Maximum strategy pivots before fail-closed"),
+    congestion_threshold: float = typer.Option(10.0, "--congestion-threshold", help="Routing congestion threshold (%)"),
+    hierarchical: str = typer.Option("auto", "--hierarchical", help="Hierarchical mode: auto, off, on"),
 ):
     """Build a chip from natural language description (Autonomous Orchestrator 2.0)."""
     
@@ -441,6 +459,7 @@ def build(
         title="🚀 Starting Autonomous Orchestrator"
     ))
 
+    run_startup_diagnostics(strict=strict_gates)
     llm = get_llm()
     
     orchestrator = BuildOrchestrator(
@@ -451,7 +470,12 @@ def build(
         verbose=show_thinking,
         skip_openlane=skip_openlane,
         full_signoff=full_signoff,
-        min_coverage=min_coverage
+        min_coverage=min_coverage,
+        strict_gates=strict_gates,
+        pdk_profile=pdk_profile,
+        max_pivots=max_pivots,
+        congestion_threshold=congestion_threshold,
+        hierarchical_mode=hierarchical,
     )
     
     orchestrator.run()

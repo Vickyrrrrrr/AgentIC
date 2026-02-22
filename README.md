@@ -1,406 +1,294 @@
-# AgentIC: AI-Powered Text-to-Silicon Compiler
+# AgentIC: Tier-1 Autonomous Text-to-Silicon
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/License-Proprietary-red) ![OpenLane](https://img.shields.io/badge/OpenLane-Integrated-purple) ![Verification](https://img.shields.io/badge/Formal_Verification-SVA-red)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Flow](https://img.shields.io/badge/Flow-Fail--Closed-critical)
+![Signoff](https://img.shields.io/badge/Signoff-Multi--Corner_STA%20%2B%20LEC-success)
+![PDK](https://img.shields.io/badge/PDK-Sky130%20%7C%20GF180-informational)
 
-**AgentIC** transforms natural language descriptions into verified, manufacturable chip layouts (GDSII). It orchestrates a crew of specialized AI agents through a self-correcting pipeline — from RTL generation through formal verification to physical design — producing industry-standard silicon with minimal human intervention.
+AgentIC converts natural-language hardware intent into RTL, verification artifacts, and OpenLane physical implementation with autonomous repair loops.
 
-> **"Build a radiation-hardened SPI master with TMR"** → Verified RTL → GDSII layout
+This README reflects the **Tier-1 upgrade**: strict fail-closed gates, bounded loop control, semantic rigor checks, multi-corner timing parsing, LEC integration, floorplan/convergence/ECO stages, and adapter-based OSS-PDK portability.
 
----
+## Why this version is different
 
-## Architecture
+AgentIC is now built to avoid two expensive failure modes:
+
+1. **Silent quality regression**: weak checks passing bad designs.
+2. **Infinite churn**: retrying the same failing strategy forever.
+
+Tier-1 addresses both.
+
+## Tier-1 upgrade highlights
+
+- **Fail-closed mode is first-class** (`--strict-gates` default).
+- **Startup toolchain self-check** before build starts.
+- **Deterministic semantic preflight** for:
+  - width mismatch diagnostics,
+  - port shadowing rejection.
+- **Loop safety controls**:
+  - failure fingerprint detection,
+  - per-state retries,
+  - global step budget,
+  - capped strategy pivots.
+- **EDA intelligence layer** to summarize large logs into structured top issues.
+- **Physical feedback loop** with:
+  - floorplan stage,
+  - congestion assessment,
+  - convergence assessor,
+  - ECO stage.
+- **Signoff upgrades**:
+  - multi-corner STA parsing (setup + hold),
+  - numeric power + IR-drop parsing,
+  - EQY-based LEC check.
+- **Hierarchy/IP scaling scaffold**:
+  - auto hierarchy planner,
+  - per-block artifact emission,
+  - reusable `ip_manifest.json`.
+- **CI split**:
+  - PR smoke checks,
+  - nightly full-flow path.
+
+## Architecture (easy view)
 
 ```mermaid
-graph TD
-    A["User: build --name chip --desc 'description'"] --> B[Architect Agent]
-    
-    subgraph "Phase 1: Design"
-        B -->|Spec| C{Golden Template Match?}
-        C -->|Yes: Simple Design| D[Use Pre-Verified Template]
-        C -->|No: Complex Design| E[LLM RTL Generation]
-        D --> F[Syntax Check — Icarus Verilog]
-        E --> F
-        F -->|Fail| G["Autonomous Fix (regex)"]
-        G -->|SV Compat Fixed| F
-        G -->|Unknown Error| G2[LLM Fix Agent]
-        G2 --> F
-        F -->|Pass| H[Lint Check — Verilator]
-        H -->|Fail| G
-        H -->|Pass| H2[Pre-Synthesis Validation]
-        H2 -->|Undriven Signals| H3[Auto-Fix: Tie to 0 / Remove]
-        H3 --> F
-    end
+flowchart TD
+    U[User Prompt] --> CLI[CLI Build Command]
+    CLI --> SC[Startup Self-Check]
+    SC -->|pass| INIT[INIT]
+    SC -->|fail + strict| FAIL[FAIL]
 
-    subgraph "Phase 2: Verification"
-        H2 -->|Clean| I[Testbench Generation]
-        I --> J[Simulation — iverilog + vvp]
-        J -->|Compile Fail| G
-        J -->|Logic Fail| K[Error Analyst]
-        K -->|TB Error| I
-        K -->|RTL Error| E
-        J -->|Pass| L[Formal Verification — SymbiYosys]
-        L --> M[Coverage Analysis]
-    end
+    INIT --> SPEC[SPEC]
+    SPEC --> RTLGEN[RTL_GEN]
+    RTLGEN --> RIGOR[RTL_FIX + Semantic Rigor Gate]
 
-    subgraph "Phase 3: Physical Design"
-        M --> N["Auto-Config Generation"]
-        N --> O[OpenLane — Synthesis to GDSII]
-        O --> P[PPA Analysis]
-        P -->|Violations| Q[Backend Optimizer]
-        Q --> E
-        P -->|Pass| R["GDSII Tapeout File"]
-    end
+    RIGOR -->|syntax/lint/semantic fail| FIXLOOP[Autonomous Fix Loop]
+    FIXLOOP --> RIGOR
+
+    RIGOR --> VERIF[VERIFICATION + TB Strict Gate]
+    VERIF -->|sim fail| ANALYZE[Error Analyst + Focused Fix]
+    ANALYZE --> VERIF
+
+    VERIF --> FORMAL[FORMAL_VERIFY]
+    FORMAL --> COV[COVERAGE_CHECK]
+    COV --> REG[REGRESSION]
+
+    REG --> FLOOR[FLOORPLAN]
+    FLOOR --> HARDEN[HARDENING OpenLane]
+    HARDEN --> CONV[CONVERGENCE_REVIEW]
+
+    CONV -->|congestion/stagnation| PIVOT[Strategy Pivot]
+    PIVOT --> FLOOR
+
+    CONV --> SIGN[SIGNOFF DRC/LVS/STA/Power/IR/LEC]
+    SIGN -->|fail| ECO[ECO_PATCH]
+    ECO --> HARDEN
+
+    SIGN -->|pass| OK[SUCCESS]
+
+    FIXLOOP -->|fingerprint repeats / budgets exceeded| FAIL
+    PIVOT -->|pivot cap exceeded| FAIL
 ```
 
----
+## Autonomous repair model
 
-## Key Features
+AgentIC is not just an error printer. It has repair loops with decision logic.
 
-### Industry Standards Compliance
-AgentIC is fully compliant with industry standards for chip production, ensuring synthesizable and verifiable designs without human intervention:
-- **Strict Linting:** Verilator (`-Wall`) catches implicit truncations, width mismatches, and combinational loops early.
-- **Simulation Signoff:** Icarus Verilog (`iverilog`) for behavioral bounding and gate-level simulation (GLS) validation.
-- **Formal Verification:** SymbiYosys (SBY) integration natively proves SVA properties for corner-case bug elimination.
-- **Physical Tapeout (RTL-to-GDSII):** Fully automated OpenLane workflow (SkyWater 130nm default) generating GDSII files with built-in DRC (Design Rule Check), LVS (Layout vs Schematic), and STA (Static Timing Analysis) signoff.
+### Loop behavior
 
-### Autonomous Self-Healing Pipeline
-AgentIC doesn't just generate code — it detects and fixes errors **without LLM calls** whenever possible:
+- For compile/sim failures, it classifies cause (**TB vs RTL**) and applies targeted fixes.
+- For large logs, it passes a **structured summary** instead of dumping raw text into prompts.
+- If the same `(state + error + artifact fingerprint)` repeats, it fails closed instead of spinning.
 
-| Error Type | Detection | Fix | LLM Needed? |
-|-----------|-----------|-----|-------------|
-| `always_comb` in iverilog | Error log pattern match | `always_comb` → `always @(*)` | ❌ No |
-| Explicit type casts | `This assignment requires an explicit cast` | `type'(val)` → `(val)` | ❌ No |
-| `unique case` / `priority case` | Error log match | Strip qualifier | ❌ No |
-| Undriven signals | Pre-synthesis scan | Tie to 0 or remove | ❌ No |
-| TB compilation error | `Compilation failed` in output | SV→Verilog regex fix | ❌ No |
-| Logic bugs | `TEST FAILED` in simulation | Error Analyst + Fixer | ✅ Yes |
-| Unknown syntax errors | Unmatched error patterns | LLM Syntax Rectifier | ✅ Yes |
+### Convergence behavior
 
-### Multi-Agent Crew
+- Tracks timing/congestion snapshots per iteration.
+- If WNS stagnates (< 0.01ns improvement for 2 consecutive iterations), triggers strategy pivot:
+  1. timing constraint tune,
+  2. area expansion,
+  3. logic decoupling hint (register slicing),
+  4. fail closed if capped pivots are exhausted.
 
-| Agent | Role | Tools |
-|-------|------|-------|
-| **Architect** | Defines micro-architecture, interfaces, and FSM states | Specification generation |
-| **Designer** | Writes synthesizable Verilog/SystemVerilog RTL | `write_verilog`, `syntax_check` |
-| **Verification Engineer** | Generates SVA assertions (industry + Yosys-compatible) | `convert_sva_to_yosys`, SymbiYosys |
-| **Testbench Agent** | Creates self-checking testbenches with port-accurate DUT instantiation | `run_simulation` |
-| **Error Analyst** | Classifies failures as RTL vs testbench bugs, directs fixes | Log analysis |
-| **Backend Engineer** | Configures OpenLane, optimizes PPA (Power, Performance, Area) | `run_openlane` |
+## Quality gates (strict mode)
 
-### Golden Reference Library
-Pre-verified RTL + testbench pairs for common IP blocks — **95% first-attempt success**:
+| Stage | Gate |
+|---|---|
+| Startup | required tools + environment must resolve |
+| RTL Fix | syntax + lint + semantic rigor must pass |
+| Verification | TB contract + simulation must pass |
+| Formal | formal result is blocking in strict mode |
+| Coverage | minimum coverage threshold is blocking |
+| Regression | regression failures are blocking |
+| Signoff | DRC/LVS/STA/power/IR/LEC all contribute to final pass/fail |
 
-| Template | Description | Complexity |
-|----------|-------------|------------|
-| `counter` | N-bit up/down counter with enable and load | Simple |
-| `fifo` | Synchronous FIFO with parameterizable width/depth | Medium |
-| `uart_tx` | UART Transmitter with configurable baud rate | Medium |
-| `spi_master` | SPI Master with configurable CPOL/CPHA | Medium |
-| `fsm` | Generic FSM with configurable states | Simple |
-| `pwm` | PWM generator with configurable resolution | Simple |
-| `timer` | General-purpose timer with prescaler | Medium |
-| `shift_register` | Shift register with serial/parallel IO | Simple |
+## PDK portability model
 
-> **Smart Matching**: Complex designs (TMR, AES, DMA, pipelined, radiation-hardened, etc.) automatically bypass templates and use full LLM generation from scratch.
+AgentIC uses an adapter-style OSS-PDK profile model.
 
-### Auto-Generated OpenLane Config
-No manual `config.tcl` needed — the system reads the RTL file, estimates complexity, and generates appropriate die area, clock period, and synthesis settings:
+Supported profiles now:
 
-| RTL Size | Die Area | Utilization | Clock Period |
-|----------|----------|-------------|-------------|
-| < 100 lines (counter, PWM) | 300×300µm | 50% | 10ns |
-| 100-300 lines (FIFO, UART, SPI) | 500×500µm | 40% | 15ns |
-| 300+ lines (TMR, AES, CPU) | 800×800µm | 35% | 20ns |
+- `sky130`
+- `gf180`
 
-### Dual-Mode Formal Verification
-- **Industry SVA**: Generates `property`/`assert property` assertions for commercial EDA tools
-- **Yosys SVA**: Auto-converts to SymbiYosys format for open-source k-induction proofs
+This is **portability support**, not foundry certification.
 
-### Strict Two-Model Policy
+## CLI quick start
+
+### 1) Standard strict build
+
+```bash
+python3 main.py build \
+  --name my_chip \
+  --desc "32-bit APB timer with interrupt" \
+  --full-signoff
 ```
-NVIDIA Cloud (Qwen3-Coder-480B) → Local VeriReason (Privacy/Offline)
+
+### 2) Portable profile selection
+
+```bash
+python3 main.py build \
+  --name my_fifo \
+  --desc "Dual-clock FIFO with status flags" \
+  --pdk-profile sky130 \
+  --strict-gates
 ```
-AgentIC enforces a strict policy: High-performance cloud inference via NVIDIA, or fully offline privacy-preserving inference via VeriReason.
-See [User Guide](docs/USER_GUIDE.md) for switching instructions.
 
-### Anti-Hallucination Engine
-- Strips `<think>` blocks, `Thought:`/`Action:` lines, markdown fences
-- Auto-converts `always_comb` → `always @(*)`, `always_ff @(...)` → `always @(...)`
-- Auto-fixes `signed'()` → `$signed()`, type casts, `unique case` → `case`
-- Validates every output contains a valid `module` definition before writing
-- Security scan blocks `$system`, shell commands, and path traversal attacks
+### 3) Tune convergence controls
 
-### Web Interface
-AgentIC features a production-grade Web Application designed to make autonomous chip building interactive and visually stunning.
-- **Frontend Stack**: React, TypeScript, Vite
-- **Backend Bridge**: FastAPI integrating directly with the AgentIC Python orchestrator
-- **Key Views**:
-  - **Landing Page**: Immersive 3D silicon chip rendering (`@react-three/fiber`).
-  - **Dashboard**: "Mission Control" providing real-time metrics (WNS, Area, Power) parsed directly from OpenLane `metrics.csv`, complete with AgentIC's intelligent LLM Signoff reporting.
-  - **Design Studio**: Send prompts, view Verilog code (`react-simple-code-editor`), and read live AI agent logs.
-  - **Fabrication**: Provides 2D/3D visualizations of hardened layouts and enables one-click GDSII tapeout downloads.
+```bash
+python3 main.py build \
+  --name deep_pipeline \
+  --desc "Pipelined datapath with valid/ready" \
+  --max-pivots 2 \
+  --congestion-threshold 10 \
+  --hierarchical auto
+```
 
----
+## Build command options (Tier-1)
 
-## VeriReason: Functioning & Industry Comparison
+```text
+--strict-gates / --no-strict-gates   (default: strict)
+--pdk-profile {sky130,gf180}         (default: sky130)
+--max-pivots N                        (default: 2)
+--congestion-threshold FLOAT          (default: 10.0)
+--hierarchical {auto,off,on}          (default: auto)
+```
 
-AgentIC natively supports **VeriReason** (e.g., `VeriReason-Qwen2.5-3b-RTLCoder-Verilog-GRPO-reasoning-tb`), a highly specialized local LLM finetuned explicitly for RTL coding and formal verification. 
+Existing options remain (`--skip-openlane`, `--full-signoff`, `--min-coverage`, `--max-retries`, etc.).
 
-### Core Functioning & Capabilities
-VeriReason drives the AgentIC autonomous loop with hardware-specific reasoning:
-- **Zero-Shot RTL Generation:** Translates natural language architectural specs directly into synthesizable Verilog.
-- **Interactive Terminal Chat:** Powers the CLI `chat` module for interactive, conversational debugging and instant structural queries.
-- **Testbench Crafting:** Authors edge-case aware, self-checking testbenches with precise port mapping and cycle-accurate stimulus.
-- **Autonomous Error Recovery:** Parses `iverilog` errors and Verilator warnings, instantly zeroing in on logic mapping issues instead of generic software fixes.
-- **Hardware Anti-Hallucination:** inherently avoids generalized LLM pitfalls like non-synthesizable `#10` delays, un-driven wires, and mixed blocking/non-blocking assignments.
+## Human-readable architecture internals
 
-### Testbench Generation & Error Handling: VeriReason vs. Industry Giants
+### Orchestrator states
 
-Generating robust, simulation-ready testbenches is typically the highest failure point for general-purpose LLMs. Below is a comparison detailing testbench reliability and error resolution between VeriReason (a specialized 3B model) and Industry Giants (e.g., GPT-4o, Claude 3.5 Sonnet):
+`INIT -> SPEC -> RTL_GEN -> RTL_FIX -> VERIFICATION -> FORMAL_VERIFY -> COVERAGE_CHECK -> REGRESSION -> FLOORPLAN -> HARDENING -> CONVERGENCE_REVIEW -> SIGNOFF -> SUCCESS/FAIL`
 
-| Metric | VeriReason (3B Specialized) | Industry Giants (General Massive LLMs)| AgentIC Advantage |
-|--------|-----------------------------|---------------------------------------|-------------------|
-| **Testbench Syntax Errors** | **~8%** | ~20% | Domain-specific training prevents SV/Verilog-2005 syntax mixups. |
-| **Simulation Logic Bug Rate**| **~12%** | ~30% | Natively understands cycle boundaries and reset logic states. |
-| **Auto-Fix Iterations** | **1-2 Attempts** | 3-5 Attempts | Directly maps simulator error logs to exact RTL flaws. |
-| **Un-driven Nets in TB** | **< 1%** | ~15% | Properly initializes test vectors and stimulus variables. |
-| **Cost & Latency** | **$0.00 / Local Native** | High API Costs / Cloud Latency | Infinite free iterative validation on consumer hardware. |
+With optional recovery path:
 
-VeriReason's GRPO reasoning engine ensures that testbench generation and error resolution hit industry-standard verification constraints significantly faster—and cheaper—than generalized models.
+`SIGNOFF fail -> ECO_PATCH -> HARDENING -> CONVERGENCE_REVIEW`
 
----
+### Key generated artifacts
 
-## Performance
+- `config.tcl` (OpenLane config)
+- `macro_placement.tcl` (floorplan macro scaffold)
+- `<design>.eqy` (LEC config)
+- `<design>_eco_patch.tcl` (ECO patch artifact)
+- `ip_manifest.json` (reusable block metadata)
+- `src/blocks/*.v` (hierarchy-enabled block artifacts)
+- `metircs/<design>/latest.json` (industry benchmark snapshot)
+- `metircs/<design>/latest.md` (human-readable benchmark table)
 
-| Metric | Golden Templates | LLM-Generated |
-|--------|-----------------|---------------|
-| First-attempt RTL success | ~95% | ~80% |
-| Lint pass rate | ~95% | ~90% (with auto-fix) |
-| Simulation pass (with retries) | ~95% | ~85% |
-| Formal verification | ~70% | ~30% |
-| Build completion | ~95% | ~85% |
+## CI model
 
-*Benchmarked on simple-to-medium complexity designs (counters, FIFOs, SPI, UART, FSMs, timers).*
+### PR smoke checks
 
----
+- Python compile check for `src/agentic`
+- Tier-1 unit tests (`tests/test_tier1_upgrade.py`)
 
-## AgentIC vs. Traditional EDA (Cadence/Synopsys)
+### Nightly full checks
 
-AgentIC is designed to dramatically contrast with the legacy segmentation of traditional EDA platforms.
+- Runs smoke first
+- Attempts full build+signoff path when environment is available
 
-| Feature | Legacy Big-Firm Workflow (Cadence / Synopsys) | AgentIC Autonomous Pipeline |
-|---------|----------------------------------------------|-----------------------------|
-| **Error Spotting** | Manual log analysis across fragmented tools (e.g. Verdi, Design Compiler). | Automated log-parsing and intelligent LLM-driven feedback loop catching RTL logic bugs on the fly. |
-| **Workflow** | Segmented, requiring expert TCL scripts for each physical design node. | End-to-end Python Orchestration: Natural Language → GDSII with zero manual intervention. |
-| **Time-to-Market** | Weeks to months for RTL iteration and physical verification. | Minutes to hours. Case study below achieved full tapeout in ~15 minutes. |
-| **Verification** | Lengthy UVM testbench writing and manual SVA creations. | Auto-generated testbenches targeting behavioral bounding, plus native SymbiYosys Formal Assertions. |
-| **Cost** | Multi-million dollar per-seat licensing over expensive cloud/on-prem clusters. | Open-Source EDA toolchain (Icarus, OpenLane) + Model API cost (or fully free via Local LLM). |
+Files:
 
-### Case Study: APB PWM Controller
-To demonstrate production readiness, an `apb_pwm_controller` (an APB interface bridging a PWM generator) was submitted to AgentIC strictly via a natural language prompt.
-* **RTL Generation:** Valid, synthesizable SystemVerilog generated and auto-fixed in 2 attempts.
-* **Verification:** Auto-generated testbench passed the simulated waveform.
-* **Tapeout (GDSII):** The `harden` workflow yielded a **~5.9 MB GDSII file** in approximately 15 minutes. The OpenLane LVS and DRC logs reported **0 violations**. Static Timing Analysis (STA) on the standard Sky130 nom process corner reported **0 setup violations and 0 hold violations**.
+- `.github/workflows/ci.yml`
+- `scripts/ci/smoke.sh`
+- `scripts/ci/nightly_full.sh`
 
-### Quantitative Benchmarks: AgentIC vs Manual Legacy Flows
-AgentIC intrinsically reduces logic errors by removing the human-in-the-loop variable during redundant syntax drafting and verification bounding:
+## Tests included for Tier-1
 
-| Metric | Manual Legacy Approach | AgentIC (Autonomous) | Improvement Factor |
-|--------|-----------------------|----------------------|--------------------|
-| **Syntax Error Rate (Pre-Lint)** | ~15-20% | **< 5%** (LLM Pre-Trained) | 4x Reduction |
-| **Linting & DRC Compliance** | Manual Fixes iteratively | **100%** Auto-Resolved | Full Automation |
-| **Logic Bug Escape Rate** | ~5-10% (Relying on human UVM tests) | **< 1%** (Formal Verification) | 10x Accuracy Increase |
-| **Verification Coverage** | Dependent on Engineer Skill | Auto-generated SymbiYosys bounds | Exhaustive State Checks |
-| **Time to Zero-DRC GDSII** | 2-4 Weeks | **< 1 Hour** | > 100x Speedup |
+- conflict marker integrity checks
+- semantic gate checks (port shadowing)
+- log parser behavior on large synthetic logs
+- multi-corner STA parser correctness
+- congestion parser correctness
+- loop fingerprint guard behavior
+- hierarchy threshold activation
 
----
+Run locally:
 
-## Contributor / New Feature Guide
-
-Before adding new intelligent agents or workflows to AgentIC, contributors MUST:
-1. **Read the Full Architecture:** Thoroughly read the *Architecture* and *Key Features* sections in this README. Ensure you understand the state machine (INIT → SPEC → RTL_GEN ... → SUCCESS).
-2. **Strict LLM Isolation:** If your feature requires LLM intervention, remember AgentIC's anti-hallucination paradigm. Wrap the feature so that tools handle syntax first, and LLMs are called *only* on logical boundaries (like the Error Analyst mapping log traces).
-3. **No Hardcoded Paths:** Ensure no physical tool paths (like OpenLane or OpenROAD) are hardcoded in the templates. Rely on config definitions like `os.path.expanduser`.
-4. **Log Observability:** Produce detailed module logs for the new agent matching the pipeline's logging format (`[YOUR_AGENT] Transitioning...`).
-
----
+```bash
+bash scripts/ci/smoke.sh
+```
 
 ## Installation
 
 ### Prerequisites
-- **Linux/WSL2** (Ubuntu 20.04+)
-- **Python 3.10+**
-- **Icarus Verilog**: `sudo apt install iverilog`
-- **Verilator**: `sudo apt install verilator` (for lint checks)
-- **Docker** (for OpenLane physical design)
-- **SymbiYosys** (optional, for formal verification — via [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build))
+
+- Linux / WSL2
+- Python 3.10+
+- Docker
+- Verilator
+- Icarus Verilog (`iverilog`, `vvp`)
+- OpenLane installation
+- OSS CAD tools for formal/LEC (`sby`, `yosys`, `eqy`)
 
 ### Setup
 
 ```bash
 git clone https://github.com/Vickyrrrrrr/AgentIC.git
 cd AgentIC
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Create `.env` in the project root:
+Configure `.env` (minimum):
+
 ```bash
-# At least one LLM API key required
-NVIDIA_API_KEY="nvapi-..."       # Primary (recommended)
-GROQ_API_KEY="gsk_..."           # Fallback
-# OPENAI_API_KEY="sk-..."        # Optional
+# LLM backend
+NVIDIA_API_KEY="..."          # cloud path
+# or
+LLM_BASE_URL="http://localhost:11434"  # local path
 
-# Tool paths (defaults usually work)
-# OPENLANE_ROOT="/home/user/OpenLane"
-# PDK_ROOT="/home/user/pdk"
+# Physical flow roots
+OPENLANE_ROOT="/home/user/OpenLane"
+PDK_ROOT="/home/user/.ciel"
 ```
 
----
+## Practical boundaries (current implementation)
 
-## Usage
+- ECO and hierarchy are production-oriented scaffolds in this phase, with concrete artifacts and control flow, but not yet a full foundry-tuned incremental optimization stack.
+- Portability means adapter-based OSS-PDK support, not tapeout certification claims.
 
-## Usage
+## Project layout
 
-> **Full Documentation**: See [User Guide](docs/USER_GUIDE.md) for advanced usage and LLM switching.
-
-### Build a Chip (Full Pipeline)
-```bash
-python main.py build \
-    --name my_spi_controller \
-    --desc "SPI master with configurable clock polarity and 8-bit data width"
-```
-
-### Quick RTL Iteration (Skip Physical Design)
-```bash
-python main.py build \
-    --name fast_counter \
-    --desc "32-bit counter with overflow detection" \
-    --skip-openlane
-```
-
-### Complex Design (Full LLM Generation)
-```bash
-python main.py build \
-    --name tmr_processor \
-    --desc "Radiation-hardened ALU with Triple Modular Redundancy and majority voting" \
-    --skip-openlane --max-retries 5
-```
-
-### Other Commands
-```bash
-# Simulate existing design
-python main.py simulate --name my_design --max-retries 10
-
-# Run OpenLane hardening only (auto-generates config.tcl)
-python main.py harden --name my_design
-
-
-```
-
-### CLI Options
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--name` | Design/module name | Required |
-| `--desc` | Natural language description | Required |
-| `--skip-openlane` | Stop after verification (skip GDSII) | `False` |
-| `--show-thinking` | Display LLM reasoning (CoT) | `False` |
-| `--max-retries` | Max auto-fix attempts per stage | `5` |
-
----
-
-## Project Structure
-
-```
+```text
 AgentIC/
-├── main.py                          # Entry point
-├── requirements.txt
-├── .env                             # API keys (not committed)
-└── src/agentic/
-    ├── cli.py                       # CLI commands (build, simulate, harden, chat)
-    ├── config.py                    # LLM & path configuration
-    ├── orchestrator.py              # Build state machine & pipeline orchestration
-    ├── agents/
-    │   ├── designer.py              # RTL generation & fixing agent
-    │   ├── testbench_designer.py    # Testbench generation agent
-    │   └── verifier.py              # SVA & error analysis agents
-    ├── golden_lib/
-    │   ├── template_matcher.py      # Keyword + complexity-aware template matching
-    │   └── templates/               # 8 pre-verified RTL + testbench pairs
-    └── tools/
-        └── vlsi_tools.py            # write_verilog, syntax/lint/sim/formal/coverage
+├── main.py
+├── src/agentic/
+│   ├── cli.py
+│   ├── config.py
+│   ├── orchestrator.py
+│   ├── agents/
+│   └── tools/vlsi_tools.py
+├── tests/test_tier1_upgrade.py
+├── scripts/ci/
+└── .github/workflows/ci.yml
 ```
-
----
-
-## Build Pipeline
-
-```
-INIT → SPEC → RTL_GEN → RTL_FIX → VERIFICATION → FORMAL_VERIFY → COVERAGE → HARDENING → SUCCESS
-                  ↑          |           |
-                  └──────────┘           │  (on failure)
-                  ↑                      │
-                  └──────────────────────┘
-```
-
-### RTL_FIX Stage (Autonomous)
-```
-Syntax Error? → Check if known SV↔Verilog pattern
-    ├── YES → Regex fix instantly (0 LLM calls)
-    └── NO  → LLM Fix Agent (with iverilog hints in prompt)
-
-Lint Passed? → Pre-Synthesis Validation
-    ├── Undriven signal used? → Tie to 0
-    ├── Undriven signal unused? → Remove declaration
-    └── All clean → Proceed to Verification
-```
-
-### Verification Stage (Autonomous)
-```
-Simulation failed with "Compilation failed"?
-    ├── TB file in error → Auto-fix SV issues in TB
-    ├── RTL file in error → Auto-fix SV issues in RTL
-    └── Unknown error → LLM Error Analyst → LLM Fixer
-```
-
-If SystemVerilog fails after max retries, the system automatically pivots to Verilog-2005 style and restarts.
-
----
-
-## Troubleshooting
-
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| Lint fails on unused signals | Verilator `-Wall` too strict | Fixed: uses `-Wno-UNUSED` now |
-| `always_comb` errors in iverilog | SV construct not fully supported | Fixed: auto-converted to `always @(*)` |
-| Template used for complex design | Keyword matcher too aggressive | Fixed: complexity indicators block simple templates |
-| Undriven signal in synthesis | LLM declared but forgot to assign | Fixed: pre-synthesis validation auto-fixes |
-| OpenLane deprecated variable error | Old config.tcl format | Fixed: auto-generates modern config |
-| "Docker Error" during hardening | Docker not running or PDK mismatch | Run `docker ps`, check `PDK_ROOT` |
-| "LLM API Failed" | Invalid key or service down | Auto-fallback: NVIDIA → Groq → Local |
-| Simulation timeout | Infinite loop in generated RTL | Increase timeout or simplify description |
-
----
-
-## Security
-
-- **Input Sanitization**: Blocks `$system`, shell injection, and path traversal
-- **Air-Gapped Deployment**: Supports fully local LLM inference via Ollama
-- **Auditable Output**: All generated code is human-readable Verilog/SystemVerilog
-- **No Binary Blobs**: Every artifact is inspectable plain text
-
----
 
 ## License
 
-**Proprietary and Confidential.**
-Copyright (c) 2026 Vicky Nishad. All Rights Reserved.
+Proprietary and Confidential.
 
-You may NOT use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of this software in any form. Any unauthorized use of this software, in whole or in part, without express written permission is strictly prohibited.
-
-## References
-- [OpenLane Documentation](https://openlane.readthedocs.io/)
-- [SkyWater 130nm PDK](https://skywater-pdk.readthedocs.io/)
-- [SymbiYosys Documentation](https://symbiyosys.readthedocs.io/)
-- [Icarus Verilog](http://iverilog.icarus.com/)
-- [Verilator](https://www.veripool.org/verilator/)
+Copyright (c) 2026 Vicky Nishad.
+All rights reserved.

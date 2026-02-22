@@ -3,13 +3,16 @@ import time
 import logging
 import os
 import re
+import hashlib
+import json
+from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List
 from rich.console import Console
 from rich.panel import Panel
 from crewai import Agent, Task, Crew, LLM
 
 # Local imports
-from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, PDK
+from .config import OPENLANE_ROOT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, PDK, WORKSPACE_ROOT, get_pdk_profile
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent, get_regression_agent
@@ -34,7 +37,13 @@ from .tools.vlsi_tools import (
     check_physical_metrics,
     run_cdc_check,
     generate_design_doc,
-    convert_sva_to_yosys
+    convert_sva_to_yosys,
+    startup_self_check,
+    run_semantic_rigor_check,
+    parse_eda_log_summary,
+    parse_congestion_metrics,
+    run_eqy_lec,
+    apply_eco_patch,
 )
 
 console = Console()
@@ -52,13 +61,49 @@ class BuildState(enum.Enum):
     FORMAL_VERIFY = "Formal Property Verification"
     COVERAGE_CHECK = "Coverage Analysis"
     REGRESSION = "Regression Testing"
+    FLOORPLAN = "Floorplanning"
     HARDENING = "GDSII Hardening"
+    CONVERGENCE_REVIEW = "Convergence Review"
+    ECO_PATCH = "ECO Patch"
     SIGNOFF = "DRC/LVS Signoff"
     SUCCESS = "Build Complete"
     FAIL = "Build Failed"
 
+
+@dataclass
+class ConvergenceSnapshot:
+    iteration: int
+    wns: float
+    tns: float
+    congestion: float
+    area_um2: float
+    power_w: float
+
+
+@dataclass
+class BuildHistory:
+    state: str
+    message: str
+    timestamp: float
+
 class BuildOrchestrator:
-    def __init__(self, name: str, desc: str, llm: LLM, max_retries: int = 5, verbose: bool = True, skip_openlane: bool = False, full_signoff: bool = False, min_coverage: float = 80.0):
+    def __init__(
+        self,
+        name: str,
+        desc: str,
+        llm: LLM,
+        max_retries: int = 5,
+        verbose: bool = True,
+        skip_openlane: bool = False,
+        full_signoff: bool = False,
+        min_coverage: float = 80.0,
+        strict_gates: bool = True,
+        pdk_profile: str = "sky130",
+        max_pivots: int = 2,
+        congestion_threshold: float = 10.0,
+        hierarchical_mode: str = "auto",
+        global_step_budget: int = 120,
+    ):
         self.name = name
         self.desc = desc
         self.llm = llm
@@ -67,10 +112,25 @@ class BuildOrchestrator:
         self.skip_openlane = skip_openlane
         self.full_signoff = full_signoff
         self.min_coverage = min_coverage
+        self.strict_gates = strict_gates
+        self.pdk_profile = get_pdk_profile(pdk_profile)
+        self.max_pivots = max_pivots
+        self.congestion_threshold = congestion_threshold
+        self.hierarchical_mode = hierarchical_mode
+        self.global_step_budget = global_step_budget
         
         self.state = BuildState.INIT
         self.strategy = BuildStrategy.SV_MODULAR
         self.retry_count = 0
+        self.state_retry_counts: Dict[str, int] = {}
+        self.failure_fingerprint_history: Dict[str, int] = {}
+        self.global_step_count = 0
+        self.pivot_count = 0
+        self.strategy_pivot_stage = 0
+        self.convergence_history: List[ConvergenceSnapshot] = []
+        self.build_history: List[BuildHistory] = []
+        self.floorplan_attempts = 0
+        self.eco_attempts = 0
         self.artifacts = {}  # Store paths to gathered files
         self.history = []    # Log of state transitions and errors
         self.errors = []     # List of error messages
@@ -94,7 +154,9 @@ class BuildOrchestrator:
 
     def log(self, message: str, refined: bool = False):
         """Logs a message to the console (if refined) and file (always)."""
-        self.history.append({"state": self.state.name, "msg": message, "time": time.time()})
+        now = time.time()
+        self.history.append({"state": self.state.name, "msg": message, "time": now})
+        self.build_history.append(BuildHistory(state=self.state.name, message=message, timestamp=now))
         
         # File Log
         if hasattr(self, 'logger'):
@@ -113,6 +175,32 @@ class BuildOrchestrator:
         self.state = new_state
         if not preserve_retries:
             self.retry_count = 0  # Reset retries on state change
+            self.state_retry_counts[new_state.name] = 0
+
+    def _bump_state_retry(self) -> int:
+        count = self.state_retry_counts.get(self.state.name, 0) + 1
+        self.state_retry_counts[self.state.name] = count
+        return count
+
+    def _artifact_fingerprint(self) -> str:
+        rtl = self.artifacts.get("rtl_code", "")
+        tb = ""
+        tb_path = self.artifacts.get("tb_path", "")
+        if tb_path and os.path.exists(tb_path):
+            try:
+                with open(tb_path, "r") as f:
+                    tb = f.read()
+            except OSError:
+                tb = ""
+        digest = hashlib.sha256((rtl + "\n" + tb).encode("utf-8", errors="ignore")).hexdigest()
+        return digest[:16]
+
+    def _record_failure_fingerprint(self, error_text: str) -> bool:
+        base = f"{self.state.name}|{error_text[:500]}|{self._artifact_fingerprint()}"
+        fp = hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
+        count = self.failure_fingerprint_history.get(fp, 0) + 1
+        self.failure_fingerprint_history[fp] = count
+        return count >= 2
 
     def run(self):
         """Main execution loop."""
@@ -120,6 +208,11 @@ class BuildOrchestrator:
         
         try:
             while self.state != BuildState.SUCCESS and self.state != BuildState.FAIL:
+                self.global_step_count += 1
+                if self.global_step_count > self.global_step_budget:
+                    self.log(f"Global step budget exceeded ({self.global_step_budget}). Failing closed.", refined=True)
+                    self.state = BuildState.FAIL
+                    break
                 if self.state == BuildState.INIT:
                     self.do_init()
                 elif self.state == BuildState.SPEC:
@@ -136,8 +229,14 @@ class BuildOrchestrator:
                     self.do_coverage_check()
                 elif self.state == BuildState.REGRESSION:
                     self.do_regression()
+                elif self.state == BuildState.FLOORPLAN:
+                    self.do_floorplan()
                 elif self.state == BuildState.HARDENING:
                     self.do_hardening()
+                elif self.state == BuildState.CONVERGENCE_REVIEW:
+                    self.do_convergence_review()
+                elif self.state == BuildState.ECO_PATCH:
+                    self.do_eco_patch()
                 elif self.state == BuildState.SIGNOFF:
                     self.do_signoff()
                 else:
@@ -151,7 +250,10 @@ class BuildOrchestrator:
             self.state = BuildState.FAIL
 
         if self.state == BuildState.SUCCESS:
-            import json
+            try:
+                self._save_industry_benchmark_metrics()
+            except Exception as e:
+                self.log(f"Benchmark metrics export warning: {e}", refined=True)
             # Create a clean summary of just the paths
             summary = {k: v for k, v in self.artifacts.items() if 'code' not in k and 'spec' not in k}
             
@@ -170,6 +272,19 @@ class BuildOrchestrator:
             # Setup directories, check tools
             self.artifacts['root'] = f"{OPENLANE_ROOT}/designs/{self.name}"
             self.setup_logger() # Setup logging to file
+            self.artifacts["pdk_profile"] = self.pdk_profile
+            self.log(
+                f"PDK profile: {self.pdk_profile.get('profile')} "
+                f"(PDK={self.pdk_profile.get('pdk')}, LIB={self.pdk_profile.get('std_cell_library')})",
+                refined=True,
+            )
+            diag = startup_self_check()
+            self.artifacts["startup_check"] = diag
+            self.logger.info(f"STARTUP SELF CHECK: {diag}")
+            if self.strict_gates and not diag.get("ok", False):
+                self.log("Startup self-check failed in strict mode.", refined=True)
+                self.state = BuildState.FAIL
+                return
             time.sleep(1) # Visual pause
             self.transition(BuildState.SPEC)
 
@@ -216,6 +331,7 @@ Outputs:
             - **NO PLACEHOLDERS**: Do not write `// Simplified check` or `assign data = 0;`. Implement the ACTUAL LOGIC.
             - **NO PARTIAL IMPLEMENTATIONS**: If it's a 4x4 array, enable ALL cells.
             - **NO HARDCODING**: Use `parameter` for widths and depths.
+            - **HARDWARE RIGOR**: Validate bit-width compatibility on every assignment and never shadow module ports with internal signals.
             """
         else:
             return """
@@ -291,6 +407,204 @@ Outputs:
         header_match = re.search(r'(module\s+\w+[\s\S]*?;)', rtl_code)
         return header_match.group(1) if header_match else "Could not extract ports — see full RTL below."
 
+    @staticmethod
+    def _tb_meets_strict_contract(tb_code: str, strategy: BuildStrategy) -> tuple:
+        missing = []
+        text = tb_code or ""
+        if "TEST PASSED" not in text:
+            missing.append("Missing TEST PASSED marker")
+        if "TEST FAILED" not in text:
+            missing.append("Missing TEST FAILED marker")
+        if strategy == BuildStrategy.SV_MODULAR:
+            if "class Transaction" not in text:
+                missing.append("Missing class Transaction")
+            if all(token not in text for token in ["class Driver", "class Monitor", "class Scoreboard"]):
+                missing.append("Missing transaction flow classes")
+        return len(missing) == 0, missing
+
+    def _condense_failure_log(self, raw_text: str, kind: str) -> str:
+        if not raw_text:
+            return raw_text
+        if len(raw_text) < 12000:
+            return raw_text
+        src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
+        os.makedirs(src_dir, exist_ok=True)
+        log_path = os.path.join(src_dir, f"{self.name}_{kind}_failure.log")
+        try:
+            with open(log_path, "w") as f:
+                f.write(raw_text)
+            summary = parse_eda_log_summary(log_path, kind=kind, top_n=10)
+            return f"LOG_SUMMARY: {summary}"
+        except OSError:
+            return raw_text[-12000:]
+
+    def _evaluate_hierarchy(self, rtl_code: str):
+        module_count = len(re.findall(r"\bmodule\b", rtl_code))
+        rtl_lines = len([l for l in rtl_code.splitlines() if l.strip()])
+        if self.hierarchical_mode == "on":
+            enabled = True
+        elif self.hierarchical_mode == "off":
+            enabled = False
+        else:
+            enabled = module_count >= 3 and rtl_lines >= 600
+        self.artifacts["hierarchy_plan"] = {
+            "mode": self.hierarchical_mode,
+            "enabled": enabled,
+            "module_count": module_count,
+            "rtl_lines": rtl_lines,
+            "thresholds": {"module_count": 3, "rtl_lines": 600},
+        }
+        if enabled:
+            self.log("Hierarchical synthesis planner: enabled.", refined=True)
+        else:
+            self.log("Hierarchical synthesis planner: disabled.", refined=True)
+
+    def _write_ip_manifest(self):
+        rtl_path = self.artifacts.get("rtl_path", "")
+        if not rtl_path or not os.path.exists(rtl_path):
+            return
+        with open(rtl_path, "r") as f:
+            rtl_code = f.read()
+        modules = re.findall(r"module\s+([A-Za-z_]\w*)", rtl_code)
+        params = re.findall(r"parameter\s+([A-Za-z_]\w*)\s*=\s*([^,;\)]+)", rtl_code)
+        ports = re.findall(
+            r"\b(input|output|inout)\s+(?:reg|wire|logic)?\s*(?:\[[^\]]+\])?\s*([A-Za-z_]\w*)",
+            rtl_code,
+        )
+        manifest = {
+            "ip_name": self.name,
+            "version": "1.0.0",
+            "clock_reset": {"clock": "clk", "reset": "rst_n", "reset_active_low": True},
+            "modules": modules,
+            "dependencies": [m for m in modules if m != self.name],
+            "parameters": [{"name": n, "default": v.strip()} for n, v in params],
+            "ports": [{"direction": d, "name": n} for d, n in ports],
+            "verification_status": {
+                "simulation": "PASS" if self.state == BuildState.SUCCESS else "UNKNOWN",
+                "formal": self.artifacts.get("formal_result", "UNKNOWN"),
+                "signoff": self.artifacts.get("signoff_result", "UNKNOWN"),
+            },
+            "ipxact_bridge_ready": True,
+        }
+        out = os.path.join(OPENLANE_ROOT, "designs", self.name, "ip_manifest.json")
+        with open(out, "w") as f:
+            json.dump(manifest, f, indent=2)
+        self.artifacts["ip_manifest"] = out
+
+    def _build_industry_benchmark_snapshot(self) -> Dict[str, Any]:
+        metrics = self.artifacts.get("metrics", {}) or {}
+        sta = self.artifacts.get("sta_signoff", {}) or {}
+        power = self.artifacts.get("power_signoff", {}) or {}
+        signoff = self.artifacts.get("signoff", {}) or {}
+        congestion = self.artifacts.get("congestion", {}) or {}
+        coverage = self.artifacts.get("coverage", {}) or {}
+        regression_results = self.artifacts.get("regression_results", []) or []
+
+        regression_pass = sum(1 for x in regression_results if x.get("status") == "PASS")
+        regression_total = len(regression_results)
+
+        snapshot = {
+            "design_name": self.name,
+            "generated_at_epoch": int(time.time()),
+            "build_status": self.state.name,
+            "signoff_result": self.artifacts.get("signoff_result", "UNKNOWN"),
+            "pdk_profile": self.pdk_profile.get("profile"),
+            "pdk": self.pdk_profile.get("pdk"),
+            "std_cell_library": self.pdk_profile.get("std_cell_library"),
+            "industry_benchmark": {
+                "area_um2": metrics.get("chip_area_um2", 0.0),
+                "cell_count": metrics.get("area", 0.0),
+                "utilization_pct": metrics.get("utilization", 0.0),
+                "timing_wns_ns": sta.get("worst_setup", metrics.get("timing_wns", 0.0)),
+                "timing_tns_ns": metrics.get("timing_tns", 0.0),
+                "hold_slack_ns": sta.get("worst_hold", 0.0),
+                "drc_violations": signoff.get("drc_violations", -1),
+                "lvs_errors": signoff.get("lvs_errors", -1),
+                "antenna_violations": signoff.get("antenna_violations", -1),
+                "total_power_mw": float(power.get("total_power_w", 0.0)) * 1000.0,
+                "internal_power_mw": float(power.get("internal_power_w", 0.0)) * 1000.0,
+                "switching_power_mw": float(power.get("switching_power_w", 0.0)) * 1000.0,
+                "leakage_power_uw": float(power.get("leakage_power_w", 0.0)) * 1e6,
+                "irdrop_vpwr_mv": float(power.get("irdrop_max_vpwr", 0.0)) * 1000.0,
+                "irdrop_vgnd_mv": float(power.get("irdrop_max_vgnd", 0.0)) * 1000.0,
+                "congestion_usage_pct": congestion.get("total_usage_pct", 0.0),
+                "congestion_overflow": congestion.get("total_overflow", 0),
+                "coverage_line_pct": coverage.get("line_pct", 0.0),
+                "formal_result": self.artifacts.get("formal_result", "UNKNOWN"),
+                "lec_result": self.artifacts.get("lec_result", "UNKNOWN"),
+                "regression_passed": regression_pass,
+                "regression_total": regression_total,
+                "clock_period_ns": self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period")),
+                "pivots_used": self.pivot_count,
+                "global_steps": self.global_step_count,
+            },
+        }
+        return snapshot
+
+    def _save_industry_benchmark_metrics(self):
+        """Write benchmark metrics after successful chip creation to metircs/."""
+        snapshot = self._build_industry_benchmark_snapshot()
+        metrics_root = os.path.join(WORKSPACE_ROOT, "metircs")
+        design_dir = os.path.join(metrics_root, self.name)
+        os.makedirs(design_dir, exist_ok=True)
+
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        json_path = os.path.join(design_dir, f"{self.name}_industry_benchmark_{stamp}.json")
+        md_path = os.path.join(design_dir, f"{self.name}_industry_benchmark_{stamp}.md")
+        latest_json = os.path.join(design_dir, "latest.json")
+        latest_md = os.path.join(design_dir, "latest.md")
+
+        with open(json_path, "w") as f:
+            json.dump(snapshot, f, indent=2)
+
+        ib = snapshot["industry_benchmark"]
+        lines = [
+            f"# {self.name} Industry Benchmark Metrics",
+            "",
+            f"- Generated At (epoch): `{snapshot['generated_at_epoch']}`",
+            f"- Build Status: `{snapshot['build_status']}`",
+            f"- Signoff Result: `{snapshot['signoff_result']}`",
+            f"- PDK Profile: `{snapshot['pdk_profile']}`",
+            "",
+            "| Metric | Value |",
+            "|---|---|",
+        ]
+        for k, v in ib.items():
+            lines.append(f"| `{k}` | `{v}` |")
+        with open(md_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        # Keep a latest pointer as plain copied files for easy consumption.
+        with open(latest_json, "w") as f:
+            json.dump(snapshot, f, indent=2)
+        with open(latest_md, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        self.artifacts["benchmark_metrics_json"] = json_path
+        self.artifacts["benchmark_metrics_md"] = md_path
+        self.artifacts["benchmark_metrics_dir"] = design_dir
+        self.log(f"Saved industry benchmark metrics to {design_dir}", refined=True)
+
+    def _emit_hierarchical_block_artifacts(self):
+        plan = self.artifacts.get("hierarchy_plan", {})
+        if not plan.get("enabled"):
+            return
+        rtl_code = self.artifacts.get("rtl_code", "")
+        block_dir = os.path.join(OPENLANE_ROOT, "designs", self.name, "src", "blocks")
+        os.makedirs(block_dir, exist_ok=True)
+        modules = re.findall(r"(module\s+[A-Za-z_]\w*[\s\S]*?endmodule)", rtl_code)
+        block_files = []
+        for mod in modules:
+            m = re.search(r"module\s+([A-Za-z_]\w*)", mod)
+            if not m:
+                continue
+            mod_name = m.group(1)
+            path = os.path.join(block_dir, f"{mod_name}.v")
+            with open(path, "w") as f:
+                f.write(mod.strip() + "\n")
+            block_files.append(path)
+        self.artifacts["hierarchy_blocks"] = block_files
+
     def do_rtl_gen(self):
         # Check Golden Reference Library for a matching template
         from .golden_lib import get_best_template
@@ -333,6 +647,9 @@ SPECIFICATION:
 STRATEGY GUIDELINES:
 {strategy_prompt}
 
+LOGIC DECOUPLING HINT:
+{self.artifacts.get('logic_decoupling_hint', 'N/A')}
+
 CRITICAL RULES:
 1. Module name must be "{self.name}"
 2. Async active-low reset `rst_n`
@@ -362,6 +679,8 @@ CRITICAL RULES:
         # Store the CLEANED code (read back from file), not raw LLM output
         with open(path, 'r') as f:
             self.artifacts['rtl_code'] = f.read()
+        self._evaluate_hierarchy(self.artifacts['rtl_code'])
+        self._emit_hierarchical_block_artifacts()
         self.transition(BuildState.RTL_FIX)
 
     def do_rtl_fix(self):
@@ -393,9 +712,23 @@ CRITICAL RULES:
                         self.artifacts['rtl_code'] = f.read()
                     # Re-check syntax after fix (stay in RTL_FIX)
                     return
-                
-                self.transition(BuildState.VERIFICATION)
-                return
+
+                sem_ok, sem_report = run_semantic_rigor_check(path)
+                self.logger.info(f"SEMANTIC RIGOR: {sem_report}")
+                if not sem_ok:
+                    if self.strict_gates:
+                        self.log("Semantic rigor gate failed. Routing back to RTL fix.", refined=True)
+                        errors = f"SEMANTIC_RIGOR_FAILURE: {sem_report}"
+                    else:
+                        self.log("Semantic rigor warnings detected (non-blocking).", refined=True)
+                        self.artifacts["semantic_report"] = sem_report
+                        self.transition(BuildState.VERIFICATION)
+                        return
+                else:
+                    self.artifacts["semantic_report"] = sem_report
+                    self.transition(BuildState.VERIFICATION)
+                    return
+
             else:
                 self.log(f"Lint Failed. Check log for details.", refined=True)
                 errors = f"SYNTAX OK, BUT LINT FAILED:\n{lint_report}"
@@ -406,6 +739,10 @@ CRITICAL RULES:
 
         # Handle Syntax/Lint Errors that need LLM
         self.logger.info(f"SYNTAX/LINT ERRORS:\n{errors}")
+        if self._record_failure_fingerprint(str(errors)):
+            self.log("Detected repeated syntax/lint failure fingerprint. Failing closed.", refined=True)
+            self.state = BuildState.FAIL
+            return
         self.retry_count += 1
         if self.retry_count > self.max_retries:
             self.log("Max Retries Exceeded for Syntax/Lint Fix.", refined=True)
@@ -422,12 +759,13 @@ CRITICAL RULES:
                 return
 
         self.log(f"Fixing Code (Attempt {self.retry_count}/{self.max_retries})", refined=True)
+        errors_for_llm = self._condense_failure_log(str(errors), kind="timing")
         
         # Agents fix syntax
         fix_prompt = f"""Fix Syntax/Lint Errors in "{self.name}".
         
         Error Log:
-        {errors}
+        {errors_for_llm}
         
         Strategy: {self.strategy.name} (Keep consistency!)
         
@@ -566,6 +904,29 @@ RULES:
              # It should be there from generation or reading above
              with open(self.artifacts['tb_path'], 'r') as f:
                 tb_code = f.read()
+
+        if self.strict_gates:
+            tb_ok, tb_issues = self._tb_meets_strict_contract(tb_code, self.strategy)
+            if self.artifacts.get("golden_template"):
+                # Golden library TBs are pre-verified and may be procedural.
+                tb_issues = [i for i in tb_issues if "class" not in i.lower()]
+                tb_ok = len(tb_issues) == 0
+            if not tb_ok:
+                self.log(f"Testbench strict gate failed: {tb_issues}", refined=True)
+                self.logger.info(f"TB STRICT GATE FAILURE: {tb_issues}")
+                self.retry_count += 1
+                if self.retry_count > self.max_retries:
+                    self.log("Max TB generation retries exceeded.", refined=True)
+                    self.state = BuildState.FAIL
+                    return
+                # Force regeneration path on next loop
+                if 'tb_path' in self.artifacts:
+                    try:
+                        os.remove(self.artifacts['tb_path'])
+                    except OSError:
+                        pass
+                    self.artifacts.pop('tb_path', None)
+                return
         
         # Run Sim
         with console.status("[bold magenta]Running Simulation...[/bold magenta]"):
@@ -579,15 +940,25 @@ RULES:
                  self.log("Skipping Hardening (--skip-openlane).", refined=True)
                  self.transition(BuildState.FORMAL_VERIFY)
             else:
-                 # Interactive Prompt for Hardening
+                # Interactive Prompt for Hardening
                  import typer
-                 console.print()
-                 if typer.confirm("Simulation Passed. Proceed to OpenLane Hardening (takes 10-30 mins)?", default=True):
+                 import sys
+                 if not sys.stdin.isatty():
+                     self.log("Non-interactive session: auto-proceeding after simulation pass.", refined=True)
                      self.transition(BuildState.FORMAL_VERIFY)
                  else:
-                     self.log("Skipping Hardening (User Cancelled).", refined=True)
-                     self.transition(BuildState.FORMAL_VERIFY)
+                     console.print()
+                     if typer.confirm("Simulation Passed. Proceed to OpenLane Hardening (takes 10-30 mins)?", default=True):
+                         self.transition(BuildState.FORMAL_VERIFY)
+                     else:
+                         self.log("Skipping Hardening (User Cancelled).", refined=True)
+                         self.transition(BuildState.FORMAL_VERIFY)
         else:
+            output_for_llm = self._condense_failure_log(output, kind="timing")
+            if self._record_failure_fingerprint(output_for_llm):
+                self.log("Detected repeated simulation failure fingerprint. Failing closed.", refined=True)
+                self.state = BuildState.FAIL
+                return
             self.retry_count += 1
             if self.retry_count > self.max_retries:
                  self.log(f"Max Sim Retries ({self.max_retries}) Exceeded. Simulation Failed.", refined=True)
@@ -604,7 +975,7 @@ RULES:
             analysis_task = Task(
                 description=f'''Analyze this Verification Failure.
 Error Log:
-{output}
+{output_for_llm}
 Is this a:
 A) TESTBENCH_ERROR (Syntax, $monitor usage, race condition, compilation fail)
 B) RTL_LOGIC_ERROR (Mismatch, Wrong State, Functional Failure)
@@ -626,7 +997,7 @@ Reply with ONLY "A" or "B".''',
                 fix_prompt = f"""Fix the Testbench logic/syntax.
 
 ERROR LOG:
-{output}
+{output_for_llm}
 
 MODULE INTERFACE (use EXACT port names):
 {port_info}
@@ -660,7 +1031,7 @@ CRITICAL:
                 {error_summary}
                 
                 Full Log:
-                {output}
+                {output_for_llm}
                 
                 Current RTL:
                 ```verilog
@@ -813,12 +1184,17 @@ CRITICAL:
                 self.artifacts['formal_result'] = 'PASS'
             else:
                 self.log(f"Formal Verification: {result[:200]}", refined=True)
-                self.artifacts['formal_result'] = 'FAIL (non-blocking)'
-                # Formal failure is non-blocking — we log it but continue
-                # Industry note: In production, this would be blocking
+                self.artifacts['formal_result'] = 'FAIL'
+                if self.strict_gates:
+                    self.log("Formal verification failed under strict mode.", refined=True)
+                    self.state = BuildState.FAIL
+                    return
         except Exception as e:
-            self.log(f"Formal verification error: {str(e)}. Continuing.", refined=True)
+            self.log(f"Formal verification error: {str(e)}.", refined=True)
             self.artifacts['formal_result'] = f'ERROR: {str(e)}'
+            if self.strict_gates:
+                self.state = BuildState.FAIL
+                return
         
         # 4. Run CDC check
         with console.status("[bold cyan]Running CDC Analysis...[/bold cyan]"):
@@ -830,7 +1206,11 @@ CRITICAL:
         if cdc_clean:
             self.log("CDC Analysis: CLEAN", refined=True)
         else:
-            self.log(f"CDC Analysis: warnings found (non-blocking)", refined=True)
+            self.log(f"CDC Analysis: warnings found", refined=True)
+            if self.strict_gates:
+                self.log("CDC issues are blocking under strict mode.", refined=True)
+                self.state = BuildState.FAIL
+                return
         
         self.transition(BuildState.COVERAGE_CHECK)
 
@@ -871,7 +1251,7 @@ CRITICAL:
             elif self.skip_openlane:
                 self.transition(BuildState.SUCCESS)
             else:
-                self.transition(BuildState.HARDENING)
+                self.transition(BuildState.FLOORPLAN)
         else:
             self.retry_count += 1
             # Cap coverage retries at 2 — the metric is heuristic-based (iverilog
@@ -883,14 +1263,17 @@ CRITICAL:
                      self.log(f"Restoring Best Testbench ({self.best_coverage:.1f}%) before proceeding.", refined=True)
                      import shutil
                      shutil.copy(self.best_tb_backup, self.artifacts['tb_path'])
-
+                if self.strict_gates:
+                    self.log(f"Coverage below threshold after {coverage_max_retries} attempts. Failing strict gate.", refined=True)
+                    self.state = BuildState.FAIL
+                    return
                 self.log(f"Coverage below threshold after {coverage_max_retries} attempts. Proceeding anyway.", refined=True)
                 if self.full_signoff:
                     self.transition(BuildState.REGRESSION)
                 elif self.skip_openlane:
                     self.transition(BuildState.SUCCESS)
                 else:
-                    self.transition(BuildState.HARDENING)
+                    self.transition(BuildState.FLOORPLAN)
                 return
             
             # Ask LLM to generate additional tests to improve coverage
@@ -1075,13 +1458,187 @@ CRITICAL:
             self.log(f"All {len(test_results)} regression tests PASSED!", refined=True)
         else:
             passed_count = sum(1 for tr in test_results if tr['status'] == 'PASS')
-            self.log(f"Regression: {passed_count}/{len(test_results)} passed (non-blocking)", refined=True)
+            self.log(f"Regression: {passed_count}/{len(test_results)} passed", refined=True)
+            if self.strict_gates:
+                self.log("Regression failures are blocking under strict mode.", refined=True)
+                self.state = BuildState.FAIL
+                return
         
         # Regression failures are non-blocking (logged but proceed)
         if self.skip_openlane:
             self.transition(BuildState.SUCCESS)
         else:
-            self.transition(BuildState.HARDENING)
+            self.transition(BuildState.FLOORPLAN)
+
+    def do_floorplan(self):
+        """Generate floorplan artifacts and feed hardening with spatial intent."""
+        self.floorplan_attempts += 1
+        self.log(f"Preparing floorplan attempt {self.floorplan_attempts}...", refined=True)
+        src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
+        os.makedirs(src_dir, exist_ok=True)
+
+        rtl_code = self.artifacts.get("rtl_code", "")
+        line_count = max(1, len([l for l in rtl_code.splitlines() if l.strip()]))
+        cell_count_est = max(100, line_count * 4)
+
+        base_die = 300 if line_count < 100 else 500 if line_count < 300 else 800
+        area_scale = self.artifacts.get("area_scale", 1.0)
+        die = int(base_die * area_scale)
+        util = 40 if line_count >= 200 else 50
+        clock_period = self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0"))
+
+        macro_placement_tcl = os.path.join(src_dir, "macro_placement.tcl")
+        with open(macro_placement_tcl, "w") as f:
+            f.write(
+                "# Auto-generated macro placement skeleton\n"
+                f"# die_area={die}x{die} cell_count_est={cell_count_est}\n"
+                "set macros {}\n"
+                "foreach m $macros {\n"
+                "  # placeholder for macro coordinates\n"
+                "}\n"
+            )
+
+        floorplan_tcl = os.path.join(src_dir, f"{self.name}_floorplan.tcl")
+        with open(floorplan_tcl, "w") as f:
+            f.write(
+                f"set ::env(DESIGN_NAME) \"{self.name}\"\n"
+                f"set ::env(PDK) \"{self.pdk_profile.get('pdk', PDK)}\"\n"
+                f"set ::env(STD_CELL_LIBRARY) \"{self.pdk_profile.get('std_cell_library', 'sky130_fd_sc_hd')}\"\n"
+                f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/{self.name}.v]\n"
+                "set ::env(FP_SIZING) \"absolute\"\n"
+                f"set ::env(DIE_AREA) \"0 0 {die} {die}\"\n"
+                f"set ::env(FP_CORE_UTIL) {util}\n"
+                f"set ::env(PL_TARGET_DENSITY) {util / 100 + 0.05:.2f}\n"
+                f"set ::env(CLOCK_PERIOD) \"{clock_period}\"\n"
+                f"set ::env(CLOCK_PORT) \"clk\"\n"
+                "set ::env(GRT_ADJUSTMENT) 0.15\n"
+            )
+
+        self.artifacts["macro_placement_tcl"] = macro_placement_tcl
+        self.artifacts["floorplan_tcl"] = floorplan_tcl
+        self.artifacts["floorplan_meta"] = {
+            "die_area": die,
+            "cell_count_est": cell_count_est,
+            "clock_period": clock_period,
+            "attempt": self.floorplan_attempts,
+        }
+        self.transition(BuildState.HARDENING)
+
+    def _pivot_strategy(self, reason: str):
+        self.pivot_count += 1
+        self.log(f"Strategy pivot triggered ({self.pivot_count}/{self.max_pivots}): {reason}", refined=True)
+        if self.pivot_count > self.max_pivots:
+            self.log("Pivot budget exceeded. Failing closed.", refined=True)
+            self.state = BuildState.FAIL
+            return
+
+        stage = self.strategy_pivot_stage % 3
+        self.strategy_pivot_stage += 1
+
+        if stage == 0:
+            old = float(self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0")))
+            new = round(old * 1.10, 2)
+            self.artifacts["clock_period_override"] = str(new)
+            self.log(f"Pivot step: timing constraint tune ({old}ns -> {new}ns).", refined=True)
+            self.transition(BuildState.FLOORPLAN, preserve_retries=True)
+            return
+
+        if stage == 1:
+            old_scale = float(self.artifacts.get("area_scale", 1.0))
+            new_scale = round(old_scale * 1.15, 3)
+            self.artifacts["area_scale"] = new_scale
+            self.log(f"Pivot step: area expansion ({old_scale}x -> {new_scale}x).", refined=True)
+            self.transition(BuildState.FLOORPLAN, preserve_retries=True)
+            return
+
+        # stage 2: logic decoupling prompt
+        self.artifacts["logic_decoupling_hint"] = (
+            "Apply register slicing / pipeline decoupling on critical path; "
+            "reduce combinational depth while preserving behavior."
+        )
+        self.log("Pivot step: requesting logic decoupling (register slicing) in RTL regen.", refined=True)
+        self.transition(BuildState.RTL_GEN, preserve_retries=True)
+
+    def do_convergence_review(self):
+        """Assess congestion/timing convergence and prevent futile loops."""
+        self.log("Assessing convergence (timing + congestion + PPA)...", refined=True)
+
+        congestion = parse_congestion_metrics(self.name, run_tag=self.artifacts.get("run_tag", "agentrun"))
+        sta = parse_sta_signoff(self.name)
+        power = parse_power_signoff(self.name)
+        metrics, _ = check_physical_metrics(self.name)
+
+        self.artifacts["congestion"] = congestion
+        self.artifacts["sta_signoff"] = sta
+        self.artifacts["power_signoff"] = power
+        if metrics:
+            self.artifacts["metrics"] = metrics
+
+        wns = float(sta.get("worst_setup", 0.0)) if not sta.get("error") else -999.0
+        tns = 0.0
+        area_um2 = float(metrics.get("chip_area_um2", 0.0)) if metrics else 0.0
+        power_w = float(power.get("total_power_w", 0.0))
+        cong_pct = float(congestion.get("total_usage_pct", 0.0))
+        snap = ConvergenceSnapshot(
+            iteration=len(self.convergence_history) + 1,
+            wns=wns,
+            tns=tns,
+            congestion=cong_pct,
+            area_um2=area_um2,
+            power_w=power_w,
+        )
+        self.convergence_history.append(snap)
+        self.artifacts["convergence_history"] = [asdict(x) for x in self.convergence_history]
+
+        self.log(
+            f"Convergence snapshot: WNS={wns:.3f}ns, congestion={cong_pct:.2f}%, area={area_um2:.1f}um^2, power={power_w:.6f}W",
+            refined=True,
+        )
+
+        # Congestion-driven loop
+        if cong_pct > self.congestion_threshold:
+            self.log(
+                f"Congestion {cong_pct:.2f}% exceeds threshold {self.congestion_threshold:.2f}%.",
+                refined=True,
+            )
+            # area expansion up to 2 times, then pivot logic
+            area_expansions = int(self.artifacts.get("area_expansions", 0))
+            if area_expansions < 2:
+                self.artifacts["area_expansions"] = area_expansions + 1
+                self.artifacts["area_scale"] = round(float(self.artifacts.get("area_scale", 1.0)) * 1.15, 3)
+                self.log("Applying +15% area expansion due to congestion.", refined=True)
+                self.transition(BuildState.FLOORPLAN, preserve_retries=True)
+                return
+            self._pivot_strategy("congestion persisted after area expansions")
+            return
+
+        # WNS stagnation logic
+        if len(self.convergence_history) >= 3:
+            w_prev = self.convergence_history[-2].wns
+            w_curr = self.convergence_history[-1].wns
+            w_prev2 = self.convergence_history[-3].wns
+            improve1 = w_curr - w_prev
+            improve2 = w_prev - w_prev2
+            if improve1 < 0.01 and improve2 < 0.01:
+                self._pivot_strategy("WNS stagnated for 2 iterations (<0.01ns)")
+                return
+
+        self.transition(BuildState.SIGNOFF)
+
+    def do_eco_patch(self):
+        """Dual-mode ECO: attempt gate patch first, fallback to RTL micro-patch."""
+        self.eco_attempts += 1
+        self.log(f"Running ECO attempt {self.eco_attempts}...", refined=True)
+        strategy = "gate" if self.eco_attempts == 1 else "rtl"
+        ok, patch_result = apply_eco_patch(self.name, strategy=strategy)
+        self.artifacts["eco_patch"] = patch_result
+        if not ok:
+            self.log(f"ECO patch failed: {patch_result}", refined=True)
+            self.state = BuildState.FAIL
+            return
+        # For now, ECO patch is represented as artifact + rerun hardening/signoff.
+        self.log(f"ECO artifact generated: {patch_result}", refined=True)
+        self.transition(BuildState.HARDENING, preserve_retries=True)
 
     def do_hardening(self):
         # 1. Generate config.tcl (CRITICAL: Required for OpenLane)
@@ -1101,18 +1658,19 @@ CRITICAL:
 # Modern OpenLane Config Template
         # Note: We use GRT_ADJUSTMENT instead of deprecated GLB_RT_ADJUSTMENT
         
-        # Determine STD_CELL_LIBRARY based on PDK (or default to sky130_fd_sc_hd)
-        # This should ideally come from global config
-        std_cell_lib = "sky130_fd_sc_hd"
-        if "gf180" in PDK:
-            std_cell_lib = "gf180mcu_fd_sc_mcu7t5v0"
+        std_cell_lib = self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")
+        pdk_name = self.pdk_profile.get("pdk", PDK)
+        clock_period = str(self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0")))
+        floor_meta = self.artifacts.get("floorplan_meta", {})
+        die = int(floor_meta.get("die_area", 500))
+        util = 40 if die >= 500 else 50
             
         config_tcl = f"""
 # User config
 set ::env(DESIGN_NAME) "{self.name}"
 
 # PDK Setup
-set ::env(PDK) "{PDK}"
+set ::env(PDK) "{pdk_name}"
 set ::env(STD_CELL_LIBRARY) "{std_cell_lib}"
 
 # Verilog Files
@@ -1121,16 +1679,17 @@ set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/{self.name}.v]
 # Clock Configuration
 set ::env(CLOCK_PORT) "{clock_port}"
 set ::env(CLOCK_NET) "{clock_port}"
-set ::env(CLOCK_PERIOD) "10.0"
+set ::env(CLOCK_PERIOD) "{clock_period}"
 
 # Synthesis
 set ::env(SYNTH_STRATEGY) "AREA 0"
 set ::env(SYNTH_SIZING) 1
 
 # Floorplanning
-set ::env(FP_SIZING) "relative"
-set ::env(FP_CORE_UTIL) 40
-set ::env(PL_TARGET_DENSITY) 0.55
+set ::env(FP_SIZING) "absolute"
+set ::env(DIE_AREA) "0 0 {die} {die}"
+set ::env(FP_CORE_UTIL) {util}
+set ::env(PL_TARGET_DENSITY) {util / 100 + 0.05:.2f}
 
 # Routing
 set ::env(GRT_ADJUSTMENT) 0.15
@@ -1148,14 +1707,22 @@ set ::env(MAGIC_DRC_USE_GDS) 1
              return
 
         # 2. Run OpenLane
+        run_tag = f"agentrun_{self.global_step_count}"
+        floorplan_tcl = self.artifacts.get("floorplan_tcl", "")
         with console.status("[bold blue]Hardening Layout (OpenLane)...[/bold blue]"):
-            success, result = run_openlane(self.name, background=False)
+            success, result = run_openlane(
+                self.name,
+                background=False,
+                run_tag=run_tag,
+                floorplan_tcl=floorplan_tcl,
+                pdk_name=pdk_name,
+            )
             
         if success:
             self.artifacts['gds'] = result
+            self.artifacts['run_tag'] = run_tag
             self.log(f"GDSII generated: {result}", refined=True)
-            # Always proceed to Signoff for final checks
-            self.transition(BuildState.SIGNOFF)
+            self.transition(BuildState.CONVERGENCE_REVIEW)
         else:
             self.log(f"Hardening Failed: {result}")
             self.state = BuildState.FAIL
@@ -1164,6 +1731,21 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         """Performs full fabrication-readiness signoff: DRC/LVS, timing closure, power analysis."""
         self.log("Running Fabrication Readiness Signoff...", refined=True)
         fab_ready = True
+        run_tag = self.artifacts.get("run_tag", "agentrun")
+        gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
+        rtl_path = self.artifacts.get("rtl_path", f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}.v")
+        if os.path.exists(rtl_path) and os.path.exists(gate_netlist):
+            lec_ok, lec_log = run_eqy_lec(self.name, rtl_path, gate_netlist)
+            self.artifacts["lec_result"] = "PASS" if lec_ok else "FAIL"
+            self.logger.info(f"LEC RESULT:\n{lec_log}")
+            if lec_ok:
+                self.log("LEC: PASS", refined=True)
+            else:
+                self.log("LEC: FAIL", refined=True)
+                fab_ready = False
+        else:
+            self.artifacts["lec_result"] = "SKIP"
+            self.log("LEC: skipped (missing RTL or gate netlist)", refined=True)
         
         # ── 1. DRC / LVS ──
         with console.status("[bold blue]Checking DRC/LVS Reports...[/bold blue]"):
@@ -1191,6 +1773,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         
         if sta.get('error'):
             self.log(f"STA: {sta['error']}", refined=True)
+            fab_ready = False
         else:
             for c in sta['corners']:
                 status = "✓" if (c['setup_slack'] >= 0 and c['hold_slack'] >= 0) else "✗"
@@ -1278,6 +1861,18 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.log(f"Datasheet generated: {doc_path}", refined=True)
         except Exception as e:
             self.log(f"Error writing datasheet: {e}", refined=True)
+
+        try:
+            self._write_ip_manifest()
+        except Exception as e:
+            self.log(f"IP manifest generation warning: {e}", refined=True)
+
+        if self.strict_gates:
+            if self.artifacts.get("formal_result", "").startswith("FAIL") or str(self.artifacts.get("formal_result", "")).startswith("ERROR"):
+                fab_ready = False
+            cov = self.artifacts.get("coverage", {})
+            if cov and float(cov.get("line_pct", 0.0)) < float(self.min_coverage):
+                fab_ready = False
         
         # FINAL VERDICT
         timing_status = "MET" if sta.get('timing_met') else "FAILED" if not sta.get('error') else "N/A"
@@ -1292,6 +1887,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             f"Timing:     {timing_status} (WNS={sta.get('worst_setup', 0):.2f}ns)\n"
             f"Power:      {power_status}\n"
             f"IR-Drop:    {irdrop_status}\n"
+            f"LEC:        {self.artifacts.get('lec_result', 'N/A')}\n"
             f"Coverage:   {self.artifacts.get('coverage', {}).get('line_pct', 'N/A')}%\n"
             f"Formal:     {self.artifacts.get('formal_result', 'SKIPPED')}\n\n"
             f"{'[bold green]FABRICATION READY ✓[/]' if fab_ready else '[bold red]NOT FABRICATION READY ✗[/]'}",
@@ -1303,6 +1899,11 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.artifacts['signoff_result'] = 'PASS'
             self.transition(BuildState.SUCCESS)
         else:
+            # Trigger ECO path before final fail when strict gates are enabled.
+            if self.strict_gates and self.eco_attempts < 2:
+                self.log("Signoff failed. Triggering ECO patch stage.", refined=True)
+                self.transition(BuildState.ECO_PATCH, preserve_retries=True)
+                return
             self.log("❌ SIGNOFF FAILED (Violations Found)", refined=True)
             self.artifacts['signoff_result'] = 'FAIL'
             self.errors.append("Signoff failed (see report).")

@@ -1,4 +1,5 @@
 import os
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 # Project Paths
@@ -10,54 +11,119 @@ OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane")
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 
-# Strict Three-Model Policy:
-<<<<<<< HEAD
-# 1. Backup GLM5 Cloud
-GLM5_CONFIG = {
-    "model": os.environ.get("BACKUP_MODEL", "openai/z-ai/glm5"),
-    "base_url": os.environ.get("BACKUP_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("NVIDIA_API_KEY", "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")
-}
-
-# 2. NVIDIA Qwen Cloud (High Performance) -> Now nemotron-3-nano
-NVIDIA_CONFIG = {
-    "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"),
-    "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("NVIDIA_API_KEY", "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")
-=======
-# 1. NVIDIA Nemotron Cloud (Primary) - Integrated into AgentIC ReAct Loop
+# LLM backends (env-only secrets)
 NEMOTRON_CONFIG = {
     "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"),
     "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("NVIDIA_API_KEY") # API Key hidden for security
+    "api_key": os.environ.get("NVIDIA_API_KEY", ""),
 }
 
-# 2. Backup GLM5 Cloud
-NVIDIA_CONFIG = {
+GLM5_CONFIG = {
     "model": os.environ.get("BACKUP_MODEL", "openai/z-ai/glm5"),
     "base_url": os.environ.get("BACKUP_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("NVIDIA_API_KEY") # API Key hidden for security
->>>>>>> 1e4247e (Update README with VeriReason benchmarks and functioning details)
+    "api_key": os.environ.get("BACKUP_API_KEY", os.environ.get("NVIDIA_API_KEY", "")),
 }
 
-# 3. VeriReason Local (Fallback)
-# Explicitly uses the VeriReason model defined in .env
 LOCAL_CONFIG = {
-    "model": os.environ.get("LLM_MODEL", "ollama/hf.co/mradermacher/VeriReason-Qwen2.5-3b-RTLCoder-Verilog-GRPO-reasoning-tb-GGUF:Q4_K_M"),
+    "model": os.environ.get(
+        "LLM_MODEL",
+        "ollama/hf.co/mradermacher/VeriReason-Qwen2.5-3b-RTLCoder-Verilog-GRPO-reasoning-tb-GGUF:Q4_K_M",
+    ),
     "base_url": os.environ.get("LLM_BASE_URL", "http://localhost:11434"),
-    "api_key": os.environ.get("LLM_API_KEY", "NA")
+    "api_key": os.environ.get("LLM_API_KEY", "NA"),
 }
 
-# Expose 'active' config variables (Defaults to Local if NVIDIA missing, but CLI handles logic)
+# Backward-compat alias used by parts of the codebase/docs
+NVIDIA_CONFIG = GLM5_CONFIG
+
+# Expose active defaults (CLI chooses concrete backend)
 LLM_MODEL = LOCAL_CONFIG["model"]
 LLM_BASE_URL = LOCAL_CONFIG["base_url"]
 LLM_API_KEY = LOCAL_CONFIG["api_key"]
 
+# Portable OSS-PDK profiles (adapter-style)
+PDK_PROFILES: Dict[str, Dict[str, Any]] = {
+    "sky130": {
+        "pdk": "sky130A",
+        "std_cell_library": "sky130_fd_sc_hd",
+        "default_clock_period": "10.0",
+    },
+    "gf180": {
+        "pdk": "gf180mcuC",
+        "std_cell_library": "gf180mcu_fd_sc_mcu7t5v0",
+        "default_clock_period": "15.0",
+    },
+}
+
+DEFAULT_PDK_PROFILE = os.environ.get("PDK_PROFILE", "sky130").strip().lower()
+if DEFAULT_PDK_PROFILE not in PDK_PROFILES:
+    DEFAULT_PDK_PROFILE = "sky130"
+
 # Tool Settings
-PDK_ROOT = os.environ.get('PDK_ROOT', os.path.expanduser('~/.ciel'))
-PDK = os.environ.get('PDK', 'sky130A') # Default to SkyWater 130nm
+PDK_ROOT = os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel"))
+PDK = os.environ.get("PDK", PDK_PROFILES[DEFAULT_PDK_PROFILE]["pdk"])
 OPENLANE_IMAGE = "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-amd64"
 
-# OSS CAD Suite (SymbiYosys, Yosys) - Self-contained within AgentIC
-OSS_CAD_SUITE_ROOT = os.environ.get('OSS_CAD_SUITE_HOME', os.path.join(WORKSPACE_ROOT, 'oss-cad-suite'))
-SBY_BIN = os.path.join(OSS_CAD_SUITE_ROOT, 'bin', 'sby')
+
+def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
+    """Resolve tool binary using configured roots before PATH.
+
+    Fallback order:
+    1) Explicit env var for that tool (if provided)
+    2) OSS_CAD_SUITE_HOME/bin
+    3) WORKSPACE_ROOT/oss-cad-suite/bin
+    4) /home/vickynishad/oss-cad-suite/bin
+    5) bin_name from PATH
+    """
+    explicit = os.environ.get(env_var, "").strip() if env_var else ""
+    if explicit and os.path.exists(explicit):
+        return explicit
+
+    roots = []
+    oss_home = os.environ.get("OSS_CAD_SUITE_HOME", "").strip()
+    if oss_home:
+        roots.append(oss_home)
+    roots.append(os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
+    roots.append("/home/vickynishad/oss-cad-suite")
+
+    for root in roots:
+        candidate = os.path.join(root, "bin", bin_name)
+        if os.path.exists(candidate):
+            return candidate
+
+    return bin_name
+
+
+OSS_CAD_SUITE_ROOT = os.environ.get("OSS_CAD_SUITE_HOME", os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
+SBY_BIN = _resolve_tool_binary("sby", env_var="SBY_BIN")
+YOSYS_BIN = _resolve_tool_binary("yosys", env_var="YOSYS_BIN")
+EQY_BIN = _resolve_tool_binary("eqy", env_var="EQY_BIN")
+
+
+def get_pdk_profile(profile: str) -> Dict[str, Any]:
+    key = (profile or DEFAULT_PDK_PROFILE).strip().lower()
+    if key not in PDK_PROFILES:
+        key = "sky130"
+    data = dict(PDK_PROFILES[key])
+    data["profile"] = key
+    return data
+
+
+def get_toolchain_diagnostics() -> Dict[str, Any]:
+    """Return resolved toolchain paths and existence info for startup checks."""
+    bins = {
+        "sby": SBY_BIN,
+        "yosys": YOSYS_BIN,
+        "eqy": EQY_BIN,
+    }
+    return {
+        "workspace_root": WORKSPACE_ROOT,
+        "openlane_root": OPENLANE_ROOT,
+        "pdk_root": PDK_ROOT,
+        "pdk": PDK,
+        "oss_cad_suite_home": os.environ.get("OSS_CAD_SUITE_HOME", ""),
+        "bins": {
+            name: {"path": path, "exists": os.path.exists(path) if os.path.isabs(path) else False}
+            for name, path in bins.items()
+        },
+    }

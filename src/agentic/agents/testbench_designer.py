@@ -32,6 +32,10 @@ def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
              
         3. **Self-Checking**: You NEVER rely on waveform inspection. The testbench MUST print "TEST PASSED" only if all checks pass.
         4. **Coverage**: You use `covergroup` and `bins` to ensure all states and transitions are hit.
+        5. **Strict Gate Contract**:
+           - Include `class Transaction` and at least one of `class Driver`/`class Monitor`/`class Scoreboard`.
+           - Emit explicit PASS/FAIL markers (`TEST PASSED` and `TEST FAILED` paths).
+           - Return complete compilable testbench code only.
         """
 
     return Agent(

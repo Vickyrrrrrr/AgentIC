@@ -27,6 +27,11 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         2. **Scalability**: You ALWAYS use `parameter` for dimensions (e.g., `DATA_WIDTH`, `FIFO_DEPTH`).
         3. **Standard Interfaces**: You use AXI-Stream (`tvalid`, `tready`, `tdata`) or APB/AHB for control.
         4. **Modern SystemVerilog**: You use `logic`, `always_ff`, `always_comb`, `enum`, and `struct`.
+        5. **Hardware Rigor (Mandatory)**:
+           - **Port Inventory First**: Before internal declarations, list all module ports and avoid any duplicate declaration.
+           - **Port Shadowing Forbidden**: Never redeclare a name that already exists in module ports.
+           - **Bit-Width Safety**: Ensure LHS and RHS bit widths are compatible for every assignment.
+           - **Reset Intent**: Every state-holding register must be explicitly initialized in reset logic.
         """
 
     return Agent(
