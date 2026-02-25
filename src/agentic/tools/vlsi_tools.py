@@ -8,6 +8,7 @@ from collections import Counter, defaultdict, deque
 from typing import Dict, Any, List, Tuple
 import shutil
 from crewai.tools import tool
+from typing import cast
 from ..config import (
     OPENLANE_ROOT,
     SCRIPTS_DIR,
@@ -249,7 +250,7 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
             stripped = line.strip()
             if not stripped or stripped.startswith('`') or stripped.startswith('//'):
                 filtered_lines.append(line)
-        clean_code = '\n'.join(filtered_lines) + clean_code[module_pos:]
+        clean_code = '\n'.join(filtered_lines) + '\n' + clean_code[module_pos:]
 
     # --- VALIDATION ---
     if "module" not in clean_code:
@@ -280,8 +281,38 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
         if not clean_code.endswith("\n"):
             clean_code += "\n"
             
-        with open(path, "w") as f:
-            f.write(clean_code)
+        # --- MULTI-FILE RTL HIERARCHY SPLITTING ---
+        if not is_testbench and "module" in clean_code:
+            import glob
+            # Remove old RTL files to prevent stale modules from breaking build
+            src_dir = os.path.dirname(path)
+            for old_rt in glob.glob(os.path.join(src_dir, "*.v")):
+                if not old_rt.endswith("_tb.v") and "regression" not in old_rt:
+                    try:
+                        os.remove(old_rt)
+                    except OSError:
+                        pass
+                        
+            # Find all modules
+            modules = re.findall(r'(module\s+([a-zA-Z0-9_]+).*?endmodule)', clean_code, re.DOTALL)
+            if len(modules) > 1:
+                # If multiple modules exist, write them to separate files
+                for mod_code, mod_name in modules:
+                    mod_path = os.path.join(src_dir, f"{mod_name}.v")
+                    with open(mod_path, "w") as f:
+                        f.write(mod_code + "\n")
+                
+                # Make sure the requested path exists so syntax check doesn't fail
+                if not os.path.exists(path):
+                    with open(path, "w") as f:
+                        f.write(f"// Main module {design_name} likely defined in other files\n")
+            else:
+                with open(path, "w") as f:
+                    f.write(clean_code)
+        else:
+            with open(path, "w") as f:
+                f.write(clean_code)
+                
         return path
     except IOError as e:
         return f"Error: Failed to write Verilog file {path}: {str(e)}"
@@ -295,11 +326,18 @@ def run_syntax_check(file_path: str) -> tuple:
         return False, f"File not found: {file_path}"
     
     try:
+        # Gather all RTL files to support multi-file compilation
+        import glob
+        src_dir = os.path.dirname(file_path)
+        rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+        if file_path not in rtl_files and os.path.exists(file_path):
+            rtl_files.append(file_path)
+
         # --lint-only: check syntax and basic semantics
         # --sv: force SystemVerilog parsing
         # --timing: support delays
         # -Wno-fatal: don't crash on warnings (unless they are errors)
-        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wno-fatal", file_path]
+        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wno-fatal"] + rtl_files
         
         result = subprocess.run(
             cmd, 
@@ -323,8 +361,14 @@ def run_lint_check(file_path: str) -> tuple:
     if not os.path.exists(file_path):
         return False, f"File not found: {file_path}"
     
+    import glob
+    src_dir = os.path.dirname(file_path)
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+    if file_path not in rtl_files and os.path.exists(file_path):
+        rtl_files.append(file_path)
+
     # Use --lint-only with sensible warnings (not -Wall, which flags unused signals as errors)
-    cmd = ["verilator", "--lint-only", "-Wno-UNUSED", "-Wno-PINMISSING", "-Wno-CASEINCOMPLETE", "--timing", file_path]
+    cmd = ["verilator", "--lint-only", "-Wno-UNUSED", "-Wno-PINMISSING", "-Wno-CASEINCOMPLETE", "--timing"] + rtl_files
     
     try:
         result = subprocess.run(
@@ -629,7 +673,7 @@ def convert_sva_to_yosys(sva_content: str, module_name: str) -> str:
     """
     port_match = re.search(r'module\s+\w+_sva\s*\((.*?)\);', sva_content, re.DOTALL)
     if not port_match:
-        return None
+        return ""
 
     ports_section = port_match.group(1)
     port_lines = []
@@ -1239,6 +1283,9 @@ def run_simulation(design_name: str) -> tuple:
     if not os.path.exists(tb_file):
         return False, f"Testbench file not found: {tb_file}"
     
+    import glob
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+
     # Compile & Build using Verilator --binary
     # --binary: Build a binary executable
     # -j 0: Use all cores
@@ -1252,7 +1299,7 @@ def run_simulation(design_name: str) -> tuple:
         "--timing",
         "--assert",
         "-Wno-fatal", # Don't error out on warnings
-        rtl_file, tb_file,
+        *rtl_files, tb_file,
         "--top-module", f"{design_name}_tb",
         "--Mdir", obj_dir,
         "-o", "sim_exec"
@@ -1645,7 +1692,7 @@ def parse_congestion_metrics(design_name: str, run_tag: str = "agentrun") -> Dic
                     continue
                 overflow_triplet = m.group("overflow").split("/")
                 total_over = int(overflow_triplet[-1].strip())
-                result["layers"].append(
+                cast(list, result["layers"]).append(
                     {
                         "layer": m.group("layer"),
                         "usage_pct": float(m.group("usage")),
@@ -1874,6 +1921,9 @@ def run_verilator_coverage(design_name: str, rtl_file: str, tb_file: str, covera
         except OSError:
             pass
 
+    import glob
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+
     compile_cmd = [
         "verilator",
         "--binary",
@@ -1881,7 +1931,7 @@ def run_verilator_coverage(design_name: str, rtl_file: str, tb_file: str, covera
         "--sv",
         "--timing",
         "-Wno-fatal",
-        rtl_file,
+        *rtl_files,
         tb_file,
         "--top-module",
         f"{design_name}_tb",
@@ -1991,7 +2041,10 @@ def run_iverilog_coverage(design_name: str, rtl_file: str, tb_file: str, coverag
     result["total_signals"] = len(signals)
     signal_set = set(signals)
 
-    compile_cmd = ["iverilog", "-g2012", "-o", sim_out, rtl_file, tb_file]
+    import glob
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+
+    compile_cmd = ["iverilog", "-g2012", "-o", sim_out, *rtl_files, tb_file]
     try:
         comp = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=120, cwd=src_dir)
     except FileNotFoundError:
@@ -2281,8 +2334,8 @@ def parse_drc_lvs_reports(design_name: str) -> tuple:
     if drc_files:
         drc_path = _best_report_path(drc_files, "drc")
         try:
-            with open(drc_path, 'r') as f:
-                drc_content = f.read()
+            with open(drc_path, 'r') as f_rpt:
+                drc_content = f_rpt.read()
             details['drc_report'] = drc_content[:2000]  # Truncate for readability
             
             # Count violations
@@ -2311,8 +2364,8 @@ def parse_drc_lvs_reports(design_name: str) -> tuple:
     if lvs_files:
         lvs_path = _best_report_path(lvs_files, ".lvs")
         try:
-            with open(lvs_path, 'r') as f:
-                lvs_content = f.read()
+            with open(lvs_path, 'r') as f_rpt:
+                lvs_content = f_rpt.read()
             details['lvs_report'] = lvs_content[:2000]
 
             # Prefer explicit numeric result when available.
@@ -2664,7 +2717,7 @@ def parse_sta_signoff(design_name: str) -> dict:
         if worst_hold == float("inf"):
             worst_hold = 0.0
 
-        timing_met = all((c["setup_slack"] >= 0.0 and c["hold_slack"] >= 0.0) for c in corners)
+        timing_met = all((float(c["setup_slack"]) >= 0.0 and float(c["hold_slack"]) >= 0.0) for c in corners)  # type: ignore
         top_paths = sorted(top_paths, key=lambda x: x.get("slack", 0.0))[:10]
 
         return {
@@ -2722,8 +2775,8 @@ def parse_power_signoff(design_name: str) -> dict:
 
         if power_report and os.path.exists(power_report):
             result["power_report"] = power_report
-            with open(power_report, "r", errors="ignore") as f:
-                content = f.read()
+            with open(power_report, "r", errors="ignore") as f_rpt:
+                content = f_rpt.read()
             total_match = re.search(r"Total\\s+([\\d.eE+\\-]+)\\s+([\\d.eE+\\-]+)\\s+([\\d.eE+\\-]+)\\s+([\\d.eE+\\-]+)", content)
             if total_match:
                 result["internal_power_w"] = float(total_match.group(1))
@@ -2771,7 +2824,7 @@ def parse_power_signoff(design_name: str) -> dict:
         result["irdrop_max_vgnd"] = _parse_irdrop(vgnd_path)
 
         # 5% of 1.8V ~= 90mV
-        result["power_ok"] = result["irdrop_max_vpwr"] <= 0.09 and result["irdrop_max_vgnd"] <= 0.09
+        result["power_ok"] = float(result["irdrop_max_vpwr"]) <= 0.09 and float(result["irdrop_max_vgnd"]) <= 0.09  # type: ignore
         return result
     except Exception:
         return result

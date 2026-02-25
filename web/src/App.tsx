@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import axios from 'axios';
 import { Canvas } from '@react-three/fiber';
 import { Chip3D } from './components/Chip3D';
@@ -14,7 +14,8 @@ const App = () => {
   const [selectedDesign, setSelectedDesign] = useState<string>('');
 
   useEffect(() => {
-    axios.get('http://localhost:8000/designs')
+    const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+    axios.get(`${API_BASE_URL}/designs`)
       .then(res => {
         const data = res.data.designs;
         setDesigns(data);

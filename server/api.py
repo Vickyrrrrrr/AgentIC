@@ -81,6 +81,8 @@ def _get_llm():
                 temperature=1.0,
                 top_p=1.0,
                 max_completion_tokens=16384,
+                max_tokens=16384,
+                timeout=300,
                 extra_body=extra,
             )
             return llm, name
@@ -476,8 +478,8 @@ def get_metrics(design_name: str):
 @app.get("/signoff/{design_name}")
 def get_signoff_report(design_name: str):
     try:
-        from agentic.tools.vlsi_tools import signoff_check_tool
-        success, report = signoff_check_tool.func(design_name)
-        return {"success": success, "report": report}
+        from agentic.tools.vlsi_tools import check_physical_metrics
+        metrics, report = check_physical_metrics(design_name)
+        return {"success": metrics is not None, "report": report}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

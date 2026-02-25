@@ -29,6 +29,7 @@ from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent, get_regression_agent
 from .agents.doc_agent import get_doc_agent
+from .agents.sdc_agent import get_sdc_agent
 from .tools.vlsi_tools import (
     write_verilog,
     run_syntax_check,
@@ -46,7 +47,6 @@ from .tools.vlsi_tools import (
     parse_drc_lvs_reports,
     parse_sta_signoff,
     parse_power_signoff,
-    check_physical_metrics,
     run_cdc_check,
     generate_design_doc,
     convert_sva_to_yosys,
@@ -78,6 +78,7 @@ class BuildState(enum.Enum):
     FORMAL_VERIFY = "Formal Property Verification"
     COVERAGE_CHECK = "Coverage Analysis"
     REGRESSION = "Regression Testing"
+    SDC_GEN = "Timing Constraints Generation"
     FLOORPLAN = "Floorplanning"
     HARDENING = "GDSII Hardening"
     CONVERGENCE_REVIEW = "Convergence Review"
@@ -179,9 +180,9 @@ class BuildOrchestrator:
         self.tb_repair_fail_count = 0
         self.tb_failure_fingerprint_history: Dict[str, int] = {}
         self.tb_recovery_counts: Dict[str, int] = {}
-        self.artifacts = {}  # Store paths to gathered files
-        self.history = []    # Log of state transitions and errors
-        self.errors = []     # List of error messages
+        self.artifacts: Dict[str, Any] = {}  # Store paths to gathered files
+        self.history: List[Dict[str, Any]] = []    # Log of state transitions and errors
+        self.errors: List[str] = []     # List of error messages
 
     def setup_logger(self):
         """Sets up a file logger for the build process."""
@@ -405,6 +406,8 @@ class BuildOrchestrator:
                     self.do_coverage_check()
                 elif self.state == BuildState.REGRESSION:
                     self.do_regression()
+                elif self.state == BuildState.SDC_GEN:
+                    self.do_sdc_gen()
                 elif self.state == BuildState.FLOORPLAN:
                     self.do_floorplan()
                 elif self.state == BuildState.HARDENING:
@@ -1133,7 +1136,7 @@ endclass
     def _kickoff_with_timeout(self, agents: List[Agent], tasks: List[Task], timeout_s: int) -> str:
         timeout_s = max(1, int(timeout_s))
         if not hasattr(signal, "SIGALRM"):
-            return str(Crew(agents=agents, tasks=tasks).kickoff())
+            return str(Crew(agents=agents, tasks=tasks).kickoff())  # type: ignore
 
         def _timeout_handler(signum, frame):
             raise TimeoutError(f"Crew kickoff exceeded {timeout_s}s timeout")
@@ -1142,7 +1145,7 @@ endclass
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(timeout_s)
         try:
-            return str(Crew(agents=agents, tasks=tasks).kickoff())
+            return str(Crew(agents=agents, tasks=tasks).kickoff())  # type: ignore
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, prev_handler)
@@ -1405,12 +1408,12 @@ LOGIC DECOUPLING HINT:
 {self.artifacts.get('logic_decoupling_hint', 'N/A')}
 
 CRITICAL RULES:
-1. Module name must be "{self.name}"
+1. Top-level module name MUST be "{self.name}"
 2. Async active-low reset `rst_n`
-3. Flatten ports (no multi-dim arrays on ports)
+3. Flatten ports on the TOP module (no multi-dim arrays on top-level ports). Internal modules can use them.
 4. **IMPLEMENT EVERYTHING**: Do not leave any logic as "to be implemented" or "simplified".
-5. **VERIFY CONNECTIVITY**: Ensure all sub-modules (if any) are correctly connected.
-6. Return code in ```verilog fence
+5. **MODULAR HIERARCHY**: For complex designs, break them into smaller sub-modules. Output ALL modules in your response.
+6. Return code in ```verilog fence.
 """,
                 expected_output='Verilog Code',
                 agent=rtl_agent
@@ -2235,7 +2238,7 @@ CRITICAL:
                 elif self.skip_openlane:
                     self.transition(BuildState.SUCCESS)
                 else:
-                    self.transition(BuildState.FLOORPLAN)
+                    self.transition(BuildState.SDC_GEN)
                 return
             if self.strict_gates:
                 self.log("Coverage infra failure is blocking under strict mode.", refined=True)
@@ -2247,7 +2250,7 @@ CRITICAL:
             elif self.skip_openlane:
                 self.transition(BuildState.SUCCESS)
             else:
-                self.transition(BuildState.FLOORPLAN)
+                self.transition(BuildState.SDC_GEN)
             return
 
         if not coverage_data.get("ok", False):
@@ -2258,7 +2261,7 @@ CRITICAL:
 
         coverage_checks = {
             "line": line_pct >= float(thresholds["line"]),
-            "branch": branch_pct >= float(thresholds["branch"]),
+            "branch": branch_pct >= 95.0, # Industry Standard Coverage Closure
             "toggle": toggle_pct >= float(thresholds["toggle"]),
             "functional": functional_pct >= float(thresholds["functional"]),
         }
@@ -2282,7 +2285,7 @@ CRITICAL:
             self.log(
                 (
                     "Coverage PASSED "
-                    f"(line>={thresholds['line']:.1f}, branch>={thresholds['branch']:.1f}, "
+                    f"(line>={thresholds['line']:.1f}, branch>=95.0, "
                     f"toggle>={thresholds['toggle']:.1f}, functional>={thresholds['functional']:.1f})"
                 ),
                 refined=True,
@@ -2292,11 +2295,11 @@ CRITICAL:
             elif self.skip_openlane:
                 self.transition(BuildState.SUCCESS)
             else:
-                self.transition(BuildState.FLOORPLAN)
+                self.transition(BuildState.SDC_GEN)
             return
 
         self.retry_count += 1
-        coverage_max_retries = min(self.max_retries, 2)
+        coverage_max_retries = min(self.max_retries, 5) # Increased for closure loop
         if self.retry_count > coverage_max_retries:
             if getattr(self, "best_tb_backup", None) and os.path.exists(self.best_tb_backup):
                 self.log(f"Restoring Best Testbench ({self.best_coverage:.1f}%) before proceeding.", refined=True)
@@ -2312,7 +2315,7 @@ CRITICAL:
             elif self.skip_openlane:
                 self.transition(BuildState.SUCCESS)
             else:
-                self.transition(BuildState.FLOORPLAN)
+                self.transition(BuildState.SDC_GEN)
             return
 
         self.log(
@@ -2327,7 +2330,7 @@ CRITICAL:
         tb_agent = get_testbench_agent(self.llm, f"Improve coverage for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
 
         improve_prompt = f"""The current testbench for "{self.name}" does not meet coverage thresholds.
-        Thresholds: {thresholds}
+        TARGET: Industry Standard >95.0% Branch Coverage.
         Current Coverage Data: {coverage_data}
         
         Current RTL:
@@ -2341,8 +2344,9 @@ CRITICAL:
         ```
         
         Create an IMPROVED self-checking testbench that:
-        1. Tests all FSM states (not just happy path)
-        2. Exercises all conditional branches (if/else, case)
+        1. Achieves >95% branch coverage by hitting all missing branches.
+        2. Tests all FSM states (not just happy path)
+        3. Exercises all conditional branches (if/else, case)
         3. Tests reset behavior mid-operation
         4. Tests boundary values (max/min inputs)
         5. Includes back-to-back operations
@@ -2512,7 +2516,49 @@ CRITICAL:
         if self.skip_openlane:
             self.transition(BuildState.SUCCESS)
         else:
-            self.transition(BuildState.FLOORPLAN)
+            self.transition(BuildState.SDC_GEN)
+
+    def do_sdc_gen(self):
+        """Generate Synthesis Design Constraints (.sdc) for OpenLane."""
+        src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
+        os.makedirs(src_dir, exist_ok=True)
+        sdc_path = os.path.join(src_dir, f"{self.name}.sdc")
+        
+        self.log("Generating SDC Timing Constraints...", refined=True)
+        sdc_agent = get_sdc_agent(self.llm, "Generate Synthesis Design Constraints", self.verbose)
+        
+        arch_spec = self.artifacts.get('spec', 'No spec generated.')
+        sdc_task = Task(
+            description=f"""Generate an SDC file for module '{self.name}'.
+            
+Architecture Specification:
+{arch_spec}
+
+REQUIREMENTS:
+1. Identify the clock port and requested frequency/period.
+2. If unspecified, assume 100MHz (10.0ns period).
+3. Output ONLY the raw SDC constraints. DO NOT output code blocks or markdown wrappers (no ```sdc).
+""",
+            expected_output="Raw SDC constraints text cleanly formatted.",
+            agent=sdc_agent
+        )
+        
+        with console.status("[bold cyan]Generating Timing Constraints (SDC)...[/bold cyan]"):
+            sdc_content = str(Crew(agents=[sdc_agent], tasks=[sdc_task]).kickoff()).strip()
+            
+            # Clean up potential markdown wrappers created by LLM anyway
+            if sdc_content.startswith("```"):
+                lines = sdc_content.split("\n")
+                if len(lines) > 2:
+                    sdc_content = "\n".join(lines[1:-1])
+            
+            with open(sdc_path, "w") as f:
+                f.write(sdc_content)
+                
+            self.artifacts["sdc_path"] = sdc_path
+            self.log(f"SDC Constraints generated: {sdc_path}", refined=True)
+            
+        self.transition(BuildState.FLOORPLAN)
 
     def do_floorplan(self):
         """Generate floorplan artifacts and feed hardening with spatial intent."""
@@ -2625,12 +2671,15 @@ REASONING: <1-line explanation>""",
             )
 
         floorplan_tcl = os.path.join(src_dir, f"{self.name}_floorplan.tcl")
+        sdc_injection = f"set ::env(BASE_SDC_FILE) \"$::env(DESIGN_DIR)/src/{self.name}.sdc\"\n" if "sdc_path" in self.artifacts else ""
+        
         with open(floorplan_tcl, "w") as f:
             f.write(
                 f"set ::env(DESIGN_NAME) \"{self.name}\"\n"
                 f"set ::env(PDK) \"{self.pdk_profile.get('pdk', PDK)}\"\n"
                 f"set ::env(STD_CELL_LIBRARY) \"{self.pdk_profile.get('std_cell_library', 'sky130_fd_sc_hd')}\"\n"
                 f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/{self.name}.v]\n"
+                f"{sdc_injection}"
                 "set ::env(FP_SIZING) \"absolute\"\n"
                 f"set ::env(DIE_AREA) \"0 0 {die} {die}\"\n"
                 f"set ::env(FP_CORE_UTIL) {util}\n"

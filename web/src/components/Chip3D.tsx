@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Float, Box, Edges } from '@react-three/drei';
 import * as THREE from 'three';
@@ -29,12 +29,12 @@ export const Chip3D = () => {
 
         {/* Top Active Matrix - Glowing */}
         <Box args={[2.5, 0.2, 2.5]} position={[0, 0, 0]}>
-          <meshStandardMaterial 
-            color="#00FF88" 
+          <meshStandardMaterial
+            color="#00FF88"
             emissive="#00FF88"
             emissiveIntensity={0.5}
-            roughness={0.2} 
-            metalness={0.8} 
+            roughness={0.2}
+            metalness={0.8}
           />
           <Edges color="#fff" />
         </Box>

@@ -102,6 +102,8 @@ def get_llm():
                 temperature=1.0,
                 top_p=1.0,
                 max_completion_tokens=16384,
+                max_tokens=16384,
+                timeout=300,
                 extra_body=extra_t
             )
             console.print(f"[green]✓ Using {name} ({cfg['model']})[/green]")
@@ -149,8 +151,6 @@ def simulate(
         # Simple logging for sim tool
         pass 
 
-    from .agents.verifier import get_error_analyst_agent
-    from .tools.vlsi_tools import syntax_check_tool, read_file_tool
     
     rtl_path = f"{OPENLANE_ROOT}/designs/{name}/src/{name}.v"
     tb_path = f"{OPENLANE_ROOT}/designs/{name}/src/{name}_tb.v"

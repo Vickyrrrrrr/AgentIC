@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
 
-const API = 'http://localhost:8000';
+const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 type Phase = 'prompt' | 'building' | 'done';
 

@@ -46,3 +46,19 @@ Thumbs.db
 temp_*.svg
 designs/*/src/sim
 .venv-agentic/
+
+# Node / Frontend
+node_modules/
+web/node_modules/
+web/dist/
+web/.vite/
+dist/
+
+# Temporary / test scripts
+*.tmp
+global_reqs.tmp
+venv_reqs.tmp
+nodesource_setup.sh
+test_import.py
+test_signoff.py
+test_signoff2.py

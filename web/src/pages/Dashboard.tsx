@@ -17,20 +17,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ selectedDesign }) => {
         setLoading(true);
 
         // Fetch Quick Metrics
-        axios.get(`http://localhost:8000/metrics/${selectedDesign}`)
+        const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+        axios.get(`${API_BASE_URL}/metrics/${selectedDesign}`)
             .then(res => {
                 if (res.data.metrics) setMetrics(res.data.metrics);
             })
-            .catch(err => {
+            .catch(() => {
                 setMetrics({ wns: 'N/A', power: 'N/A', area: 'N/A', gate_count: 'N/A' });
             });
 
         // Fetch Full LLM Signoff Report
-        axios.get(`http://localhost:8000/signoff/${selectedDesign}`)
+        axios.get(`${API_BASE_URL}/signoff/${selectedDesign}`)
             .then(res => {
                 setSignoffData({ report: res.data.report, pass: res.data.success });
             })
-            .catch(err => {
+            .catch(() => {
                 setSignoffData({ report: 'Failed to retrieve Signoff Report. Has the device been fully hardened via OpenLane yet?', pass: false });
             })
             .finally(() => setLoading(false));
