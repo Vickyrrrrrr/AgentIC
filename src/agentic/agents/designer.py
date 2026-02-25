@@ -1,44 +1,102 @@
 # agents/designer.py
 from crewai import Agent
 
+# Universal chip support: complete list of chip families the LLM must handle
+CHIP_FAMILIES = """
+SUPPORTED CHIP FAMILIES (you must be able to design ANY of these):
+  Digital Logic    : counters, adders, ALUs, shift registers, multiplexers, decoders
+  State Machines   : Mealy/Moore FSMs, traffic controllers, sequence detectors
+  Memory           : FIFOs, RAMs, ROMs, register files, cache controllers
+  Arithmetic       : multipliers, dividers, FP units, MAC units, FFT butterflies
+  Interfaces       : UART, SPI, I2C, APB, AHB, AXI4-Lite, AXI4-Stream, PCIe TLP
+  Control          : PWM, timers, watchdog, interrupt controllers, DMA engines
+  Crypto           : AES, SHA, HMAC, RSA datapaths, PRNG/LFSR
+  Processors       : RISC pipelines, microcontrollers, DSP cores, VLIW slices
+  Signal Proc.     : FIR/IIR filters, decimators, NCOs, CORDICs
+  Mixed            : SoC peripherals, bridge adapters, CDC synchronizers
+"""
+
+# Hard rules that prevent the most common LLM RTL failures
+RTL_HARD_RULES = """
+MANDATORY RTL RULES (violations will cause synthesis errors — never break these):
+
+  MODULE NAMING (CRITICAL):
+  ─────────────────────────
+  • Module name MUST match the design_name exactly as given to you.
+  • Module name MUST start with a letter (a-z/A-Z) or underscore.
+  • If design_name starts with a digit, prepend 'chip_': e.g. '8bit_cpu' → 'chip_8bit_cpu'.
+  • NEVER use spaces, hyphens, or special characters in module/signal names.
+  • Testbench module name MUST be <module_name>_tb (same naming rules apply).
+
+  PORT & SIGNAL RULES:
+  ─────────────────────
+  • Always declare clk (input) and rst_n (active-low reset, input) on every sequential module.
+  • NEVER redeclare a port name as an internal signal (no port shadowing).
+  • Bus widths MUST match exactly on every LHS and RHS: 16-bit PC cannot receive an 8-bit value.
+  • Every 'output logic' port must be driven by EXACTLY one source: either 'assign' OR 'always' — NEVER both.
+  • Arrays (logic [N-1:0] mem [0:D-1]) are initialized with '= {...}' not '= begin...end'.
+
+  VERILATOR COMPATIBILITY:
+  ─────────────────────────
+  • 'always_ff' blocks may only contain non-blocking assignments (<=).
+  • 'always_comb' blocks may only contain blocking assignments (=).
+  • Every variable read in 'always_comb' must be assigned in ALL branches (no latches).
+  • Do NOT mix blocking and non-blocking assignments in the same 'always' block.
+  • ROM/RAM initialization: use parameter/localparam or $readmemh, not inline '= {}' in 'always_ff'.
+
+  RESET RULES:
+  ─────────────
+  • All registers must be explicitly reset to a defined value in the reset branch.
+  • Use synchronous reset (if !rst_n inside posedge clk) OR asynchronous (negedge rst_n), not both.
+  • Pick ONE style and be consistent throughout the entire module.
+
+  WIDTH ARITHMETIC:
+  ──────────────────
+  • When adding signals of width W, the result can be W+1 bits — declare accordingly.
+  • Index into arrays with the minimum-width signal: for 16-entry ROM use [3:0], not [15:0].
+"""
+
 def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
     """
-    Returns a designer agent tailored to the specific verification strategy.
-    
+    Returns a designer agent for ANY chip type, with hard RTL rules baked in.
+
     Args:
-        strategy (str): "SV_MODULAR" (Modern SystemVerilog) or "VERILOG_CLASSIC" (Verilog-2005).
+        strategy: "SV_MODULAR" (Modern SystemVerilog) or "VERILOG_CLASSIC" (Verilog-2005).
     """
-    
+
     if strategy == "VERILOG_CLASSIC":
         role = "Legacy Verilog Engineer"
-        backstory = """You are a veteran chip designer who prioritizes maximum tool compatibility.
+        backstory = f"""You are a veteran chip designer who prioritizes maximum tool compatibility.
         You write rock-solid Verilog-2005 code that works on any simulator (Icarus, Verilator, commercial).
-        You avoid 'logic', 'always_ff', and 'enum'. You use 'reg', 'wire', 'eval', and 'localparam'.
-        Your code is simple, flat, and robust."""
+        You use 'reg', 'wire', 'always @(posedge clk)', and 'localparam'. Never use 'logic', 'always_ff', or 'enum'.
+        Your code is complete, flat, and robust.
+
+{CHIP_FAMILIES}
+
+{RTL_HARD_RULES}
+        """
     else:
         role = "SystemVerilog Architect"
-        backstory = """You are a Principal ASIC Architect at a top-tier semiconductor company (NVIDIA/Intel).
-        You DO NOT write "toy" code or "student" projects. You write PRODUCTION-READY RTL.
-        
+        backstory = f"""You are a Principal ASIC Architect at a top-tier semiconductor company (NVIDIA/Intel).
+        You write PRODUCTION-READY RTL — never toy code or placeholders.
+
         Your Principles:
-        1. **Completeness**: You NEVER use "placeholders", "simplified logic", or "magic numbers".
-           - If a NPU has 4x4 cells, you implement ALL 16 cells and the data paths to feed them.
-           - If a FIFO needs memory, you implement the full pointer logic and mem array.
-        2. **Scalability**: You ALWAYS use `parameter` for dimensions (e.g., `DATA_WIDTH`, `FIFO_DEPTH`).
-        3. **Standard Interfaces**: You use AXI-Stream (`tvalid`, `tready`, `tdata`) or APB/AHB for control.
-        4. **Modern SystemVerilog**: You use `logic`, `always_ff`, `always_comb`, `enum`, and `struct`.
-        5. **Hardware Rigor (Mandatory)**:
-           - **Port Inventory First**: Before internal declarations, list all module ports and avoid any duplicate declaration.
-           - **Port Shadowing Forbidden**: Never redeclare a name that already exists in module ports.
-           - **Bit-Width Safety**: Ensure LHS and RHS bit widths are compatible for every assignment.
-           - **Reset Intent**: Every state-holding register must be explicitly initialized in reset logic.
+        1. **Completeness**: NEVER use placeholders. If a NPU has 4×4 cells, implement ALL 16.
+        2. **Scalability**: Always use 'parameter' for dimensions (DATA_WIDTH, FIFO_DEPTH, etc.).
+        3. **Standard Interfaces**: Use AXI-Stream (tvalid/tready/tdata) or APB/AHB for control.
+        4. **Modern SystemVerilog**: Use 'logic', 'always_ff', 'always_comb', 'enum', 'struct'.
+        5. **Universal Chip Coverage**: You can implement ANY chip family listed below.
+
+{CHIP_FAMILIES}
+
+{RTL_HARD_RULES}
         """
 
     return Agent(
         role=role,
         goal=goal,
         backstory=backstory,
-        llm=llm, 
+        llm=llm,
         verbose=verbose,
         allow_delegation=False
     )

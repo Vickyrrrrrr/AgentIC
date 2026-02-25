@@ -1,0 +1,74 @@
+### AgentIC-Specific VeriReason Fine-Tuning Config
+### For use with LLamaFactory: llamafactory-cli train training/agentic_sft_config.yaml
+###
+### Prerequisites:
+###   pip install llamafactory
+###   python training/collect_training_data.py  # generates agentic_sft_data.jsonl
+
+### ============================================================
+### Model Configuration
+### ============================================================
+model_name_or_path: Nellyw888/VeriReason-Qwen2.5-7b-SFT-Reasoning
+# Alternatives:
+#   Nellyw888/VeriReason-Qwen2.5-3B-Verilog-RTL-GRPO-reasoning-tb  (3B, lighter)
+#   Nellyw888/VeriReason-Llama-7b-RTLCoder-GRPO-reasoning-tb       (LLaMA backbone)
+
+### ============================================================
+### Data Configuration
+### ============================================================
+dataset_dir: training
+dataset: agentic_sft_data  # will look for agentic_sft_data.jsonl
+
+# Template matching the AgentIC prompt format
+template: qwen  # or llama3 if using Llama backbone
+
+# Custom prompt template that matches AgentIC's format
+# The model learns to parse BUILD CONTEXT and output in CLASS/ROOT_CAUSE format
+
+### ============================================================
+### Training Hyperparameters
+### ============================================================
+stage: sft
+do_train: true
+
+# LoRA for efficient fine-tuning (fits on 24GB GPU)
+finetuning_type: lora
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target: all  # target all linear layers
+
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8  # effective batch size = 16
+learning_rate: 2.0e-5
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+
+# Sequence length — AgentIC prompts can be long (RTL + context)
+cutoff_len: 4096
+
+# Mixed precision for speed
+bf16: true  # set to false if GPU doesn't support bf16
+
+### ============================================================
+### Logging & Saving
+### ============================================================
+output_dir: training/checkpoints/agentic-sft
+logging_steps: 10
+save_steps: 200
+save_total_limit: 3
+
+report_to: none  # set to "wandb" if you have W&B
+
+### ============================================================
+### Evaluation
+### ============================================================
+do_eval: false
+# Set do_eval: true and add eval_dataset if you split your data
+
+### ============================================================
+### Advanced (keep defaults unless you know what you're doing)
+### ============================================================
+overwrite_cache: true
+preprocessing_num_workers: 4

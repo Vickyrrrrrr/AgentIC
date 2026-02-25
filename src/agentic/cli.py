@@ -29,6 +29,9 @@ from .config import (
     NEMOTRON_CONFIG,
     GLM5_CONFIG,
     PDK,
+    SIM_BACKEND_DEFAULT,
+    COVERAGE_FALLBACK_POLICY_DEFAULT,
+    COVERAGE_PROFILE_DEFAULT,
 )
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
@@ -446,6 +449,12 @@ def build(
     max_pivots: int = typer.Option(2, "--max-pivots", min=0, help="Maximum strategy pivots before fail-closed"),
     congestion_threshold: float = typer.Option(10.0, "--congestion-threshold", help="Routing congestion threshold (%)"),
     hierarchical: str = typer.Option("auto", "--hierarchical", help="Hierarchical mode: auto, off, on"),
+    tb_gate_mode: str = typer.Option("strict", "--tb-gate-mode", help="TB gate mode: strict or relaxed"),
+    tb_max_retries: int = typer.Option(3, "--tb-max-retries", min=1, help="Maximum TB gate recovery attempts"),
+    tb_fallback_template: str = typer.Option("uvm_lite", "--tb-fallback-template", help="TB fallback template: uvm_lite or classic"),
+    coverage_backend: str = typer.Option(SIM_BACKEND_DEFAULT, "--coverage-backend", help="Coverage backend: auto, verilator, iverilog"),
+    coverage_fallback_policy: str = typer.Option(COVERAGE_FALLBACK_POLICY_DEFAULT, "--coverage-fallback-policy", help="Coverage fallback policy: fail_closed, fallback_oss, skip"),
+    coverage_profile: str = typer.Option(COVERAGE_PROFILE_DEFAULT, "--coverage-profile", help="Coverage profile: balanced, aggressive, relaxed"),
 ):
     """Build a chip from natural language description (Autonomous Orchestrator 2.0)."""
     
@@ -458,6 +467,26 @@ def build(
         f"{'[bold green]Full Industry Signoff Enabled[/bold green]' if full_signoff else ''}",
         title="🚀 Starting Autonomous Orchestrator"
     ))
+
+    tb_gate_mode = tb_gate_mode.lower().strip()
+    if tb_gate_mode not in {"strict", "relaxed"}:
+        raise typer.BadParameter("--tb-gate-mode must be one of: strict, relaxed")
+
+    tb_fallback_template = tb_fallback_template.lower().strip()
+    if tb_fallback_template not in {"uvm_lite", "classic"}:
+        raise typer.BadParameter("--tb-fallback-template must be one of: uvm_lite, classic")
+
+    coverage_backend = coverage_backend.lower().strip()
+    if coverage_backend not in {"auto", "verilator", "iverilog"}:
+        raise typer.BadParameter("--coverage-backend must be one of: auto, verilator, iverilog")
+
+    coverage_fallback_policy = coverage_fallback_policy.lower().strip()
+    if coverage_fallback_policy not in {"fail_closed", "fallback_oss", "skip"}:
+        raise typer.BadParameter("--coverage-fallback-policy must be one of: fail_closed, fallback_oss, skip")
+
+    coverage_profile = coverage_profile.lower().strip()
+    if coverage_profile not in {"balanced", "aggressive", "relaxed"}:
+        raise typer.BadParameter("--coverage-profile must be one of: balanced, aggressive, relaxed")
 
     run_startup_diagnostics(strict=strict_gates)
     llm = get_llm()
@@ -476,6 +505,12 @@ def build(
         max_pivots=max_pivots,
         congestion_threshold=congestion_threshold,
         hierarchical_mode=hierarchical,
+        tb_gate_mode=tb_gate_mode,
+        tb_max_retries=tb_max_retries,
+        tb_fallback_template=tb_fallback_template,
+        coverage_backend=coverage_backend,
+        coverage_fallback_policy=coverage_fallback_policy,
+        coverage_profile=coverage_profile,
     )
     
     orchestrator.run()

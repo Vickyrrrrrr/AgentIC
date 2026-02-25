@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_ROOT = os.path.join(REPO_ROOT, "src")
@@ -143,6 +144,319 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(7, data.get("total_overflow"))
 
 
+class CoverageAdapterTests(unittest.TestCase):
+    def test_detect_tb_style(self):
+        self.assertEqual("sv_class_based", vlsi_tools.detect_tb_style("class Driver; endclass"))
+        self.assertEqual("classic_verilog", vlsi_tools.detect_tb_style("module tb; initial begin end endmodule"))
+
+    def test_coverage_never_returns_empty_dict_on_missing_files(self):
+        tmp = tempfile.mkdtemp(prefix="tier1_cov_missing_")
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        original = vlsi_tools.OPENLANE_ROOT
+        vlsi_tools.OPENLANE_ROOT = tmp
+        self.addCleanup(lambda: setattr(vlsi_tools, "OPENLANE_ROOT", original))
+
+        passed, output, cov = vlsi_tools.run_simulation_with_coverage("chip_missing", backend="auto")
+        self.assertFalse(passed)
+        self.assertIsInstance(cov, dict)
+        self.assertNotEqual({}, cov)
+        self.assertTrue(cov.get("infra_failure"))
+
+    def test_iverilog_backend_rejects_class_sv_tb(self):
+        tmp = tempfile.mkdtemp(prefix="tier1_cov_ivl_")
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        original = vlsi_tools.OPENLANE_ROOT
+        vlsi_tools.OPENLANE_ROOT = tmp
+        self.addCleanup(lambda: setattr(vlsi_tools, "OPENLANE_ROOT", original))
+
+        src = os.path.join(tmp, "designs", "chip", "src")
+        os.makedirs(src, exist_ok=True)
+        rtl = os.path.join(src, "chip.v")
+        tb = os.path.join(src, "chip_tb.v")
+        with open(rtl, "w") as f:
+            f.write("module chip(input logic clk, output logic y); assign y = clk; endmodule\n")
+        with open(tb, "w") as f:
+            f.write("interface chip_if; logic clk; endinterface\nclass Driver; virtual chip_if vif; endclass\nmodule chip_tb; endmodule\n")
+
+        class CompileFail:
+            returncode = 1
+            stdout = ""
+            stderr = "syntax error: unsupported class item"
+
+        with patch("agentic.tools.vlsi_tools.subprocess.run", return_value=CompileFail()):
+            passed, _, cov = vlsi_tools.run_simulation_with_coverage(
+                "chip",
+                backend="iverilog",
+                fallback_policy="fail_closed",
+                profile="balanced",
+            )
+
+        self.assertFalse(passed)
+        self.assertTrue(cov.get("infra_failure"))
+        self.assertEqual("unsupported_tb_style", cov.get("error_kind"))
+        self.assertEqual("iverilog", cov.get("backend"))
+
+    def test_auto_backend_fallback_oss_to_iverilog(self):
+        tmp = tempfile.mkdtemp(prefix="tier1_cov_fallback_")
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        original = vlsi_tools.OPENLANE_ROOT
+        vlsi_tools.OPENLANE_ROOT = tmp
+        self.addCleanup(lambda: setattr(vlsi_tools, "OPENLANE_ROOT", original))
+
+        src = os.path.join(tmp, "designs", "chip", "src")
+        os.makedirs(src, exist_ok=True)
+        with open(os.path.join(src, "chip.v"), "w") as f:
+            f.write("module chip(input logic clk, output logic y); assign y = clk; endmodule\n")
+        with open(os.path.join(src, "chip_tb.v"), "w") as f:
+            f.write("class Driver; endclass\nmodule chip_tb; initial $display(\"TEST PASSED\"); endmodule\n")
+
+        primary_fail = (
+            False,
+            "primary fail",
+            {
+                "ok": False,
+                "backend": "verilator",
+                "coverage_mode": "full_oss",
+                "infra_failure": True,
+                "error_kind": "compile_error",
+                "diagnostics": ["compile fail"],
+                "line_pct": 0.0,
+                "branch_pct": 0.0,
+                "toggle_pct": 0.0,
+                "functional_pct": 0.0,
+                "assertion_pct": 0.0,
+                "signals_toggled": 0,
+                "total_signals": 0,
+                "report_path": "",
+                "raw_diag_path": "",
+            },
+        )
+        fallback_ok = (
+            True,
+            "fallback ok",
+            {
+                "ok": True,
+                "backend": "iverilog",
+                "coverage_mode": "fallback_oss",
+                "infra_failure": False,
+                "error_kind": "",
+                "diagnostics": [],
+                "line_pct": 86.0,
+                "branch_pct": 81.0,
+                "toggle_pct": 76.0,
+                "functional_pct": 82.0,
+                "assertion_pct": 100.0,
+                "signals_toggled": 4,
+                "total_signals": 5,
+                "report_path": "diag",
+                "raw_diag_path": "diag",
+            },
+        )
+
+        with patch("agentic.tools.vlsi_tools.run_verilator_coverage", return_value=primary_fail) as ver_mock, patch(
+            "agentic.tools.vlsi_tools.run_iverilog_coverage", return_value=fallback_ok
+        ) as ivl_mock:
+            passed, _, cov = vlsi_tools.run_simulation_with_coverage(
+                "chip", backend="auto", fallback_policy="fallback_oss", profile="balanced"
+            )
+
+        self.assertTrue(passed)
+        self.assertEqual("iverilog", cov.get("backend"))
+        self.assertEqual("fallback_oss", cov.get("coverage_mode"))
+        self.assertFalse(cov.get("infra_failure"))
+        self.assertTrue(ver_mock.called)
+        self.assertTrue(ivl_mock.called)
+
+
+class FormalConversionTests(unittest.TestCase):
+    def test_sva_converter_removes_temporal_tokens_for_sby(self):
+        sva = textwrap.dedent(
+            """
+            module my_chip_sva (
+                input logic clk,
+                input logic rst_n,
+                input logic en,
+                output logic [7:0] cnt_out
+            );
+                property p_reset_assert;
+                    @(posedge clk) !rst_n |-> ##1 cnt_out == 8'd0;
+                endproperty
+                assert property (p_reset_assert);
+
+                property p_increment;
+                    @(posedge clk) disable iff (!rst_n) en |=> cnt_out == $past(cnt_out) + 1;
+                endproperty
+                assert property (p_increment);
+
+                property p_toggle_seq;
+                    @(posedge clk) !en ##1 en;
+                endproperty
+                assert property (p_toggle_seq);
+            endmodule
+            """
+        )
+
+        converted = vlsi_tools.convert_sva_to_yosys(sva, "my_chip")
+        self.assertIsNotNone(converted)
+        self.assertNotIn("|->", converted)
+        self.assertNotIn("|=>", converted)
+        self.assertIsNone(re.search(r"##\s*\d+", converted))
+        self.assertIn("reg [7:0] past_cnt_out;", converted)
+
+        ok, report = vlsi_tools.validate_yosys_sby_check(converted)
+        self.assertTrue(ok, msg=str(report))
+
+    def test_sby_preflight_rejects_residual_temporal_syntax(self):
+        bad_code = textwrap.dedent(
+            """
+            module bad_sby(input logic clk, input logic a, input logic b);
+                always @(posedge clk) begin
+                    assert(a |-> ##1 b);
+                end
+            endmodule
+            """
+        )
+        ok, report = vlsi_tools.validate_yosys_sby_check(bad_code)
+        self.assertFalse(ok)
+        issue_codes = {issue.get("issue_code") for issue in report.get("issues", [])}
+        self.assertIn("residual_temporal_implication", issue_codes)
+        self.assertIn("residual_temporal_delay", issue_codes)
+
+
+class TestbenchGateTests(unittest.TestCase):
+    def test_tb_static_gate_rejects_non_virtual_interface_usage(self):
+        tb = textwrap.dedent(
+            """
+            interface dut_if;
+              logic clk;
+              logic rst_n;
+              logic en;
+              logic [7:0] q;
+            endinterface
+
+            class Transaction; endclass
+            class Driver;
+              dut_if vif;
+              function new(dut_if vif);
+                this.vif = vif;
+              endfunction
+            endclass
+            class Monitor; endclass
+            class Scoreboard; endclass
+
+            module dut_tb;
+              initial begin
+                $display("TEST PASSED");
+                $display("TEST FAILED");
+              end
+            endmodule
+            """
+        )
+        ok, report = vlsi_tools.run_tb_static_contract_check(tb, "SV_MODULAR")
+        self.assertFalse(ok)
+        codes = set(report.get("issue_codes", []))
+        self.assertIn("non_virtual_interface_handle", codes)
+        self.assertIn("constructor_interface_type_error", codes)
+
+    def test_tb_repair_patches_interface_and_covergroup_patterns(self):
+        tb = textwrap.dedent(
+            """
+            interface dut_if;
+              logic clk;
+              logic rst_n;
+              logic en;
+              logic [7:0] q;
+            endinterface
+
+            class Transaction; endclass
+            class Driver;
+              dut_if vif;
+              function new(dut_if vif);
+                this.vif = vif;
+              endfunction
+            endclass
+
+            covergroup cv_q;
+              coverpoint q { bins all = {[0:255]}; }
+            endgroup
+
+            class Scoreboard;
+              cv_q cov;
+              function new();
+                cov = new;
+              endfunction
+              function void sample();
+                cov.sample();
+              endfunction
+            endclass
+            """
+        )
+        repaired = vlsi_tools.repair_tb_for_verilator(tb, {"issue_categories": ["interface_typing_error", "covergroup_scope_error"]})
+        self.assertIn("virtual dut_if vif;", repaired)
+        self.assertIn("function new(virtual dut_if vif);", repaired)
+        self.assertNotIn("covergroup cv_q", repaired)
+        self.assertNotIn("cov.sample()", repaired)
+
+    def test_tb_compile_gate_normalizes_diagnostics(self):
+        tmpdir = tempfile.mkdtemp(prefix="tier1_tb_compile_")
+        self.addCleanup(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
+        rtl_path = os.path.join(tmpdir, "dut.v")
+        tb_path = os.path.join(tmpdir, "dut_tb.v")
+        with open(rtl_path, "w") as f:
+            f.write("module dut(input logic clk, output logic y); assign y = clk; endmodule\n")
+        with open(tb_path, "w") as f:
+            f.write("module dut_tb; dut_if vif; endmodule\n")
+
+        fake_stderr = textwrap.dedent(
+            """
+            %Error: /tmp/dut_tb.v:34:5: syntax error, unexpected IDENTIFIER
+            %Error: /tmp/dut_tb.v:37:30: syntax error, unexpected IDENTIFIER, expecting ')'
+            %Error: Internal Error: parser confused in class Driver
+            """
+        )
+
+        class DummyResult:
+            returncode = 1
+            stdout = ""
+            stderr = fake_stderr
+
+        with patch("agentic.tools.vlsi_tools.subprocess.run", return_value=DummyResult()):
+            ok, report = vlsi_tools.run_tb_compile_gate("dut", tb_path, rtl_path)
+
+        self.assertFalse(ok)
+        cats = set(report.get("issue_categories", []))
+        self.assertIn("syntax_error", cats)
+        self.assertIn("interface_typing_error", cats)
+        self.assertIn("parser_internal_state_error", cats)
+        self.assertTrue(report.get("fingerprint"))
+
+    def test_coverpoint_hierarchical_expression_not_flagged(self):
+        tb = textwrap.dedent(
+            """
+            interface dut_if;
+              logic clk;
+              logic en;
+            endinterface
+            class Transaction; endclass
+            class Driver; endclass
+            class Monitor; endclass
+            class Scoreboard; endclass
+            covergroup cg;
+              coverpoint vif.en { bins all[] = {0,1}; }
+            endgroup
+            module dut_tb;
+              initial begin
+                $display("TEST PASSED");
+                $display("TEST FAILED");
+              end
+            endmodule
+            """
+        )
+        ok, report = vlsi_tools.run_tb_static_contract_check(tb, "SV_MODULAR")
+        codes = set(report.get("issue_codes", []))
+        self.assertNotIn("covergroup_scope_error", codes)
+
+
 class OrchestratorSafetyTests(unittest.TestCase):
     def test_failure_fingerprint_repetition(self):
         orch = BuildOrchestrator(
@@ -197,6 +511,70 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertTrue(os.path.isdir(metircs_dir))
         self.assertTrue(os.path.isfile(os.path.join(metircs_dir, "latest.json")))
         self.assertTrue(os.path.isfile(os.path.join(metircs_dir, "latest.md")))
+
+    def test_extract_module_ports_ignores_comments(self):
+        orch = BuildOrchestrator(name="ports_demo", desc="demo", llm=None)
+        rtl = textwrap.dedent(
+            """
+            module ports_demo (
+                input logic clk,
+                input logic rst_n, // asynchronous reset
+                output logic [7:0] count // output assignments are below
+            );
+            // External output assignments comment should not become a port name.
+            assign count = 8'h00;
+            endmodule
+            """
+        )
+        ports = orch._extract_module_ports(rtl)
+        names = [p["name"] for p in ports]
+        self.assertEqual(["clk", "rst_n", "count"], names)
+        self.assertNotIn("assignments", names)
+
+    def test_coverage_infra_failure_fail_closed_no_tb_regen(self):
+        orch = BuildOrchestrator(
+            name="cov_fail_demo",
+            desc="demo",
+            llm=None,
+            strict_gates=True,
+            coverage_backend="auto",
+            coverage_fallback_policy="fail_closed",
+            coverage_profile="balanced",
+        )
+        orch.state = orch.state.COVERAGE_CHECK
+        orch.artifacts["root"] = tempfile.mkdtemp(prefix="tier1_cov_fail_")
+        self.addCleanup(lambda: shutil.rmtree(orch.artifacts["root"], ignore_errors=True))
+        orch.setup_logger()
+        orch.artifacts["rtl_code"] = "module cov_fail_demo(input logic clk, output logic y); assign y = clk; endmodule\n"
+        tb_path = os.path.join(orch.artifacts["root"], "cov_fail_demo_tb.v")
+        with open(tb_path, "w") as f:
+            f.write("module cov_fail_demo_tb; initial $display(\"TEST PASSED\"); endmodule\n")
+        orch.artifacts["tb_path"] = tb_path
+
+        cov_result = {
+            "ok": False,
+            "backend": "verilator",
+            "coverage_mode": "full_oss",
+            "infra_failure": True,
+            "error_kind": "tool_missing",
+            "diagnostics": ["verilator missing"],
+            "line_pct": 0.0,
+            "branch_pct": 0.0,
+            "toggle_pct": 0.0,
+            "functional_pct": 0.0,
+            "assertion_pct": 0.0,
+            "signals_toggled": 0,
+            "total_signals": 0,
+            "report_path": "",
+            "raw_diag_path": "",
+        }
+
+        with patch("agentic.orchestrator.run_simulation_with_coverage", return_value=(False, "infra fail", cov_result)):
+            orch.do_coverage_check()
+
+        self.assertEqual("FAIL", orch.state.name)
+        self.assertEqual(0, orch.retry_count)
+        self.assertEqual(1, orch.artifacts.get("coverage_attempt_count"))
 
 
 if __name__ == "__main__":

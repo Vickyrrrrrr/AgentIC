@@ -64,6 +64,19 @@ PDK_ROOT = os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel"))
 PDK = os.environ.get("PDK", PDK_PROFILES[DEFAULT_PDK_PROFILE]["pdk"])
 OPENLANE_IMAGE = "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-amd64"
 
+# Simulation/Coverage adapter defaults
+SIM_BACKEND_DEFAULT = os.environ.get("SIM_BACKEND_DEFAULT", "auto").strip().lower()
+if SIM_BACKEND_DEFAULT not in {"auto", "verilator", "iverilog"}:
+    SIM_BACKEND_DEFAULT = "auto"
+
+COVERAGE_FALLBACK_POLICY_DEFAULT = os.environ.get("COVERAGE_FALLBACK_POLICY", "fallback_oss").strip().lower()
+if COVERAGE_FALLBACK_POLICY_DEFAULT not in {"fail_closed", "fallback_oss", "skip"}:
+    COVERAGE_FALLBACK_POLICY_DEFAULT = "fallback_oss"
+
+COVERAGE_PROFILE_DEFAULT = os.environ.get("COVERAGE_PROFILE", "balanced").strip().lower()
+if COVERAGE_PROFILE_DEFAULT not in {"balanced", "aggressive", "relaxed"}:
+    COVERAGE_PROFILE_DEFAULT = "balanced"
+
 
 def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
     """Resolve tool binary using configured roots before PATH.
