@@ -12,7 +12,7 @@ import glob
 import threading
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -416,8 +416,19 @@ def cancel_build(job_id: str):
 
 
 @app.get("/designs")
-def list_designs():
-    """List all chip designs on disk."""
+def list_designs(request: Request):
+    """List all chip designs on disk, but ONLY if accessed locally."""
+    origin = request.headers.get("origin", "")
+    host = request.headers.get("host", "")
+    
+    # Check if request is coming from public internet (Ngrok/Vercel)
+    is_local = any(loc in origin for loc in ["localhost", "127.0.0.1", "0.0.0.0"]) or \
+               any(loc in host for loc in ["localhost", "127.0.0.1", "0.0.0.0"])
+               
+    if not is_local:
+        # SECURITY HOTFIX: Public web app disabled listing local OpenLane designs
+        return {"designs": []}
+
     des_dir = os.path.join(os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane")), "designs")
     if not os.path.exists(des_dir):
         return {"designs": []}

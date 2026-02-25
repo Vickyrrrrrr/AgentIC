@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
+import { fetchEventSource } from '@microsoft/fetch-event-source';
 
 const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
 
@@ -39,7 +40,7 @@ export const DesignStudio = () => {
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
     const [skipOpenlane, setSkipOpenlane] = useState(false);
-    const esRef = useRef<EventSource | null>(null);
+    const abortCtrlRef = useRef<AbortController | null>(null);
 
     // Auto-generate design name from prompt
     useEffect(() => {
@@ -68,27 +69,35 @@ export const DesignStudio = () => {
     };
 
     const startStreaming = (jid: string) => {
-        if (esRef.current) esRef.current.close();
-        const es = new EventSource(`${API}/build/stream/${jid}`);
-        esRef.current = es;
+        if (abortCtrlRef.current) abortCtrlRef.current.abort();
+        const ctrl = new AbortController();
+        abortCtrlRef.current = ctrl;
 
-        es.onmessage = (evt) => {
-            try {
-                const data: BuildEvent = JSON.parse(evt.data);
-                if (data.type === 'ping') return;
-                if (data.type === 'stream_end') {
-                    es.close();
-                    fetchResult(jid, data.status as any);
-                    return;
-                }
-                setEvents(prev => [...prev, data]);
-                setJobStatus(data.type === 'error' ? 'failed' : 'running');
-            } catch { /* ignore parse errors */ }
-        };
-
-        es.onerror = () => {
-            es.close();
-        };
+        fetchEventSource(`${API}/build/stream/${jid}`, {
+            method: 'GET',
+            headers: {
+                'ngrok-skip-browser-warning': 'true',
+                'Accept': 'text/event-stream',
+            },
+            signal: ctrl.signal,
+            onmessage(evt) {
+                try {
+                    const data: BuildEvent = JSON.parse(evt.data);
+                    if (data.type === 'ping') return;
+                    if (data.type === 'stream_end') {
+                        ctrl.abort();
+                        fetchResult(jid, data.status as any);
+                        return;
+                    }
+                    setEvents(prev => [...prev, data]);
+                    setJobStatus(data.type === 'error' ? 'failed' : 'running');
+                } catch { /* ignore parse errors */ }
+            },
+            onerror(err) {
+                ctrl.abort();
+                throw err;
+            }
+        });
     };
 
     const fetchResult = async (jid: string, status: string) => {
@@ -109,7 +118,7 @@ export const DesignStudio = () => {
     };
 
     const handleReset = () => {
-        esRef.current?.close();
+        abortCtrlRef.current?.abort();
         setPhase('prompt');
         setEvents([]);
         setResult(null);
@@ -124,7 +133,7 @@ export const DesignStudio = () => {
         if ('Notification' in window && Notification.permission === 'default') {
             Notification.requestPermission();
         }
-        return () => esRef.current?.close();
+        return () => abortCtrlRef.current?.abort();
     }, []);
 
     return (
