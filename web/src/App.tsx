@@ -13,11 +13,14 @@ const App = () => {
   const [designs, setDesigns] = useState<{ name: string, has_gds: boolean }[]>([]);
   const [selectedDesign, setSelectedDesign] = useState<string>('');
 
+  // Bypass Ngrok browser warning for all Axios requests
+  axios.defaults.headers.common['ngrok-skip-browser-warning'] = 'true';
+
   useEffect(() => {
-    const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+    const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
     axios.get(`${API_BASE_URL}/designs`)
       .then(res => {
-        const data = res.data.designs;
+        const data = res.data?.designs || [];
         setDesigns(data);
         if (data.length > 0) {
           const withGds = data.find((d: any) => d.has_gds);
