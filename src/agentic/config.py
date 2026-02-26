@@ -11,17 +11,10 @@ OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane")
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 
-# LLM backends (env-only secrets)
-NEMOTRON_CONFIG = {
-    "model": os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-nano-30b-a3b"),
+CLOUD_CONFIG = {
+    "model": os.environ.get("NVIDIA_MODEL", "deepseek-ai/deepseek-r1"),
     "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
     "api_key": os.environ.get("NVIDIA_API_KEY", ""),
-}
-
-GLM5_CONFIG = {
-    "model": os.environ.get("BACKUP_MODEL", "openai/z-ai/glm5"),
-    "base_url": os.environ.get("BACKUP_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("BACKUP_API_KEY", os.environ.get("NVIDIA_API_KEY", "")),
 }
 
 LOCAL_CONFIG = {
@@ -34,7 +27,7 @@ LOCAL_CONFIG = {
 }
 
 # Backward-compat alias used by parts of the codebase/docs
-NVIDIA_CONFIG = GLM5_CONFIG
+NVIDIA_CONFIG = CLOUD_CONFIG
 
 # Expose active defaults (CLI chooses concrete backend)
 LLM_MODEL = LOCAL_CONFIG["model"]

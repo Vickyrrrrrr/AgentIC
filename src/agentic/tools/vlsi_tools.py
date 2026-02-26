@@ -184,17 +184,17 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
     clean_code = re.sub(r'<explanation>.*?</explanation>', '', clean_code, flags=re.DOTALL)
 
     # Extract code from markdown fences robustly — try multiple fence formats
-    blocks = re.findall(r'```(?:verilog|systemverilog|sv|v)?\s*(.*?)```', clean_code, re.DOTALL | re.IGNORECASE)
+    blocks = re.findall(r'```(?:verilog|systemverilog|sv|v)?\s*(.*?)(?:```|$)', clean_code, re.DOTALL | re.IGNORECASE)
     if not blocks:
         # Try triple-backtick without language tag
-        blocks = re.findall(r'```\s*(.*?)```', clean_code, re.DOTALL)
+        blocks = re.findall(r'```\s*(.*?)(?:```|$)', clean_code, re.DOTALL)
     if not blocks:
         # Try indented code blocks (4+ spaces)
         indented = re.findall(r'(?:^    .+$\n?)+', clean_code, re.MULTILINE)
         if indented:
             blocks = [b.replace('    ', '', 1) for b in indented]
 
-    valid_blocks = [b.strip() for b in blocks if "module" in b and "endmodule" in b]
+    valid_blocks = [b.strip() for b in blocks if "module" in b]
     
     if valid_blocks:
         clean_code = "\n\n".join(valid_blocks)
@@ -215,6 +215,8 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
         end_idx = clean_code.rfind("endmodule")
         if end_idx != -1 and end_idx >= start_idx:
             clean_code = clean_code[start_idx:end_idx + 9]  # +9 for "endmodule"
+        else:
+            clean_code = clean_code[start_idx:]
     else:
         # Fallback to original raw code if extraction mangled it
         raw_clean = re.sub(r'<think>.*?</think>', '', code, flags=re.DOTALL)
@@ -224,6 +226,8 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
             end_idx = raw_clean.rfind("endmodule")
             if end_idx != -1 and end_idx >= start_idx:
                 clean_code = raw_clean[start_idx:end_idx + 9]
+            else:
+                clean_code = raw_clean[start_idx:]
     
     # Sanitize model artifacts and fix common issues
     # Remove model tokens like <｜begin▁of▁sentence｜>
@@ -241,6 +245,10 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
     clean_code = re.sub(r'^(Thought|Action|Observation|Final Answer):.*$', '', clean_code, flags=re.MULTILINE)
     # Remove lines that are purely natural language (no Verilog keywords)
     # Only strip if the line is before the first 'module'
+    
+    # Prevent Verilator syntax errors from normal comments starting with "verilator"
+    clean_code = re.sub(r'(?i)(//\s*)(verilator\b)', r'\1[\2]', clean_code)
+    clean_code = re.sub(r'(?i)(/\*\s*)(verilator\b)', r'\1[\2]', clean_code)
     module_pos = clean_code.find('module')
     if module_pos > 0:
         preamble = clean_code[:module_pos]
@@ -255,7 +263,7 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
     # --- VALIDATION ---
     if "module" not in clean_code:
         # Last resort: try to find module..endmodule in the ORIGINAL input
-        last_chance = re.search(r'(module\s+\w+[\s\S]*?endmodule)', code)
+        last_chance = re.search(r'(module\s+\w+[\s\S]*?(?:endmodule|$))', code)
         if last_chance:
             clean_code = last_chance.group(1)
         else:
@@ -275,6 +283,15 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
         clean_code = clean_code.replace(";", ";\n")
         clean_code = clean_code.replace(" begin ", " begin\n")
         clean_code = clean_code.replace(" end ", "\nend ")
+
+    # 5. Fix common LLM hallucination: semicolons instead of commas in module parameter lists
+    header_match = re.search(r'(module\s+[a-zA-Z0-9_]+\s*#\s*\([\s\S]*?\)\s*\()', clean_code)
+    if header_match:
+        header = header_match.group(1)
+        fixed_header = re.sub(r'(parameter\s+[^;]+);', r'\1,', header)
+        # Remove the trailing comma before the closing parenthesis, keeping any comments
+        fixed_header = re.sub(r',(\s*(?://[^\n]*\n\s*)?\)\s*\()', r'\1', fixed_header)
+        clean_code = clean_code.replace(header, fixed_header)
     
     try:
         # Verilator requires a newline at the end of the file

@@ -52,13 +52,12 @@ def _get_llm():
     """Mirrors CLI's get_llm() — tries cloud first, falls back to local.
     Priority: NVIDIA Nemotron → GLM5 Cloud → VeriReason Local
     """
-    from agentic.config import NEMOTRON_CONFIG, GLM5_CONFIG, LOCAL_CONFIG
+    from agentic.config import CLOUD_CONFIG, LOCAL_CONFIG
     from crewai import LLM
 
     configs = [
-        ("NVIDIA Nemotron Cloud", NEMOTRON_CONFIG),
-        ("Backup GLM5 Cloud",     GLM5_CONFIG),
-        ("VeriReason Local",      LOCAL_CONFIG),
+        ("Cloud Compute Engine",  CLOUD_CONFIG),
+        ("Local Compute Engine",      LOCAL_CONFIG),
     ]
 
     for name, cfg in configs:
@@ -68,22 +67,20 @@ def _get_llm():
             continue
         try:
             extra = {}
-            if "nemotron" in cfg["model"].lower():
-                extra = {"reasoning_budget": 16384,
-                         "chat_template_kwargs": {"enable_thinking": True}}
-            elif "glm5" in cfg["model"].lower():
+            if "glm5" in cfg["model"].lower():
                 extra = {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
 
             llm = LLM(
                 model=cfg["model"],
                 base_url=cfg["base_url"],
                 api_key=key if key and key not in ("NA", "") else "mock-key",
-                temperature=1.0,
-                top_p=1.0,
+                temperature=0.60,
+                top_p=0.95,
                 max_completion_tokens=16384,
                 max_tokens=16384,
                 timeout=300,
                 extra_body=extra,
+                model_kwargs={"top_k": 20, "min_p": 0.0, "presence_penalty": 0, "repetition_penalty": 1}
             )
             return llm, name
         except Exception:
@@ -137,7 +134,7 @@ def _run_agentic_build(job_id: str, design_name: str, description: str, skip_ope
 
         # Use smart LLM selection: Cloud first (Nemotron → GLM5) → Local fallback
         llm, llm_name = _get_llm()
-        _emit_event(job_id, "checkpoint", "INIT", f"🤖 LLM selected: {llm_name}", step=1)
+        _emit_event(job_id, "checkpoint", "INIT", f"🤖 AgentIC Compute Engine selected: {llm_name}", step=1)
 
         orchestrator = BuildOrchestrator(
             name=design_name,

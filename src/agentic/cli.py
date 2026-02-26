@@ -26,8 +26,7 @@ from .config import (
     LLM_API_KEY,
     NVIDIA_CONFIG,
     LOCAL_CONFIG,
-    NEMOTRON_CONFIG,
-    GLM5_CONFIG,
+    CLOUD_CONFIG,
     PDK,
     SIM_BACKEND_DEFAULT,
     COVERAGE_FALLBACK_POLICY_DEFAULT,
@@ -69,9 +68,8 @@ def get_llm():
     """
     
     configs = [
-        ("NVIDIA Nemotron Cloud", NEMOTRON_CONFIG),
-        ("Backup GLM5 Cloud", GLM5_CONFIG),
-        ("VeriReason Local", LOCAL_CONFIG),
+        ("Cloud Compute Engine", CLOUD_CONFIG),
+        ("Local Compute Engine", LOCAL_CONFIG),
     ]
     
     for name, cfg in configs:
@@ -85,12 +83,7 @@ def get_llm():
             console.print(f"[dim]Testing {name}...[/dim]")
             # Add extra parameters for reasoning models
             extra_t = {}
-            if "nemotron" in cfg["model"].lower():
-                extra_t = {
-                    "reasoning_budget": 16384,
-                    "chat_template_kwargs": {"enable_thinking": True}
-                }
-            elif "glm5" in cfg["model"].lower():
+            if "glm5" in cfg["model"].lower():
                  extra_t = {
                      "chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}
                  }
@@ -99,17 +92,18 @@ def get_llm():
                 model=cfg["model"],
                 base_url=cfg["base_url"],
                 api_key=key if key and key != "NA" else "mock-key", # Local LLMs might use mock-key
-                temperature=1.0,
-                top_p=1.0,
+                temperature=0.60,
+                top_p=0.95,
                 max_completion_tokens=16384,
                 max_tokens=16384,
                 timeout=300,
-                extra_body=extra_t
+                extra_body=extra_t,
+                model_kwargs={"top_k": 20, "min_p": 0.0, "presence_penalty": 0, "repetition_penalty": 1}
             )
-            console.print(f"[green]✓ Using {name} ({cfg['model']})[/green]")
+            console.print(f"[green]✓ AgentIC is working on your chip using {name}[/green]")
             return llm
         except Exception as e:
-            console.print(f"[yellow]⚠ {name} init failed: {e}[/yellow]")
+            console.print(f"[yellow]⚠ {name} init failed[/yellow]")
     
     # Critical Failure if both fail
     console.print(f"[bold red]CRITICAL: No valid LLM backend found.[/bold red]")

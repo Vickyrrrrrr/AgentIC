@@ -780,6 +780,9 @@ SPECIFICATION SECTIONS (Markdown):
 
         lines.extend(
             [
+                f"module {design_name}_tb;",
+                f"  {if_name} vif();",
+                "",
                 "class Transaction;",
                 "  rand bit [31:0] stimulus;",
                 "  bit has_x;",
@@ -826,7 +829,7 @@ SPECIFICATION SECTIONS (Markdown):
             if width:
                 lines.append(f"    vif.{pname} = $urandom;")
             else:
-                lines.append(f"    vif.{pname} = $urandom_range(0, 1);")
+                lines.append(f"    vif.{pname} = $random % 2;")
         lines.append("  endtask")
         lines.append("endclass")
         lines.append("")
@@ -887,9 +890,6 @@ SPECIFICATION SECTIONS (Markdown):
                 "    end",
                 "  endtask",
                 "endclass",
-                "",
-                f"module {design_name}_tb;",
-                f"  {if_name} vif();",
                 "",
             ]
         )

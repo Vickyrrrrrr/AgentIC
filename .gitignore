@@ -62,3 +62,11 @@ nodesource_setup.sh
 test_import.py
 test_signoff.py
 test_signoff2.py
+test_direct_call.py
+test_llm_call.py
+fix_recursion.py
+fix_subprocess.py
+test_tb.v
+benchmark_verieval.py
+*.jsonl
+scripts/remote_setup.sh
