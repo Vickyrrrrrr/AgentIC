@@ -69,3 +69,6 @@ fix_subprocess.py
 test_tb.v
 benchmark_verieval.py
 scripts/remote_setup.sh
+*.jsonl
+leaderboard.md
+verieval_results.json
