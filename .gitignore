@@ -68,5 +68,4 @@ fix_recursion.py
 fix_subprocess.py
 test_tb.v
 benchmark_verieval.py
-*.jsonl
 scripts/remote_setup.sh
