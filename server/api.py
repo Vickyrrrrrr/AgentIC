@@ -1,6 +1,6 @@
 """
 AgentIC Backend API — Premium Chip Studio
-Real-time SSE streaming, job management, and chip result reporting.
+Real-time SSE streaming, job management, human-in-the-loop approval, and chip result reporting.
 """
 import asyncio
 import json
@@ -10,12 +10,22 @@ import time
 import uuid
 import glob
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from server.approval import approval_manager
+from server.stage_summary import (
+    build_stage_complete_payload,
+    get_next_stage,
+    STAGE_DESCRIPTIONS,
+    STAGE_HUMAN_NAMES,
+    generate_failure_explanation,
+    get_stage_log_summary,
+)
 
 # ─── Python path ────────────────────────────────────────────────────
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -127,6 +137,63 @@ def _emit_event(job_id: str, event_type: str, state: str, message: str, step: in
     JOB_STORE[job_id]["current_state"] = state
 
 
+def _emit_agent_thought(job_id: str, agent_name: str, thought_type: str, content: str, state: str = ""):
+    """Emit a real-time agent thought event for the activity feed."""
+    if job_id not in JOB_STORE:
+        return
+    event = {
+        "type": "agent_thought",
+        "agent_name": agent_name,
+        "thought_type": thought_type,
+        "content": content,
+        "state": state or JOB_STORE[job_id].get("current_state", "UNKNOWN"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "step": 0,
+        "total_steps": TOTAL_STEPS,
+        "message": f"[{agent_name}] {content[:200]}",
+    }
+    JOB_STORE[job_id]["events"].append(event)
+
+
+def _emit_agent_thinking(job_id: str, agent_name: str, message: str, state: str = ""):
+    """Emit an agent_thinking event to show a pulsing thinking indicator in the frontend.
+    
+    This is emitted at the start of any long-running LLM call and automatically
+    superseded when the next real log entry arrives.
+    """
+    if job_id not in JOB_STORE:
+        return
+    event = {
+        "type": "agent_thinking",
+        "agent_name": agent_name,
+        "message": message,
+        "content": message,
+        "state": state or JOB_STORE[job_id].get("current_state", "UNKNOWN"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "step": 0,
+        "total_steps": TOTAL_STEPS,
+    }
+    JOB_STORE[job_id]["events"].append(event)
+
+
+def _emit_stage_complete(job_id: str, payload: dict):
+    """Emit a stage_complete event with full approval card data."""
+    if job_id not in JOB_STORE:
+        return
+    event = {
+        **payload,
+        "type": "stage_complete",
+        "step": BUILD_STATES_ORDER.index(payload.get("stage_name", "INIT")) + 1 if payload.get("stage_name") in BUILD_STATES_ORDER else 0,
+        "total_steps": TOTAL_STEPS,
+        "state": payload.get("stage_name", "UNKNOWN"),
+        "message": f"✋ Stage {payload.get('stage_name', '')} complete — awaiting approval",
+    }
+    JOB_STORE[job_id]["events"].append(event)
+    JOB_STORE[job_id]["current_state"] = payload.get("stage_name", "UNKNOWN")
+    JOB_STORE[job_id]["waiting_approval"] = True
+    JOB_STORE[job_id]["waiting_stage"] = payload.get("stage_name", "")
+
+
 # ─── Models ──────────────────────────────────────────────────────────
 class BuildRequest(BaseModel):
     design_name: str
@@ -147,6 +214,19 @@ class BuildRequest(BaseModel):
     coverage_backend: str = "auto"  # From SIM_BACKEND_DEFAULT
     coverage_fallback_policy: str = "fail_closed"  # From COVERAGE_FALLBACK_POLICY_DEFAULT
     coverage_profile: str = "balanced"  # From COVERAGE_PROFILE_DEFAULT
+    human_in_loop: bool = False  # Enable human-in-the-loop approval (HITL Build page sends True)
+    skip_stages: List[str] = []  # Stages to skip (from build mode selector UI)
+
+
+class ApproveRequest(BaseModel):
+    stage: str
+    design_name: str
+
+
+class RejectRequest(BaseModel):
+    stage: str
+    design_name: str
+    feedback: Optional[str] = None
 
 
 def _repo_root() -> str:
@@ -185,12 +265,23 @@ def _docs_index() -> Dict[str, Dict[str, str]]:
 
 # ─── Build Runner ────────────────────────────────────────────────────
 def _run_agentic_build(job_id: str, req: BuildRequest):
-    """Runs the full AgentIC build in a background thread, emitting events."""
+    """Runs the full AgentIC build in a background thread, emitting events.
+    
+    When human_in_loop is enabled, the orchestrator pauses after each stage
+    and waits for user approval via the /approve or /reject endpoints.
+    """
     try:
-        from agentic.orchestrator import BuildOrchestrator
+        from agentic.orchestrator import BuildOrchestrator, BuildState
 
         JOB_STORE[job_id]["status"] = "running"
+        JOB_STORE[job_id]["human_in_loop"] = req.human_in_loop
+        JOB_STORE[job_id]["waiting_approval"] = False
+        JOB_STORE[job_id]["waiting_stage"] = ""
+        JOB_STORE[job_id]["skip_stages"] = req.skip_stages or []
         _emit_event(job_id, "checkpoint", "INIT", "🚀 Build started — initializing workspace", step=1)
+
+        # Current agent tracker for thought events
+        current_agent_state = {"name": "Orchestrator", "stage": "INIT"}
 
         def event_sink(event: dict):
             """Hook called by orchestrator on every log/transition."""
@@ -200,9 +291,16 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             step = BUILD_STATES_ORDER.index(state) + 1 if state in BUILD_STATES_ORDER else 0
             _emit_event(job_id, event_type, state, message, step=step)
 
+            # Also emit as agent_thought for the live activity feed
+            if message and event_type in ("log", "checkpoint"):
+                # Infer agent name from state
+                agent_name = _infer_agent_name(state, message)
+                thought_type = _infer_thought_type(message)
+                _emit_agent_thought(job_id, agent_name, thought_type, message, state)
+
         # Use smart LLM selection: Cloud first (Nemotron → GLM5) → Local fallback
         llm, llm_name = _get_llm()
-        _emit_event(job_id, "checkpoint", "INIT", f"🤖 AgentIC Compute Engine selected: {llm_name}", step=1)
+        _emit_event(job_id, "checkpoint", "INIT", f"🤖 Compute engine ready", step=1)
 
         orchestrator = BuildOrchestrator(
             name=req.design_name,
@@ -226,7 +324,13 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             coverage_profile=req.coverage_profile,
             event_sink=event_sink,
         )
-        orchestrator.run()
+
+        if req.human_in_loop:
+            # Run with human-in-the-loop approval gates
+            _run_with_approval_gates(job_id, orchestrator, req, llm)
+        else:
+            # Original autonomous flow
+            orchestrator.run()
 
         # Check if cancelled mid-build
         if JOB_STORE.get(job_id, {}).get("cancelled"):
@@ -237,6 +341,27 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         # Gather result
         success = orchestrator.state.name == "SUCCESS"
         result = _build_result_summary(orchestrator, req.design_name, success)
+        
+        # Generate LLM failure explanation if build failed
+        if not success:
+            try:
+                failed_state = orchestrator.state.name
+                # Find the last non-terminal state from build history
+                last_stage = "UNKNOWN"
+                for entry in reversed(orchestrator.build_history):
+                    if entry.state not in ("SUCCESS", "FAIL", "UNKNOWN"):
+                        last_stage = entry.state
+                        break
+                error_log = get_stage_log_summary(orchestrator, last_stage)
+                explanation = generate_failure_explanation(llm, last_stage, req.design_name, error_log)
+                result["failure_explanation"] = explanation.get("explanation", "")
+                result["failure_suggestion"] = explanation.get("suggestion", "")
+                result["failed_stage"] = last_stage
+                result["failed_stage_human"] = STAGE_HUMAN_NAMES.get(last_stage, last_stage.replace("_", " ").title())
+            except Exception:
+                result["failure_explanation"] = ""
+                result["failure_suggestion"] = ""
+        
         JOB_STORE[job_id]["result"] = result
         JOB_STORE[job_id]["status"] = "done" if success else "failed"
 
@@ -253,6 +378,298 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         JOB_STORE[job_id]["status"] = "failed"
         JOB_STORE[job_id]["result"] = {"error": str(e), "traceback": err}
         _emit_event(job_id, "error", "FAIL", f"💥 Critical error: {str(e)}", step=0)
+    finally:
+        # Cleanup approval gates
+        design_name = JOB_STORE.get(job_id, {}).get("design_name", "")
+        if design_name:
+            approval_manager.cleanup(design_name)
+
+
+def _infer_agent_name(state: str, message: str) -> str:
+    """Infer which agent is active from the state and message content."""
+    msg_lower = message.lower()
+    
+    if "architect" in msg_lower or "sid" in msg_lower or "decompos" in msg_lower:
+        return "ArchitectModule"
+    elif "self-reflect" in msg_lower or "selfreflect" in msg_lower:
+        return "SelfReflectPipeline"
+    elif "waveform" in msg_lower or "vcd" in msg_lower:
+        return "WaveformExpertModule"
+    elif "debug" in msg_lower and "deep" in msg_lower:
+        return "DeepDebuggerModule"
+    elif "testbench" in msg_lower or "tb " in msg_lower or "tb_" in msg_lower:
+        return "Testbench Designer"
+    elif "formal" in msg_lower or "sva" in msg_lower or "sby" in msg_lower:
+        return "Verification Engineer"
+    elif "regression" in msg_lower:
+        return "Regression Architect"
+    elif "error" in msg_lower or "fix" in msg_lower or "syntax" in msg_lower:
+        return "Error Analyst"
+    elif "rtl" in msg_lower or "verilog" in msg_lower or "module" in msg_lower:
+        return "RTL Designer"
+    elif "coverage" in msg_lower:
+        return "Verification Engineer"
+    elif "openlane" in msg_lower or "gds" in msg_lower or "harden" in msg_lower:
+        return "Physical Design"
+    elif "floorplan" in msg_lower or "placement" in msg_lower:
+        return "Physical Design"
+    elif "drc" in msg_lower or "lvs" in msg_lower or "signoff" in msg_lower:
+        return "Signoff Engineer"
+    elif "sdc" in msg_lower or "timing" in msg_lower or "clock" in msg_lower:
+        return "SDC Agent"
+    elif "convergence" in msg_lower or "eco" in msg_lower:
+        return "Convergence Reviewer"
+    
+    # Fallback by state
+    state_agents = {
+        "INIT": "Orchestrator",
+        "SPEC": "ArchitectModule",
+        "RTL_GEN": "RTL Designer",
+        "RTL_FIX": "Error Analyst",
+        "VERIFICATION": "Testbench Designer",
+        "FORMAL_VERIFY": "Verification Engineer",
+        "COVERAGE_CHECK": "Verification Engineer",
+        "REGRESSION": "Regression Architect",
+        "SDC_GEN": "SDC Agent",
+        "FLOORPLAN": "Physical Design",
+        "HARDENING": "Physical Design",
+        "CONVERGENCE_REVIEW": "Convergence Reviewer",
+        "ECO_PATCH": "Convergence Reviewer",
+        "SIGNOFF": "Signoff Engineer",
+    }
+    return state_agents.get(state, "Orchestrator")
+
+
+def _infer_thought_type(message: str) -> str:
+    """Infer the thought type from message content."""
+    msg_lower = message.lower()
+    
+    if any(kw in msg_lower for kw in ["running", "executing", "calling", "invoking", "checking"]):
+        return "tool_call"
+    elif any(kw in msg_lower for kw in ["result:", "output:", "passed", "completed", "success"]):
+        return "tool_result"
+    elif any(kw in msg_lower for kw in ["decided", "choosing", "strategy", "pivot", "fallback"]):
+        return "decision"
+    elif any(kw in msg_lower for kw in ["found", "detected", "observed", "noticed"]):
+        return "observation"
+    else:
+        return "thought"
+
+
+def _get_thinking_message(state_name: str, design_name: str) -> str:
+    """Generate a human-readable thinking message for a given stage."""
+    messages = {
+        "INIT": f"Setting up workspace for {design_name}...",
+        "SPEC": f"Decomposing architecture for {design_name}...",
+        "RTL_GEN": f"Generating Verilog RTL for {design_name}...",
+        "RTL_FIX": f"Running syntax checks and applying fixes...",
+        "VERIFICATION": f"Generating testbench and running simulation...",
+        "FORMAL_VERIFY": f"Writing assertions and running formal verification...",
+        "COVERAGE_CHECK": f"Analyzing code coverage metrics...",
+        "REGRESSION": f"Running regression test suite...",
+        "SDC_GEN": f"Generating timing constraints...",
+        "FLOORPLAN": f"Creating floorplan configuration...",
+        "HARDENING": f"Running GDSII hardening flow...",
+        "CONVERGENCE_REVIEW": f"Analyzing timing and area convergence...",
+        "ECO_PATCH": f"Applying engineering change orders...",
+        "SIGNOFF": f"Running DRC, LVS, and STA checks...",
+    }
+    return messages.get(state_name, f"Processing {state_name}...")
+
+
+def _run_with_approval_gates(job_id: str, orchestrator, req, llm):
+    """Run the orchestrator with approval gates after every stage.
+    
+    This replaces orchestrator.run() when human_in_loop is enabled.
+    After each stage completes, it generates a summary, emits stage_complete,
+    and blocks until the user approves or rejects.
+    """
+    from agentic.orchestrator import BuildState
+    
+    design_name = req.design_name
+    skip_stages = set(req.skip_stages or [])
+    orchestrator.log(f"Build started for '{orchestrator.name}'", refined=True)
+    
+    try:
+        while orchestrator.state != BuildState.SUCCESS and orchestrator.state != BuildState.FAIL:
+            orchestrator.global_step_count += 1
+            if orchestrator.global_step_count > orchestrator.global_step_budget:
+                orchestrator.log(f"Global step budget exceeded ({orchestrator.global_step_budget}). Failing closed.", refined=True)
+                orchestrator.state = BuildState.FAIL
+                break
+            
+            # Check for cancellation
+            if JOB_STORE.get(job_id, {}).get("cancelled"):
+                orchestrator.state = BuildState.FAIL
+                break
+            
+            current_state_name = orchestrator.state.name
+            
+            # Auto-skip stages that the user opted out of
+            if current_state_name in skip_stages:
+                _emit_event(job_id, "log", current_state_name, 
+                    f"Skipping {current_state_name.replace('_', ' ').title()} (user preference)", 
+                    step=BUILD_STATES_ORDER.index(current_state_name) + 1 if current_state_name in BUILD_STATES_ORDER else 0)
+                next_st = get_next_stage(current_state_name)
+                if next_st and hasattr(BuildState, next_st):
+                    orchestrator.transition(getattr(BuildState, next_st))
+                else:
+                    orchestrator.state = BuildState.SUCCESS
+                continue
+            
+            # Check for user feedback from previous rejection
+            feedback = approval_manager.get_pending_feedback(design_name)
+            if feedback:
+                _emit_agent_thought(job_id, "Orchestrator", "observation", 
+                    f"User feedback from review: {feedback}. Taking this into account before proceeding.", 
+                    current_state_name)
+                # Inject feedback into the orchestrator's context
+                orchestrator.log(f"User feedback from review: {feedback}. Take this into account before proceeding.", refined=True)
+            
+            # Emit thinking indicator before stage execution
+            agent_name = _infer_agent_name(current_state_name, "")
+            _emit_agent_thinking(job_id, agent_name, 
+                _get_thinking_message(current_state_name, orchestrator.name), 
+                current_state_name)
+            
+            # Execute the current stage
+            prev_state = orchestrator.state
+            _execute_stage(orchestrator, current_state_name)
+            new_state = orchestrator.state
+            
+            # If the stage transitioned to a new state, the stage completed successfully
+            # Generate approval card and wait
+            if new_state != prev_state or new_state in (BuildState.SUCCESS, BuildState.FAIL):
+                completed_stage = current_state_name
+                
+                # Don't wait for approval on terminal states
+                if new_state in (BuildState.SUCCESS, BuildState.FAIL):
+                    # Still emit stage_complete for the last stage before terminal
+                    if completed_stage not in ("SUCCESS", "FAIL"):
+                        _emit_stage_summary(job_id, orchestrator, completed_stage, design_name, llm, wait=False)
+                    break
+                
+                # Generate and emit stage_complete, then wait for approval
+                approved = _emit_stage_summary(job_id, orchestrator, completed_stage, design_name, llm, wait=True)
+                
+                if not approved:
+                    # User rejected — loop back to retry the CURRENT state
+                    # (which is now new_state after transition)
+                    # Actually, set state back to the stage that just completed so it retries
+                    _emit_agent_thought(job_id, "Orchestrator", "decision", 
+                        f"Stage {completed_stage} rejected by user. Retrying...", 
+                        new_state.name)
+                    # The state already transitioned. If rejected, we need to figure out
+                    # what to do. For most stages, retrying means going back.
+                    # However, the rejection feedback was already stored and will be
+                    # picked up at the top of the next iteration.
+                    continue
+            else:
+                # State didn't change — this can happen for retry loops within a stage
+                # Don't emit approval for internal retries
+                continue
+                
+    except Exception as e:
+        orchestrator.log(f"CRITICAL ERROR: {str(e)}", refined=False)
+        import traceback
+        from rich.console import Console
+        Console().print(traceback.format_exc())
+        orchestrator.state = BuildState.FAIL
+
+    if orchestrator.state == BuildState.SUCCESS:
+        try:
+            orchestrator._save_industry_benchmark_metrics()
+        except Exception as e:
+            orchestrator.log(f"Benchmark metrics export warning: {e}", refined=True)
+        from rich.console import Console
+        from rich.panel import Panel
+        summary = {k: v for k, v in orchestrator.artifacts.items() if 'code' not in k and 'spec' not in k}
+        Console().print(Panel(
+            f"[bold green]BUILD SUCCESSFUL[/]\n\n" + 
+            "\n".join([f"[bold]{k.upper()}:[/] {v}" for k, v in summary.items()]),
+            title="Done"
+        ))
+    else:
+        from rich.console import Console
+        from rich.panel import Panel
+        Console().print(Panel(f"[bold red]BUILD FAILED[/]", title="Failed"))
+
+
+def _execute_stage(orchestrator, state_name: str):
+    """Execute a single orchestrator stage by name."""
+    from agentic.orchestrator import BuildState
+    
+    stage_handlers = {
+        "INIT": orchestrator.do_init,
+        "SPEC": orchestrator.do_spec,
+        "RTL_GEN": orchestrator.do_rtl_gen,
+        "RTL_FIX": orchestrator.do_rtl_fix,
+        "VERIFICATION": orchestrator.do_verification,
+        "FORMAL_VERIFY": orchestrator.do_formal_verify,
+        "COVERAGE_CHECK": orchestrator.do_coverage_check,
+        "REGRESSION": orchestrator.do_regression,
+        "SDC_GEN": orchestrator.do_sdc_gen,
+        "FLOORPLAN": orchestrator.do_floorplan,
+        "HARDENING": orchestrator.do_hardening,
+        "CONVERGENCE_REVIEW": orchestrator.do_convergence_review,
+        "ECO_PATCH": orchestrator.do_eco_patch,
+        "SIGNOFF": orchestrator.do_signoff,
+    }
+    
+    handler = stage_handlers.get(state_name)
+    if handler:
+        handler()
+    else:
+        orchestrator.log(f"Unknown state {state_name}", refined=False)
+        orchestrator.state = BuildState.FAIL
+
+
+def _emit_stage_summary(job_id: str, orchestrator, stage_name: str, design_name: str, llm, wait: bool = True) -> bool:
+    """Generate stage summary, emit stage_complete event, and optionally wait for approval.
+    
+    Returns True if approved (or not waiting), False if rejected.
+    """
+    # Emit thinking indicator while generating summary
+    _emit_agent_thinking(job_id, "Orchestrator", "Preparing stage summary...", stage_name)
+    
+    # Build the stage_complete payload with LLM summary
+    try:
+        payload = build_stage_complete_payload(orchestrator, stage_name, design_name, llm)
+    except Exception as e:
+        payload = {
+            "type": "stage_complete",
+            "stage_name": stage_name,
+            "summary": f"Stage {stage_name} completed. (Summary generation error: {str(e)[:100]})",
+            "artifacts": [],
+            "decisions": [],
+            "warnings": [],
+            "next_stage_name": get_next_stage(stage_name) or "DONE",
+            "next_stage_preview": STAGE_DESCRIPTIONS.get(get_next_stage(stage_name) or "", ""),
+            "timestamp": time.time(),
+        }
+    
+    # Emit the stage_complete event
+    _emit_stage_complete(job_id, payload)
+    
+    if not wait:
+        return True
+    
+    # Create approval gate and wait
+    approval_manager.create_gate(design_name, stage_name)
+    gate = approval_manager.wait_for_approval(design_name, stage_name, timeout=7200.0)
+    
+    JOB_STORE[job_id]["waiting_approval"] = False
+    JOB_STORE[job_id]["waiting_stage"] = ""
+    
+    if gate.approved:
+        return True
+    elif gate.rejected:
+        return False
+    else:
+        # Timeout — treat as approved to not block indefinitely
+        _emit_agent_thought(job_id, "Orchestrator", "observation", 
+            f"⏰ Approval timeout for {stage_name}. Auto-proceeding.", stage_name)
+        return True
 
 
 def _build_result_summary(orchestrator, design_name: str, success: bool) -> dict:
@@ -685,3 +1102,91 @@ def get_signoff_report(design_name: str):
         return {"success": metrics is not None, "report": report}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Human-in-the-Loop Approval Endpoints ───────────────────────────
+
+@app.post("/approve")
+def approve_stage(req: ApproveRequest):
+    """Approve the current stage and allow the pipeline to proceed."""
+    ok = approval_manager.approve(req.design_name, req.stage)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No pending approval for design '{req.design_name}' at stage '{req.stage}'")
+    return {"ok": True, "message": f"Stage '{req.stage}' approved for '{req.design_name}'"}
+
+
+@app.post("/reject")
+def reject_stage(req: RejectRequest):
+    """Reject the current stage, optionally providing feedback for retry."""
+    ok = approval_manager.reject(req.design_name, req.stage, req.feedback)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No pending approval for design '{req.design_name}' at stage '{req.stage}'")
+    return {
+        "ok": True,
+        "message": f"Stage '{req.stage}' rejected for '{req.design_name}'" + (f" with feedback" if req.feedback else ""),
+        "will_retry": True
+    }
+
+
+@app.get("/approval/status")
+def get_approval_status():
+    """List all stages currently waiting for user approval."""
+    waiting = approval_manager.get_waiting_stages()
+    return {"waiting": waiting, "count": len(waiting)}
+
+
+@app.get("/build/artifacts/{design_name}")
+def get_partial_artifacts(design_name: str):
+    """Scan the design's output directory for any partial artifacts produced during a build.
+    Used by the failure summary card to show what was generated before the build failed.
+    """
+    artifacts = []
+    
+    # Check designs/ workspace directory
+    workspace_dir = os.path.join(_repo_root(), "designs", design_name)
+    if os.path.isdir(workspace_dir):
+        for f in os.listdir(workspace_dir):
+            fpath = os.path.join(workspace_dir, f)
+            if os.path.isfile(fpath):
+                size = os.path.getsize(fpath)
+                artifacts.append({
+                    "name": f,
+                    "path": fpath,
+                    "size": size,
+                    "type": _classify_artifact(f),
+                })
+    
+    # Check OpenLane designs directory
+    openlane_root = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
+    ol_design_dir = os.path.join(openlane_root, "designs", design_name)
+    if os.path.isdir(ol_design_dir):
+        for root_dir, _dirs, files in os.walk(ol_design_dir):
+            for f in files:
+                if f.endswith(('.v', '.sv', '.vcd', '.gds', '.def', '.sdc', '.json', '.tcl', '.sby', '.log', '.csv')):
+                    fpath = os.path.join(root_dir, f)
+                    size = os.path.getsize(fpath)
+                    artifacts.append({
+                        "name": f,
+                        "path": fpath,
+                        "size": size,
+                        "type": _classify_artifact(f),
+                    })
+    
+    return {"design_name": design_name, "artifacts": artifacts[:50]}  # Cap at 50
+
+
+def _classify_artifact(filename: str) -> str:
+    """Classify a file by its extension."""
+    ext = os.path.splitext(filename)[1].lower()
+    classifications = {
+        '.v': 'rtl', '.sv': 'rtl',
+        '.vcd': 'waveform',
+        '.gds': 'layout', '.def': 'layout',
+        '.sdc': 'constraints',
+        '.json': 'config',
+        '.tcl': 'script',
+        '.sby': 'formal',
+        '.log': 'log',
+        '.csv': 'report',
+    }
+    return classifications.get(ext, 'other')

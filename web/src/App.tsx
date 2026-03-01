@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { Dashboard } from './pages/Dashboard';
 import { DesignStudio } from './pages/DesignStudio';
+import { HumanInLoopBuild } from './pages/HumanInLoopBuild';
 import { Benchmarking } from './pages/Benchmarking';
 import { Fabrication } from './pages/Fabrication';
 import { Documentation } from './pages/Documentation';
@@ -42,6 +43,7 @@ const App = () => {
     () => [
       { name: 'Home', icon: '🏠' },
       { name: 'Design Studio', icon: '⚡' },
+      { name: 'HITL Build', icon: '🧑‍💻' },
       { name: 'Dashboard', icon: '📊' },
       { name: 'Documentation', icon: '📚' },
       { name: 'Benchmarking', icon: '📈' },
@@ -211,6 +213,7 @@ const App = () => {
 
           {selectedPage === 'Dashboard' && <Dashboard selectedDesign={selectedDesign} />}
           {selectedPage === 'Design Studio' && <DesignStudio />}
+          {selectedPage === 'HITL Build' && <HumanInLoopBuild />}
           {selectedPage === 'Documentation' && <Documentation />}
           {selectedPage === 'Benchmarking' && <Benchmarking selectedDesign={selectedDesign} />}
           {selectedPage === 'Fabrication' && (
