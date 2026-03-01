@@ -7,49 +7,99 @@ interface BenchmarkingProps {
 export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) => {
     return (
         <div className="page-container">
-            <h2 style={{ fontFamily: 'Orbitron', color: '#00FF88' }}>📊 Market Benchmarking: {selectedDesign || 'No Design'}</h2>
-            <p style={{ color: '#888' }}>Compare your AgentIC generated RTL models against established industry IP cores.</p>
+            <h2 className="app-title">📊 Market Benchmarking: {selectedDesign || 'No Design'}</h2>
+            <p className="app-subtitle">Compare AgentIC-generated flows against conventional enterprise chip flows.</p>
 
-            <div className="sci-fi-card">
-                <h3 style={{ color: '#E0E0E0' }}>Cost & Efficiency Analysis</h3>
-                <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', marginTop: '10px' }}>
+            <div className="sci-fi-card" style={{ marginBottom: '1.5rem' }}>
+                <h3>Cost & Efficiency Analysis</h3>
+                <table className="enterprise-table" style={{ marginTop: '10px' }}>
                     <thead>
-                        <tr style={{ borderBottom: '1px solid #333', color: '#00D1FF' }}>
-                            <th style={{ padding: '10px' }}>Metric</th>
-                            <th style={{ padding: '10px' }}>AgentIC AI</th>
-                            <th style={{ padding: '10px' }}>Cadence/Synopsys Flow</th>
+                        <tr>
+                            <th>Metric</th>
+                            <th>AgentIC</th>
+                            <th>Traditional Flow</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td style={{ padding: '10px', color: '#888' }}>RTL to GDSII Time</td>
-                            <td style={{ padding: '10px', color: '#00FF88' }}>~15 Minutes</td>
-                            <td style={{ padding: '10px' }}>Days/Weeks</td>
-                        </tr>
-                        <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
-                            <td style={{ padding: '10px', color: '#888' }}>PPA Analysis Acc.</td>
-                            <td style={{ padding: '10px', color: '#00FF88' }}>AgentIC Predictive Check (95% ± 5% Correlation)</td>
-                            <td style={{ padding: '10px' }}>Cadence Innovus Ground Truth</td>
+                            <td>RTL to GDSII Time</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>~15 Minutes</td>
+                            <td>Days/Weeks</td>
                         </tr>
                         <tr>
-                            <td style={{ padding: '10px', color: '#888' }}>Log Triage</td>
-                            <td style={{ padding: '10px', color: '#00FF88' }}>Automated LLM Parsing</td>
-                            <td style={{ padding: '10px' }}>Manual Grepping</td>
-                        </tr>
-                        <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
-                            <td style={{ padding: '10px', color: '#888' }}>Workflow Friction</td>
-                            <td style={{ padding: '10px', color: '#00FF88' }}>Single `main.py` entry</td>
-                            <td style={{ padding: '10px' }}>TCL Scripts & Makefiles</td>
+                            <td>Spec Decomposition</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>ArchitectModule SID (automated)</td>
+                            <td>Manual architecture review (weeks)</td>
                         </tr>
                         <tr>
-                            <td style={{ padding: '10px', color: '#888' }}>Licensing Cost</td>
-                            <td style={{ padding: '10px', color: '#00FF88' }}>Free (Open Source) + API</td>
-                            <td style={{ padding: '10px' }}>$1M+ per seat</td>
+                            <td>Verification Methodology</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Multi-agent diagnosis (5-class)</td>
+                            <td>Manual waveform debugging</td>
                         </tr>
                         <tr>
-                            <td style={{ padding: '10px', color: '#888' }}>DRC / LVS Violations</td>
-                            <td style={{ padding: '10px', color: '#00FF88' }}>0 (Auto-Fixing)</td>
-                            <td style={{ padding: '10px' }}>Depends on Engineer</td>
+                            <td>Agent Collaboration</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>12 agents with tools + Crews</td>
+                            <td>Siloed engineer teams</td>
+                        </tr>
+                        <tr>
+                            <td>Self-Healing</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>SelfReflectPipeline + convergence</td>
+                            <td>Manual iteration</td>
+                        </tr>
+                        <tr>
+                            <td>Log Triage</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Automated LLM Parsing</td>
+                            <td>Manual Grepping</td>
+                        </tr>
+                        <tr>
+                            <td>Licensing Cost</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Open Source + API</td>
+                            <td>$1M+ / seat</td>
+                        </tr>
+                        <tr>
+                            <td>DRC / LVS Violations</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Auto-heal assisted</td>
+                            <td>Manual closure process</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="sci-fi-card">
+                <h3>Core Module Architecture</h3>
+                <table className="enterprise-table" style={{ marginTop: '10px' }}>
+                    <thead>
+                        <tr>
+                            <th>Module</th>
+                            <th>Based On</th>
+                            <th>Stage</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style={{ fontWeight: 600 }}>ArchitectModule</td>
+                            <td>Spec2RTL-Agent</td>
+                            <td>SPEC → SID JSON decomposition</td>
+                        </tr>
+                        <tr>
+                            <td style={{ fontWeight: 600 }}>ReActAgent</td>
+                            <td>Yao et al., 2023</td>
+                            <td>Thought→Action→Observation loops</td>
+                        </tr>
+                        <tr>
+                            <td style={{ fontWeight: 600 }}>SelfReflectPipeline</td>
+                            <td>Self-Reflection Retry</td>
+                            <td>HARDENING with convergence tracking</td>
+                        </tr>
+                        <tr>
+                            <td style={{ fontWeight: 600 }}>DeepDebuggerModule</td>
+                            <td>FVDebug</td>
+                            <td>Formal — causal graphs + For-and-Against</td>
+                        </tr>
+                        <tr>
+                            <td style={{ fontWeight: 600 }}>WaveformExpertModule</td>
+                            <td>VerilogCoder</td>
+                            <td>VCD + AST back-trace diagnosis</td>
                         </tr>
                     </tbody>
                 </table>

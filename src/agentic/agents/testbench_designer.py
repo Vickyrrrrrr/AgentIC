@@ -1,5 +1,6 @@
 # agents/testbench_designer.py
 from crewai import Agent
+from ..tools.vlsi_tools import syntax_check_tool, read_file_tool
 
 TB_UNIVERSAL_RULES = """
 TESTBENCH UNIVERSAL RULES (must follow for ANY chip type):
@@ -68,26 +69,23 @@ def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
     else:
         role = "UVM Verification Lead"
         backstory = f"""You are a Senior Verification Engineer at a top semiconductor firm.
-        Your goal is 100% Functional Coverage. You do NOT write simple directed tests.
+        Your goal is 100% Functional Coverage with Verilator-compatible output.
+
+        CRITICAL: Your target compiler is Verilator 5.0+.
+        Verilator does NOT support: classes, interfaces, covergroups, program blocks, virtual, new(), rand.
+        You MUST use FLAT PROCEDURAL SystemVerilog only.
 
         Your Methodology:
-        1. **Constrained Random Verification**: Use 'rand' classes to generate corner-case stimuli.
+        1. **Flat Procedural TB**: Use reg/wire declarations, initial blocks, and direct signal driving.
+        2. **Randomized Stimulus**: Use $urandom for random data generation (Verilator-safe).
+        3. **Self-Checking**: Compare DUT outputs against expected values with if-statements.
+        4. **Error Tracking**: Use `integer fail_count;` — increment on each check failure.
+        5. **PASS/FAIL**: Print "TEST PASSED" if fail_count==0, "TEST FAILED" otherwise.
+        6. **Timeout Watchdog**: Always add `initial begin #100000; $display("TEST FAILED: Timeout"); $finish; end`
+        7. **Waveform Dump**: Always add $dumpfile/$dumpvars.
 
-        2. **CRITICAL — Bottom-Up Compilation Order** (must follow exactly to avoid syntax errors):
-             a. 'interface' definition (ports, clocking blocks)
-             b. 'class Transaction' (No dependencies)
-             c. 'class Driver'  (depends on Transaction + interface)
-             d. 'class Monitor' (depends on Transaction + interface)
-             e. 'class Scoreboard' (depends on Transaction)
-             f. 'class Environment' (depends on Driver, Monitor, Scoreboard)
-             g. 'module <design_name>_tb' — The top-level (no 'program' blocks)
-
-        3. **Self-Checking**: TB MUST print "TEST PASSED" or "TEST FAILED". No waveform reliance.
-        4. **Coverage**: Use 'covergroup' with 'bins' for all states and transitions.
-        5. **Strict Gate Contract**:
-           - Include Transaction, Driver (or Monitor), and Scoreboard classes.
-           - Explicit PASS/FAIL markers required.
-           - Return only complete, compilable testbench code.
+        NEVER USE: interface, class, virtual, covergroup, coverpoint, program, new(), rand, constraint.
+        These are NOT supported by Verilator and will cause immediate compile failure.
 
 {TB_UNIVERSAL_RULES}
         """
@@ -98,5 +96,6 @@ def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         backstory=backstory,
         llm=llm,
         verbose=verbose,
-        allow_delegation=False
+        allow_delegation=False,
+        tools=[syntax_check_tool, read_file_tool]
     )

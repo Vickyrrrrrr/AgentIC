@@ -11,13 +11,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ selectedDesign }) => {
     });
     const [signoffData, setSignoffData] = useState<{ report: string, pass: boolean | null }>({ report: 'Fetching full sign-off analysis...', pass: null });
     const [loading, setLoading] = useState(false);
+    const [recentJobs, setRecentJobs] = useState<any[]>([]);
 
     useEffect(() => {
         if (!selectedDesign) return;
         setLoading(true);
 
-        // Fetch Quick Metrics
         const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+
+        // Fetch Quick Metrics
         axios.get(`${API_BASE_URL}/metrics/${selectedDesign}`)
             .then(res => {
                 if (res.data.metrics) setMetrics(res.data.metrics);
@@ -36,52 +38,128 @@ export const Dashboard: React.FC<DashboardProps> = ({ selectedDesign }) => {
             })
             .finally(() => setLoading(false));
 
+        // Fetch recent jobs
+        axios.get(`${API_BASE_URL}/jobs`)
+            .then(res => {
+                const jobs = (res.data?.jobs || [])
+                    .filter((j: any) => j.design_name === selectedDesign)
+                    .slice(0, 5);
+                setRecentJobs(jobs);
+            })
+            .catch(() => setRecentJobs([]));
+
     }, [selectedDesign]);
+
+    const statusColor = (status: string) => {
+        if (status === 'done') return 'var(--success)';
+        if (status === 'failed') return 'var(--fail)';
+        if (status === 'running') return 'var(--accent)';
+        return 'var(--text-dim)';
+    };
 
     return (
         <div className="page-container">
             <div className="header-container">
                 <h2 className="app-title">📡 Mission Control: {selectedDesign || 'No Design'}</h2>
+                <p className="app-subtitle">Silicon metrics, signoff analysis, and agent intelligence for this design.</p>
             </div>
 
-            {loading ? <div style={{ color: '#00D1FF', margin: '20px 0' }}>Loading metrics...</div> : (
-                <div className="grid-4">
-                    <div className="sci-fi-card">
+            {loading ? <div style={{ color: 'var(--text-mid)', margin: '20px 0' }}>Loading metrics...</div> : (
+                <div className="grid-4" style={{ marginBottom: '1.5rem' }}>
+                    <div className="sci-fi-card metric-highlight">
                         <div className="metric-label">Worst Negative Slack</div>
-                        <div className="metric-value" style={{ color: '#00FF99' }}>{metrics.wns}</div>
-                        <div style={{ color: '#888', fontSize: '12px', marginTop: '10px' }}>Timing</div>
+                        <div className="metric-value" style={{ color: 'var(--success)' }}>{metrics.wns}</div>
+                        <div className="metric-tag">Timing</div>
                     </div>
 
-                    <div className="sci-fi-card">
+                    <div className="sci-fi-card metric-highlight">
                         <div className="metric-label">Total Power</div>
-                        <div className="metric-value" style={{ color: '#00D1FF' }}>{metrics.power}</div>
-                        <div style={{ color: '#888', fontSize: '12px', marginTop: '10px' }}>Energy</div>
+                        <div className="metric-value" style={{ color: 'var(--accent)' }}>{metrics.power}</div>
+                        <div className="metric-tag">Energy</div>
                     </div>
 
-                    <div className="sci-fi-card">
+                    <div className="sci-fi-card metric-highlight">
                         <div className="metric-label">Die Area</div>
-                        <div className="metric-value" style={{ color: '#7000FF' }}>{metrics.area}</div>
-                        <div style={{ color: '#888', fontSize: '12px', marginTop: '10px' }}>Silicon Footprint</div>
+                        <div className="metric-value" style={{ color: 'var(--text)' }}>{metrics.area}</div>
+                        <div className="metric-tag">Silicon Footprint</div>
                     </div>
 
-                    <div className="sci-fi-card">
+                    <div className="sci-fi-card metric-highlight">
                         <div className="metric-label">Gate Count</div>
-                        <div className="metric-value" style={{ color: '#FF0055' }}>{metrics.gate_count}</div>
-                        <div style={{ color: '#888', fontSize: '12px', marginTop: '10px' }}>Logic Cells</div>
+                        <div className="metric-value" style={{ color: 'var(--text)' }}>{metrics.gate_count}</div>
+                        <div className="metric-tag">Logic Cells</div>
                     </div>
                 </div>
             )}
 
-            <div className="sci-fi-card" style={{ marginBottom: '20px' }}>
-                <h3>💡 AgentIC Signoff Report {signoffData.pass === true ? '<✅ PASSED>' : signoffData.pass === false ? '<❌ FAILED>' : ''}</h3>
-                <pre style={{
-                    background: '#050505', padding: '15px', border: '1px solid #333',
-                    borderRadius: '4px', color: '#00FF88', fontFamily: 'Fira Code',
-                    whiteSpace: 'pre-wrap', maxHeight: '400px', overflowY: 'auto'
-                }}>
+            {/* Agent Intelligence Card */}
+            <div className="sci-fi-card" style={{ marginBottom: '1.5rem' }}>
+                <h3 style={{ marginBottom: '0.75rem' }}>🧠 Agent Architecture</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem' }}>
+                    <div className="dash-insight-card">
+                        <div className="dash-insight-icon">📐</div>
+                        <div className="dash-insight-title">Spec Decomposition</div>
+                        <div className="dash-insight-value">SID/JSON Contract</div>
+                        <div className="dash-insight-detail">ArchitectModule → validated ports, FSMs, sub-modules</div>
+                    </div>
+                    <div className="dash-insight-card">
+                        <div className="dash-insight-icon">👥</div>
+                        <div className="dash-insight-title">Collaborative RTL</div>
+                        <div className="dash-insight-value">Designer + Reviewer</div>
+                        <div className="dash-insight-detail">2-agent Crew with syntax_check and read_file tools</div>
+                    </div>
+                    <div className="dash-insight-card">
+                        <div className="dash-insight-icon">🔄</div>
+                        <div className="dash-insight-title">Self-Healing</div>
+                        <div className="dash-insight-value">Convergence-Aware</div>
+                        <div className="dash-insight-detail">SelfReflectPipeline with fingerprinting + stagnation detection</div>
+                    </div>
+                </div>
+            </div>
+
+            <div className="sci-fi-card" style={{ marginBottom: '1.5rem' }}>
+                <h3 style={{ marginBottom: '0.75rem' }}>
+                    AgentIC Signoff Report
+                    {signoffData.pass === true && <span style={{ color: 'var(--success)', marginLeft: '0.5rem', fontSize: '0.85rem' }}>✅ PASSED</span>}
+                    {signoffData.pass === false && <span style={{ color: 'var(--fail)', marginLeft: '0.5rem', fontSize: '0.85rem' }}>❌ FAILED</span>}
+                </h3>
+                <pre className="dash-signoff-report">
                     {signoffData.report}
                 </pre>
             </div>
+
+            {/* Recent Build History */}
+            {recentJobs.length > 0 && (
+                <div className="sci-fi-card">
+                    <h3 style={{ marginBottom: '0.75rem' }}>Recent Builds</h3>
+                    <table className="enterprise-table">
+                        <thead>
+                            <tr>
+                                <th>Job ID</th>
+                                <th>Status</th>
+                                <th>Current Stage</th>
+                                <th>Events</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {recentJobs.map((job: any) => (
+                                <tr key={job.job_id}>
+                                    <td style={{ fontFamily: 'Fira Code, monospace', fontSize: '0.78rem' }}>
+                                        {job.job_id.substring(0, 8)}…
+                                    </td>
+                                    <td>
+                                        <span style={{ color: statusColor(job.status), fontWeight: 600 }}>
+                                            {job.status}
+                                        </span>
+                                    </td>
+                                    <td>{job.current_state}</td>
+                                    <td>{job.event_count}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
         </div>
     );
 };

@@ -92,11 +92,11 @@ class TemplateMatcher:
     # When these appear, the LLM should generate from scratch instead of using a template.
     COMPLEXITY_INDICATORS = [
         "tmr", "triple modular", "redundancy", "radiation", "hardened", "hardening",
-        "fault tolerant", "majority voting", "lockstep", "ecc", "error correct",
-        "axi", "ahb", "apb", "wishbone", "avalon",  # bus protocols
+        "fault tolerant", "majority voting", "lockstep", r"\becc\b", "error correct",
+        r"\baxi\b", r"\bahb\b", r"\bapb\b", "wishbone", "avalon",  # bus protocols
         "pipeline", "pipelined", "superscalar", "out of order",
-        "dma", "cache", "mmu", "arbiter", "crossbar",
-        "encryption", "aes", "sha", "rsa", "crypto",
+        r"\bdma\b", "cache", r"\bmmu\b", "arbiter", "crossbar",
+        "encryption", r"\baes\b", r"\bsha\b", r"\brsa\b", "crypto",
         "neural", "accelerator", "tensor", "convolution",
         "multi.?channel", "multi.?port", "dual.?port",
         "custom protocol", "proprietary",

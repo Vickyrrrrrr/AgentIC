@@ -4,12 +4,12 @@ from langchain_openai import ChatOpenAI
 
 def get_architect_agent(llm, tools, verbose=False):
     deepseek_llm = ChatOpenAI(
-        model="deepseek-ai/deepseek-v3.1-terminus",
+        model="deepseek-ai/deepseek-v3.2",
         base_url="https://integrate.api.nvidia.com/v1",
         api_key=os.environ.get("NVIDIA_API_KEY", ""),
-        temperature=0.2,
+        temperature=1.0,
         model_kwargs={
-            "top_p": 0.7,
+            "top_p": 0.95,
             "extra_body": {"chat_template_kwargs": {"thinking": True}}
         },
         max_tokens=8192

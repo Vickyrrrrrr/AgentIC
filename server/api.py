@@ -42,10 +42,30 @@ TRAINING_JSONL = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "
 BUILD_STATES_ORDER = [
     "INIT", "SPEC", "RTL_GEN", "RTL_FIX", "VERIFICATION",
     "FORMAL_VERIFY", "COVERAGE_CHECK", "REGRESSION",
+    "SDC_GEN",
     "FLOORPLAN", "HARDENING", "CONVERGENCE_REVIEW",
     "ECO_PATCH", "SIGNOFF", "SUCCESS",
 ]
 TOTAL_STEPS = len(BUILD_STATES_ORDER)
+
+STAGE_META: Dict[str, Dict[str, str]] = {
+    "INIT": {"label": "Initializing Workspace", "icon": "🔧"},
+    "SPEC": {"label": "Architectural Planning", "icon": "📐"},
+    "RTL_GEN": {"label": "RTL Generation", "icon": "💻"},
+    "RTL_FIX": {"label": "RTL Syntax Fixing", "icon": "🔨"},
+    "VERIFICATION": {"label": "Verification & Testbench", "icon": "🧪"},
+    "FORMAL_VERIFY": {"label": "Formal Verification", "icon": "📊"},
+    "COVERAGE_CHECK": {"label": "Coverage Analysis", "icon": "📈"},
+    "REGRESSION": {"label": "Regression Testing", "icon": "🔁"},
+    "SDC_GEN": {"label": "SDC Generation", "icon": "🕒"},
+    "FLOORPLAN": {"label": "Floorplanning", "icon": "🗺️"},
+    "HARDENING": {"label": "GDSII Hardening", "icon": "🏗️"},
+    "CONVERGENCE_REVIEW": {"label": "Convergence Review", "icon": "🎯"},
+    "ECO_PATCH": {"label": "ECO Patch", "icon": "🩹"},
+    "SIGNOFF": {"label": "DRC/LVS Signoff", "icon": "✅"},
+    "SUCCESS": {"label": "Build Complete", "icon": "🎉"},
+    "FAIL": {"label": "Build Failed", "icon": "❌"},
+}
 
 
 def _get_llm():
@@ -113,10 +133,58 @@ class BuildRequest(BaseModel):
     description: str
     skip_openlane: bool = False
     full_signoff: bool = False
+    max_retries: int = 5
+    show_thinking: bool = False
+    min_coverage: float = 80.0
+    strict_gates: bool = True
+    pdk_profile: str = "sky130"
+    max_pivots: int = 2
+    congestion_threshold: float = 10.0
+    hierarchical: str = "auto"
+    tb_gate_mode: str = "strict"
+    tb_max_retries: int = 3
+    tb_fallback_template: str = "uvm_lite"
+    coverage_backend: str = "auto"  # From SIM_BACKEND_DEFAULT
+    coverage_fallback_policy: str = "fail_closed"  # From COVERAGE_FALLBACK_POLICY_DEFAULT
+    coverage_profile: str = "balanced"  # From COVERAGE_PROFILE_DEFAULT
+
+
+def _repo_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _docs_index() -> Dict[str, Dict[str, str]]:
+    root = _repo_root()
+    return {
+        "readme": {
+            "title": "README",
+            "section": "Product",
+            "path": os.path.join(root, "README.md"),
+            "summary": "Full platform overview, flow, quality gates, and upgrade details.",
+        },
+        "web_guide": {
+            "title": "Web App Guide",
+            "section": "Web",
+            "path": os.path.join(root, "WEB_APP_GUIDE.md"),
+            "summary": "Web app architecture and usage guide.",
+        },
+        "install": {
+            "title": "Installation",
+            "section": "Setup",
+            "path": os.path.join(root, "docs", "INSTALL.md"),
+            "summary": "Installation and environment setup steps.",
+        },
+        "user_guide": {
+            "title": "User Guide",
+            "section": "Usage",
+            "path": os.path.join(root, "docs", "USER_GUIDE.md"),
+            "summary": "Operator guide for build flows and outputs.",
+        },
+    }
 
 
 # ─── Build Runner ────────────────────────────────────────────────────
-def _run_agentic_build(job_id: str, design_name: str, description: str, skip_openlane: bool, full_signoff: bool):
+def _run_agentic_build(job_id: str, req: BuildRequest):
     """Runs the full AgentIC build in a background thread, emitting events."""
     try:
         from agentic.orchestrator import BuildOrchestrator
@@ -137,11 +205,25 @@ def _run_agentic_build(job_id: str, design_name: str, description: str, skip_ope
         _emit_event(job_id, "checkpoint", "INIT", f"🤖 AgentIC Compute Engine selected: {llm_name}", step=1)
 
         orchestrator = BuildOrchestrator(
-            name=design_name,
-            desc=description,
+            name=req.design_name,
+            desc=req.description,
             llm=llm,
-            skip_openlane=skip_openlane,
-            full_signoff=full_signoff,
+            max_retries=req.max_retries,
+            verbose=req.show_thinking,
+            skip_openlane=req.skip_openlane,
+            full_signoff=req.full_signoff,
+            min_coverage=req.min_coverage,
+            strict_gates=req.strict_gates,
+            pdk_profile=req.pdk_profile,
+            max_pivots=req.max_pivots,
+            congestion_threshold=req.congestion_threshold,
+            hierarchical_mode=req.hierarchical,
+            tb_gate_mode=req.tb_gate_mode,
+            tb_max_retries=req.tb_max_retries,
+            tb_fallback_template=req.tb_fallback_template,
+            coverage_backend=req.coverage_backend,
+            coverage_fallback_policy=req.coverage_fallback_policy,
+            coverage_profile=req.coverage_profile,
             event_sink=event_sink,
         )
         orchestrator.run()
@@ -154,7 +236,7 @@ def _run_agentic_build(job_id: str, design_name: str, description: str, skip_ope
 
         # Gather result
         success = orchestrator.state.name == "SUCCESS"
-        result = _build_result_summary(orchestrator, design_name, success)
+        result = _build_result_summary(orchestrator, req.design_name, success)
         JOB_STORE[job_id]["result"] = result
         JOB_STORE[job_id]["status"] = "done" if success else "failed"
 
@@ -163,7 +245,7 @@ def _run_agentic_build(job_id: str, design_name: str, description: str, skip_ope
         _emit_event(job_id, final_type, orchestrator.state.name, final_msg, step=TOTAL_STEPS)
 
         # ── Auto-export to training JSONL ──────────────────────────
-        _export_training_record(job_id, design_name, description, result, orchestrator)
+        _export_training_record(job_id, req.design_name, req.description, result, orchestrator)
 
     except Exception as e:
         import traceback
@@ -177,6 +259,16 @@ def _build_result_summary(orchestrator, design_name: str, success: bool) -> dict
     """Collect all artifacts and metrics into a summary dict."""
     artifacts = orchestrator.artifacts or {}
     history = orchestrator.build_history or []
+
+    # Self-healing telemetry (derived from build history + artifacts)
+    lower_msgs = [h.message.lower() for h in history]
+    self_heal_stats = {
+        "stage_exception_count": sum("stage " in m and "exception" in m for m in lower_msgs),
+        "formal_regen_count": int(artifacts.get("formal_regen_count", 0) or 0),
+        "coverage_best_restore_count": sum("restoring best testbench" in m for m in lower_msgs),
+        "coverage_regression_reject_count": sum("tb regressed coverage" in m for m in lower_msgs),
+        "deterministic_tb_fallback_count": sum("deterministic tb fallback" in m for m in lower_msgs),
+    }
 
     summary = {
         "success": success,
@@ -192,6 +284,7 @@ def _build_result_summary(orchestrator, design_name: str, success: bool) -> dict
              "congestion": s.congestion, "area_um2": s.area_um2, "power_w": s.power_w}
             for s in (orchestrator.convergence_history or [])
         ],
+        "self_heal": self_heal_stats,
         "total_steps": len(history),
         "strategy": orchestrator.strategy.value if orchestrator.strategy else "",
         "build_time_s": int(time.time()) - (history[0].timestamp if history else int(time.time())),
@@ -276,6 +369,105 @@ def read_root():
     return {"message": "AgentIC API is online", "version": "3.0.0"}
 
 
+@app.get("/pipeline/schema")
+def get_pipeline_schema():
+    """Canonical pipeline schema for frontend timeline rendering."""
+    stages = [{"state": s, **STAGE_META.get(s, {"label": s, "icon": "•"})} for s in BUILD_STATES_ORDER]
+    return {
+        "stages": stages,
+        "terminal_states": ["SUCCESS", "FAIL"],
+        "optional_stages": ["REGRESSION", "ECO_PATCH"],
+        "total_steps": TOTAL_STEPS,
+    }
+
+
+@app.get("/build/options")
+def get_build_options_contract():
+    """Metadata contract for web build-option UI and docs sync."""
+    return {
+        "groups": [
+            {
+                "name": "Core",
+                "options": [
+                    {"key": "strict_gates", "type": "boolean", "default": True, "description": "Enable strict gate enforcement with bounded self-healing."},
+                    {"key": "full_signoff", "type": "boolean", "default": False, "description": "Run full physical signoff checks when available."},
+                    {"key": "skip_openlane", "type": "boolean", "default": False, "description": "Skip physical implementation stages for faster RTL-only iteration."},
+                    {"key": "max_retries", "type": "int", "default": 5, "min": 1, "max": 12, "description": "Max repair retries per stage."},
+                ],
+            },
+            {
+                "name": "Coverage",
+                "options": [
+                    {"key": "min_coverage", "type": "float", "default": 80.0, "min": 0.0, "max": 100.0, "description": "Minimum line coverage threshold."},
+                    {"key": "coverage_profile", "type": "enum", "default": "balanced", "values": ["balanced", "aggressive", "relaxed"], "description": "Profile-based line/branch/toggle/function thresholds."},
+                    {"key": "coverage_backend", "type": "enum", "default": "auto", "values": ["auto", "verilator", "iverilog"], "description": "Coverage simulator backend selection."},
+                    {"key": "coverage_fallback_policy", "type": "enum", "default": "fail_closed", "values": ["fail_closed", "fallback_oss", "skip"], "description": "Behavior when coverage infra fails."},
+                ],
+            },
+            {
+                "name": "Verification",
+                "options": [
+                    {"key": "tb_gate_mode", "type": "enum", "default": "strict", "values": ["strict", "relaxed"], "description": "TB compile/static gate mode."},
+                    {"key": "tb_max_retries", "type": "int", "default": 3, "min": 1, "max": 10, "description": "TB-specific retry budget."},
+                    {"key": "tb_fallback_template", "type": "enum", "default": "uvm_lite", "values": ["uvm_lite", "classic"], "description": "Deterministic fallback testbench template."},
+                ],
+            },
+            {
+                "name": "Physical",
+                "options": [
+                    {"key": "pdk_profile", "type": "enum", "default": "sky130", "values": ["sky130", "gf180"], "description": "OSS PDK profile."},
+                    {"key": "max_pivots", "type": "int", "default": 2, "min": 0, "max": 6, "description": "Convergence strategy pivot budget."},
+                    {"key": "congestion_threshold", "type": "float", "default": 10.0, "min": 0.0, "max": 100.0, "description": "Congestion threshold for convergence review."},
+                    {"key": "hierarchical", "type": "enum", "default": "auto", "values": ["auto", "on", "off"], "description": "Hierarchy planner mode."},
+                ],
+            },
+        ]
+    }
+
+
+@app.get("/docs/index")
+def get_docs_index():
+    """List in-app documentation documents."""
+    docs = _docs_index()
+    items = []
+    for doc_id, meta in docs.items():
+        path = meta.get("path", "")
+        if os.path.exists(path):
+            items.append({
+                "id": doc_id,
+                "title": meta.get("title", doc_id),
+                "section": meta.get("section", "General"),
+                "summary": meta.get("summary", ""),
+            })
+    return {"docs": items}
+
+
+@app.get("/docs/content/{doc_id}")
+def get_doc_content(doc_id: str):
+    """Return markdown content for one document by id."""
+    docs = _docs_index()
+    meta = docs.get(doc_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    path = meta.get("path", "")
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Document file missing")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read document: {e}")
+
+    return {
+        "id": doc_id,
+        "title": meta.get("title", doc_id),
+        "section": meta.get("section", "General"),
+        "content": content,
+    }
+
+
 @app.post("/build")
 def trigger_build(req: BuildRequest):
     """Start a new chip build. Returns job_id immediately."""
@@ -301,9 +493,11 @@ def trigger_build(req: BuildRequest):
         "created_at": int(time.time()),
     }
 
+    req.design_name = design_name
+
     thread = threading.Thread(
         target=_run_agentic_build,
-        args=(job_id, design_name, req.description, req.skip_openlane, req.full_signoff),
+        args=(job_id, req),
         daemon=True,
     )
     thread.start()

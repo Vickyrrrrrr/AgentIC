@@ -19,6 +19,12 @@ interface BuildEvent {
     status?: string;  // present on stream_end events
 }
 
+interface StageSchemaItem {
+    state: string;
+    label: string;
+    icon: string;
+}
+
 function slugify(text: string): string {
     return text
         .toLowerCase()
@@ -39,7 +45,27 @@ export const DesignStudio = () => {
     const [jobStatus, setJobStatus] = useState<'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'cancelling'>('queued');
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
+
+    // Build Options
     const [skipOpenlane, setSkipOpenlane] = useState(false);
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [fullSignoff, setFullSignoff] = useState(false);
+    const [maxRetries, setMaxRetries] = useState(5);
+    const [showThinking, setShowThinking] = useState(false);
+    const [minCoverage, setMinCoverage] = useState(80.0);
+    const [strictGates, setStrictGates] = useState(true);
+    const [pdkProfile, setPdkProfile] = useState("sky130");
+    const [maxPivots, setMaxPivots] = useState(2);
+    const [congestionThreshold, setCongestionThreshold] = useState(10.0);
+    const [hierarchical, setHierarchical] = useState("auto");
+    const [tbGateMode, setTbGateMode] = useState("strict");
+    const [tbMaxRetries, setTbMaxRetries] = useState(3);
+    const [tbFallbackTemplate, setTbFallbackTemplate] = useState("uvm_lite");
+    const [coverageBackend, setCoverageBackend] = useState("auto");
+    const [coverageFallbackPolicy, setCoverageFallbackPolicy] = useState("fail_closed");
+    const [coverageProfile, setCoverageProfile] = useState("balanced");
+    const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
+
     const abortCtrlRef = useRef<AbortController | null>(null);
 
     // Auto-generate design name from prompt
@@ -57,7 +83,21 @@ export const DesignStudio = () => {
                 design_name: designName || slugify(prompt),
                 description: prompt,
                 skip_openlane: skipOpenlane,
-                full_signoff: false,
+                full_signoff: fullSignoff,
+                max_retries: maxRetries,
+                show_thinking: showThinking,
+                min_coverage: minCoverage,
+                strict_gates: strictGates,
+                pdk_profile: pdkProfile,
+                max_pivots: maxPivots,
+                congestion_threshold: congestionThreshold,
+                hierarchical: hierarchical,
+                tb_gate_mode: tbGateMode,
+                tb_max_retries: tbMaxRetries,
+                tb_fallback_template: tbFallbackTemplate,
+                coverage_backend: coverageBackend,
+                coverage_fallback_policy: coverageFallbackPolicy,
+                coverage_profile: coverageProfile
             });
             const { job_id } = res.data;
             setJobId(job_id);
@@ -72,6 +112,10 @@ export const DesignStudio = () => {
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         const ctrl = new AbortController();
         abortCtrlRef.current = ctrl;
+
+        // Clear previous events on reconnect to prevent duplicates
+        // (server replays all events from the beginning on each connection)
+        setEvents([]);
 
         fetchEventSource(`${API}/build/stream/${jid}`, {
             method: 'GET',
@@ -89,7 +133,14 @@ export const DesignStudio = () => {
                         fetchResult(jid, data.status as any);
                         return;
                     }
-                    setEvents(prev => [...prev, data]);
+                    setEvents(prev => {
+                        // Deduplicate: skip if last event has same message + type
+                        const last = prev[prev.length - 1];
+                        if (last && last.message === data.message && last.type === data.type) {
+                            return prev;
+                        }
+                        return [...prev, data];
+                    });
                     setJobStatus(data.type === 'error' ? 'failed' : 'running');
                 } catch { /* ignore parse errors */ }
             },
@@ -133,6 +184,9 @@ export const DesignStudio = () => {
         if ('Notification' in window && Notification.permission === 'default') {
             Notification.requestPermission();
         }
+        axios.get(`${API}/pipeline/schema`)
+            .then(res => setStageSchema(res.data?.stages || []))
+            .catch(() => setStageSchema([]));
         return () => abortCtrlRef.current?.abort();
     }, []);
 
@@ -189,7 +243,7 @@ export const DesignStudio = () => {
                             )}
 
                             <div className="prompt-options">
-                                <label className="toggle-label">
+                                <label className="toggle-label" style={{ marginBottom: '1rem', display: 'flex' }}>
                                     <input
                                         type="checkbox"
                                         checked={skipOpenlane}
@@ -197,6 +251,127 @@ export const DesignStudio = () => {
                                     />
                                     <span>Skip OpenLane (RTL + Verify only, faster)</span>
                                 </label>
+
+                                <button
+                                    className="advanced-toggle-btn"
+                                    onClick={() => setShowAdvanced(!showAdvanced)}
+                                    style={{ background: 'transparent', border: '1px solid var(--border-mid)', color: 'var(--text-mid)', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.9rem', width: '100%', textAlign: 'left', marginBottom: '1rem', transition: 'all var(--fast)', fontWeight: 500 }}
+                                    onMouseOver={e => { e.currentTarget.style.borderColor = 'var(--text-dim)'; e.currentTarget.style.color = 'var(--text)'; }}
+                                    onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border-mid)'; e.currentTarget.style.color = 'var(--text-mid)'; }}
+                                >
+                                    {showAdvanced ? '▼ Hide Advanced Options' : '▶ Show Advanced Options'}
+                                </button>
+
+                                {showAdvanced && (
+                                    <div className="advanced-options-panel" style={{ background: 'var(--bg-card)', padding: '1.25rem', borderRadius: 'var(--radius-md)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem', border: '1px solid var(--border)', boxShadow: 'var(--shadow-xs)' }}>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Max Retries</span>
+                                                <input type="number" value={maxRetries} onChange={e => setMaxRetries(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
+                                            </label>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Min Coverage (%)</span>
+                                                <input type="number" step="0.1" value={minCoverage} onChange={e => setMinCoverage(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
+                                            </label>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>PDK Profile</span>
+                                                <select value={pdkProfile} onChange={e => setPdkProfile(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
+                                                    <option value="sky130">sky130</option>
+                                                    <option value="gf180">gf180</option>
+                                                </select>
+                                            </label>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Coverage Profile</span>
+                                                <select value={coverageProfile} onChange={e => setCoverageProfile(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
+                                                    <option value="balanced">Balanced</option>
+                                                    <option value="aggressive">Aggressive</option>
+                                                    <option value="relaxed">Relaxed</option>
+                                                </select>
+                                            </label>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>TB Gate Mode</span>
+                                                <select value={tbGateMode} onChange={e => setTbGateMode(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
+                                                    <option value="strict">Strict</option>
+                                                    <option value="relaxed">Relaxed</option>
+                                                </select>
+                                            </label>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>TB Fallback Template</span>
+                                                <select value={tbFallbackTemplate} onChange={e => setTbFallbackTemplate(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
+                                                    <option value="uvm_lite">UVM Lite</option>
+                                                    <option value="classic">Classic</option>
+                                                </select>
+                                            </label>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Coverage Backend</span>
+                                                <select value={coverageBackend} onChange={e => setCoverageBackend(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
+                                                    <option value="auto">Auto</option>
+                                                    <option value="verilator">Verilator</option>
+                                                    <option value="iverilog">Icarus Verilog</option>
+                                                </select>
+                                            </label>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Fallback Policy</span>
+                                                <select value={coverageFallbackPolicy} onChange={e => setCoverageFallbackPolicy(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
+                                                    <option value="fail_closed">Fail Closed</option>
+                                                    <option value="fallback_oss">Fallback OSS</option>
+                                                    <option value="skip">Skip</option>
+                                                </select>
+                                            </label>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Hierarchical</span>
+                                                <select value={hierarchical} onChange={e => setHierarchical(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
+                                                    <option value="auto">Auto</option>
+                                                    <option value="on">On</option>
+                                                    <option value="off">Off</option>
+                                                </select>
+                                            </label>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Congestion Threshold (%)</span>
+                                                <input type="number" step="0.1" value={congestionThreshold} onChange={e => setCongestionThreshold(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
+                                            </label>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Max Pivots</span>
+                                                <input type="number" value={maxPivots} onChange={e => setMaxPivots(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
+                                            </label>
+                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
+                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>TB Max Retries</span>
+                                                <input type="number" value={tbMaxRetries} onChange={e => setTbMaxRetries(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
+                                            </label>
+                                        </div>
+
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', marginTop: '0.5rem', background: 'var(--bg)', padding: '1rem', borderRadius: 'var(--radius)', border: '1px solid var(--border-mid)' }}>
+                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
+                                                <input type="checkbox" checked={fullSignoff} onChange={e => setFullSignoff(e.target.checked)} />
+                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Full Signoff</span>
+                                            </label>
+                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
+                                                <input type="checkbox" checked={strictGates} onChange={e => setStrictGates(e.target.checked)} />
+                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Strict Gates</span>
+                                            </label>
+                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
+                                                <input type="checkbox" checked={showThinking} onChange={e => setShowThinking(e.target.checked)} />
+                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Show Thinking</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
 
                             {error && <div className="error-banner">⚠️ {error}</div>}
@@ -229,6 +404,7 @@ export const DesignStudio = () => {
                             jobId={jobId}
                             events={events}
                             jobStatus={jobStatus}
+                            stageSchema={stageSchema}
                         />
                     </motion.div>
                 )}

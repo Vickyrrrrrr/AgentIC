@@ -61,10 +61,9 @@ console = Console()
 
 # Setup Brain
 def get_llm():
-    """Returns the LLM instance. Strict 3-Model Policy:
-       1. NVIDIA Nemotron Cloud (Primary)
-       2. NVIDIA Qwen Cloud (High Perf)
-       3. VeriReason Local (Fallback)
+    """Returns the LLM instance from the best available provider:
+       1. NVIDIA Cloud (e.g. Llama 3.3, DeepSeek)
+       2. Local Compute Engine (VeriReason/Ollama)
     """
     
     configs = [
@@ -87,18 +86,22 @@ def get_llm():
                  extra_t = {
                      "chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}
                  }
+            elif "deepseek-v3.2" in cfg["model"].lower():
+                 extra_t = {
+                     "chat_template_kwargs": {"thinking": True}
+                 }
                 
             llm = LLM(
                 model=cfg["model"],
                 base_url=cfg["base_url"],
                 api_key=key if key and key != "NA" else "mock-key", # Local LLMs might use mock-key
-                temperature=0.60,
-                top_p=0.95,
-                max_completion_tokens=16384,
-                max_tokens=16384,
+                temperature=0.2, # Standardized for RTL generation stability
+                top_p=0.7,   # Optimized for code output
+                max_completion_tokens=8192,
+                max_tokens=8192,
                 timeout=300,
                 extra_body=extra_t,
-                model_kwargs={"top_k": 20, "min_p": 0.0, "presence_penalty": 0, "repetition_penalty": 1}
+                model_kwargs={"presence_penalty": 0, "repetition_penalty": 1}
             )
             console.print(f"[green]✓ AgentIC is working on your chip using {name}[/green]")
             return llm

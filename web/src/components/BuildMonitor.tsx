@@ -13,6 +13,7 @@ const STATES_DISPLAY: Record<string, { label: string; icon: string }> = {
     FORMAL_VERIFY: { label: 'Formal Verification', icon: '📊' },
     COVERAGE_CHECK: { label: 'Coverage Analysis', icon: '📈' },
     REGRESSION: { label: 'Regression Testing', icon: '🔁' },
+    SDC_GEN: { label: 'SDC Generation', icon: '🕒' },
     FLOORPLAN: { label: 'Floorplanning', icon: '🗺️' },
     HARDENING: { label: 'GDSII Hardening', icon: '🏗️' },
     CONVERGENCE_REVIEW: { label: 'Convergence Review', icon: '🎯' },
@@ -20,8 +21,6 @@ const STATES_DISPLAY: Record<string, { label: string; icon: string }> = {
     SIGNOFF: { label: 'DRC/LVS Signoff', icon: '✅' },
     SUCCESS: { label: 'Build Complete', icon: '🎉' },
 };
-
-const STATE_ORDER = Object.keys(STATES_DISPLAY);
 
 interface BuildEvent {
     type: string;
@@ -32,22 +31,56 @@ interface BuildEvent {
     timestamp: number;
 }
 
+interface StageSchemaItem {
+    state: string;
+    label: string;
+    icon: string;
+}
+
 interface Props {
     designName: string;
     jobId: string;
     events: BuildEvent[];
     jobStatus: string;
+    stageSchema?: StageSchemaItem[];
 }
 
-export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobStatus }) => {
+export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobStatus, stageSchema }) => {
     const logsRef = useRef<HTMLDivElement>(null);
     const [cancelling, setCancelling] = React.useState(false);
 
+    const mergedDisplay: Record<string, { label: string; icon: string }> = React.useMemo(() => {
+        if (!stageSchema || stageSchema.length === 0) return STATES_DISPLAY;
+        const map: Record<string, { label: string; icon: string }> = {};
+        for (const stage of stageSchema) {
+            map[stage.state] = { label: stage.label, icon: stage.icon };
+        }
+        if (!map.SUCCESS) map.SUCCESS = STATES_DISPLAY.SUCCESS;
+        return map;
+    }, [stageSchema]);
+
+    const stateOrder = React.useMemo(() => Object.keys(mergedDisplay), [mergedDisplay]);
+
     const reachedStates = new Set(events.map(e => e.state));
     const currentState = events.length > 0 ? events[events.length - 1].state : 'INIT';
-    const currentStep = Math.max(1, STATE_ORDER.indexOf(currentState) + 1);
+    const currentStateIndex = stateOrder.indexOf(currentState);
+    const furthestReachedIndex = Math.max(
+        0,
+        ...events
+            .map(e => stateOrder.indexOf(e.state))
+            .filter(idx => idx >= 0)
+    );
+    const currentStep = Math.max(1, (currentStateIndex >= 0 ? currentStateIndex : furthestReachedIndex) + 1);
     const logEvents = events.filter(e => e.message && e.message.trim().length > 0);
     const isDone = ['done', 'failed', 'cancelled', 'cancelling'].includes(jobStatus);
+
+    const selfHeal = {
+        stageExceptions: events.filter(e => /stage .* exception/i.test(e.message || '')).length,
+        formalRegens: events.filter(e => /regenerating sva/i.test(e.message || '')).length,
+        coverageRestores: events.filter(e => /restoring best testbench/i.test(e.message || '')).length,
+        coverageRejects: events.filter(e => /regressed coverage/i.test(e.message || '')).length,
+        deterministicFallbacks: events.filter(e => /deterministic tb fallback/i.test(e.message || '')).length,
+    };
 
     useEffect(() => {
         if (logsRef.current) {
@@ -77,7 +110,7 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                     {!isDone ? (
                         <>
                             <span className="spinner" />
-                            <span>Step {currentStep} / {STATE_ORDER.length}</span>
+                            <span>Step {currentStep} / {stateOrder.length}</span>
                             <button
                                 className="cancel-btn"
                                 onClick={handleCancel}
@@ -100,9 +133,9 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                 <div className="checkpoint-column">
                     <div className="section-heading">Build Pipeline</div>
                     <div className="checkpoint-list">
-                        {STATE_ORDER.map((stateKey, idx) => {
-                            const info = STATES_DISPLAY[stateKey];
-                            const isPassed = STATE_ORDER.indexOf(stateKey) < STATE_ORDER.indexOf(currentState);
+                        {stateOrder.map((stateKey, idx) => {
+                            const info = mergedDisplay[stateKey] || { label: stateKey, icon: '•' };
+                            const isPassed = stateOrder.indexOf(stateKey) < stateOrder.indexOf(currentState);
                             const isCurrent = currentState === stateKey && !isDone;
                             const isSuccess = stateKey === 'SUCCESS' && jobStatus === 'done';
 
@@ -122,7 +155,7 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                                         ) : (
                                             <span className="check-todo" />
                                         )}
-                                        {idx < STATE_ORDER.length - 1 && (
+                                        {idx < stateOrder.length - 1 && (
                                             <div className={`checkpoint-line ${isPassed ? 'line-done' : ''}`} />
                                         )}
                                     </div>
@@ -141,6 +174,25 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                 {/* Live Terminal */}
                 <div className="terminal-column">
                     <div className="section-heading">Live Log</div>
+                    <div style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius)',
+                        background: 'var(--bg-card)',
+                        padding: '0.65rem 0.75rem',
+                        marginBottom: '0.65rem',
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '0.5rem',
+                        color: 'var(--text-mid)',
+                        fontSize: '0.78rem',
+                    }}>
+                        <span style={{ color: 'var(--text)', fontWeight: 600 }}>Self-Healing</span>
+                        <span>Stage guards: {selfHeal.stageExceptions}</span>
+                        <span>Formal regens: {selfHeal.formalRegens}</span>
+                        <span>TB regressions blocked: {selfHeal.coverageRejects}</span>
+                        <span>Best TB restores: {selfHeal.coverageRestores}</span>
+                        <span>TB fallbacks: {selfHeal.deterministicFallbacks}</span>
+                    </div>
                     <div className="live-terminal" ref={logsRef}>
                         {logEvents.length === 0 ? (
                             <span className="terminal-waiting">Waiting for AgentIC to start…</span>
@@ -167,11 +219,11 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                     <div className="progress-bar-wrap">
                         <div
                             className="progress-bar-fill"
-                            style={{ width: `${(currentStep / STATE_ORDER.length) * 100}%` }}
+                            style={{ width: `${(currentStep / stateOrder.length) * 100}%` }}
                         />
                     </div>
                     <div className="progress-label">
-                        {Math.round((currentStep / STATE_ORDER.length) * 100)}% complete
+                        {Math.round((currentStep / stateOrder.length) * 100)}% complete
                     </div>
                 </div>
             </div>

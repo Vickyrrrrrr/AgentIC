@@ -1,20 +1,28 @@
-import { useState, useEffect, Suspense } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { Canvas } from '@react-three/fiber';
-import { Chip3D } from './components/Chip3D';
 import { Dashboard } from './pages/Dashboard';
 import { DesignStudio } from './pages/DesignStudio';
 import { Benchmarking } from './pages/Benchmarking';
 import { Fabrication } from './pages/Fabrication';
+import { Documentation } from './pages/Documentation';
 import './index.css';
 
 const App = () => {
   const [selectedPage, setSelectedPage] = useState('Design Studio');
   const [designs, setDesigns] = useState<{ name: string, has_gds: boolean }[]>([]);
   const [selectedDesign, setSelectedDesign] = useState<string>('');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = localStorage.getItem('agentic-theme');
+    return saved === 'dark' ? 'dark' : 'light';
+  });
 
   // Bypass Ngrok browser warning for all Axios requests
   axios.defaults.headers.common['ngrok-skip-browser-warning'] = 'true';
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('agentic-theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
@@ -30,84 +38,185 @@ const App = () => {
       .catch(err => console.error("Failed to fetch designs", err));
   }, []);
 
-  return (
-    <div className="app-container">
-      {/* Sidebar Navigation */}
-      <nav className="sidebar">
-        <h2>AgentIC</h2>
+  const navItems = useMemo(
+    () => [
+      { name: 'Home', icon: '🏠' },
+      { name: 'Design Studio', icon: '⚡' },
+      { name: 'Dashboard', icon: '📊' },
+      { name: 'Documentation', icon: '📚' },
+      { name: 'Benchmarking', icon: '📈' },
+      { name: 'Fabrication', icon: '🏗️' },
+    ],
+    []
+  );
 
-        {/* Global Design Selector */}
-        <div style={{ padding: '0 1rem', marginTop: '10px' }}>
-          <p style={{ fontSize: '12px', color: '#888', marginBottom: '5px', fontFamily: 'Fira Code' }}>ACTIVE CHIP</p>
+  return (
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <div className="app-brand">
+          <div className="app-brand-logo">A</div>
+          <div>
+            <div className="app-brand-title">AgentIC</div>
+            <div className="app-brand-sub">Autonomous Silicon Studio</div>
+          </div>
+        </div>
+
+        <div className="app-sidebar-group">
+          <div className="app-sidebar-label">Active Design</div>
           <select
+            className="app-design-select"
             value={selectedDesign}
             onChange={(e) => setSelectedDesign(e.target.value)}
-            style={{ width: '100%', background: '#111', color: '#00FF88', border: '1px solid #333', padding: '8px', borderRadius: '4px', fontFamily: 'Fira Code', outline: 'none' }}
           >
-            {designs.map(d => (
+            {designs.map((d) => (
               <option key={d.name} value={d.name}>
-                {d.name} {d.has_gds ? '[GDS✓]' : ''}
+                {d.name} {d.has_gds ? '• GDS' : ''}
               </option>
             ))}
           </select>
         </div>
 
-        <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column' }}>
-          {['Home', 'Dashboard', 'Design Studio', 'Benchmarking', 'Fabrication'].map(page => (
+        <nav className="app-nav">
+          {navItems.map((item) => (
             <button
-              key={page}
-              className={selectedPage === page ? 'active' : ''}
-              onClick={() => setSelectedPage(page)}
+              key={item.name}
+              className={`app-nav-btn ${selectedPage === item.name ? 'active' : ''}`}
+              onClick={() => setSelectedPage(item.name)}
             >
-              <span style={{ marginRight: '10px' }}>
-                {page === 'Home' && '🏠'}
-                {page === 'Dashboard' && '📊'}
-                {page === 'Design Studio' && '⚡'}
-                {page === 'Benchmarking' && '📈'}
-                {page === 'Fabrication' && '🏗️'}
-              </span>
-              {page}
+              <span>{item.icon}</span>
+              <span>{item.name}</span>
             </button>
           ))}
-        </div>
+        </nav>
 
-        <div style={{ marginTop: 'auto', textAlign: 'center', color: '#555', fontSize: '12px' }}>
-          <p>AgentIC Web App v2.0</p>
-          <p>© 2026</p>
+        <div className="app-sidebar-footer">
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+          >
+            {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
+          </button>
+          <div className="app-version">v4.0 · Multi-Agent · 2026</div>
         </div>
-      </nav>
+      </aside>
 
-      {/* Main Content Area */}
-      <main className="main-content">
-        {selectedPage === 'Home' && (
-          <div className="landing-container">
-            <h1 className="landing-title">AgentIC</h1>
-            <p className="landing-subtitle">Autonomous Silicon Design Framework</p>
-            <div className="chip-canvas-container">
-              <Suspense fallback={<div style={{ color: '#00FF88' }}>Loading 3D Engine...</div>}>
-                <Canvas camera={{ position: [0, 4, 6], fov: 45 }}>
-                  {/* Note: ambientLight intrinsic elements exist natively in R3F */}
-                  <ambientLight intensity={0.5} />
-                  <pointLight position={[10, 10, 10]} intensity={1} />
-                  <Chip3D />
-                </Canvas>
-              </Suspense>
+      <main className="app-main">
+        <header className="app-topbar">
+          <h1>{selectedPage}</h1>
+          <div className="app-topbar-meta">Multi-Agent Autonomous Silicon</div>
+        </header>
+
+        <section className="app-content">
+          {selectedPage === 'Home' && (
+            <div className="home-overview">
+              <div className="home-hero">
+                <div className="home-hero-badge">Text → Silicon</div>
+                <h2 className="home-hero-title">Autonomous Chip Design Studio</h2>
+                <p className="home-hero-desc">
+                  From natural language to fabrication-ready GDSII — powered by multi-agent
+                  collaboration, structured spec decomposition, self-healing loops, and
+                  15-stage autonomous pipeline.
+                </p>
+              </div>
+
+              <div className="home-card-grid">
+                <div className="home-kpi">{designs.length}<span>Designs</span></div>
+                <div className="home-kpi">15<span>Pipeline Stages</span></div>
+                <div className="home-kpi">5<span>Core Modules</span></div>
+                <div className="home-kpi">12<span>AI Agents</span></div>
+              </div>
+
+              <div className="home-section">
+                <h3 className="home-section-title">Multi-Agent Architecture</h3>
+                <div className="home-agent-grid">
+                  <div className="agent-card">
+                    <div className="agent-icon">🏗️</div>
+                    <div className="agent-name">ArchitectModule</div>
+                    <div className="agent-desc">Spec → Structured JSON (SID) contract</div>
+                  </div>
+                  <div className="agent-card">
+                    <div className="agent-icon">💻</div>
+                    <div className="agent-name">RTL Designer + Reviewer</div>
+                    <div className="agent-desc">Collaborative 2-agent Crew with tools</div>
+                  </div>
+                  <div className="agent-card">
+                    <div className="agent-icon">🧪</div>
+                    <div className="agent-name">TB Designer</div>
+                    <div className="agent-desc">Verilator-safe flat procedural TBs</div>
+                  </div>
+                  <div className="agent-card">
+                    <div className="agent-icon">🔍</div>
+                    <div className="agent-name">Error Analyst</div>
+                    <div className="agent-desc">Multi-class failure diagnosis (A–E)</div>
+                  </div>
+                  <div className="agent-card">
+                    <div className="agent-icon">🔄</div>
+                    <div className="agent-name">SelfReflectPipeline</div>
+                    <div className="agent-desc">Convergence-aware hardening retry</div>
+                  </div>
+                  <div className="agent-card">
+                    <div className="agent-icon">🧠</div>
+                    <div className="agent-name">DeepDebugger</div>
+                    <div className="agent-desc">FVDebug causal graphs + for-and-against</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="home-section">
+                <h3 className="home-section-title">Pipeline Flow</h3>
+                <div className="pipeline-flow">
+                  {[
+                    { icon: '📐', label: 'SPEC', sub: 'SID Decompose' },
+                    { icon: '💻', label: 'RTL_GEN', sub: '2-Agent Crew' },
+                    { icon: '🔨', label: 'RTL_FIX', sub: 'Lint + Rigor' },
+                    { icon: '🧪', label: 'VERIFY', sub: 'Sim + TB Gate' },
+                    { icon: '📊', label: 'FORMAL', sub: 'SVA + SBY' },
+                    { icon: '📈', label: 'COVERAGE', sub: 'Anti-regress' },
+                    { icon: '🗺️', label: 'FLOOR', sub: 'Floorplan' },
+                    { icon: '🏗️', label: 'HARDEN', sub: 'Self-Reflect' },
+                    { icon: '✅', label: 'SIGNOFF', sub: 'DRC/LVS/STA' },
+                  ].map((s, i) => (
+                    <div className="pipeline-stage" key={s.label}>
+                      <div className="pipeline-stage-icon">{s.icon}</div>
+                      <div className="pipeline-stage-label">{s.label}</div>
+                      <div className="pipeline-stage-sub">{s.sub}</div>
+                      {i < 8 && <div className="pipeline-arrow">→</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="home-section">
+                <h3 className="home-section-title">Quick Start</h3>
+                <div className="home-quickstart">
+                  <div className="quickstart-step">
+                    <div className="quickstart-num">1</div>
+                    <div>Go to <strong>Design Studio</strong> and describe any chip</div>
+                  </div>
+                  <div className="quickstart-step">
+                    <div className="quickstart-num">2</div>
+                    <div>Watch 12 AI agents build it through 15 stages</div>
+                  </div>
+                  <div className="quickstart-step">
+                    <div className="quickstart-num">3</div>
+                    <div>Check <strong>Dashboard</strong> for silicon metrics and signoff</div>
+                  </div>
+                </div>
+                <button className="btn-primary home-cta" onClick={() => setSelectedPage('Design Studio')}>
+                  Start New Build →
+                </button>
+              </div>
             </div>
+          )}
 
-            <button
-              className="btn-primary"
-              style={{ marginTop: '30px', fontSize: '1.2rem' }}
-              onClick={() => setSelectedPage('Design Studio')}
-            >
-              Start New Project
-            </button>
-          </div>
-        )}
-
-        {selectedPage === 'Dashboard' && <Dashboard selectedDesign={selectedDesign} />}
-        {selectedPage === 'Design Studio' && <DesignStudio />}
-        {selectedPage === 'Benchmarking' && <Benchmarking selectedDesign={selectedDesign} />}
-        {selectedPage === 'Fabrication' && <Fabrication selectedDesign={selectedDesign} hasGds={designs.find(d => d.name === selectedDesign)?.has_gds} />}
+          {selectedPage === 'Dashboard' && <Dashboard selectedDesign={selectedDesign} />}
+          {selectedPage === 'Design Studio' && <DesignStudio />}
+          {selectedPage === 'Documentation' && <Documentation />}
+          {selectedPage === 'Benchmarking' && <Benchmarking selectedDesign={selectedDesign} />}
+          {selectedPage === 'Fabrication' && (
+            <Fabrication selectedDesign={selectedDesign} hasGds={designs.find((d) => d.name === selectedDesign)?.has_gds} />
+          )}
+        </section>
       </main>
     </div>
   );

@@ -12,7 +12,7 @@ DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 
 CLOUD_CONFIG = {
-    "model": os.environ.get("NVIDIA_MODEL", "deepseek-ai/deepseek-r1"),
+    "model": os.environ.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct"),
     "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
     "api_key": os.environ.get("NVIDIA_API_KEY", ""),
 }

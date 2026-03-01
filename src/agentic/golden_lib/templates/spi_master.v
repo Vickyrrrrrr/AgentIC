@@ -19,6 +19,9 @@ module spi_master #(
 );
 
     localparam CNT_WIDTH = $clog2(CLK_DIV);
+    /* verilator lint_off WIDTHTRUNC */
+    localparam [CNT_WIDTH-1:0] CLK_DIV_MAX = CLK_DIV - 1;
+    /* verilator lint_on WIDTHTRUNC */
 
     localparam [2:0] IDLE     = 3'd0,
                      CS_SETUP = 3'd1,
@@ -29,7 +32,9 @@ module spi_master #(
     reg [2:0]          state;
     reg [CNT_WIDTH-1:0] clk_cnt;
     reg [2:0]          bit_cnt;
+    /* verilator lint_off UNUSEDSIGNAL */
     reg [7:0]          shift_out;
+    /* verilator lint_on UNUSEDSIGNAL */
     reg [7:0]          shift_in;
     reg                sclk_edge;  // 0 = rising, 1 = falling
 
@@ -67,7 +72,7 @@ module spi_master #(
                 CS_SETUP: begin
                     cs_n <= 1'b0;
                     mosi <= mosi_data[7];  // MSB first
-                    if (clk_cnt == CLK_DIV - 1) begin
+                    if (clk_cnt == CLK_DIV_MAX) begin
                         clk_cnt   <= 0;
                         sclk_edge <= 0;
                         state     <= TRANSFER;
@@ -77,7 +82,7 @@ module spi_master #(
                 end
                 
                 TRANSFER: begin
-                    if (clk_cnt == CLK_DIV - 1) begin
+                    if (clk_cnt == CLK_DIV_MAX) begin
                         clk_cnt <= 0;
                         if (!sclk_edge) begin
                             // Rising edge: sample MISO
@@ -103,7 +108,7 @@ module spi_master #(
                 
                 CS_HOLD: begin
                     sclk <= 1'b0;
-                    if (clk_cnt == CLK_DIV - 1) begin
+                    if (clk_cnt == CLK_DIV_MAX) begin
                         cs_n      <= 1'b1;
                         miso_data <= shift_in;
                         state     <= FINISH;

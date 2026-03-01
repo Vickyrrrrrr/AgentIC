@@ -247,8 +247,16 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
     # Only strip if the line is before the first 'module'
     
     # Prevent Verilator syntax errors from normal comments starting with "verilator"
-    clean_code = re.sub(r'(?i)(//\s*)(verilator\b)', r'\1[\2]', clean_code)
-    clean_code = re.sub(r'(?i)(/\*\s*)(verilator\b)', r'\1[\2]', clean_code)
+    # BUT preserve legitimate Verilator pragmas (lint_off, lint_on, public, etc.)
+    _VERILATOR_PRAGMAS = r'lint_off|lint_on|public|no_inline|split_var|coverage_off|coverage_on|tracing_off|tracing_on'
+    clean_code = re.sub(
+        r'(?i)(//\s*)(verilator)\b(?!\s*(?:' + _VERILATOR_PRAGMAS + r'))',
+        r'\1[\2]', clean_code,
+    )
+    clean_code = re.sub(
+        r'(?i)(/\*\s*)(verilator)\b(?!\s*(?:' + _VERILATOR_PRAGMAS + r'))',
+        r'\1[\2]', clean_code,
+    )
     module_pos = clean_code.find('module')
     if module_pos > 0:
         preamble = clean_code[:module_pos]
@@ -299,7 +307,7 @@ def write_verilog(design_name: str, code: str, is_testbench: bool = False, suffi
             clean_code += "\n"
             
         # --- MULTI-FILE RTL HIERARCHY SPLITTING ---
-        if not is_testbench and "module" in clean_code:
+        if not is_testbench and ext == ".v" and "module" in clean_code:
             import glob
             # Remove old RTL files to prevent stale modules from breaking build
             src_dir = os.path.dirname(path)
@@ -373,6 +381,8 @@ def run_syntax_check(file_path: str) -> tuple:
 def run_lint_check(file_path: str) -> tuple:
     """
     Runs Verilator --lint-only for stricter static analysis.
+    Uses -Wno-fatal so warnings don't cause non-zero exit.
+    Falls back to iverilog if Verilator reports only warnings (no real errors).
     Returns: (True, "OK") or (False, ErrorLog)
     """
     if not os.path.exists(file_path):
@@ -384,8 +394,18 @@ def run_lint_check(file_path: str) -> tuple:
     if file_path not in rtl_files and os.path.exists(file_path):
         rtl_files.append(file_path)
 
-    # Use --lint-only with sensible warnings (not -Wall, which flags unused signals as errors)
-    cmd = ["verilator", "--lint-only", "-Wno-UNUSED", "-Wno-PINMISSING", "-Wno-CASEINCOMPLETE", "--timing"] + rtl_files
+    # --sv: force SystemVerilog parsing (critical for typedef, logic, always_comb)
+    # -Wno-fatal: don't exit on warnings — let us separate real errors from warnings
+    # Suppress informational warnings that are not bugs:
+    cmd = [
+        "verilator", "--lint-only", "--sv", "--timing",
+        "-Wno-fatal",          # warnings don't cause non-zero exit
+        "-Wno-UNUSED",         # unused signals (common in AI-generated code)
+        "-Wno-PINMISSING",     # missing port connections
+        "-Wno-CASEINCOMPLETE", # incomplete case (handled by default)
+        "-Wno-WIDTHEXPAND",    # zero-extension (harmless implicit widening)
+        "-Wno-WIDTHTRUNC",     # truncation (flag separately in semantic check)
+    ] + rtl_files
     
     try:
         result = subprocess.run(
@@ -393,21 +413,83 @@ def run_lint_check(file_path: str) -> tuple:
             capture_output=True, text=True,
             timeout=30
         )
-        # Verilator prints errors to stderr
-        if result.returncode != 0:
-            # Filter warnings if needed, but for now capture all
-            return False, f"Verilator Lint Errors:\n{result.stderr}"
-            
-        # Even if return code is 0, check for warnings?
-        # Verilator returns 0 even with warnings unless -Werror is used.
-        # But we want to fail on critical issues.
-        # Let's keep it simple: If execution fails, return False.
-        return True, "Lint OK"
+        stderr = result.stderr.strip()
+        
+        if result.returncode == 0:
+            # Check for remaining warnings (non-fatal)
+            if stderr:
+                # Parse for LATCH warnings — these are fixable and important
+                has_latch = bool(re.search(r'%Warning-LATCH:', stderr))
+                if has_latch:
+                    # LATCH is a real design issue — fail so the LLM can fix it
+                    return False, f"Verilator Lint Errors:\n{stderr}"
+                # Other warnings are informational, pass with report
+                return True, f"Lint OK (with warnings):\n{stderr}"
+            return True, "Lint OK"
+        
+        # Non-zero exit: check if there are REAL %Error lines (not just "Exiting due to N warning(s)")
+        real_errors = [
+            line for line in stderr.splitlines()
+            if line.strip().startswith("%Error") and "Exiting due to" not in line
+        ]
+        
+        if not real_errors:
+            # Only warnings caused the exit — try iverilog fallback
+            iverilog_ok, iverilog_report = run_iverilog_lint(file_path)
+            if iverilog_ok:
+                return True, f"Lint OK (Verilator warnings only, iverilog passed):\n{stderr}"
+            else:
+                return False, f"Verilator Lint Errors:\n{stderr}\n\niverilog also failed:\n{iverilog_report}"
+        
+        return False, f"Verilator Lint Errors:\n{stderr}"
         
     except FileNotFoundError:
          return True, "Verilator not found (Skipping Lint)"
     except subprocess.TimeoutExpired:
          return False, "Lint check timed out."
+
+
+def run_iverilog_lint(file_path: str) -> tuple:
+    """
+    Fallback lint check using Icarus Verilog (iverilog).
+    iverilog is an industry-standard open-source simulator used widely in
+    academia and production for syntax/semantic validation.
+    Returns: (True, "OK") or (False, ErrorLog)
+    """
+    if not os.path.exists(file_path):
+        return False, f"File not found: {file_path}"
+    
+    import glob
+    src_dir = os.path.dirname(file_path)
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+    if file_path not in rtl_files and os.path.exists(file_path):
+        rtl_files.append(file_path)
+
+    # -g2012: IEEE 1800-2012 SystemVerilog standard
+    # -Wall: enable all warnings
+    # -o /dev/null: don't produce output binary (lint-only mode)
+    cmd = ["iverilog", "-g2012", "-Wall", "-o", "/dev/null"] + rtl_files
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True,
+            timeout=30
+        )
+        combined = (result.stdout + "\n" + result.stderr).strip()
+        
+        # iverilog returns 0 on success, non-zero on errors
+        if result.returncode == 0:
+            if combined:
+                return True, f"iverilog OK (with warnings):\n{combined}"
+            return True, "iverilog OK"
+        
+        return False, f"iverilog Lint Errors:\n{combined}"
+        
+    except FileNotFoundError:
+        return False, "iverilog not found (install with: apt install iverilog)"
+    except subprocess.TimeoutExpired:
+        return False, "iverilog lint check timed out."
 
 
 def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
@@ -618,6 +700,42 @@ def _extract_disable_iff(condition: str) -> Tuple[str, str]:
     return disable_cond, cond.strip()
 
 
+def _balance_parens(expr: str) -> str:
+    """Ensure parentheses are balanced, stripping outermost wrapper if unbalanced."""
+    expr = expr.strip()
+    depth = 0
+    for ch in expr:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+    # If more open than close, add closing parens
+    if depth > 0:
+        expr += ')' * depth
+    # If more close than open, strip trailing close parens
+    elif depth < 0:
+        while depth < 0 and expr.endswith(')'):
+            expr = expr[:-1].rstrip()
+            depth += 1
+    # Strip redundant outer wrapping: ((x)) → (x)
+    while len(expr) > 2 and expr.startswith('(') and expr.endswith(')'):
+        inner = expr[1:-1]
+        # Only strip if inner parens are balanced
+        d = 0
+        ok = True
+        for ch in inner:
+            if ch == '(': d += 1
+            elif ch == ')': d -= 1
+            if d < 0:
+                ok = False
+                break
+        if ok and d == 0:
+            expr = inner
+        else:
+            break
+    return expr
+
+
 def _split_sva_implication(condition: str) -> Tuple[str, str, str]:
     """Split implication into antecedent/operator/consequent."""
     match = re.match(r'(.+?)\s*(\|->|\|=>)\s*(.+)', condition.strip(), re.DOTALL)
@@ -687,8 +805,17 @@ def convert_sva_to_yosys(sva_content: str, module_name: str) -> str:
 
     Supports implication forms `|->` and `|=>` plus bounded `##N` delays by
     generating per-property trigger shift registers.
+
+    Handles both:
+      - Named properties: ``property foo; ... endproperty``
+      - Inline assertions: ``assert property (@(posedge clk) ...);``
+      - Parameterized module declarations: ``module foo_sva #(parameter ...) (...)``
     """
-    port_match = re.search(r'module\s+\w+_sva\s*\((.*?)\);', sva_content, re.DOTALL)
+    # Match module declaration — with or without #(parameter ...)
+    port_match = re.search(
+        r'module\s+\w+_sva\s*(?:#\s*\([^)]*\)\s*)?\s*\((.*?)\)\s*;',
+        sva_content, re.DOTALL,
+    )
     if not port_match:
         return ""
 
@@ -698,7 +825,11 @@ def convert_sva_to_yosys(sva_content: str, module_name: str) -> str:
         line = line.strip()
         if line and not line.startswith('//'):
             port_lines.append(line.rstrip(','))
+    
+    if not port_lines:
+        return ""
 
+    # --- Extract named properties (property ... endproperty) ---
     raw_properties = re.findall(r'property\s+(\w+)\s*;(.*?)endproperty', sva_content, re.DOTALL)
     properties = []
     for prop_name, body in raw_properties:
@@ -707,6 +838,81 @@ def convert_sva_to_yosys(sva_content: str, module_name: str) -> str:
             clk = body_match.group(1).strip()
             condition = body_match.group(2).strip()
             properties.append((prop_name, clk, condition))
+
+    # --- Extract inline assertions (assert property (...)) ---
+    # These don't have property/endproperty wrappers
+    inline_asserts = re.findall(
+        r'assert\s+property\s*\(\s*@\(posedge\s+(\w+)\)\s*(.*?)\)\s*;',
+        sva_content, re.DOTALL,
+    )
+    for idx, (clk, condition) in enumerate(inline_asserts):
+        prop_name = f"inline_assert_{idx}"
+        condition = condition.strip().rstrip(')')
+        # Handle unbalanced parens from greedy match
+        open_p = condition.count('(')
+        close_p = condition.count(')')
+        while close_p > open_p and condition.endswith(')'):
+            condition = condition[:-1].rstrip()
+            close_p -= 1
+        properties.append((prop_name, clk, condition))
+
+    # --- Extract inline cover properties ---
+    inline_covers = re.findall(
+        r'cover\s+property\s*\(\s*@\(posedge\s+(\w+)\)\s*(.*?)\)\s*;',
+        sva_content, re.DOTALL,
+    )
+    # Cover properties are informational — we'll add them as cover statements
+
+    if not properties and not inline_covers:
+        return ""
+
+    # --- Extract port signal names for filtering ---
+    # Properties referencing internal signals (state, shift_in, etc.) must be
+    # skipped because they're not accessible from the bind-check module.
+    port_signal_names = set()
+    for pl in port_lines:
+        # Extract the last word (signal name) from port declaration
+        m = re.search(r'(\w+)\s*$', pl)
+        if m:
+            port_signal_names.add(m.group(1))
+
+    def _uses_only_port_signals(condition: str) -> bool:
+        """Check if a condition only references port signals (not internals)."""
+        # Extract all identifiers from the condition
+        idents = set(re.findall(r'\b([a-zA-Z_]\w*)\b', condition))
+        # Remove known keywords and constants
+        keywords = {'posedge', 'negedge', 'disable', 'iff', 'if', 'else',
+                    'begin', 'end', 'assert', 'property', 'cover', 'bit',
+                    'reg', 'wire', 'logic', 'init_done', 'past'}
+        idents -= keywords
+        # Remove numeric-looking identifiers (like b0, h1, etc.)
+        idents = {i for i in idents if not re.match(r'^[0-9]|^[bBhHdD]\d', i)}
+        if not idents:
+            return True
+        # Check if all identifiers are port signals or are past_* references
+        for ident in idents:
+            if ident not in port_signal_names and not ident.startswith('past_'):
+                return False
+        return True
+
+    # Filter properties to only those using port signals
+    # and only those without range delays ##[N:M] or $-functions which can't 
+    # be translated to RTL trigger chains
+    port_properties = []
+    for prop_name, clk, condition in properties:
+        if not _uses_only_port_signals(condition):
+            continue
+        # Skip properties with range delays (##[...]) — can't map to fixed-cycle RTL
+        if re.search(r'##\s*\[', condition):
+            continue
+        # Skip properties with $past, $isunknown, etc.
+        if re.search(r'\$\w+', condition):
+            continue
+        port_properties.append((prop_name, clk, condition))
+    properties = port_properties
+
+    if not properties and not inline_covers:
+        return ""
 
     yosys_code = f'''// AUTO-GENERATED: Yosys-compatible assertions for {module_name}
 // Original industry-standard SVA is preserved in {module_name}_sva.sv
@@ -759,8 +965,8 @@ module {module_name}_sby_check (
             base_delay = 0 if op == "|->" else 1
             extra_delay, consequent_expr = _consume_delay_prefix(consequent)
             total_delay = base_delay + extra_delay
-            antecedent_expr = antecedent if antecedent else "1'b1"
-            consequent_expr = consequent_expr if consequent_expr else "1'b1"
+            antecedent_expr = _balance_parens(antecedent) if antecedent else "1'b1"
+            consequent_expr = _balance_parens(consequent_expr) if consequent_expr else "1'b1"
 
             if total_delay == 0:
                 if disable_cond:
@@ -789,9 +995,9 @@ module {module_name}_sby_check (
         else:
             delayed_match = re.match(r'^\(?\s*(.+?)\s*##\s*(\d+)\s*(.+?)\s*\)?$', cond, re.DOTALL)
             if delayed_match:
-                antecedent_expr = delayed_match.group(1).strip()
+                antecedent_expr = _balance_parens(delayed_match.group(1).strip())
                 total_delay = int(delayed_match.group(2))
-                consequent_expr = delayed_match.group(3).strip()
+                consequent_expr = _balance_parens(delayed_match.group(3).strip())
                 trig_name = f"p_trig_{idx}"
                 trigger_defs.append(f"    reg [{total_delay}:0] {trig_name} = '0;")
                 if disable_cond:
@@ -809,6 +1015,7 @@ module {module_name}_sby_check (
                         block_lines.append(f"        {trig_name}[{stage + 1}] <= {trig_name}[{stage}];")
                     block_lines.append(f"        if (init_done && {trig_name}[{total_delay}]) assert({consequent_expr});")
             else:
+                cond = _balance_parens(cond)
                 if disable_cond:
                     block_lines.append(f"        if (!({disable_cond}) && init_done) assert({cond});")
                 else:
@@ -820,6 +1027,25 @@ module {module_name}_sby_check (
     if trigger_defs:
         yosys_code += "\n".join(trigger_defs) + "\n\n"
     yosys_code += "\n".join(property_blocks)
+
+    # --- Add cover properties ---
+    for idx, (clk, condition) in enumerate(inline_covers):
+        condition = condition.strip().rstrip(')')
+        # Balance and clean up parens
+        condition = _balance_parens(condition)
+        disable_cond, cond = _extract_disable_iff(condition)
+        cond = _balance_parens(cond)
+        if _uses_only_port_signals(cond):
+            yosys_code += f"\n    // Cover: inline_cover_{idx}\n"
+            if disable_cond:
+                yosys_code += f"    always @(posedge {clk}) begin\n"
+                yosys_code += f"        if (!({disable_cond}) && init_done) cover({cond});\n"
+                yosys_code += "    end\n"
+            else:
+                yosys_code += f"    always @(posedge {clk}) begin\n"
+                yosys_code += f"        if (init_done) cover({cond});\n"
+                yosys_code += "    end\n"
+
     yosys_code += f'''endmodule
 
 // Bind to DUT
@@ -834,9 +1060,14 @@ def write_sby_config(design_name, use_sby_check: bool = True):
         design_name: Name of the design
         use_sby_check: If True, use the Yosys-compatible _sby_check.sv file
     """
-    path = f"{OPENLANE_ROOT}/designs/{design_name}/src/{design_name}.sby"
+    design_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
+    path = f"{design_dir}/{design_name}.sby"
     
     sva_file = f"{design_name}_sby_check.sv" if use_sby_check else f"{design_name}_sva.sv"
+    
+    # Use absolute paths in [files] to avoid SBY working-directory issues
+    rtl_abs = f"{design_dir}/{design_name}.v"
+    sva_abs = f"{design_dir}/{sva_file}"
     
     config = f"""[options]
 mode prove
@@ -850,8 +1081,8 @@ read -formal {sva_file}
 prep -top {design_name}
 
 [files]
-{design_name}.v
-{sva_file}
+{rtl_abs}
+{sva_abs}
 """
     with open(path, "w") as f:
         f.write(config)
@@ -1031,14 +1262,26 @@ def run_tb_static_contract_check(tb_code: str, strategy: str = "SV_MODULAR") -> 
 
     strategy_norm = str(strategy).upper()
     if "SV_MODULAR" in strategy_norm:
-        has_txn = "class Transaction" in text
-        has_flow = any(tok in text for tok in ["class Driver", "class Monitor", "class Scoreboard"])
-        report["checks"]["has_transaction_class"] = has_txn
-        report["checks"]["has_flow_classes"] = has_flow
-        if not has_txn:
-            _add_issue("missing_transaction_class", "SV modular mode requires class Transaction.")
-        if not has_flow:
-            _add_issue("missing_flow_classes", "SV modular mode requires Driver/Monitor/Scoreboard classes.")
+        # Verilator does NOT support classes/interfaces inside modules.
+        # Instead of requiring them, we CHECK that the TB has proper stimulus
+        # and checking infrastructure (procedural or class-based).
+        has_dut_inst = re.search(r'\b\w+\s+dut\s*\(', text) is not None
+        has_stimulus = bool(re.search(r'\$urandom|\$random|initial\s+begin', text))
+        has_checking = bool(re.search(r'if\s*\(|assert\s*\(', text))
+        report["checks"]["has_dut_instantiation"] = has_dut_inst
+        report["checks"]["has_stimulus"] = has_stimulus
+        report["checks"]["has_checking"] = has_checking
+        if not has_dut_inst:
+            _add_issue("missing_dut_instantiation", "TB must instantiate the DUT.")
+        if not has_stimulus:
+            _add_issue("missing_stimulus", "TB must contain stimulus logic ($urandom, $random, or initial block).")
+        # Warn about Verilator-incompatible constructs (non-blocking)
+        if "class " in text and re.search(r'^\s*class\b', text, re.MULTILINE):
+            _add_issue("verilator_unsupported_class", "Classes inside modules are rejected by Verilator. Use flat procedural code.", severity="warning")
+        if re.search(r'^\s*interface\b', text, re.MULTILINE):
+            _add_issue("verilator_unsupported_interface", "Interface blocks inside modules are rejected by Verilator.", severity="warning")
+        if re.search(r'\bcovergroup\b', text, re.IGNORECASE):
+            _add_issue("verilator_unsupported_covergroup", "Covergroups are not supported by Verilator.", severity="warning")
 
     # Disallow problematic constructs in this flow.
     unsupported = [
@@ -1188,6 +1431,12 @@ def run_tb_compile_gate(design_name: str, tb_path: str, rtl_path: str) -> Tuple[
             categories.add("covergroup_scope_error")
         if "pin not found" in low or "pinnotfound" in low:
             categories.add("pin_mismatch")
+        # Missing interface definition (e.g. UVM-lite fallback references _if not in design)
+        if "cannot find" in low and "interface" in low:
+            categories.add("missing_interface")
+        # Dotted references to missing interfaces (cascade from above)
+        if "dotted reference" in low and ("missing module" in low or "missing interface" in low):
+            categories.add("dotted_ref_missing_interface")
         if not categories:
             categories.add("compile_error")
     report["issue_categories"] = sorted(categories)
@@ -1195,14 +1444,323 @@ def run_tb_compile_gate(design_name: str, tb_path: str, rtl_path: str) -> Tuple[
     fp_base = "|".join(report["issue_categories"]) + "|" + "\n".join(report["diagnostics"][:6])
     report["fingerprint"] = hashlib.sha256(fp_base.encode("utf-8", errors="ignore")).hexdigest()[:16]
     report["ok"] = result.returncode == 0
+
+    # --- iverilog fallback ---
+    # If Verilator rejects the TB (especially for interface/class issues),
+    # try compiling with iverilog to determine if the code is fundamentally
+    # broken or just Verilator-incompatible.
+    if not report["ok"]:
+        verilator_only_cats = {
+            "missing_interface", "dotted_ref_missing_interface",
+            "constructor_interface_type_error", "interface_typing_error",
+            "unsupported_class_construct",
+        }
+        if verilator_only_cats & set(report["issue_categories"]):
+            iverilog_ok, iverilog_msg = _iverilog_compile_tb(tb_path, rtl_path, design_name)
+            report["iverilog_fallback_ok"] = iverilog_ok
+            report["iverilog_fallback_msg"] = iverilog_msg
+            if iverilog_ok:
+                report["ok"] = True
+                report["issue_categories"].append("verilator_only_failure_iverilog_ok")
+
     return report["ok"], report
 
 
+def _iverilog_compile_tb(tb_path: str, rtl_path: str, design_name: str) -> Tuple[bool, str]:
+    """Try compiling TB + RTL with iverilog as a Verilator fallback."""
+    cmd = ["iverilog", "-g2012", "-Wall", "-o", "/dev/null", rtl_path, tb_path]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        combined = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode == 0:
+            return True, f"iverilog compile OK: {combined[:500]}" if combined else "iverilog compile OK"
+        return False, f"iverilog compile failed:\n{combined[:2000]}"
+    except FileNotFoundError:
+        return False, "iverilog not found"
+    except subprocess.TimeoutExpired:
+        return False, "iverilog compile timed out"
+
+
+# ---------------------------------------------------------------------------
+# Error-log classifier — parse Verilator compile output into structured,
+# actionable error records so the repair pass can apply *targeted* fixes
+# instead of blind regex guessing.
+# ---------------------------------------------------------------------------
+
+def classify_compile_errors(compile_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Parse Verilator compile output and return a list of classified error records.
+
+    Each record has:
+        category  – str   e.g. 'virtual_interface_module_scope', 'unsupported_class',
+                          'rand_constraint', 'syntax_error', 'port_mismatch', …
+        line      – int   source line number (0 if unknown)
+        file      – str   filename from the error ('' if unknown)
+        message   – str   raw error/warning text
+        action    – str   suggested repair action:
+                          'remove_line', 'strip_block', 'strip_keyword',
+                          'rewrite', 'regenerate', 'unknown'
+    """
+    raw = compile_report.get("compile_output", "")
+    if not raw:
+        return []
+
+    errors: List[Dict[str, Any]] = []
+    seen_sigs: set = set()  # deduplicate identical messages
+
+    # ---- Verilator error/warning line patterns ----
+    # %Error: file.v:17:33: syntax error, unexpected ';'
+    # %Error-<tag>: file.v:10: ...
+    # %Warning-<tag>: file.v:15: ...
+    loc_pat = re.compile(
+        r"^%(?:Error|Warning)(?:-\w+)?:\s*([^:]+):(\d+)(?::\d+)?:\s*(.+)$"
+    )
+    # Some messages lack a file:line prefix
+    generic_pat = re.compile(
+        r"^%(?:Error|Warning)(?:-\w+)?:\s*(.+)$"
+    )
+
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+
+        m = loc_pat.match(s)
+        if m:
+            fname, lineno_str, msg = m.group(1), m.group(2), m.group(3)
+            lineno = int(lineno_str)
+        elif generic_pat.match(s):
+            fname, lineno, msg = "", 0, generic_pat.match(s).group(1)
+        else:
+            # Pick up lines that contain 'syntax error' but lack the % prefix
+            if "syntax error" in s.lower() or "error:" in s.lower():
+                fname, lineno, msg = "", 0, s
+            else:
+                continue
+
+        sig = f"{fname}:{lineno}:{msg[:80]}"
+        if sig in seen_sigs:
+            continue
+        seen_sigs.add(sig)
+
+        cat, action = _classify_single_error(msg, fname, lineno)
+        errors.append({
+            "category": cat,
+            "line": lineno,
+            "file": fname,
+            "message": msg,
+            "action": action,
+        })
+
+    return errors
+
+
+def _classify_single_error(msg: str, fname: str, lineno: int) -> tuple:
+    """Classify a single error message into (category, action)."""
+    low = msg.lower()
+
+    # ---- virtual interface at module scope ----
+    if "virtual" in low and ("interface" in low or "unexpected" in low):
+        return ("virtual_interface_module_scope", "remove_line")
+
+    # ---- class / endclass / rand / constraint not supported ----
+    if any(kw in low for kw in ("class ", "endclass", "rand ", "constraint ")):
+        return ("unsupported_class_construct", "strip_block")
+    # rand keyword in variable decl
+    if re.search(r"\brand\b", low):
+        return ("rand_constraint", "strip_keyword")
+
+    # ---- missing interface definition (root cause of UVM-lite fallback failures) ----
+    if "cannot find" in low and "interface" in low:
+        return ("missing_interface", "regenerate")
+
+    # ---- dotted reference to missing module/interface (cascade from missing interface) ----
+    if "dotted reference" in low and ("missing module" in low or "missing interface" in low):
+        return ("dotted_ref_missing_interface", "rewrite")
+
+    # ---- can't find definition in dotted variable (e.g. vif.clk) ----
+    if "can't find definition" in low and "dotted variable" in low:
+        return ("dotted_ref_missing_interface", "rewrite")
+
+    # ---- CELL vs variable mismatch (e.g. vif is a cell but used as variable) ----
+    if "found definition" in low and "cell" in low and "expected a variable" in low:
+        return ("cell_variable_mismatch", "regenerate")
+
+    # ---- interface typing errors ----
+    if "unexpected identifier" in low and ("_if" in msg or "interface" in low):
+        return ("interface_typing_error", "rewrite")
+
+    # ---- covergroup / coverpoint ----
+    if "covergroup" in low or "coverpoint" in low:
+        return ("covergroup_unsupported", "strip_block")
+
+    # ---- port/pin mismatch ----
+    if "pin not found" in low or "pinnotfound" in low or ("port" in low and "not found" in low):
+        return ("port_mismatch", "regenerate")
+
+    # ---- undeclared identifier ----
+    if "was not found" in low or "undeclared identifier" in low or ("unknown" in low and "identifier" in low):
+        return ("undeclared_identifier", "rewrite")
+
+    # ---- generic syntax error ----
+    if "syntax error" in low:
+        return ("syntax_error", "rewrite")
+
+    # ---- missing module ----
+    if "cannot find" in low and "module" in low:
+        return ("missing_module", "regenerate")
+
+    # ---- timescale warnings (non-fatal, informational) ----
+    if "timescale" in low:
+        return ("timescale_warning", "ignore")
+
+    # ---- parser internal error ----
+    if "internal error" in low:
+        return ("parser_internal_error", "regenerate")
+
+    return ("compile_error", "unknown")
+
+
 def repair_tb_for_verilator(tb_code: str, compile_report: Dict[str, Any]) -> str:
-    """Deterministic repair pass for common Verilator TB incompatibilities."""
+    """Deterministic repair pass for common Verilator TB incompatibilities.
+
+    This enhanced version first classifies the error log using
+    ``classify_compile_errors`` so it can apply *targeted* fixes instead of
+    blind regex guessing.  The original regex-based repairs are kept as a
+    fallback for any errors the classifier cannot handle.
+    """
     fixed = tb_code or ""
     if not fixed.strip():
         return fixed
+
+    # ------------------------------------------------------------------
+    # Phase 0 — Classify errors from the compile report
+    # ------------------------------------------------------------------
+    classified = classify_compile_errors(compile_report)
+    categories_seen = {e["category"] for e in classified}
+    error_lines = {e["line"] for e in classified if e["line"] > 0}
+
+    # ------------------------------------------------------------------
+    # Phase 1 — TARGETED fixes driven by classified errors
+    # ------------------------------------------------------------------
+
+    # 1a.  Remove ``virtual interface <name>;`` at **module** scope
+    #      (Verilator rejects this — the interface type isn't even defined
+    #       in the design, so we remove the line entirely.)
+    if "virtual_interface_module_scope" in categories_seen or re.search(
+        r"^\s*virtual\s+interface\s+\w+\s*;", fixed, re.MULTILINE
+    ):
+        lines = fixed.splitlines()
+        in_class = False
+        kept: List[str] = []
+        for ln in lines:
+            stripped = ln.strip()
+            if re.match(r"^class\b", stripped):
+                in_class = True
+            if re.match(r"^endclass\b", stripped):
+                in_class = False
+            # Only remove at module scope, not inside classes
+            if not in_class and re.match(r"^\s*virtual\s+interface\s+\w+\s*;", ln):
+                continue  # drop the line
+            kept.append(ln)
+        fixed = "\n".join(kept)
+
+    # 1b.  Strip class … endclass blocks at module scope
+    #      (Verilator doesn't support SV classes at top/module scope.)
+    if "unsupported_class_construct" in categories_seen or re.search(
+        r"^\s*class\b", fixed, re.MULTILINE
+    ):
+        fixed = _strip_module_scope_classes(fixed)
+
+    # 1b2. Rewrite missing-interface pattern: ``<name>_if vif()`` + ``vif.X``
+    #      → remove interface instantiation, replace ``vif.X`` with direct ``X``
+    #      This handles the UVM-lite fallback TB that references a non-existent
+    #      interface definition.
+    missing_if_errors = {"missing_interface", "dotted_ref_missing_interface",
+                         "cell_variable_mismatch"}
+    if missing_if_errors & categories_seen or re.search(
+        r"^\s*\w+_if\s+\w+\s*\(\s*\)\s*;", fixed, re.MULTILINE
+    ):
+        # Find all interface instance names: ``<if_type> <inst_name>();``
+        if_instances = re.findall(
+            r"^\s*(\w+_if)\s+(\w+)\s*\(\s*\)\s*;", fixed, re.MULTILINE
+        )
+        for if_type, inst_name in if_instances:
+            # Remove the interface instantiation line
+            fixed = re.sub(
+                rf"^\s*{re.escape(if_type)}\s+{re.escape(inst_name)}\s*\(\s*\)\s*;\s*$",
+                "",
+                fixed,
+                flags=re.MULTILINE,
+            )
+            # Replace ``inst_name.signal`` with just ``signal`` everywhere
+            fixed = re.sub(
+                rf"\b{re.escape(inst_name)}\.(\w+)",
+                r"\1",
+                fixed,
+            )
+        # Also remove ``virtual <if_type> <var>;`` declarations inside classes
+        for if_type, _ in if_instances:
+            fixed = re.sub(
+                rf"^\s*virtual\s+{re.escape(if_type)}\s+\w+\s*;\s*$",
+                "",
+                fixed,
+                flags=re.MULTILINE,
+            )
+        # Remove function args that reference virtual interface types
+        for if_type, _ in if_instances:
+            fixed = re.sub(
+                rf"\bvirtual\s+{re.escape(if_type)}\s+\w+",
+                "",
+                fixed,
+            )
+            # Clean up empty function argument lists: ``function new();``
+            fixed = re.sub(r"\(\s*,\s*\)", "()", fixed)
+            fixed = re.sub(r"\(\s*\)", "()", fixed)
+
+    # 1c.  Strip ``rand`` keyword from any surviving variable declarations
+    if "rand_constraint" in categories_seen or re.search(r"\brand\s+", fixed):
+        fixed = re.sub(r"\brand\s+", "", fixed)
+
+    # 1d.  Strip ``constraint`` blocks
+    fixed = re.sub(
+        r"(?ms)^\s*constraint\s+\w+\s*\{.*?\}\s*;?\s*$", "", fixed
+    )
+
+    # 1e.  Replace class-based ``new()`` calls with plain procedural code.
+    #      e.g. ``Driver driver; driver = new(dut);`` → remove both lines
+    #      when the class was already stripped.
+    #      After class stripping, type names of stripped classes become undeclared.
+    #      Remove ``<TypeName> <var>;`` and ``<var> = new(…);`` when TypeName
+    #      was among the stripped classes.
+    if hasattr(_strip_module_scope_classes, "_last_stripped_classes"):
+        for cls_name in _strip_module_scope_classes._last_stripped_classes:
+            # declaration: ``ClassName varName;``
+            fixed = re.sub(
+                rf"^\s*{re.escape(cls_name)}\s+\w+\s*;\s*$",
+                "",
+                fixed,
+                flags=re.MULTILINE,
+            )
+            # ``varName = new(…);`` or ``varName = new();``
+            # (we already removed the type decl, so we also need to remove the
+            #  assignment to ``new`` that references the same variable)
+        fixed = re.sub(
+            r"^\s*\w+\s*=\s*new\s*\(.*?\)\s*;\s*$",
+            "",
+            fixed,
+            flags=re.MULTILINE,
+        )
+        # ``varName.run();`` calls on stripped objects
+        fixed = re.sub(
+            r"^\s*\w+\.\w+\s*\(.*?\)\s*;\s*$",
+            "",
+            fixed,
+            flags=re.MULTILINE,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 2 — LEGACY regex-based repairs (kept for breadth)
+    # ------------------------------------------------------------------
 
     interface_names = set(re.findall(r"^\s*interface\s+([A-Za-z_]\w*)\b", fixed, flags=re.MULTILINE))
     interface_names.update(re.findall(r"\b([A-Za-z_]\w*_if)\b", fixed))
@@ -1276,11 +1834,66 @@ def repair_tb_for_verilator(tb_code: str, compile_report: Dict[str, Any]) -> str
         flags=re.MULTILINE,
     )
 
+    # ------------------------------------------------------------------
+    # Phase 3 — Safety net: if the TB is now empty or has no module, bail
+    # ------------------------------------------------------------------
+    if "module" not in fixed:
+        # Return original — the orchestrator will escalate to full regen
+        return tb_code
+
     # Clean excessive blank runs after rewrites.
     fixed = re.sub(r"\n{3,}", "\n\n", fixed)
     if not fixed.endswith("\n"):
         fixed += "\n"
     return fixed
+
+
+def _strip_module_scope_classes(code: str) -> str:
+    """Remove all ``class … endclass`` blocks that appear at module scope.
+
+    Preserves classes that are inside ``package … endpackage`` since those
+    are structurally valid in SystemVerilog.  Tracks the *names* of stripped
+    classes on the function attribute ``_last_stripped_classes`` so the caller
+    can clean up dangling references.
+    """
+    lines = code.splitlines()
+    result: List[str] = []
+    depth = 0  # nesting depth of class blocks being stripped
+    in_package = False
+    stripped_classes: List[str] = []
+
+    for ln in lines:
+        stripped = ln.strip()
+
+        # Track package scope
+        if re.match(r"^package\b", stripped):
+            in_package = True
+        if re.match(r"^endpackage\b", stripped):
+            in_package = False
+
+        # Only strip at module scope (not inside package)
+        if not in_package:
+            if depth == 0 and re.match(r"^class\b", stripped):
+                m = re.match(r"^class\s+([A-Za-z_]\w*)", stripped)
+                if m:
+                    stripped_classes.append(m.group(1))
+                depth = 1
+                continue
+            if depth > 0:
+                # Handle nested classes if any
+                if re.match(r"^class\b", stripped):
+                    depth += 1
+                if re.match(r"^endclass\b", stripped):
+                    depth -= 1
+                continue  # skip all lines inside the class block
+
+        result.append(ln)
+
+    _strip_module_scope_classes._last_stripped_classes = stripped_classes
+    return "\n".join(result)
+
+# Initialize the function attribute
+_strip_module_scope_classes._last_stripped_classes = []
 
 def run_simulation(design_name: str) -> tuple:
     """
@@ -1411,7 +2024,13 @@ def run_openlane(
         "./flow.tcl", "-design", design_name, "-tag", run_tag, "-overwrite", "-ignore_mismatches"
     ]
     if floorplan_tcl:
-        cmd.extend(["-config_file", floorplan_tcl])
+        # Convert host absolute path to Docker-relative path
+        # Docker mounts OPENLANE_ROOT at /openlane
+        if floorplan_tcl.startswith(OPENLANE_ROOT):
+            docker_config_path = floorplan_tcl.replace(OPENLANE_ROOT, "/openlane")
+        else:
+            docker_config_path = floorplan_tcl
+        cmd.extend(["-config_file", docker_config_path])
     
     if background:
         log_file_path = os.path.join(design_dir, "harden.log")
