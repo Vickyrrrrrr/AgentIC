@@ -47,6 +47,29 @@ TESTBENCH UNIVERSAL RULES (must follow for ANY chip type):
   • UART/SPI/I2C     : drive byte stream, check start/stop, verify loopback
   • AXI/APB device   : send valid transactions, check ready/resp signals
   • CPU core         : load NOP/ADD/BR instructions, check PC progression
+
+  DATA INTEGRITY VERIFICATION (CRITICAL):
+  ─────────────────────────────────────────
+  When verifying data integrity, always store all stimulus values before applying
+  them to the DUT, then compare DUT outputs against those stored values.
+  Never generate a new random value during the checking phase — the checking
+  phase must only read values that were stored during the stimulus phase.
+  Example for FIFO / memory:
+    reg [7:0] stim_array [0:DEPTH-1];
+    // Stimulus phase — store then drive
+    for (i = 0; i < DEPTH; i++) begin
+        stim_array[i] = $urandom;
+        data_in = stim_array[i];
+        push = 1; #10; push = 0;
+    end
+    // Checking phase — compare against stored values
+    for (i = 0; i < DEPTH; i++) begin
+        pop = 1; #10; pop = 0;
+        if (data_out !== stim_array[i]) begin
+            $display("MISMATCH at %0d: expected %h got %h", i, stim_array[i], data_out);
+            fail_count = fail_count + 1;
+        end
+    end
 """
 
 def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):

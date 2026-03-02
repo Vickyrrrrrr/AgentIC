@@ -6,6 +6,8 @@ import re
 import hashlib
 import json
 import signal
+import difflib
+import subprocess
 import threading
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List
@@ -56,6 +58,7 @@ from .tools.vlsi_tools import (
     validate_yosys_sby_check,
     startup_self_check,
     run_semantic_rigor_check,
+    auto_fix_width_warnings,
     parse_eda_log_summary,
     parse_congestion_metrics,
     run_eqy_lec,
@@ -1190,6 +1193,99 @@ endclass
 
         raise RuntimeError("Crew kickoff returned no result")
 
+    def _format_semantic_rigor_errors(self, sem_report: dict) -> str:
+        """Parse raw Verilator width warnings into structured, actionable context for the LLM fixer."""
+        lines = []
+        lines.append("SEMANTIC_RIGOR_FAILURE — Width and port issues detected.\n")
+
+        # Port shadowing — already structured
+        for sig in sem_report.get("port_shadowing", []):
+            lines.append(f"PORT SHADOWING: Signal '{sig}' is declared as both a port and an internal signal. "
+                         f"Remove the redundant internal declaration.")
+
+        # Width issues — parse raw Verilator warning strings into structured records
+        for raw in sem_report.get("width_issues", []):
+            parsed = self._parse_width_warning(raw)
+            if parsed:
+                lines.append(
+                    f"Signal '{parsed['signal']}' at line {parsed['line']}: "
+                    f"expected {parsed['expected']} bits but got {parsed['actual']} bits. "
+                    f"Fix the width mismatch at this exact location."
+                )
+            else:
+                # Fallback: still include the warning but mark it clearly
+                lines.append(f"WIDTH WARNING: {raw.strip()}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_width_warning(warning: str) -> dict | None:
+        """Extract signal name, line number, and bit widths from a Verilator width warning.
+
+        Handles patterns like:
+          %Warning-WIDTHTRUNC: src/foo.v:42:5: Operator ASSIGN expects 8 bits on the Assign RHS, but Assign RHS's URANDOMRANGE generates 32 bits.
+          %Warning-WIDTHEXPAND: src/foo.v:43:22: Operator EQ expects 32 or 5 bits on the LHS, but LHS's VARREF 'cnt' generates 4 bits.
+        """
+        import re
+        # Extract line number from file:line:col pattern
+        line_match = re.search(r":(\d+):\d+:", warning)
+        line_no = int(line_match.group(1)) if line_match else 0
+
+        # Extract signal/variable name — Verilator uses VARREF, Var, SELBIT, etc.
+        sig_match = re.search(r"(?:VARREF|Var|of|SEL|SELBIT|ARRAYSEL)\s+'(\w+)'", warning)
+        signal = sig_match.group(1) if sig_match else ""
+
+        # Extract expected width.
+        # Verilator can emit "expects N bits" or "expects N or M bits" — take
+        # the *last* number before "bits" in the expects clause since Verilator
+        # lists the context width first and the meaningful target width second.
+        expect_match = re.search(r"expects\s+(\d+(?:\s+or\s+\d+)?)\s+bits", warning)
+        expected = "?"
+        if expect_match:
+            # If format is "32 or 5", extract both; use the smaller (signal-meaningful) one.
+            nums = re.findall(r"\d+", expect_match.group(1))
+            if nums:
+                expected = nums[-1]  # last number is the more specific width
+
+        # Extract actual width — "generates N bits"
+        actual_match = re.search(r"generates\s+(\d+)\s+bits", warning)
+        if not actual_match:
+            actual_match = re.search(r"(?:is|has)\s+(\d+)\s+bits", warning)
+
+        actual = actual_match.group(1) if actual_match else "?"
+
+        # If we couldn't extract anything meaningful, return None for fallback
+        if not signal and expected == "?" and actual == "?":
+            return None
+
+        # If no signal name found, try to extract any quoted identifier
+        if not signal:
+            id_match = re.search(r"'(\w+)'", warning)
+            signal = id_match.group(1) if id_match else "unknown"
+
+        return {"signal": signal, "line": line_no, "expected": expected, "actual": actual}
+
+    @staticmethod
+    def _format_unfixable_width_errors(unfixable: list) -> str:
+        """Build a detailed, actionable LLM prompt from unfixable width warning context.
+
+        Each entry in *unfixable* has: line_number, source_line, kind, signal,
+        expected_width, actual_width, verilator_message.
+        """
+        parts = ["SEMANTIC_RIGOR_FAILURE — Width mismatches the mechanical post-processor could not resolve.\n"
+                 "Fix every issue listed below. Use whatever approach is correct for each specific expression "
+                 "(cast, explicit sizing, localparam, bit-select, zero-extension, etc.).\n"]
+        for ctx in unfixable:
+            parts.append(
+                f"LINE {ctx['line_number']}: {ctx['source_line']}\n"
+                f"  Verilator says: {ctx['verilator_message']}\n"
+                f"  Signal '{ctx['signal']}' is {ctx['actual_width']} bits wide, "
+                f"but the expression context requires {ctx['expected_width']} bits.\n"
+                f"  The RHS likely involves a parameter expression that evaluates to 32-bit integer.\n"
+                f"  Resolve this width mismatch at this exact line.\n"
+            )
+        return "\n".join(parts)
+
     def _condense_failure_log(self, raw_text: str, kind: str) -> str:
         if not raw_text:
             return raw_text
@@ -1497,13 +1593,26 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             )
             
             with console.status(f"[bold yellow]Generating RTL ({self.strategy.name})...[/bold yellow]"):
-                result = Crew(
-                    agents=[rtl_agent, reviewer],
-                    tasks=[rtl_task, review_task],
-                    verbose=self.verbose
-                ).kickoff()
-            
-            rtl_code = str(result)
+                try:
+                    result = Crew(
+                        agents=[rtl_agent, reviewer],
+                        tasks=[rtl_task, review_task],
+                        verbose=self.verbose
+                    ).kickoff()
+                    rtl_code = str(result)
+                except Exception as crew_exc:
+                    self.log(f"CrewAI RTL generation error: {crew_exc}", refined=True)
+                    self.logger.warning(f"CrewAI kickoff exception in do_rtl_gen: {crew_exc}")
+                    # Strategy pivot: allow recovery instead of hard crash
+                    if self.strategy == BuildStrategy.SV_MODULAR:
+                        self.log("Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
+                        self.strategy = BuildStrategy.VERILOG_CLASSIC
+                        self.transition(BuildState.RTL_GEN)
+                    else:
+                        self.log("CrewAI error on fallback strategy. Build Failed.", refined=True)
+                        self.state = BuildState.FAIL
+                    return
+
             self.logger.info(f"GENERATED RTL ({self.strategy.name}):\n{rtl_code}")
         
         # Save file (write_verilog cleans LLM output: strips markdown, think tags, etc.)
@@ -1555,8 +1664,34 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 self.logger.info(f"SEMANTIC RIGOR: {sem_report}")
                 if not sem_ok:
                     if self.strict_gates:
-                        self.log("Semantic rigor gate failed. Routing back to RTL fix.", refined=True)
-                        errors = f"SEMANTIC_RIGOR_FAILURE: {sem_report}"
+                        # --- Mechanical width auto-fix (no LLM) ---
+                        self.log("Semantic rigor gate failed. Attempting mechanical width auto-fix.", refined=True)
+                        fix_ok, fix_report = auto_fix_width_warnings(path)
+                        self.logger.info(f"WIDTH AUTO-FIX: fixed={fix_report.get('fixed_count', 0)}, "
+                                         f"remaining={fix_report.get('remaining_count', 0)}")
+                        if fix_ok:
+                            self.log(f"Width auto-fix resolved all {fix_report['fixed_count']} warnings.", refined=True)
+                            # Re-read the patched RTL into artifacts
+                            with open(path, 'r') as f:
+                                self.artifacts['rtl_code'] = f.read()
+                            # Loop back to re-check syntax/lint on the patched file
+                            return
+                        elif fix_report.get("fixed_count", 0) > 0:
+                            self.log(f"Width auto-fix resolved {fix_report['fixed_count']} warnings; "
+                                     f"{fix_report['remaining_count']} remain. Re-checking.", refined=True)
+                            with open(path, 'r') as f:
+                                self.artifacts['rtl_code'] = f.read()
+                            # Loop back — the remaining warnings may resolve after re-lint
+                            return
+                        # Post-processor couldn't fix anything — fall through to LLM
+                        self.log("Mechanical auto-fix could not resolve width warnings. Routing to LLM fixer.", refined=True)
+                        # If the post-processor gathered rich context for unfixable warnings,
+                        # build a detailed prompt giving the LLM everything it needs.
+                        unfixable = fix_report.get("unfixable_context", [])
+                        if unfixable:
+                            errors = self._format_unfixable_width_errors(unfixable)
+                        else:
+                            errors = self._format_semantic_rigor_errors(sem_report)
                     else:
                         self.log("Semantic rigor warnings detected (non-blocking).", refined=True)
                         self.artifacts["semantic_report"] = sem_report
@@ -1600,7 +1735,9 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         errors_for_llm = self._condense_failure_log(str(errors), kind="timing")
         
         # Agents fix syntax — with full build context and failure history
-        fix_prompt = f"""Fix Syntax/Lint Errors in "{self.name}".
+        fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
+
+Fix Syntax/Lint Errors in "{self.name}".
 
 BUILD CONTEXT:
 {self._build_llm_context()}
@@ -1617,7 +1754,6 @@ IMPORTANT: The compiler is Verilator 5.0+ (SystemVerilog 2017+).
 - Use modern SystemVerilog features (`logic`, `always_comb`, `always_ff`).
 - Ensure strict 2-state logic handling (reset all registers).
 - Avoid 4-state logic (x/z) reliance as Verilator is 2-state optimized.
-- Explain what you changed and why in a brief comment at the top.
 
 Code:
 ```verilog
@@ -1645,9 +1781,23 @@ You explain what you changed and why.""",
         )
         
         with console.status("[bold red]AI fixing Syntax/Lint Errors...[/bold red]"):
-            result = Crew(agents=[fixer], tasks=[task]).kickoff()
-            
-        new_code = str(result)
+            try:
+                result = Crew(agents=[fixer], tasks=[task]).kickoff()
+                new_code = str(result)
+            except Exception as crew_exc:
+                self.log(f"CrewAI fix error: {crew_exc}", refined=True)
+                self.logger.warning(f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}")
+                # Return last known RTL — allow the retry loop / strategy pivot to handle it
+                if self.strategy == BuildStrategy.SV_MODULAR:
+                    self.log("Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
+                    self.strategy = BuildStrategy.VERILOG_CLASSIC
+                    self.retry_count = 0
+                    self.transition(BuildState.RTL_GEN)
+                else:
+                    self.log("CrewAI error on fallback strategy. Build Failed.", refined=True)
+                    self.state = BuildState.FAIL
+                return
+
         self.logger.info(f"FIXED RTL:\n{new_code}")
         
         # --- Inner retry loop for LLM parse errors ---
@@ -1675,11 +1825,7 @@ You explain what you changed and why.""",
                 return
 
             # Re-prompt the LLM immediately with explicit format instructions
-            reformat_prompt = f"""Your previous response could NOT be parsed as Verilog code.
-The parser said: {new_path}
-
-You MUST output the COMPLETE Verilog module inside ```verilog``` fences.
-Do NOT output only a description or explanation — output the FULL code.
+            reformat_prompt = f"""Your previous response contained no Verilog code. Respond now with ONLY the complete corrected Verilog module inside ```verilog fences. Nothing else.
 
 Here is the current code that needs the lint fixes applied:
 ```verilog
@@ -1688,8 +1834,6 @@ Here is the current code that needs the lint fixes applied:
 
 Original errors to fix:
 {errors_for_llm}
-
-OUTPUT FORMAT: You must respond with the complete fixed Verilog code inside ```verilog``` fences.
 """
             reformat_task = Task(
                 description=reformat_prompt,
@@ -1869,6 +2013,23 @@ RULES:
         )
 
         if not compile_ok:
+            # If RTL was structurally changed from the sim-failure repair path,
+            # the old testbench's port connections are likely incompatible.
+            # Immediately regenerate the TB instead of retrying the stale one.
+            if self.artifacts.pop('rtl_changed_from_sim_fix', False):
+                self.log("TB compile gate failed after RTL sim-fix. "
+                         "Regenerating testbench against updated RTL.", refined=True)
+                self._record_tb_gate_history("compile", False, "regen_after_rtl_fix", compile_report)
+                tb_path = self.artifacts.get("tb_path")
+                if tb_path and os.path.exists(tb_path):
+                    try:
+                        os.remove(tb_path)
+                    except OSError:
+                        pass
+                self.artifacts.pop("tb_path", None)
+                self._clear_tb_fingerprints()
+                return  # Re-enters do_verification → generates fresh TB
+
             self.tb_compile_fail_count += 1
             self._record_tb_gate_history("compile", False, "gate_fail", compile_report)
             self._handle_tb_gate_failure("compile", compile_report, tb_code)
@@ -1945,11 +2106,15 @@ C) PORT_MISMATCH — TB and RTL have incompatible port names, widths, or missing
 D) TIMING_RACE — Clock/reset timing issue in TB stimulus (setup/hold violations, race conditions)
 E) ARCHITECTURAL — Design spec is ambiguous, contradictory, or fundamentally flawed
 
-Reply in this EXACT format (3 lines):
+Reply in this EXACT format (one field per line):
 CLASS: <letter A-E>
-ROOT_CAUSE: <1-line description of the specific problem>
-FIX_HINT: <specific suggestion for how to fix it>''',
-                expected_output='Structured failure classification with CLASS, ROOT_CAUSE, and FIX_HINT',
+FAILING_OUTPUT: <the exact $display message from the simulation log that indicates failure, e.g. "Data mismatch at pop 0">
+FAILING_SIGNALS: <comma-separated list of signal names whose values are wrong>
+EXPECTED_VS_ACTUAL: <expected value vs actual value if determinable, otherwise "undetermined">
+RESPONSIBLE_CONSTRUCT: <the specific always_ff/always_comb/assign statement and its line number in the RTL that most likely causes the wrong value, e.g. "always_ff block at line 23 driving write_ptr">
+ROOT_CAUSE: <1-line description naming the specific signal and logic error, e.g. "write_ptr increments on push but the counter does not gate on the full flag">
+FIX_HINT: <surgical fix instruction referencing specific line numbers or signal names, e.g. "Change line 25: gate the write_ptr increment with !full">''',
+                expected_output='Structured signal-level failure classification with CLASS, FAILING_OUTPUT, FAILING_SIGNALS, EXPECTED_VS_ACTUAL, RESPONSIBLE_CONSTRUCT, ROOT_CAUSE, and FIX_HINT',
                 agent=analyst
             )
             
@@ -1962,6 +2127,10 @@ FIX_HINT: <specific suggestion for how to fix it>''',
             failure_class = "A"  # default fallback
             root_cause = ""
             fix_hint = ""
+            failing_output = ""
+            failing_signals = ""
+            expected_vs_actual = ""
+            responsible_construct = ""
             for line in analysis.split("\n"):
                 line_stripped = line.strip()
                 if line_stripped.startswith("CLASS:"):
@@ -1972,6 +2141,24 @@ FIX_HINT: <specific suggestion for how to fix it>''',
                     root_cause = line_stripped.replace("ROOT_CAUSE:", "").strip()
                 elif line_stripped.startswith("FIX_HINT:"):
                     fix_hint = line_stripped.replace("FIX_HINT:", "").strip()
+                elif line_stripped.startswith("FAILING_OUTPUT:"):
+                    failing_output = line_stripped.replace("FAILING_OUTPUT:", "").strip()
+                elif line_stripped.startswith("FAILING_SIGNALS:"):
+                    failing_signals = line_stripped.replace("FAILING_SIGNALS:", "").strip()
+                elif line_stripped.startswith("EXPECTED_VS_ACTUAL:"):
+                    expected_vs_actual = line_stripped.replace("EXPECTED_VS_ACTUAL:", "").strip()
+                elif line_stripped.startswith("RESPONSIBLE_CONSTRUCT:"):
+                    responsible_construct = line_stripped.replace("RESPONSIBLE_CONSTRUCT:", "").strip()
+            
+            # Build structured diagnosis string for downstream fix prompts
+            structured_diagnosis = (
+                f"FAILING_OUTPUT: {failing_output}\n"
+                f"FAILING_SIGNALS: {failing_signals}\n"
+                f"EXPECTED_VS_ACTUAL: {expected_vs_actual}\n"
+                f"RESPONSIBLE_CONSTRUCT: {responsible_construct}\n"
+                f"ROOT_CAUSE: {root_cause}\n"
+                f"FIX_HINT: {fix_hint}"
+            )
             
             self.log(
                 f"Diagnosis: CLASS={failure_class} | ROOT_CAUSE={root_cause[:100]} | FIX_HINT={fix_hint[:100]}",
@@ -2069,14 +2256,12 @@ CRITICAL RULES:
                 error_lines = [line for line in output.split('\n') if "Error" in line or "fail" in line.lower()]
                 error_summary = "\n".join(error_lines)
                 
-                fix_prompt = f"""Fix the RTL logic to pass verification.
+                fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. No explanation, no commentary, no "Thought:" prefixes.
 
-DIAGNOSIS FROM ERROR ANALYST:
-ROOT CAUSE: {root_cause}
-FIX HINT: {fix_hint}
+SURGICAL FIX REQUIRED — make the MINIMUM change to fix the specific issue identified.
 
-BUILD CONTEXT:
-{self._build_llm_context(include_rtl=False)}
+SIGNAL-LEVEL DIAGNOSIS FROM ERROR ANALYST:
+{structured_diagnosis}
 
 Specific Issues Detected:
 {error_summary}
@@ -2097,11 +2282,15 @@ Ref TB:
 PREVIOUS ATTEMPTS:
 {self._format_failure_history()}
 
-CRITICAL:
-- Address the ROOT CAUSE and FIX HINT above directly.
-- Maintain design intent from the architecture spec.
+CRITICAL RULES:
+- You MUST make the minimum possible change to fix the specific issue identified.
+- Do NOT rewrite the module. Do NOT restructure the design.
+- Identify the exact lines responsible for the failure and change ONLY those lines.
+- Do NOT remove sub-module instantiations or flatten a hierarchical design.
+- Do NOT change port names, port widths, or module interfaces.
+- Return the complete module with only the specific buggy lines changed.
 - Use your syntax_check tool to verify the fix compiles before returning it.
-- Return ONLY the fixed {self.strategy.name} logic in ```verilog fences.
+- Return ONLY the fixed {self.strategy.name} code in ```verilog fences.
 """
             
             # Execute Fix — fixer uses analyst's diagnosis as context
@@ -2121,7 +2310,50 @@ CRITICAL:
             self.logger.info(f"FIXED CODE:\n{fixed_code}")
             
             if not is_tb_issue:
-                # RTL Fix — write cleaned code and read it back
+                # RTL Fix — diff check to reject full rewrites
+                original_code = self.artifacts.get('rtl_code', '')
+                original_lines = original_code.splitlines()
+                fixed_lines = fixed_code.splitlines()
+
+                # Count changed lines using SequenceMatcher
+                if original_lines and fixed_lines:
+                    matcher = difflib.SequenceMatcher(None, original_lines, fixed_lines)
+                    unchanged = sum(block.size for block in matcher.get_matching_blocks())
+                    total = max(len(original_lines), len(fixed_lines))
+                    changed_ratio = 1.0 - (unchanged / total) if total > 0 else 0.0
+                    self.logger.info(f"RTL DIFF CHECK: {changed_ratio:.1%} of lines changed "
+                                     f"({total - unchanged}/{total})")
+
+                    if changed_ratio > 0.30:
+                        self.log(f"RTL fix rejected: {changed_ratio:.0%} of lines changed (>30%). "
+                                 "Requesting surgical retry.", refined=True)
+                        # Re-prompt with explicit rejection context
+                        retry_prompt = f"""RESPOND WITH VERILOG CODE ONLY.
+
+Your previous fix was REJECTED because it changed {changed_ratio:.0%} of the code (>30% threshold).
+You must make a SURGICAL fix — change ONLY the specific lines that cause the bug.
+
+DIAGNOSIS:
+{structured_diagnosis}
+
+Original RTL (DO NOT REWRITE — change only the buggy lines):
+```verilog
+{original_code}
+```
+
+Return the complete module with ONLY the minimal fix applied.
+"""
+                        retry_task = Task(
+                            description=retry_prompt,
+                            expected_output="Fixed Verilog Code in ```verilog fences",
+                            agent=fixer
+                        )
+                        with console.status("[bold yellow]AI Implementing Surgical Fix (retry)...[/bold yellow]"):
+                            result2 = Crew(agents=[fixer], tasks=[retry_task], verbose=self.verbose).kickoff()
+                        fixed_code = str(result2)
+                        self.logger.info(f"SURGICAL RETRY CODE:\n{fixed_code}")
+
+                # Write cleaned code and read it back
                 path = write_verilog(self.name, fixed_code)
                 if isinstance(path, str) and path.startswith("Error:"):
                     self.log(f"File Write Error when fixing RTL logic: {path}", refined=True)
@@ -2130,6 +2362,9 @@ CRITICAL:
                 self.artifacts['rtl_path'] = path
                 with open(path, 'r') as f:
                     self.artifacts['rtl_code'] = f.read()
+                # Flag that RTL was structurally changed from the sim-failure path
+                # so TB compile gate knows to regenerate the testbench if needed
+                self.artifacts['rtl_changed_from_sim_fix'] = True
                 self.log("RTL Updated. Transitioning back to RTL_FIX to verify syntax.", refined=True)
                 self.transition(BuildState.RTL_FIX, preserve_retries=True)
                 return
@@ -2167,6 +2402,8 @@ CRITICAL:
             verif_agent = get_verification_agent(self.llm, verbose=self.verbose)
             sva_task = Task(
                 description=f"""Generate SystemVerilog Assertions (SVA) for module "{self.name}".
+
+Generate SVA assertions that are compatible with the Yosys formal verification engine. Yosys has limited SVA support. Before writing any assertion syntax, reason about whether Yosys can parse it. Use the simplest correct assertion style. If unsure whether a construct is Yosys-compatible, use a simpler equivalent.
                 
                 RTL Code:
                 ```verilog
@@ -2245,7 +2482,27 @@ CRITICAL:
                 f.write(yosys_code)
             self.log("Yosys-compatible assertions generated.", refined=True)
             
-            # 3. Write SBY config and run
+            # 3. Yosys SVA preflight — catch syntax errors before sby runs
+            from .config import YOSYS_BIN as _YOSYS_BIN
+            _yosys = _YOSYS_BIN or "yosys"
+            preflight_cmd = [_yosys, "-p", f"read_verilog -formal -sv {sby_check_path}"]
+            try:
+                pf = subprocess.run(preflight_cmd, capture_output=True, text=True, timeout=30)
+                if pf.returncode != 0:
+                    yosys_err = (pf.stderr or pf.stdout or "").strip()
+                    self.log(f"Yosys SVA preflight failed. Regenerating SVA with error context.", refined=True)
+                    self.logger.info(f"YOSYS SVA PREFLIGHT FAIL:\n{yosys_err}")
+                    # Remove stale SVA files so the next iteration regenerates
+                    for stale in (sva_path, sby_check_path):
+                        if os.path.exists(stale):
+                            os.remove(stale)
+                    self.artifacts["sva_preflight_error"] = yosys_err[:2000]
+                    # Stay in FORMAL_VERIFY — will regenerate SVA on re-entry
+                    return
+            except Exception as pf_exc:
+                self.logger.warning(f"Yosys SVA preflight exception: {pf_exc}")
+
+            # 4. Write SBY config and run
             write_sby_config(self.name, use_sby_check=True)
             
             with console.status("[bold cyan]Running Formal Verification (SymbiYosys)...[/bold cyan]"):

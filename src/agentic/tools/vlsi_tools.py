@@ -354,7 +354,8 @@ def run_syntax_check(file_path: str) -> tuple:
         # Gather all RTL files to support multi-file compilation
         import glob
         src_dir = os.path.dirname(file_path)
-        rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+        rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
+                     if not f.endswith("_tb.v") and "regression" not in f]
         if file_path not in rtl_files and os.path.exists(file_path):
             rtl_files.append(file_path)
 
@@ -390,7 +391,8 @@ def run_lint_check(file_path: str) -> tuple:
     
     import glob
     src_dir = os.path.dirname(file_path)
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
+                 if not f.endswith("_tb.v") and "regression" not in f]
     if file_path not in rtl_files and os.path.exists(file_path):
         rtl_files.append(file_path)
 
@@ -555,6 +557,232 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
 
     report["ok"] = not report["port_shadowing"] and not report["width_issues"]
     return report["ok"], report
+
+
+def auto_fix_width_warnings(file_path: str) -> Tuple[bool, Dict[str, Any]]:
+    """Mechanical post-processor that fixes Verilator width warnings directly in the RTL file.
+
+    Parses each Verilator WIDTHTRUNC / WIDTHEXPAND warning, reads the offending line,
+    applies a bit-slice or zero-extension, writes back, then re-runs Verilator to verify.
+
+    Returns:
+        (all_fixed, report_dict)
+        - all_fixed=True  → every width warning was resolved; file is updated in-place
+        - all_fixed=False → some warnings remain; report["remaining"] has what's left
+    """
+    report: Dict[str, Any] = {
+        "fixed_count": 0,
+        "remaining_count": 0,
+        "remaining": [],
+        "actions": [],
+    }
+
+    if not os.path.exists(file_path):
+        report["remaining"] = [f"File not found: {file_path}"]
+        report["remaining_count"] = 1
+        return False, report
+
+    # ── Step 1: Run Verilator -Wall and collect width warnings ──
+    warnings = _collect_width_warnings(file_path)
+    if not warnings:
+        return True, report  # nothing to fix
+
+    # ── Step 2: Parse each warning into an actionable record ──
+    parsed = [_parse_width_warning_record(w) for w in warnings]
+    parsed = [p for p in parsed if p is not None]
+
+    if not parsed:
+        # Couldn't parse any warnings — hand off to caller
+        report["remaining"] = warnings
+        report["remaining_count"] = len(warnings)
+        return False, report
+
+    # ── Step 3: Apply mechanical fixes to the file ──
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    applied = 0
+    unfixable_context: List[Dict[str, Any]] = []  # rich context for LLM fallback
+    for rec in parsed:
+        lineno = rec["line"] - 1  # 0-indexed
+        if lineno < 0 or lineno >= len(lines):
+            report["remaining"].append(rec["raw"])
+            continue
+
+        original_line = lines[lineno]
+        fixed_line = _apply_width_fix(original_line, rec)
+
+        if fixed_line and fixed_line != original_line:
+            lines[lineno] = fixed_line
+            applied += 1
+            report["actions"].append({
+                "line": rec["line"],
+                "kind": rec["kind"],
+                "expected": rec["expected"],
+                "actual": rec["actual"],
+                "before": original_line.rstrip(),
+                "after": fixed_line.rstrip(),
+            })
+        else:
+            report["remaining"].append(rec["raw"])
+            # Build rich context for LLM fallback — include everything
+            # the LLM needs to resolve the mismatch itself.
+            unfixable_context.append({
+                "line_number": rec["line"],
+                "source_line": original_line.rstrip(),
+                "kind": rec["kind"],
+                "signal": rec.get("signal", ""),
+                "expected_width": rec["expected"],
+                "actual_width": rec["actual"],
+                "verilator_message": rec["raw"],
+            })
+
+    if unfixable_context:
+        report["unfixable_context"] = unfixable_context
+
+    if applied == 0:
+        report["remaining_count"] = len(report["remaining"]) or len(warnings)
+        if not report["remaining"]:
+            report["remaining"] = warnings
+        return False, report
+
+    # ── Step 4: Write back ──
+    with open(file_path, "w") as f:
+        f.writelines(lines)
+
+    report["fixed_count"] = applied
+
+    # ── Step 5: Re-run Verilator to verify ──
+    remaining_warnings = _collect_width_warnings(file_path)
+    report["remaining"] = remaining_warnings
+    report["remaining_count"] = len(remaining_warnings)
+
+    return len(remaining_warnings) == 0, report
+
+
+# ---------------------------------------------------------------------------
+#  Internal helpers for the width post-processor
+# ---------------------------------------------------------------------------
+
+def _collect_width_warnings(file_path: str) -> List[str]:
+    """Run Verilator -Wall and return only WIDTH-related warning lines."""
+    cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wall", file_path]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        stderr = result.stderr or ""
+    except Exception:
+        return []
+
+    hit_keys = ("WIDTHTRUNC", "WIDTHEXPAND", "WIDTH")
+    out = []
+    for line in stderr.splitlines():
+        upper = line.upper()
+        if any(k in upper for k in hit_keys):
+            out.append(line.strip())
+    return out
+
+
+def _parse_width_warning_record(warning: str) -> dict | None:
+    """Extract structured fields from one Verilator width warning.
+
+    Returns dict with keys: kind, line, expected, actual, signal, raw
+    or None if unparseable.
+    """
+    upper = warning.upper()
+    if "WIDTHTRUNC" in upper:
+        kind = "trunc"
+    elif "WIDTHEXPAND" in upper:
+        kind = "expand"
+    elif "WIDTH" in upper:
+        kind = "width"
+    else:
+        return None
+
+    # file:line:col
+    line_match = re.search(r":(\d+):\d+:", warning)
+    if not line_match:
+        return None
+    lineno = int(line_match.group(1))
+
+    # "expects N bits" or "expects N or M bits"
+    exp_match = re.search(r"expects\s+(\d+(?:\s+or\s+\d+)?)\s+bits", warning)
+    # "generates M bits"  or  "is M bits"
+    act_match = re.search(r"(?:generates|is|has)\s+(\d+)\s+bits", warning)
+
+    if not exp_match or not act_match:
+        return None
+
+    # For "expects 32 or 5 bits", take the last (more specific) number
+    exp_nums = re.findall(r"\d+", exp_match.group(1))
+    expected = int(exp_nums[-1]) if exp_nums else None
+    actual = int(act_match.group(1))
+
+    if expected is None:
+        return None
+
+    # Extract signal name — Verilator uses VARREF 'name', Var 'name', etc.
+    sig_match = re.search(r"(?:VARREF|Var|SEL|SELBIT|ARRAYSEL)\s+'(\w+)'", warning)
+    signal = sig_match.group(1) if sig_match else ""
+    if not signal:
+        id_match = re.search(r"'(\w+)'", warning)
+        signal = id_match.group(1) if id_match else ""
+
+    return {
+        "kind": kind,
+        "line": lineno,
+        "expected": expected,
+        "actual": actual,
+        "signal": signal,
+        "raw": warning,
+    }
+
+
+def _apply_width_fix(line: str, rec: dict) -> str | None:
+    """Return a fixed version of *line* according to the parsed warning record.
+
+    WIDTHTRUNC  (actual > expected): bit-slice the RHS  →  expr[expected-1:0]
+    WIDTHEXPAND (actual < expected): zero-extend the RHS → {(expected-actual){1'b0}}, expr}
+    """
+    expected = rec["expected"]
+    actual = rec["actual"]
+    kind = rec["kind"]
+
+    # Find the assignment ( = or <= ) and work on the RHS
+    assign_match = re.search(r"(.*?)(<=|=)\s*(.+?)\s*(;)", line)
+    if not assign_match:
+        return None  # not a simple assignment line — can't fix mechanically
+
+    lhs = assign_match.group(1)
+    op = assign_match.group(2)
+    rhs = assign_match.group(3).strip()
+    semi = assign_match.group(4)
+
+    # Don't double-fix (idempotency guard)
+    if re.search(r"\[\s*\d+\s*:\s*0\s*\]\s*$", rhs) and kind == "trunc":
+        return None
+    if rhs.startswith("{") and "'b0" in rhs and kind == "expand":
+        return None
+
+    if kind == "trunc" and actual > expected:
+        # Bit-slice the RHS to the expected width
+        fixed_rhs = f"({rhs})[{expected - 1}:0]"
+    elif kind == "expand" and actual < expected:
+        # Zero-extend the RHS to the expected width
+        pad = expected - actual
+        fixed_rhs = f"{{{pad}'b0, {rhs}}}"
+    elif kind == "width":
+        # Generic WIDTH: if actual > expected, truncate; otherwise extend
+        if actual > expected:
+            fixed_rhs = f"({rhs})[{expected - 1}:0]"
+        elif actual < expected:
+            pad = expected - actual
+            fixed_rhs = f"{{{pad}'b0, {rhs}}}"
+        else:
+            return None  # same width — shouldn't happen
+    else:
+        return None
+
+    return f"{lhs}{op} {fixed_rhs}{semi}\n"
 
 
 def validate_rtl_for_synthesis(file_path: str) -> tuple:
@@ -1060,14 +1288,30 @@ def write_sby_config(design_name, use_sby_check: bool = True):
         design_name: Name of the design
         use_sby_check: If True, use the Yosys-compatible _sby_check.sv file
     """
-    design_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
-    path = f"{design_dir}/{design_name}.sby"
+    import glob as _glob
+    src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
+    formal_dir = f"{OPENLANE_ROOT}/designs/{design_name}/formal"
+    os.makedirs(formal_dir, exist_ok=True)
+    path = f"{formal_dir}/{design_name}.sby"
     
     sva_file = f"{design_name}_sby_check.sv" if use_sby_check else f"{design_name}_sva.sv"
+    sva_abs = f"{src_dir}/{sva_file}"
     
-    # Use absolute paths in [files] to avoid SBY working-directory issues
-    rtl_abs = f"{design_dir}/{design_name}.v"
-    sva_abs = f"{design_dir}/{sva_file}"
+    # Glob all RTL files from src/ — same pattern as Verilator multi-file fix
+    # Exclude _sva.sv (raw LLM SVA — not Yosys-compatible) and _tb.v testbenches
+    sva_raw = f"{src_dir}/{design_name}_sva.sv"
+    rtl_files = sorted(
+        f for f in _glob.glob(os.path.join(src_dir, "*.v")) + _glob.glob(os.path.join(src_dir, "*.sv"))
+        if not f.endswith("_tb.v") and "regression" not in f
+        and f != sva_abs and f != sva_raw
+    )
+    # Ensure the Yosys-compatible SVA check file is included
+    if os.path.exists(sva_abs):
+        rtl_files.append(sva_abs)
+    
+    # Build [script] read commands and [files] entries from the globbed list
+    read_cmds = "\n".join(f"read -formal {os.path.basename(f)}" for f in rtl_files)
+    files_entries = "\n".join(rtl_files)
     
     config = f"""[options]
 mode prove
@@ -1076,13 +1320,11 @@ mode prove
 smtbmc
 
 [script]
-read -formal {design_name}.v
-read -formal {sva_file}
+{read_cmds}
 prep -top {design_name}
 
 [files]
-{rtl_abs}
-{sva_abs}
+{files_entries}
 """
     with open(path, "w") as f:
         f.write(config)
@@ -1090,18 +1332,18 @@ prep -top {design_name}
 
 def run_formal_verification(design_name):
     """Runs SymbiYosys (SBY) for formal verification."""
-    design_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
-    sby_file = f"{design_dir}/{design_name}.sby"
+    formal_dir = f"{OPENLANE_ROOT}/designs/{design_name}/formal"
+    sby_file = f"{formal_dir}/{design_name}.sby"
     
     if not os.path.exists(sby_file):
         return False, "SBY configuration file not found."
 
-    # Run SBY (using bundled binary)
+    # Run SBY from formal/ directory to avoid polluting src/
     sby_cmd = _resolve_binary(SBY_BIN)
     try:
         result = subprocess.run(
             [sby_cmd, "-f", f"{design_name}.sby"],
-            cwd=design_dir,
+            cwd=formal_dir,
             capture_output=True,
             text=True,
             timeout=600  # 10 minute timeout for formal verification
@@ -1370,13 +1612,20 @@ def run_tb_compile_gate(design_name: str, tb_path: str, rtl_path: str) -> Tuple[
         report["fingerprint"] = hashlib.sha256(report["compile_output"].encode("utf-8")).hexdigest()[:16]
         return False, report
 
+    import glob
+    src_dir = os.path.dirname(rtl_path)
+    all_rtl = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
+               if not f.endswith("_tb.v") and "regression" not in f]
+    if rtl_path not in all_rtl and os.path.exists(rtl_path):
+        all_rtl.append(rtl_path)
+
     cmd = [
         "verilator",
         "--lint-only",
         "--sv",
         "--timing",
         "-Wno-fatal",
-        rtl_path,
+        *all_rtl,
         tb_path,
         "--top-module",
         f"{design_name}_tb",
@@ -1468,7 +1717,13 @@ def run_tb_compile_gate(design_name: str, tb_path: str, rtl_path: str) -> Tuple[
 
 def _iverilog_compile_tb(tb_path: str, rtl_path: str, design_name: str) -> Tuple[bool, str]:
     """Try compiling TB + RTL with iverilog as a Verilator fallback."""
-    cmd = ["iverilog", "-g2012", "-Wall", "-o", "/dev/null", rtl_path, tb_path]
+    import glob
+    src_dir = os.path.dirname(rtl_path)
+    all_rtl = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
+               if not f.endswith("_tb.v") and "regression" not in f]
+    if rtl_path not in all_rtl and os.path.exists(rtl_path):
+        all_rtl.append(rtl_path)
+    cmd = ["iverilog", "-g2012", "-Wall", "-o", "/dev/null", *all_rtl, tb_path]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         combined = (result.stdout + "\n" + result.stderr).strip()
@@ -1914,7 +2169,8 @@ def run_simulation(design_name: str) -> tuple:
         return False, f"Testbench file not found: {tb_file}"
     
     import glob
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
+                 if not f.endswith("_tb.v") and "regression" not in f]
 
     # Compile & Build using Verilator --binary
     # --binary: Build a binary executable
@@ -2558,7 +2814,8 @@ def run_verilator_coverage(design_name: str, rtl_file: str, tb_file: str, covera
             pass
 
     import glob
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
+                 if not f.endswith("_tb.v") and "regression" not in f]
 
     compile_cmd = [
         "verilator",

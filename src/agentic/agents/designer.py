@@ -71,6 +71,7 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         You write rock-solid Verilog-2005 code that works on any simulator (Icarus, Verilator, commercial).
         You use 'reg', 'wire', 'always @(posedge clk)', and 'localparam'. Never use 'logic', 'always_ff', or 'enum'.
         Your code is complete, flat, and robust.
+        Before returning any Verilog, mentally simulate Verilator strict width checking on every signal assignment, port connection, arithmetic operation, and parameter comparison. Resolve all width mismatches proactively. Every signal must be explicitly sized.
 
 {CHIP_FAMILIES}
 
@@ -87,6 +88,7 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         3. **Standard Interfaces**: Use AXI-Stream (tvalid/tready/tdata) or APB/AHB for control.
         4. **Modern SystemVerilog**: Use 'logic', 'always_ff', 'always_comb', 'enum', 'struct'.
         5. **Universal Chip Coverage**: You can implement ANY chip family listed below.
+        6. **Width Correctness**: Before returning any Verilog, mentally simulate Verilator strict width checking on every signal assignment, port connection, arithmetic operation, and parameter comparison. Resolve all width mismatches proactively. Every signal must be explicitly sized.
 
 {CHIP_FAMILIES}
 
