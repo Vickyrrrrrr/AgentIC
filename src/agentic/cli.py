@@ -452,6 +452,7 @@ def build(
     coverage_backend: str = typer.Option(SIM_BACKEND_DEFAULT, "--coverage-backend", help="Coverage backend: auto, verilator, iverilog"),
     coverage_fallback_policy: str = typer.Option(COVERAGE_FALLBACK_POLICY_DEFAULT, "--coverage-fallback-policy", help="Coverage fallback policy: fail_closed, fallback_oss, skip"),
     coverage_profile: str = typer.Option(COVERAGE_PROFILE_DEFAULT, "--coverage-profile", help="Coverage profile: balanced, aggressive, relaxed"),
+    no_golden_templates: bool = typer.Option(False, "--no-golden-templates", help="Disable golden template matching in RTL_GEN; force LLM to generate RTL from scratch"),
 ):
     """Build a chip from natural language description (Autonomous Orchestrator 2.0)."""
     
@@ -508,6 +509,7 @@ def build(
         coverage_backend=coverage_backend,
         coverage_fallback_policy=coverage_fallback_policy,
         coverage_profile=coverage_profile,
+        no_golden_templates=no_golden_templates,
     )
     
     orchestrator.run()

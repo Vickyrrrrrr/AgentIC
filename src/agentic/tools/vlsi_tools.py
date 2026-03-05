@@ -1507,7 +1507,22 @@ def run_tb_static_contract_check(tb_code: str, strategy: str = "SV_MODULAR") -> 
         # Verilator does NOT support classes/interfaces inside modules.
         # Instead of requiring them, we CHECK that the TB has proper stimulus
         # and checking infrastructure (procedural or class-based).
-        has_dut_inst = re.search(r'\b\w+\s+dut\s*\(', text) is not None
+        # Match DUT instantiation patterns:
+        #   module_name dut(              — basic
+        #   module_name #(...) dut(       — parameterized
+        #   module_name uut/DUT/UUT(      — alternative instance names
+        #   module_name #(...) inst_name( — any parameterized instantiation
+        _dut_names = r'(?:dut|DUT|uut|UUT|u_dut|i_dut|dut_inst)'
+        # Pattern for #(...) with one level of nested parens, e.g. #(.WIDTH(8))
+        _param_block = r'#\s*\([^)]*(?:\([^)]*\)[^)]*)*\)'
+        has_dut_inst = (
+            # Basic: module_name dut/uut/DUT (
+            re.search(rf'\b\w+\s+{_dut_names}\s*\(', text, re.IGNORECASE) is not None
+            # Parameterized: module_name #(...) dut/uut/DUT (
+            or re.search(rf'\b\w+\s*{_param_block}\s*{_dut_names}\s*\(', text, re.IGNORECASE | re.DOTALL) is not None
+            # Generic parameterized: module_name #(...) any_instance_name (
+            or re.search(rf'\b\w+\s*{_param_block}\s*\w+\s*\(', text, re.DOTALL) is not None
+        )
         has_stimulus = bool(re.search(r'\$urandom|\$random|initial\s+begin', text))
         has_checking = bool(re.search(r'if\s*\(|assert\s*\(', text))
         report["checks"]["has_dut_instantiation"] = has_dut_inst
@@ -1898,6 +1913,13 @@ def repair_tb_for_verilator(tb_code: str, compile_report: Dict[str, Any]) -> str
     # Phase 1 — TARGETED fixes driven by classified errors
     # ------------------------------------------------------------------
 
+    # 1a0. Fix incorrect top module name (Verilator "--top-module 'X' was not found")
+    raw_output = compile_report.get("compile_output", "")
+    design_name = compile_report.get("design_name", "")
+    if design_name and "--top-module" in raw_output and "was not found" in raw_output:
+        expected_tb = f"{design_name}_tb"
+        fixed = re.sub(r'^\s*module\s+([A-Za-z_]\w*)\b', f'module {expected_tb}', fixed, count=1, flags=re.MULTILINE)
+
     # 1a.  Remove ``virtual interface <name>;`` at **module** scope
     #      (Verilator rejects this — the interface type isn't even defined
     #       in the design, so we remove the line entirely.)
@@ -1980,6 +2002,102 @@ def repair_tb_for_verilator(tb_code: str, compile_report: Dict[str, Any]) -> str
     fixed = re.sub(
         r"(?ms)^\s*constraint\s+\w+\s*\{.*?\}\s*;?\s*$", "", fixed
     )
+
+    # 1d2. Move variable declarations to the top of ``begin ... end`` blocks.
+    #      Verilator rejects declarations after procedural statements.
+    #      Matches: integer/int/reg/logic/bit/real/time var = init;
+    #      inside begin...end blocks that have prior procedural stmts.
+    def _hoist_decls_in_begin_blocks(source: str) -> str:
+        """Hoist variable declarations to the top of their begin...end block."""
+        VAR_DECL = re.compile(
+            r'^(\s*)(integer|int|reg|logic|bit|real|time|shortint|longint|byte)'
+            r'\s+(\w+)\s*(=\s*[^;]*)?;\s*$'
+        )
+        lines = source.splitlines()
+        result: List[str] = []
+        # Stack of (begin_line_index, has_procedural_stmt)
+        block_stack: List[List[Any]] = []
+        deferred: List[tuple] = []  # (original_index, declaration_line, insert_after_index)
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            result.append(line)
+            idx = len(result) - 1
+
+            # Track begin/end nesting
+            if re.search(r'\bbegin\b', stripped):
+                block_stack.append([idx, False])
+            
+            if block_stack:
+                # Check if this is a variable declaration after a procedural stmt
+                m = VAR_DECL.match(line)
+                if m and block_stack[-1][1]:
+                    # This decl is after procedural code — needs hoisting
+                    deferred.append((idx, line, block_stack[-1][0]))
+                elif not m and stripped and not stripped.startswith('//'):
+                    # Mark that we've seen a procedural statement
+                    if not re.search(r'\bbegin\b', stripped) and not re.search(r'\bend\b', stripped):
+                        block_stack[-1][1] = True
+
+            if re.search(r'\bend\b', stripped) and block_stack:
+                block_stack.pop()
+
+        # Apply hoists in reverse order to preserve indices
+        for orig_idx, decl_line, begin_idx in reversed(deferred):
+            result[orig_idx] = ''  # remove from original location
+            result.insert(begin_idx + 1, decl_line)  # insert right after begin
+
+        return '\n'.join(ln for ln in result if ln is not None)
+
+    if re.search(r'\binteger\b|\bint\b', fixed) and re.search(r'\bbegin\b', fixed):
+        fixed = _hoist_decls_in_begin_blocks(fixed)
+
+    # 1f.  Extract ``always`` statements mistakenly placed inside ``initial begin``
+    #      blocks.  Verilator rejects ``always`` inside procedural contexts.
+    #      Pattern: initial begin ... always #N sig = ~sig; ... end
+    #      Fix: hoist each such always stmt to module scope, remove from initial.
+    if re.search(r"\binitial\b", fixed) and re.search(r"\balways\b", fixed):
+        def _hoist_always_from_initial(source: str) -> str:
+            """Move `always` statements out of initial blocks to module scope."""
+            hoisted: List[str] = []
+            result_lines: List[str] = []
+            depth = 0
+            in_initial = False
+            initial_depth = 0
+            for ln in source.splitlines():
+                stripped = ln.strip()
+                # Track initial begin nesting
+                if re.match(r"^initial\s+begin\b", stripped):
+                    in_initial = True
+                    initial_depth = depth
+                    depth += 1
+                    result_lines.append(ln)
+                    continue
+                if in_initial:
+                    # Count begin/end to handle nesting
+                    depth += len(re.findall(r"\bbegin\b", stripped))
+                    depth -= len(re.findall(r"\bend\b", stripped))
+                    # If this is an always statement inside initial, hoist it
+                    if re.match(r"always\b", stripped):
+                        hoisted.append(stripped)
+                        if depth <= initial_depth:
+                            in_initial = False
+                        continue
+                    if depth <= initial_depth:
+                        in_initial = False
+                result_lines.append(ln)
+            # Append all hoisted always statements before endmodule
+            output = "\n".join(result_lines)
+            if hoisted:
+                hoist_block = "\n".join(f"  {h}" for h in hoisted)
+                output = re.sub(
+                    r"(\bendmodule\b)",
+                    hoist_block + "\n\\1",
+                    output,
+                    count=1,
+                )
+            return output
+        fixed = _hoist_always_from_initial(fixed)
 
     # 1e.  Replace class-based ``new()`` calls with plain procedural code.
     #      e.g. ``Driver driver; driver = new(dut);`` → remove both lines

@@ -33,7 +33,7 @@ from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent, get_regression_agent
 from .agents.doc_agent import get_doc_agent
 from .agents.sdc_agent import get_sdc_agent
-from .core import ArchitectModule, SelfReflectPipeline
+from .core import ArchitectModule, SelfReflectPipeline, ReActAgent, WaveformExpertModule, DeepDebuggerModule
 from .tools.vlsi_tools import (
     write_verilog,
     run_syntax_check,
@@ -70,6 +70,44 @@ from .tools.vlsi_tools import (
 )
 
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Universal LLM Code Output Validator
+# ---------------------------------------------------------------------------
+# Called after every LLM code generation call (RTL, TB, SVA, fix) to reject
+# prose / English explanations that are not valid Verilog / SystemVerilog.
+# ---------------------------------------------------------------------------
+
+# Common English sentence-starting words that never begin valid Verilog code
+_PROSE_START_WORDS = re.compile(
+    r"^\s*(the|this|here|i |in |a |an |to |we |my |it |as |for |note|sure|below|above|let|thank|sorry|great|of course)",
+    re.IGNORECASE,
+)
+
+
+def validate_llm_code_output(raw: str) -> bool:
+    """Return True if *raw* looks like valid Verilog/SystemVerilog code.
+
+    Checks:
+    1. Contains both ``module`` and ``endmodule`` keywords.
+    2. Does NOT start with an English prose word (after stripping markdown
+       fences and think-tags).
+    """
+    # Strip markdown fences and <think> tags for inspection
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    cleaned = re.sub(r"```(?:verilog|systemverilog|sv|v)?\s*", "", cleaned)
+    cleaned = re.sub(r"```", "", cleaned)
+    cleaned = cleaned.strip()
+
+    if "module" not in cleaned or "endmodule" not in cleaned:
+        return False
+
+    if _PROSE_START_WORDS.match(cleaned):
+        return False
+
+    return True
+
 
 class BuildStrategy(enum.Enum):
     SV_MODULAR = "SystemVerilog Modular (Modern)"
@@ -134,11 +172,13 @@ class BuildOrchestrator:
         coverage_fallback_policy: str = COVERAGE_FALLBACK_POLICY_DEFAULT,
         coverage_profile: str = COVERAGE_PROFILE_DEFAULT,
         event_sink=None,  # Optional callable(dict) for live event streaming (web API)
+        no_golden_templates: bool = False,  # Bypass golden template matching in RTL_GEN
     ):
         self.name = name
         self.desc = desc
         self.llm = llm
         self.event_sink = event_sink  # Web API hook: callable(event_dict) or None
+        self.no_golden_templates = no_golden_templates
         self.max_retries = max_retries
         self.verbose = verbose
         self.skip_openlane = skip_openlane
@@ -171,8 +211,11 @@ class BuildOrchestrator:
         self.state = BuildState.INIT
         self.strategy = BuildStrategy.SV_MODULAR
         self.retry_count = 0
+        self.global_retry_count = 0  # Added for Bug 2
         self.state_retry_counts: Dict[str, int] = {}
         self.failure_fingerprint_history: Dict[str, int] = {}
+        self.failed_code_by_fingerprint: Dict[str, str] = {}  # Added for Bug 1
+        self.tb_failed_code_by_fingerprint: Dict[str, str] = {}  # Added for Bug 1
         self.global_step_count = 0
         self.pivot_count = 0
         self.strategy_pivot_stage = 0
@@ -240,7 +283,6 @@ class BuildOrchestrator:
         self.log(f"Transitioning: {self.state.name} -> {new_state.name}", refined=True)
         self.state = new_state
         if not preserve_retries:
-            self.retry_count = 0  # Reset retries on state change
             self.state_retry_counts[new_state.name] = 0
         # Emit a dedicated transition event for the web UI checkpoint timeline
         if self.event_sink is not None:
@@ -276,6 +318,26 @@ class BuildOrchestrator:
         fp = hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
         count = self.failure_fingerprint_history.get(fp, 0) + 1
         self.failure_fingerprint_history[fp] = count
+        
+        # Bug 1: Track the exact code that produced this error
+        rtl = self.artifacts.get("rtl_code", "")
+        tb = ""
+        tb_path = self.artifacts.get("tb_path", "")
+        if tb_path and os.path.exists(tb_path):
+            try:
+                with open(tb_path, "r") as f:
+                    tb = f.read()
+            except OSError:
+                pass
+        
+        code_context = ""
+        if rtl:
+            code_context += f"// --- RTL CODE ---\n{rtl}\n"
+        if tb:
+            code_context += f"// --- TESTBENCH CODE ---\n{tb}\n"
+            
+        self.failed_code_by_fingerprint[fp] = code_context
+        
         return count >= 2
 
     def _clear_last_fingerprint(self, error_text: str) -> None:
@@ -369,6 +431,9 @@ class BuildOrchestrator:
             lines.append("PREVIOUS FAILURE FINGERPRINTS (do NOT repeat these fixes):")
             for fp_hash, count in recent_fps:
                 lines.append(f"  [{count}x] fingerprint {fp_hash[:12]}...")
+                failed_code = self.failed_code_by_fingerprint.get(fp_hash)
+                if failed_code:
+                    lines.append(f"  CODE FROM THIS REJECTED ATTEMPT:\n{failed_code}")
 
         # TB gate history (last 5 events)
         tb_history = self.artifacts.get("tb_gate_history", [])
@@ -380,6 +445,11 @@ class BuildOrchestrator:
                     f"  gate={evt.get('gate')} ok={evt.get('ok')} "
                     f"action={evt.get('action')} categories={evt.get('issue_categories', [])}"
                 )
+                fp_hash = evt.get('fingerprint')
+                if fp_hash:
+                    failed_tb_code = self.tb_failed_code_by_fingerprint.get(fp_hash)
+                    if failed_tb_code:
+                        lines.append(f"  REJECTED TESTBENCH CODE FOR THIS EVENT:\n{failed_tb_code}")
 
         # Build history (last 5 state transitions with errors)
         error_entries = [h for h in self.build_history if "error" in h.message.lower() or "fail" in h.message.lower()]
@@ -399,6 +469,11 @@ class BuildOrchestrator:
         
         try:
             while self.state != BuildState.SUCCESS and self.state != BuildState.FAIL:
+                if self.global_retry_count >= 15:
+                    self.log(f"Global retry budget exceeded ({self.global_retry_count}/15). Failing closed.", refined=True)
+                    self.state = BuildState.FAIL
+                    break
+                    
                 self.global_step_count += 1
                 if self.global_step_count > self.global_step_budget:
                     self.log(f"Global step budget exceeded ({self.global_step_budget}). Failing closed.", refined=True)
@@ -787,17 +862,22 @@ SPECIFICATION SECTIONS (Markdown):
         fp = hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
         count = self.tb_failure_fingerprint_history.get(fp, 0) + 1
         self.tb_failure_fingerprint_history[fp] = count
+        
+        # Bug 1: Track generated TB code that produced this error
+        tb_path = self.artifacts.get("tb_path", "")
+        if tb_path and os.path.exists(tb_path):
+            try:
+                with open(tb_path, "r") as f:
+                    self.tb_failed_code_by_fingerprint[fp] = f.read()
+            except OSError:
+                pass
+                
         return count >= 2
 
     def _clear_tb_fingerprints(self) -> None:
         """Reset all TB failure fingerprints.
-
-        Called when a fundamentally new TB is generated (LLM or deterministic
-        fallback) so that compile/static gates get a fresh set of attempts
-        against the new artifact instead of matching old fingerprints.
         """
-        self.tb_failure_fingerprint_history.clear()
-        self.tb_recovery_counts.clear()
+        pass # Bug 2: Do not clear fingerprints or retry counters to prevent infinite loops
 
     def generate_uvm_lite_tb_from_rtl_ports(self, design_name: str, rtl_code: str) -> str:
         """Deterministic Verilator-safe testbench generated from RTL ports.
@@ -882,7 +962,7 @@ SPECIFICATION SECTIONS (Markdown):
         lines.append("")
 
         # Dump waveforms
-        lines.append(f'    $dumpfile("{design_name}.vcd");')
+        lines.append(f'    $dumpfile("{design_name}_wave.vcd");')
         lines.append(f'    $dumpvars(0, {design_name}_tb);')
         lines.append("")
 
@@ -971,6 +1051,8 @@ SPECIFICATION SECTIONS (Markdown):
         cycle = int(self.tb_recovery_counts.get(gate, 0)) + 1
         self.tb_recovery_counts[gate] = cycle
         self.artifacts[f"tb_recovery_cycle_{gate}"] = cycle
+        
+        self.global_retry_count += 1 # Bug 2: increment global budget
 
         if cycle > self.tb_max_retries:
             self.log(
@@ -1001,6 +1083,9 @@ SPECIFICATION SECTIONS (Markdown):
                     return
             self.tb_repair_fail_count += 1
             self._record_tb_gate_history(gate, False, "auto_repair_nochange", report)
+            # Auto-repair couldn't fix it — clear fingerprint so cycle 2 (LLM regen)
+            # gets a fair shot instead of being killed by the fingerprint guard.
+            self._clear_tb_fingerprints()
             return
 
         if cycle == 2:
@@ -1025,8 +1110,9 @@ SPECIFICATION SECTIONS (Markdown):
         self.artifacts["tb_path"] = path
         # Fallback generation completed; allow compile/static gate to run a fresh
         # bounded recovery loop against this new artifact.
-        self.tb_recovery_counts[gate] = 0
-        self.artifacts[f"tb_recovery_cycle_{gate}"] = 0
+        
+        # Bug 2: Removing explicit counter reset: self.tb_recovery_counts[gate] = 0
+        # self.artifacts[f"tb_recovery_cycle_{gate}"] = 0
         self._record_tb_gate_history(gate, False, "deterministic_fallback", report)
         self.log("TB gate failed; switched to deterministic fallback template.", refined=True)
 
@@ -1502,7 +1588,11 @@ endclass
         # Check Golden Reference Library for a matching template
         from .golden_lib import get_best_template
         
-        template = get_best_template(self.desc, self.name)
+        if self.no_golden_templates:
+            self.log("Golden template matching DISABLED (--no-golden-templates). Generating from scratch.", refined=True)
+            template = None
+        else:
+            template = get_best_template(self.desc, self.name)
         
         if template:
             self.log(f"Golden Reference MATCH: {template['ip_type']} (score={template['score']})", refined=True)
@@ -1600,6 +1690,15 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                         verbose=self.verbose
                     ).kickoff()
                     rtl_code = str(result)
+                    # --- Universal code output validation (RTL gen) ---
+                    if not validate_llm_code_output(rtl_code):
+                        self.log("RTL generation returned prose instead of code. Retrying once.", refined=True)
+                        self.logger.warning(f"RTL VALIDATION FAIL (prose detected):\n{rtl_code[:500]}")
+                        rtl_code = str(Crew(
+                            agents=[rtl_agent, reviewer],
+                            tasks=[rtl_task, review_task],
+                            verbose=self.verbose
+                        ).kickoff())
                 except Exception as crew_exc:
                     self.log(f"CrewAI RTL generation error: {crew_exc}", refined=True)
                     self.logger.warning(f"CrewAI kickoff exception in do_rtl_gen: {crew_exc}")
@@ -1724,7 +1823,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             if self.strategy == BuildStrategy.SV_MODULAR:
                 self.log("Attempting Strategy Pivot: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
                 self.strategy = BuildStrategy.VERILOG_CLASSIC
-                self.transition(BuildState.RTL_GEN) # Restart RTL Gen with new strategy
+                self.transition(BuildState.RTL_GEN, preserve_retries=True) # Restart RTL Gen with new strategy
                 return
             else:
                 self.log("Already on fallback strategy. Build Failed.", refined=True)
@@ -1733,9 +1832,63 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
 
         self.log(f"Fixing Code (Attempt {self.retry_count}/{self.max_retries})", refined=True)
         errors_for_llm = self._condense_failure_log(str(errors), kind="timing")
-        
-        # Agents fix syntax — with full build context and failure history
-        fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
+
+        # ── ReAct iterative RTL fix (runs before single-shot CrewAI) ──
+        # ReActAgent does Thought→Action→Observation loops using the already-imported
+        # syntax_check_tool and read_file_tool to self-verify its own fixes.
+        _react_fixed_code = None
+        if os.path.exists(path) and errors_for_llm.strip():
+            _react_agent = ReActAgent(
+                llm=self.llm,
+                role="RTL Syntax Fixer",
+                max_steps=6,
+                verbose=self.verbose,
+            )
+            # syntax_check_tool and read_file_tool are already imported at module top
+            _react_agent.register_tool(
+                "syntax_check",
+                "Run Verilator syntax check on an absolute .v file path. Returns error text.",
+                lambda p: str(run_syntax_check(p.strip())),
+            )
+            _react_agent.register_tool(
+                "read_file",
+                "Read contents of an absolute file path.",
+                lambda p: open(p.strip()).read() if os.path.exists(p.strip()) else f"Not found: {p}",
+            )
+            _react_context = (
+                f"RTL file path: {path}\n\n"
+                f"Errors:\n{errors_for_llm}\n\n"
+                f"Current RTL:\n```verilog\n{self.artifacts['rtl_code']}\n```"
+            )
+            _react_trace = _react_agent.run(
+                task=(
+                    f"Fix all syntax and lint errors in Verilog module '{self.name}'. "
+                    f"Use syntax_check tool to verify your fix compiles clean. "
+                    f"Final Answer must be ONLY corrected Verilog inside ```verilog fences."
+                ),
+                context=_react_context,
+            )
+            if _react_trace.success and _react_trace.final_answer:
+                _vlog = re.search(r'```verilog\s*(.*?)```', _react_trace.final_answer, re.DOTALL)
+                if _vlog:
+                    _react_fixed_code = _vlog.group(1).strip()
+                    self.logger.info(
+                        f"[ReAct] RTL fix done in {_react_trace.total_steps} steps "
+                        f"({_react_trace.total_duration_s:.1f}s)"
+                    )
+            if not _react_fixed_code:
+                self.logger.info(
+                    f"[ReAct] No valid code produced "
+                    f"(success={_react_trace.success}, steps={_react_trace.total_steps}). "
+                    "Falling through to single-shot CrewAI."
+                )
+
+        # If ReAct produced valid code, skip single-shot CrewAI and go straight to write
+        if _react_fixed_code:
+            new_code = _react_fixed_code
+        else:
+            # Agents fix syntax — with full build context and failure history
+            fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
 
 Fix Syntax/Lint Errors in "{self.name}".
 
@@ -1760,43 +1913,47 @@ Code:
 {self.artifacts['rtl_code']}
 ```
 """
-        
-        # Use a fixer agent with enhanced backstory
-        fixer = Agent(
-            role="Syntax Rectifier",
-            goal="Fix Verilog Compilation & Lint Errors while preserving design intent",
-            backstory="""Expert in Verilator error messages, SystemVerilog lint warnings, and RTL debugging.
+
+            # Use a fixer agent with enhanced backstory
+            fixer = Agent(
+                role="Syntax Rectifier",
+                goal="Fix Verilog Compilation & Lint Errors while preserving design intent",
+                backstory="""Expert in Verilator error messages, SystemVerilog lint warnings, and RTL debugging.
 You analyze the ARCHITECTURE SPEC to understand design intent before fixing.
 You review PREVIOUS FIX ATTEMPTS to avoid repeating ineffective patches.
 You explain what you changed and why.""",
-            llm=self.llm,
-            verbose=self.verbose,
-            tools=[syntax_check_tool, read_file_tool]
-        )
-        
-        task = Task(
-             description=fix_prompt,
-             expected_output="Fixed Verilog Code",
-             agent=fixer
-        )
-        
-        with console.status("[bold red]AI fixing Syntax/Lint Errors...[/bold red]"):
-            try:
-                result = Crew(agents=[fixer], tasks=[task]).kickoff()
-                new_code = str(result)
-            except Exception as crew_exc:
-                self.log(f"CrewAI fix error: {crew_exc}", refined=True)
-                self.logger.warning(f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}")
-                # Return last known RTL — allow the retry loop / strategy pivot to handle it
-                if self.strategy == BuildStrategy.SV_MODULAR:
-                    self.log("Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
-                    self.strategy = BuildStrategy.VERILOG_CLASSIC
-                    self.retry_count = 0
-                    self.transition(BuildState.RTL_GEN)
-                else:
-                    self.log("CrewAI error on fallback strategy. Build Failed.", refined=True)
-                    self.state = BuildState.FAIL
-                return
+                llm=self.llm,
+                verbose=self.verbose,
+                tools=[syntax_check_tool, read_file_tool]
+            )
+
+            task = Task(
+                 description=fix_prompt,
+                 expected_output="Fixed Verilog Code",
+                 agent=fixer
+            )
+
+            with console.status("[bold red]AI fixing Syntax/Lint Errors...[/bold red]"):
+                try:
+                    result = Crew(agents=[fixer], tasks=[task]).kickoff()
+                    new_code = str(result)
+                    # --- Universal code output validation (RTL fix) ---
+                    if not validate_llm_code_output(new_code):
+                        self.log("RTL fix returned prose instead of code. Retrying once.", refined=True)
+                        self.logger.warning(f"RTL FIX VALIDATION FAIL (prose detected):\n{new_code[:500]}")
+                        new_code = str(Crew(agents=[fixer], tasks=[task]).kickoff())
+                except Exception as crew_exc:
+                    self.log(f"CrewAI fix error: {crew_exc}", refined=True)
+                    self.logger.warning(f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}")
+                    # Return last known RTL — allow the retry loop / strategy pivot to handle it
+                    if self.strategy == BuildStrategy.SV_MODULAR:
+                        self.log("Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
+                        self.strategy = BuildStrategy.VERILOG_CLASSIC
+                        self.transition(BuildState.RTL_GEN, preserve_retries=True)
+                    else:
+                        self.log("CrewAI error on fallback strategy. Build Failed.", refined=True)
+                        self.state = BuildState.FAIL
+                    return
 
         self.logger.info(f"FIXED RTL:\n{new_code}")
         
@@ -1915,11 +2072,36 @@ PREVIOUS TB FAILURES (must fix if present):
 RULES:
 - Use `timescale 1ns / 1ps
 - Module name: {self.name}_tb
-- Drive clk with: initial clk = 0; always #5 clk = ~clk;
+- MANDATORY: Add this VCD block immediately after the `timescale directive:
+      initial begin
+          $dumpfile("{self.name}_wave.vcd");
+          $dumpvars(0, {self.name}_tb);
+      end
+  This is required for waveform debugging. Do not omit it.
+- Clock generation: write TWO separate module-level statements (NEVER put `always` inside `initial begin`):
+      initial clk = 1'b0;
+      always #5 clk = ~clk;
+  WARNING: `always` is a module-level construct. Placing it inside `initial begin...end` causes a Verilator compile error.
+- All variable declarations (integer, int, reg, logic) MUST appear at the TOP of a begin...end block,
+  BEFORE any procedural statements (#delay, assignments, if/for). Verilator rejects mid-block declarations.
 - Assert rst_n low for 50ns, then release
 - Print "TEST PASSED" on success, "TEST FAILED" on failure
 - End with $finish
 - Do NOT invent ports that aren't in the MODULE INTERFACE above
+
+SYNCHRONOUS DUT TIMING RULE (mandatory for ALL designs):
+This DUT is synchronous. All registered outputs update on the rising clock edge.
+After applying any stimulus (reset deassertion, enable assertion, data input),
+always wait for at least one complete clock cycle (`@(posedge clk);` or
+`repeat(N) @(posedge clk);`) before sampling or comparing any DUT output.
+Never sample a DUT output in the same time step that stimulus is applied.
+Failure to observe this rule causes off-by-one timing mismatches.
+
+SELF-CHECK (do this before returning code):
+Before returning any testbench code, mentally simulate the entire testbench execution against the DUT. Ask yourself: if this DUT had a bug, would this testbench catch it? If the testbench would pass even with a broken DUT, it is not a valid testbench — rewrite it. Every checking statement must compare the DUT output against a value that was computed independently of the DUT.
+
+COMPILATION SELF-CHECK (do this before returning code):
+Before returning any testbench code, mentally compile it with strict SystemVerilog rules. Every construct you use must be valid in the Verilator strict mode environment. If you are unsure whether a construct is valid, use a simpler equivalent that you are certain is valid.
 """,
                     expected_output="SystemVerilog Testbench",
                     agent=tb_agent
@@ -1932,6 +2114,15 @@ RULES:
                             tasks=[tb_task],
                             timeout_s=self.tb_generation_timeout_s,
                         )
+                        # --- Universal code output validation (TB gen) ---
+                        if not validate_llm_code_output(tb_code):
+                            self.log("TB generation returned prose instead of code. Retrying once.", refined=True)
+                            self.logger.warning(f"TB VALIDATION FAIL (prose detected):\n{tb_code[:500]}")
+                            tb_code = self._kickoff_with_timeout(
+                                agents=[tb_agent],
+                                tasks=[tb_task],
+                                timeout_s=self.tb_generation_timeout_s,
+                            )
                     except Exception as e:
                         self.log(f"TB generation stalled/failed ({e}). Using deterministic fallback TB.", refined=True)
                         self.logger.info(f"TB GENERATION FALLBACK: {e}")
@@ -2073,6 +2264,7 @@ RULES:
                 self.state = BuildState.FAIL
                 return
             self.retry_count += 1
+            self.global_retry_count += 1 # Bug 2: Increment global retry
             if self.retry_count > self.max_retries:
                  self.log(f"Max Sim Retries ({self.max_retries}) Exceeded. Simulation Failed.", refined=True)
                  self.state = BuildState.FAIL
@@ -2082,7 +2274,47 @@ RULES:
             
             # --- AUTONOMOUS FIX: Try to fix compilation errors without LLM ---
             # Auto-fixes removed (Verilator supports SV natively)
-            
+
+            # ── Waveform + AST diagnosis (enhances LLM analysis below) ──
+            _waveform_context = ""
+            _vcd_path = os.path.join(
+                OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}_wave.vcd"
+            )
+            _rtl_path = self.artifacts.get(
+                "rtl_path",
+                os.path.join(OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}.v"),
+            )
+            if (
+                os.path.exists(_vcd_path)
+                and os.path.getsize(_vcd_path) > 200
+                and os.path.exists(_rtl_path)
+            ):
+                _waveform_mod = WaveformExpertModule()
+                _diagnosis = _waveform_mod.analyze_failure(
+                    rtl_path=_rtl_path,
+                    vcd_path=_vcd_path,
+                    sim_log=output,          # 'output' is the sim stdout/stderr
+                    design_name=self.name,
+                )
+                if _diagnosis is not None:
+                    _waveform_context = (
+                        f"\n\n## WAVEFORM + AST ANALYSIS\n"
+                        f"{_diagnosis.diagnosis_summary}\n"
+                        f"Fix location: {_diagnosis.suggested_fix_area}\n"
+                    )
+                    self.logger.info(
+                        f"[WaveformExpert] {_diagnosis.failing_signal} mismatch "
+                        f"at t={_diagnosis.mismatch_time}"
+                    )
+                else:
+                    self.logger.info("[WaveformExpert] No signal mismatch found in VCD")
+            else:
+                _vcd_size = os.path.getsize(_vcd_path) if os.path.exists(_vcd_path) else 0
+                self.logger.info(
+                    f"[WaveformExpert] Skipping — VCD exists={os.path.exists(_vcd_path)}, "
+                    f"size={_vcd_size}, rtl_exists={os.path.exists(_rtl_path)}"
+                )
+
             # --- LLM ERROR ANALYSIS + FIX: Collaborative 2-agent Crew ---
             analyst = get_error_analyst_agent(self.llm, verbose=self.verbose)
             analysis_task = Task(
@@ -2092,7 +2324,7 @@ BUILD CONTEXT:
 {self._build_llm_context(include_rtl=False)}
 
 ERROR LOG:
-{output_for_llm}
+{output_for_llm}{_waveform_context}
 
 CURRENT TESTBENCH (first 3000 chars):
 {tb_code[:3000]}
@@ -2207,7 +2439,7 @@ FIX_HINT: <surgical fix instruction referencing specific line numbers or signal 
                 # ARCHITECTURAL — spec is flawed, go back to SPEC stage
                 self.log(f"Architectural issue detected: {root_cause}. Regenerating spec.", refined=True)
                 self.artifacts["logic_decoupling_hint"] = f"Previous build failed due to: {root_cause}. {fix_hint}"
-                self.transition(BuildState.SPEC)
+                self.transition(BuildState.SPEC, preserve_retries=True)
                 return
             
             # Classes A (TB syntax) and B (RTL logic) — use LLM fix
@@ -2249,6 +2481,13 @@ CRITICAL RULES:
 - NEVER use: class, interface, covergroup, program, rand, virtual, new()
 - Use flat procedural style: reg/wire declarations, initial/always blocks
 - Use your syntax_check tool to verify the fix compiles before returning it
+
+SYNCHRONOUS DUT TIMING RULE (mandatory for ALL designs):
+This DUT is synchronous. All registered outputs update on the rising clock edge.
+After applying any stimulus (reset deassertion, enable assertion, data input),
+always wait for at least one complete clock cycle (`@(posedge clk);` or
+`repeat(N) @(posedge clk);`) before sampling or comparing any DUT output.
+Never sample a DUT output in the same time step that stimulus is applied.
 """
             else:
                 self.log("Analyst identified RTL Logic Error. Fixing RTL...", refined=True)
@@ -2307,6 +2546,15 @@ CRITICAL RULES:
                      verbose=self.verbose
                  ).kickoff()
             fixed_code = str(result)
+            # --- Universal code output validation (verification fix) ---
+            if not validate_llm_code_output(fixed_code):
+                self.log("Fix generation returned prose instead of code. Retrying once.", refined=True)
+                self.logger.warning(f"FIX VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
+                fixed_code = str(Crew(
+                    agents=[fixer],
+                    tasks=[fix_task],
+                    verbose=self.verbose
+                ).kickoff())
             self.logger.info(f"FIXED CODE:\n{fixed_code}")
             
             if not is_tb_issue:
@@ -2351,6 +2599,11 @@ Return the complete module with ONLY the minimal fix applied.
                         with console.status("[bold yellow]AI Implementing Surgical Fix (retry)...[/bold yellow]"):
                             result2 = Crew(agents=[fixer], tasks=[retry_task], verbose=self.verbose).kickoff()
                         fixed_code = str(result2)
+                        # --- Universal code output validation (surgical RTL retry) ---
+                        if not validate_llm_code_output(fixed_code):
+                            self.log("Surgical RTL retry returned prose instead of code. Retrying once.", refined=True)
+                            self.logger.warning(f"SURGICAL RETRY VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
+                            fixed_code = str(Crew(agents=[fixer], tasks=[retry_task], verbose=self.verbose).kickoff())
                         self.logger.info(f"SURGICAL RETRY CODE:\n{fixed_code}")
 
                 # Write cleaned code and read it back
@@ -2399,6 +2652,13 @@ Return the complete module with ONLY the minimal fix applied.
         if not os.path.exists(sva_path):
             self.log("Generating SVA Assertions...", refined=True)
             
+            # Bug 3: Inject DeepDebugger diagnostic context into the SVA generation prompt
+            formal_debug = self.artifacts.get("formal_debug_context", "")
+            if formal_debug:
+                formal_debug_str = f"\n\nPREVIOUS FORMAL VERIFICATION FAILURE DIAGNOSIS:\n{formal_debug}\n\nPlease use this diagnosis to correct the flawed assertions.\n"
+            else:
+                formal_debug_str = ""
+            
             verif_agent = get_verification_agent(self.llm, verbose=self.verbose)
             sva_task = Task(
                 description=f"""Generate SystemVerilog Assertions (SVA) for module "{self.name}".
@@ -2412,7 +2672,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 
                 SPECIFICATION:
                 {self.artifacts.get('spec', '')}
-                
+                {formal_debug_str}
                 Requirements:
                 1. Create a separate SVA module named "{self.name}_sva"
                 2. **CRITICAL FOR SYMBIYOSYS/YOSYS COMPATIBILITY:**
@@ -2427,6 +2687,9 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                    - State machine reachability
                 4. Include cover properties (`cover property`)
                 5. Return code inside ```verilog fences
+
+                OUTPUT FORMAT CONSTRAINT (mandatory):
+                Your entire response must be valid SystemVerilog code only. No explanations, no prose, no comments before the module declaration. Your response must begin with the keyword `module`. Any response that does not begin with `module` will be rejected and retried.
                 """,
                 expected_output='SystemVerilog SVA module',
                 agent=verif_agent
@@ -2434,6 +2697,16 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             
             with console.status("[bold cyan]AI Generating SVA Assertions...[/bold cyan]"):
                 sva_result = str(Crew(agents=[verif_agent], tasks=[sva_task]).kickoff())
+            
+            # --- Universal code output validation (SVA) ---
+            if not validate_llm_code_output(sva_result):
+                self.log("SVA generation returned prose instead of code. Retrying once.", refined=True)
+                self.logger.warning(f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}")
+                sva_result = str(Crew(agents=[verif_agent], tasks=[sva_task]).kickoff())
+                if not validate_llm_code_output(sva_result):
+                    self.log("SVA retry also returned invalid output. Skipping formal.", refined=True)
+                    self.transition(BuildState.COVERAGE_CHECK)
+                    return
             
             self.logger.info(f"GENERATED SVA:\n{sva_result}")
             
@@ -2515,6 +2788,56 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 self.artifacts['formal_result'] = 'PASS'
             else:
                 self.log(f"Formal Verification: {result[:200]}", refined=True)
+
+                # ── FVDebug: Causal graph + balanced analysis ──
+                _formal_debug_context = ""
+                _rtl_path_fv = self.artifacts.get("rtl_path", "")
+                _sby_cfg = os.path.join(
+                    OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}_sby_check.sby"
+                )
+                # sby config is written by write_sby_config() — check both extensions
+                if not os.path.exists(_sby_cfg):
+                    _sby_cfg = os.path.join(
+                        OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}_formal.sby"
+                    )
+                from .config import SBY_BIN as _SBY_BIN, YOSYS_BIN as _YOSYS_BIN
+                if os.path.exists(_sby_cfg) and os.path.exists(_rtl_path_fv):
+                    _debugger = DeepDebuggerModule(
+                        llm=self.llm,
+                        sby_bin=_SBY_BIN or "sby",
+                        yosys_bin=_YOSYS_BIN or "yosys",
+                        verbose=self.verbose,
+                        max_signals_to_analyze=4,
+                    )
+                    _verdict = _debugger.debug_formal_failure(
+                        rtl_path=_rtl_path_fv,
+                        sby_config_path=_sby_cfg,
+                        design_name=self.name,
+                        rtl_code=self.artifacts.get("rtl_code", ""),
+                    )
+                    if _verdict is not None:
+                        _formal_debug_context = (
+                            f"\n\nFVDEBUG ROOT CAUSE:\n"
+                            f"  Signal: '{_verdict.root_cause_signal}' "
+                            f"at line {_verdict.root_cause_line} "
+                            f"(confidence: {_verdict.confidence:.0%})\n"
+                            f"  Fix: {_verdict.fix_description}\n"
+                            f"  Analysis:\n{_verdict.balanced_analysis_log}\n"
+                        )
+                        self.logger.info(
+                            f"[DeepDebugger] Root cause: {_verdict.root_cause_signal} "
+                            f"line {_verdict.root_cause_line} conf={_verdict.confidence:.2f}"
+                        )
+                    else:
+                        self.logger.info("[DeepDebugger] No verdict (all signals uncertain)")
+                else:
+                    self.logger.info(
+                        f"[DeepDebugger] Skipping — "
+                        f"sby_cfg_exists={os.path.exists(_sby_cfg)}, "
+                        f"rtl_exists={os.path.exists(_rtl_path_fv)}"
+                    )
+                self.artifacts["formal_debug_context"] = _formal_debug_context
+
                 self.artifacts['formal_result'] = 'FAIL'
                 if self.strict_gates:
                     self.log("Formal verification failed under strict mode.", refined=True)
@@ -2745,6 +3068,13 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         5. Includes back-to-back operations
         6. Must print "TEST PASSED" on success
         
+        SYNCHRONOUS DUT TIMING RULE (mandatory for ALL designs):
+        This DUT is synchronous. All registered outputs update on the rising clock edge.
+        After applying any stimulus (reset deassertion, enable assertion, data input),
+        always wait for at least one complete clock cycle before sampling or comparing
+        any DUT output. Never sample a DUT output in the same time step that stimulus
+        is applied.
+
         Return ONLY the complete testbench in ```verilog fences.
         """
 
@@ -2758,6 +3088,11 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             result = Crew(agents=[tb_agent], tasks=[improve_task]).kickoff()
 
         improved_tb = str(result)
+        # --- Universal code output validation (coverage TB improvement) ---
+        if not validate_llm_code_output(improved_tb):
+            self.log("Coverage TB improvement returned prose instead of code. Retrying once.", refined=True)
+            self.logger.warning(f"COVERAGE TB VALIDATION FAIL (prose detected):\n{improved_tb[:500]}")
+            improved_tb = str(Crew(agents=[tb_agent], tasks=[improve_task]).kickoff())
         self.logger.info(f"IMPROVED TB:\n{improved_tb}")
 
         tb_path = write_verilog(self.name, improved_tb, is_testbench=True)
