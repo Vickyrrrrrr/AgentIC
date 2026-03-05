@@ -96,6 +96,7 @@ export const HumanInLoopBuild = () => {
 
     // Build options
     const [skipOpenlane, setSkipOpenlane] = useState(false);
+    const [skipCoverage, setSkipCoverage] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [maxRetries, setMaxRetries] = useState(5);
     const [showThinking, setShowThinking] = useState(false);
@@ -133,11 +134,13 @@ export const HumanInLoopBuild = () => {
         setError('');
         // Quick RTL mode implies skip_openlane
         const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
+        const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
         try {
             const res = await axios.post(`${API}/build`, {
                 design_name: designName || slugify(prompt),
                 description: prompt,
                 skip_openlane: effectiveSkipOpenlane,
+                skip_coverage: effectiveSkipCoverage,
                 max_retries: maxRetries,
                 show_thinking: showThinking,
                 min_coverage: minCoverage,
@@ -354,6 +357,7 @@ export const HumanInLoopBuild = () => {
         setThinkingData(null);
         setBuildMode('verified');
         setSkipStages(new Set(BUILD_MODE_SKIPS.verified));
+        setSkipCoverage(false);
         setShowStageToggles(false);
         setPartialArtifacts([]);
         setShowFullLog(false);
@@ -490,6 +494,10 @@ export const HumanInLoopBuild = () => {
                             <label className="hitl-toggle">
                                 <input type="checkbox" checked={skipOpenlane} onChange={e => setSkipOpenlane(e.target.checked)} />
                                 <span>Skip OpenLane (RTL + Verify only)</span>
+                            </label>
+                            <label className="hitl-toggle">
+                                <input type="checkbox" checked={skipCoverage} onChange={e => setSkipCoverage(e.target.checked)} />
+                                <span>Skip Coverage</span>
                             </label>
                             <button
                                 className="hitl-advanced-toggle"

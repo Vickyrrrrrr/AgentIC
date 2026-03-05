@@ -1,421 +1,344 @@
-<div align="center">
+# AgentIC
 
-<br/>
+AgentIC is an autonomous digital design pipeline that takes a natural-language chip specification and drives it through RTL generation, verification, formal checks, coverage, regression, and optional physical implementation. The system is built as a gated flow around standard EDA tools and AI-assisted generation and debugging.
 
-<!-- ──────────────── WORDMARK ──────────────── -->
-<h1>
-  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=42&pause=1000&color=C9643E&center=true&vCenter=true&width=600&lines=AgentIC" alt="AgentIC" />
-</h1>
+This README is written for both technical readers and non-specialists. It explains what the system does, what the build stages mean, and what the repository contains, without exposing internal proprietary logic.
 
-<h3><em>Describe a chip. Get silicon.</em></h3>
+## What AgentIC Actually Does
 
-<br/>
+At a high level, AgentIC performs four jobs:
 
-<!-- ──────────────── BRAND BADGES ──────────────── -->
+1. Turn an ambiguous prose specification into a structured hardware task.
+2. Generate candidate RTL, testbenches, properties, and constraints.
+3. Push those artifacts through quality gates with controlled repair loops.
+4. Stop only when the design either passes the configured flow or fails with a concrete diagnosis.
 
-![](https://img.shields.io/badge/Autonomous%20Silicon%20Compiler-informational?style=for-the-badge&labelColor=1C1A17&color=C9643E)
-![](https://img.shields.io/badge/All%205%20Core%20Modules%20Active-success?style=for-the-badge&labelColor=1C1A17&color=3A7856)
-![](https://img.shields.io/badge/Fail--Closed%20by%20Default-critical?style=for-the-badge&labelColor=1C1A17&color=B83030)
+The system is not a simple code generator. It is a build-and-check pipeline that keeps testing what it generates.
 
-<br/>
+## System Model
 
-![](https://img.shields.io/badge/Python-3.10%2B-C9643E?style=flat-square&logo=python&logoColor=white&labelColor=1C1A17)
-![](https://img.shields.io/badge/PDK-Sky130%20%7C%20GF180-C9643E?style=flat-square&labelColor=1C1A17)
-![](https://img.shields.io/badge/Formal%20Verification-SymbiYosys-C9643E?style=flat-square&labelColor=1C1A17)
-![](https://img.shields.io/badge/Physical%20Flow-OpenLane-C9643E?style=flat-square&labelColor=1C1A17)
-![](https://img.shields.io/badge/License-Proprietary-A67828?style=flat-square&labelColor=1C1A17)
+AgentIC is organized around three layers:
 
-<br/><br/>
+### 1. Orchestration Layer
 
-<table>
-<tr>
-<td align="center" width="220"><b>Natural Language In ⟶</b></td>
-<td align="center" width="60">→</td>
-<td align="center" width="220"><b>⟶ Verified RTL + GDS Out</b></td>
-</tr>
-</table>
+The orchestrator owns stage transitions, retry budgets, artifact routing, and failure handling. It is the source of truth for:
 
-<br/>
+- which stage runs next
+- what inputs each stage is allowed to consume
+- what counts as pass, fail, skip, or tool error
+- how many retries are allowed
+- when the build must halt instead of spinning
 
-</div>
+Core implementation: [orchestrator.py](/home/vickynishad/AgentIC/src/agentic/orchestrator.py)
 
----
+### 2. Tool Layer
 
-## What is AgentIC?
+EDA tool wrappers execute Verilator, Icarus Verilog, Yosys, and SymbiYosys. Intermediate work is staged in temporary directories; human-relevant artifacts remain in the design tree.
 
-AgentIC is a **fully autonomous hardware compiler** that takes a plain-English description of a digital circuit and produces a complete, verified, physically-implemented chip design — with no human in the loop unless you want one.
+Core implementation: [vlsi_tools.py](/home/vickynishad/AgentIC/src/agentic/tools/vlsi_tools.py)
 
-It is not a code-generation copilot. It is not a template filler. It is an **end-to-end autonomous agent system** that reasons, verifies, debugs, repairs, and re-verifies until the design meets every quality gate — then hands you the GDS.
+### 3. Agent Layer
 
-> *"You wrote the spec. We wrote the chip."*
+Specialist AI components assist specific tasks such as RTL generation, testbench creation, failure analysis, and formal-property generation. These components do not bypass the tool checks; their output must still pass the relevant stage gates.
 
----
+## End-to-End Pipeline
 
-## The Problem It Solves
+The full build pipeline is:
 
-Traditional hardware design has two unavoidable costs:
-
-| Problem | Industry Reality | AgentIC's Answer |
-|---------|-----------------|-----------------|
-| **Iteration time** | Hours per RTL-to-sim cycle | Fully automated multi-stage pipeline |
-| **Silent bugs** | Weak checks ship bad silicon | Every gate is fail-closed — if it cannot prove correctness, it does not proceed |
-| **Expert bottleneck** | Needs senior RTL + verification + physical engineers | One prompt, autonomous resolution |
-| **Infinite churn** | Teams retry the same broken strategy | Loop budgets, loop-identity detection, and strategy pivots are baked in |
-
----
-
-<div align="center">
-
-## Pipeline at a Glance
-
-</div>
-
-```
-Your Prompt
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        AGENTRIC PIPELINE                         │
-│                                                                  │
-│  ① Specification     →  Structured design contract              │
-│  ② RTL Generation    →  Architecture-aware Verilog              │
-│  ③ RTL Hardening     →  Iterative syntax · lint · semantic fix  │
-│  ④ Verification      →  Testbench compile · simulation          │
-│  ⑤ Formal Proof      →  SVA assertions · SymbiYosys bounded MC  │
-│  ⑥ Coverage          →  Profile-driven closure · anti-regression│
-│  ⑦ Regression        →  Directed corner-case execution          │
-│  ⑧ Physical Flow     →  Floorplan · Hardening · Convergence     │
-│  ⑨ Signoff           →  DRC · LVS · STA · Power · IR · LEC     │
-│                                                                  │
-│              SUCCESS  ──────────────────── GDS + Reports        │
-└─────────────────────────────────────────────────────────────────┘
+```text
+Specification
+  -> RTL_GEN
+  -> RTL_FIX
+  -> VERIFICATION
+  -> FORMAL_VERIFY
+  -> COVERAGE_CHECK
+  -> REGRESSION
+  -> HARDENING
+  -> CONVERGENCE
+  -> SIGNOFF
 ```
 
-Every transition between stages is gated. Nothing proceeds until the previous stage passes cleanly.
+Each stage is gated. A stage can only advance if its required checks pass. There is no silent forwarding of a broken artifact.
 
----
+### Stage Intent
 
-## Five Core Intelligence Modules
+| Stage | Purpose | Typical Outputs |
+|------|---------|-----------------|
+| `SPECIFICATION` | Normalize the user prompt into a design contract | structured prompt context |
+| `RTL_GEN` | Generate initial RTL and supporting files | `<name>.v`, supporting metadata |
+| `RTL_FIX` | Enforce syntax, lint, and semantic rigor; repair failures | corrected RTL, diagnostics |
+| `VERIFICATION` | Build TB, run simulation, analyze functional failures | `<name>_tb.v`, sim logs, VCD |
+| `FORMAL_VERIFY` | Generate SVA, preflight it, run formal checks | `<name>_sva.sv`, formal summaries |
+| `COVERAGE_CHECK` | Improve or validate coverage after functional success | coverage metrics, coverage JSON |
+| `REGRESSION` | Run directed corner-case validation | regression results |
+| `HARDENING` | Invoke OpenLane flow if enabled | layout flow outputs |
+| `CONVERGENCE` | Recover from physical-flow failures | updated configs or constraints |
+| `SIGNOFF` | Run DRC/LVS/STA/power/equivalence style checks | signoff reports |
 
-AgentIC's reasoning layer is built on five proprietary modules — all active in the current production pipeline.
+## Reliability Model
 
-<br/>
+AgentIC is designed around one rule: every stage must provide enough evidence to justify the next stage.
 
-<table>
-<thead>
-<tr>
-<th width="220">Module</th>
-<th>Capability</th>
-<th width="200">When It Activates</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><b>Specification Architect</b></td>
-<td>Converts ambiguous prose into a precise, structured design contract shared by all downstream agents — preventing conflicting interpretations before a single line of RTL is written</td>
-<td>Before RTL generation</td>
-</tr>
-<tr>
-<td><b>Iterative Reasoning Agent</b></td>
-<td>Applies a multi-step Think → Act → Observe loop to reason through RTL issues before committing any repair, reducing unnecessary edits and preserving design intent</td>
-<td>Every RTL repair cycle</td>
-</tr>
-<tr>
-<td><b>Waveform Intelligence</b></td>
-<td>Reads simulation waveforms and traces every incorrectly-driven output back to the exact RTL construct responsible — giving the repair layer deterministic evidence instead of inference</td>
-<td>On any simulation failure</td>
-</tr>
-<tr>
-<td><b>Formal Causal Debugger</b></td>
-<td>Builds a signal causality graph from the failing formal property, applies balanced for-and-against analysis, and returns the root-cause signal, source line, and a confidence score</td>
-<td>On any formal failure</td>
-</tr>
-<tr>
-<td><b>Self-Reflection Recovery</b></td>
-<td>Categorises physical implementation failures, reflects on convergence history, proposes corrective actions, applies them, and tracks whether metrics are improving or stagnating before retrying</td>
-<td>On any hardening failure</td>
-</tr>
-</tbody>
-</table>
+### Fail-Closed By Default
 
-<br/>
+If syntax, lint, simulation, formal checks, or physical checks fail, the build does not continue unless a replacement artifact passes the relevant gate.
 
-> **Intellectual Property Notice** — The internal algorithms, decision logic, prompt architecture, repair heuristics, scoring mechanisms, and module interfaces are proprietary and confidential. The table above describes *capabilities*, not *implementations*. No part of AgentIC's core reasoning design is disclosed in this document.
+### Deterministic Before Generative
 
----
+Repair is layered:
 
-## Quality Architecture
+1. deterministic cleanup or mechanical fix
+2. targeted analysis
+3. constrained regeneration
+4. strategy pivot or fail-closed halt
 
-AgentIC is engineered around one principle: **trust nothing, verify everything.**
+This ordering matters. The system tries to preserve design intent and minimize uncontrolled rewrites.
 
-### Fail-Closed Gates
+### Budgeted Loops
 
-Every stage either **passes** or **halts with a diagnosis**. There is no silent forwarding of a broken artifact.
+Each repair path is budgeted. The system tracks repeated failures and retry exhaustion to avoid infinite churn.
 
+## Core Reasoning Components
+
+AgentIC uses multiple specialized components rather than one undifferentiated "agent".
+
+These components are used for tasks such as:
+
+- RTL generation
+- testbench generation
+- SVA generation
+- constraint generation
+- documentation
+
+These outputs are still stage-gated. AgentIC does not assume that generated code is valid just because an AI model produced it.
+
+## How Reliability Is Managed
+
+Reliability work in AgentIC focuses on three practical areas:
+
+- clear stage boundaries
+- explicit artifact passing between stages
+- replayable testing from benchmark failures
+
+The goal is to make failures diagnosable and repeatable, not to hide them behind optimistic retries.
+
+## Toolchain
+
+AgentIC is built around open-source digital design tools:
+
+- Verilator
+- Icarus Verilog (`iverilog`, `vvp`)
+- Yosys
+- SymbiYosys (`sby`)
+- OpenLane for physical implementation
+
+Formal and physical-flow stages are optional depending on the selected build mode and installed environment.
+
+## Repository Structure
+
+Top-level layout:
+
+```text
+AgentIC/
+├── src/agentic/          # orchestrator, tool wrappers, agents, CLI
+├── tests/                # unit and reliability tests
+├── benchmark/            # benchmark runner and reports
+├── docs/                 # supporting documentation
+├── web/                  # frontend
+├── server/               # backend/service layer
+├── scripts/              # helper and CI scripts
+├── artifacts/            # generated runtime artifacts
+└── metircs/              # benchmark and design metrics
 ```
-  RTL FIX ──► [Syntax Gate] ──► [Lint Gate] ──► [Semantic Gate] ──► Next Stage
-                   │                 │                  │
-                 FAIL              FAIL              FAIL
-                   └─────────────────┴──────────────────┘
-                                     │
-                             Repair Loop (budgeted)
-                                     │
-                         [Loop-Identity Guard] ◄── prevents infinite churn
-```
 
-### Layered Autonomous Repair
+Key files:
 
-At every gate, the system applies repair in strict priority order:
+- [README.md](/home/vickynishad/AgentIC/README.md)
+- [main.py](/home/vickynishad/AgentIC/main.py)
+- [cli.py](/home/vickynishad/AgentIC/src/agentic/cli.py)
+- [orchestrator.py](/home/vickynishad/AgentIC/src/agentic/orchestrator.py)
+- [vlsi_tools.py](/home/vickynishad/AgentIC/src/agentic/tools/vlsi_tools.py)
+- [USER_GUIDE.md](/home/vickynishad/AgentIC/docs/USER_GUIDE.md)
 
-1. **Deterministic pass** — machine-precise corrections with zero LLM involvement
-2. **Reasoned pass** — multi-step agentic reasoning with hardware-specific tool use
-3. **Generative pass** — LLM-guided surgical correction, minimum diff enforced
-4. **Strategy pivot** — if all passes exhaust their budget, the build fails closed; it does not ship a broken artifact
-
-### Loop Safety
-
-Every repair loop has a hard step budget. Identical repeated artifacts are detected and rejected before an LLM call is made. If the system cannot demonstrate measurable forward progress, it escalates to fail-closed rather than spinning.
-
----
-
-## Multi-Agent Collaboration
-
-The generative layer is a collaborative crew of specialised AI agents, each scoped to a single responsibility and equipped with hardware-specific tooling:
-
-| Agent Role | Responsibility |
-|------------|---------------|
-| **RTL Designer** | Architecture-aware Verilog generation with pre-submission self-verification |
-| **Testbench Designer** | Simulator-safe testbenches with stimulus integrity guarantees |
-| **Failure Analyst** | Signal-level diagnosis — always cites specific RTL line, construct, and expected vs. actual values |
-| **Verification Engineer** | SVA assertion generation tuned for the open-source formal toolchain |
-| **Regression Architect** | Directed corner-case scenario planning |
-| **Physical Constraints** | SDC timing constraint synthesis |
-| **Documentation** | Design specification and IP declaration |
-
-All agents operate from the structured design contract established at the Specification stage — eliminating the divergence that occurs when different agents interpret the same prose spec independently.
-
----
-
-## Human-in-the-Loop Web Interface
-
-<div align="center">
-
-![](https://img.shields.io/badge/Real--time%20SSE%20Streaming-C9643E?style=for-the-badge&labelColor=1C1A17)
-![](https://img.shields.io/badge/Approval%20Gates-C9643E?style=for-the-badge&labelColor=1C1A17)
-![](https://img.shields.io/badge/Live%20Agent%20Reasoning%20View-C9643E?style=for-the-badge&labelColor=1C1A17)
-
-</div>
-
-AgentIC ships with a production-grade web application (React 19 + Vite frontend, FastAPI backend). Every pipeline event streams to the UI in real time. Three build modes are available:
-
-| Mode | Description |
-|------|-------------|
-| **Autonomous** | Zero human checkpoints — fully hands-off |
-| **Supervised** | Pause and approve at user-defined stages |
-| **Interactive** | Full step-by-step control with per-decision approval |
-
-Design artifacts, agent reasoning steps, signal traces, formal proof results, and physical convergence metrics are all visible in the interface as they are produced.
-
----
-
-## Signoff Coverage
-
-| Domain | What Is Verified |
-|--------|-----------------|
-| **Functional** | Simulation correctness across all generated and directed stimuli |
-| **Formal** | Bounded model checking with SVA property coverage |
-| **Structural** | DRC — design rule compliance for the target PDK |
-| **Physical** | LVS — layout-versus-schematic equivalence |
-| **Timing** | Multi-corner STA — setup and hold across all paths |
-| **Power** | Peak and average power estimation |
-| **IR Drop** | Supply integrity validation |
-| **Equivalence** | LEC — RTL-to-GDS logical equivalence |
-
----
-
-## Getting Started
+## Installation
 
 ### Prerequisites
 
-```bash
-# Core
-Python 3.10+, Verilator 5.x, Icarus Verilog (iverilog + vvp)
+Minimum verification flow:
 
-# Formal verification
-oss-cad-suite  — provides sby, yosys, eqy
-
-# Physical implementation (optional, skip with --skip-openlane)
-OpenLane + Docker
+```text
+Python 3.10+
+Verilator 5.x
+Icarus Verilog
+Yosys / SymbiYosys via oss-cad-suite
 ```
 
-### Install
+Optional physical flow:
+
+```text
+OpenLane
+Docker
+Installed PDK (for example sky130 or gf180)
+```
+
+### Setup
 
 ```bash
 git clone https://github.com/Vickyrrrrrr/AgentIC.git
 cd AgentIC
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Configure `.env`
+### Environment
+
+Typical `.env` values:
 
 ```bash
-# LLM backend — cloud
 NVIDIA_API_KEY="your-key-here"
-
-# LLM backend — local
 LLM_BASE_URL="http://localhost:11434"
-
-# Physical flow roots (only needed for --full-signoff builds)
 OPENLANE_ROOT="/path/to/OpenLane"
 PDK_ROOT="/path/to/pdk"
 ```
 
----
+See [USER_GUIDE.md](/home/vickynishad/AgentIC/docs/USER_GUIDE.md) for model backend selection details.
 
-## CLI Reference
+## CLI Usage
+
+All commands are invoked through `main.py`.
+
+### Build
+
+Fast RTL and verification flow:
 
 ```bash
-# Functional verification only — fast, no physical tools needed
 python3 main.py build \
   --name my_design \
   --desc "32-bit APB timer with interrupt" \
   --skip-openlane
+```
 
-# Full build through physical signoff
+Full flow with signoff-oriented stages:
+
+```bash
 python3 main.py build \
   --name my_design \
   --desc "32-bit APB timer with interrupt" \
   --full-signoff \
   --pdk-profile sky130
+```
 
-# Exploration mode — relaxed gates
+Skip coverage while still continuing from formal to regression:
+
+```bash
 python3 main.py build \
   --name my_design \
-  --desc "32-bit APB timer with interrupt" \
+  --desc "UART transmitter with programmable baud divisor" \
   --skip-openlane \
-  --no-strict-gates
+  --skip-coverage
 ```
 
-### All build flags
+Important build flags:
 
-```
---strict-gates / --no-strict-gates   Enforce all quality gates (default: strict)
---skip-openlane                      Stop after formal/coverage signoff
---pdk-profile {sky130, gf180}        Target PDK (default: sky130)
---full-signoff                       Run full DRC/LVS/STA/Power/LEC suite
---max-retries N                      Per-stage LLM repair budget
---min-coverage N                     Coverage closure threshold (%)
---max-pivots N                       Physical flow strategy pivot limit
---congestion-threshold FLOAT         Routing congestion abort threshold
---hierarchical {auto, off, on}       Hierarchical flow mode
+```text
+--skip-openlane
+--skip-coverage
+--full-signoff
+--strict-gates / --no-strict-gates
+--min-coverage
+--max-retries
+--max-pivots
+--pdk-profile {sky130,gf180}
+--hierarchical {auto,off,on}
+--congestion-threshold
 ```
 
----
+### Other Commands
+
+```bash
+python3 main.py simulate --name <design>
+python3 main.py harden --name <design>
+python3 main.py verify <design>
+```
 
 ## Generated Artifacts
 
-Every completed build produces a full artifact set:
+A typical design directory contains:
 
-```
+```text
 designs/<name>/
 ├── src/
-│   ├── <name>.v              # Production RTL
-│   ├── <name>_tb.v           # Verified testbench
-│   ├── <name>_sva.sv         # SVA property suite
-│   └── <name>.sdc            # Timing constraints
+│   ├── <name>.v
+│   ├── <name>_tb.v
+│   ├── <name>_sva.sv
+│   ├── *_formal_result.json
+│   ├── *_coverage_result.json
+│   └── *.vcd
 ├── formal/
-│   └── <name>.sby            # SymbiYosys config + results
-├── <name>.eqy                # Equivalence check config
-├── <name>_eco_patch.tcl      # ECO patch (when signoff required it)
-├── config.tcl                # OpenLane configuration
-├── macro_placement.tcl       # Floorplan
-└── ip_manifest.json          # IP declaration manifest
-
-metircs/<name>/
-├── latest.json               # Machine-readable benchmark snapshot
-└── latest.md                 # Human-readable signoff report
+├── config.tcl
+├── macro_placement.tcl
+└── ip_manifest.json
 ```
 
----
+Design-local `src/` is intended to keep permanent, human-useful artifacts. Tool intermediates such as Verilator build trees, compiled simulators, `.sby` working directories, coverage work products, and Yosys scratch outputs are staged in temporary directories and cleaned automatically.
 
-## CI
+## Benchmarking
+
+The repository includes a benchmark runner for multi-design evaluation:
 
 ```bash
-# PR gate — syntax + unit tests (fast, ~2 min)
-bash scripts/ci/smoke.sh
-
-# Nightly — full build + signoff
-bash scripts/ci/nightly_full.sh
+python3 benchmark/run_benchmark.py --design counter8 --attempts 1 --skip-openlane
 ```
 
-Workflow definition: `.github/workflows/ci.yml`
+Generated summaries live under [benchmark/results](/home/vickynishad/AgentIC/benchmark/results).
 
----
+Benchmarking matters here because repeated failures usually point to pipeline issues, validation gaps, or repair-routing problems. Those failures are used to improve the system over time.
 
-## Supported PDKs
+## Web Interface
 
-| PDK | Process Node | Status |
-|-----|-------------|--------|
-| SkyWater Sky130 | 130 nm | Production |
-| GlobalFoundries GF180MCU | 180 nm | Production |
+AgentIC includes a frontend and backend for interactive execution and live streaming of pipeline events. The UI is useful when you want:
 
----
+- stage-by-stage visibility
+- human approval gates
+- real-time log streaming
+- artifact inspection during a build
 
-## Practical Scope
+Frontend and service code:
 
-AgentIC is designed for **OSS PDK prototype tape-out and research-grade autonomous hardware design**. It is not a replacement for a certified commercial foundry sign-off flow. ECO and hierarchical flows produce concrete, functional artifacts but are not tuned for production process corners.
+- [web](/home/vickynishad/AgentIC/web)
+- [server](/home/vickynishad/AgentIC/server)
 
----
+## Scope And Limits
 
-<div align="center">
+AgentIC is aimed at autonomous digital design exploration, verification-heavy iteration, and open-source PDK implementation flows. It is not yet a replacement for a certified commercial signoff stack or a production ASIC team with foundry-qualified internal methodology.
 
-## Design Philosophy
+Practical implications:
 
-<br/>
+- benchmark pass rate still matters more than demo quality
+- hierarchical repair is harder than single-module repair and is treated explicitly
+- formal and coverage stages are valuable, but must be routed correctly to be useful
+- "industry-grade" here means constrained, diagnosable, replayable, and fail-closed
 
-> *The system is only as trustworthy as its most lenient gate.*
->
-> Every component is designed to fail loudly, repair precisely,
-> and proceed only when correctness is demonstrated — not assumed.
+## Design Principles
 
-<br/>
+The project is built around a small number of non-negotiable rules:
 
-| Principle | What It Means in Practice |
-|-----------|--------------------------|
-| **Fail closed** | No stage silently degrades quality |
-| **Minimum diff** | Repairs change the least possible — intent is preserved |
-| **Bounded loops** | Every retry has a hard budget |
-| **Determinism first** | Machine-precise fixes are always attempted before LLM fixes |
-| **Evidence-driven** | Every diagnosis cites signal names and line numbers — never guesses |
+- fail closed
+- prefer deterministic fixes before LLM fixes
+- preserve design intent with minimum-diff repair
+- validate every generated artifact before downstream use
+- treat routing bugs as seriously as model bugs
+- turn observed benchmark failures into regression tests
 
-</div>
+## IP Note
 
----
+This README describes capabilities and workflow at a high level. It does not document the internal prompt architecture, private heuristics, decision policies, or proprietary reasoning logic used inside the system.
 
 ## License
 
-**Proprietary and Confidential.**
+Proprietary and Confidential.
 
 Copyright © 2026 Vicky Nishad. All rights reserved.
 
-This software, its architecture, algorithms, agent designs, internal logic, prompt methodologies, repair heuristics, and all associated intellectual property are the exclusive property of the author. No part of this system — in whole or in part — may be reproduced, decompiled, reverse-engineered, distributed, sublicensed, or used in any derivative work without explicit written permission from the copyright holder.
-
-Unauthorised use is a violation of applicable intellectual property law.
-
----
-
-<div align="center">
-
-<br/>
-
-![](https://img.shields.io/badge/Built%20with%20intention-C9643E?style=for-the-badge&labelColor=1C1A17)
-![](https://img.shields.io/badge/Designed%20to%20last-C9643E?style=for-the-badge&labelColor=1C1A17)
-
-<br/>
-
-*AgentIC — from words to wafers.*
-
-<br/>
-
-</div>
+This repository, including its architecture, algorithms, prompts, agent logic, repair heuristics, and associated intellectual property, may not be reproduced, distributed, reverse-engineered, or used in derivative works without explicit written permission.

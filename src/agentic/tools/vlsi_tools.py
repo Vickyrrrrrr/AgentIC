@@ -4,6 +4,8 @@ import re
 import json
 import hashlib
 import subprocess
+import tempfile
+import glob
 from collections import Counter, defaultdict, deque
 from typing import Dict, Any, List, Tuple
 import shutil
@@ -53,6 +55,162 @@ def _resolve_binary(bin_hint: str) -> str:
     if found:
         return found
     return bin_hint
+
+
+def _build_tool_result(
+    tool: str,
+    *,
+    ok: bool,
+    result: str,
+    returncode: int = -1,
+    stdout: str = "",
+    stderr: str = "",
+    diagnostics: List[str] | None = None,
+    metrics: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build the canonical structured tool result."""
+    return {
+        "ok": bool(ok),
+        "tool": tool,
+        "returncode": int(returncode),
+        "stdout": stdout or "",
+        "stderr": stderr or "",
+        "result": result,
+        "diagnostics": list(diagnostics or []),
+        "metrics": dict(metrics or {}),
+    }
+
+
+def _collect_design_rtl(src_dir: str, include_sv: bool = True) -> List[str]:
+    patterns = [os.path.join(src_dir, "*.v")]
+    if include_sv:
+        patterns.append(os.path.join(src_dir, "*.sv"))
+    rtl_files: List[str] = []
+    for pattern in patterns:
+        rtl_files.extend(glob.glob(pattern))
+    seen = set()
+    ordered = []
+    for path in sorted(rtl_files):
+        if path.endswith("_tb.v") or "regression" in path:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        ordered.append(path)
+    return ordered
+
+
+def _stage_inputs(tmpdir: str, paths: List[str]) -> Dict[str, str]:
+    """Copy required inputs to tmpdir and return original->staged mapping."""
+    staged: Dict[str, str] = {}
+    used_names: set[str] = set()
+    for path in paths:
+        if not path or not os.path.exists(path) or path in staged:
+            continue
+        base = os.path.basename(path)
+        stem, ext = os.path.splitext(base)
+        candidate = base
+        counter = 1
+        while candidate in used_names:
+            candidate = f"{stem}_{counter}{ext}"
+            counter += 1
+        used_names.add(candidate)
+        dst = os.path.join(tmpdir, candidate)
+        shutil.copy2(path, dst)
+        staged[path] = dst
+    return staged
+
+
+def _stage_path(path: str, staged_map: Dict[str, str]) -> str:
+    return staged_map.get(path, path)
+
+
+def _temp_roots_from_stage_map(staged_map: Dict[str, str]) -> Tuple[str, str]:
+    if not staged_map:
+        return "", ""
+    temp_root = os.path.commonpath([os.path.dirname(path) for path in staged_map.values()])
+    original_root = os.path.commonpath([os.path.dirname(path) for path in staged_map.keys()])
+    return temp_root, original_root
+
+
+def _rewrite_temp_paths(text: str, staged_map: Dict[str, str]) -> str:
+    """Rewrite temp paths in diagnostic text back to original source paths."""
+    if not text or not staged_map:
+        return text
+
+    rewritten = text
+    # Exact staged path replacement first.
+    for original, staged in sorted(staged_map.items(), key=lambda item: len(item[1]), reverse=True):
+        rewritten = rewritten.replace(staged, original)
+        staged_norm = os.path.normpath(staged)
+        if staged_norm != staged:
+            rewritten = rewritten.replace(staged_norm, original)
+        basename = os.path.basename(staged)
+        original_base = os.path.basename(original)
+        if basename == original_base:
+            basename_re = re.compile(rf"(?<![\w./-]){re.escape(basename)}(?=(?::\d)|\b)")
+            rewritten = basename_re.sub(original, rewritten)
+
+    temp_root, original_root = _temp_roots_from_stage_map(staged_map)
+    if temp_root and original_root:
+        rewritten = rewritten.replace(temp_root + os.sep, original_root + os.sep)
+        rewritten = rewritten.replace(temp_root, original_root)
+
+    return rewritten
+
+
+def _assert_no_temp_paths(text: str, staged_map: Dict[str, str]):
+    temp_root, _ = _temp_roots_from_stage_map(staged_map)
+    if temp_root and text and temp_root in text:
+        raise AssertionError(f"Temp path leak detected in tool diagnostics: {temp_root}")
+
+
+def _rewrite_result_paths(result_dict: Dict[str, Any], staged_map: Dict[str, str]) -> Dict[str, Any]:
+    """Sanitize tool result payloads so no temp paths leak upstream."""
+    sanitized = dict(result_dict)
+    for key in ("stdout", "stderr"):
+        value = sanitized.get(key, "")
+        if isinstance(value, str):
+            sanitized[key] = _rewrite_temp_paths(value, staged_map)
+            _assert_no_temp_paths(sanitized[key], staged_map)
+
+    diagnostics = sanitized.get("diagnostics", [])
+    if isinstance(diagnostics, list):
+        clean_diags = []
+        for entry in diagnostics:
+            if isinstance(entry, str):
+                clean = _rewrite_temp_paths(entry, staged_map)
+                _assert_no_temp_paths(clean, staged_map)
+                clean_diags.append(clean)
+            else:
+                clean_diags.append(entry)
+        sanitized["diagnostics"] = clean_diags
+    return sanitized
+
+
+def _promote_vcd_artifacts(tmpdir: str, src_dir: str):
+    for entry in os.listdir(tmpdir):
+        if not entry.endswith(".vcd"):
+            continue
+        src = os.path.join(tmpdir, entry)
+        dst = os.path.join(src_dir, entry)
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            continue
+
+
+def _collect_diag_lines(raw: str, limit: int = 12) -> List[str]:
+    diag_lines: List[str] = []
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("%Error") or s.startswith("%Warning") or "syntax error" in s.lower() or "internal error" in s.lower():
+            diag_lines.append(s)
+    if not diag_lines:
+        diag_lines = [x.strip() for x in raw.splitlines() if x.strip()]
+    return diag_lines[:limit]
 
 
 def startup_self_check() -> Dict[str, Any]:
@@ -349,35 +507,37 @@ def run_syntax_check(file_path: str) -> tuple:
     """
     if not os.path.exists(file_path):
         return False, f"File not found: {file_path}"
-    
-    try:
-        # Gather all RTL files to support multi-file compilation
-        import glob
-        src_dir = os.path.dirname(file_path)
-        rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
-                     if not f.endswith("_tb.v") and "regression" not in f]
-        if file_path not in rtl_files and os.path.exists(file_path):
-            rtl_files.append(file_path)
 
-        # --lint-only: check syntax and basic semantics
-        # --sv: force SystemVerilog parsing
-        # --timing: support delays
-        # -Wno-fatal: don't crash on warnings (unless they are errors)
-        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wno-fatal"] + rtl_files
-        
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, text=True,
-            timeout=60
-        )
-        # Verilator prints errors/warnings to stderr
-        if result.returncode == 0:
-            return True, "Syntax OK (Verilator)"
-        return False, f"Verilator Syntax Errors:\n{result.stderr}"
-    except subprocess.TimeoutExpired:
-        return False, "Syntax check timed out (>60s)."
-    except FileNotFoundError:
-        return False, "Verilator not found. Please install Verilator 5.0+."
+    src_dir = os.path.dirname(file_path)
+    rtl_files = _collect_design_rtl(src_dir)
+    if file_path not in rtl_files:
+        rtl_files.append(file_path)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, rtl_files)
+        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wno-fatal"] + [
+            os.path.basename(_stage_path(path, staged_map)) for path in rtl_files
+        ]
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            tool_result = _build_tool_result(
+                "verilator",
+                ok=completed.returncode == 0,
+                result="PASS" if completed.returncode == 0 else "FAIL",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                diagnostics=_collect_diag_lines((completed.stderr or completed.stdout or "").strip()),
+                metrics={"mode": "syntax_check"},
+            )
+            tool_result = _rewrite_result_paths(tool_result, staged_map)
+            if tool_result["ok"]:
+                return True, "Syntax OK (Verilator)"
+            return False, f"Verilator Syntax Errors:\n{tool_result['stderr']}"
+        except subprocess.TimeoutExpired:
+            return False, "Syntax check timed out (>60s)."
+        except FileNotFoundError:
+            return False, "Verilator not found. Please install Verilator 5.0+."
 
 def run_lint_check(file_path: str) -> tuple:
     """
@@ -388,67 +548,65 @@ def run_lint_check(file_path: str) -> tuple:
     """
     if not os.path.exists(file_path):
         return False, f"File not found: {file_path}"
-    
-    import glob
+
     src_dir = os.path.dirname(file_path)
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
-                 if not f.endswith("_tb.v") and "regression" not in f]
-    if file_path not in rtl_files and os.path.exists(file_path):
+    rtl_files = _collect_design_rtl(src_dir)
+    if file_path not in rtl_files:
         rtl_files.append(file_path)
 
     # --sv: force SystemVerilog parsing (critical for typedef, logic, always_comb)
     # -Wno-fatal: don't exit on warnings — let us separate real errors from warnings
     # Suppress informational warnings that are not bugs:
-    cmd = [
-        "verilator", "--lint-only", "--sv", "--timing",
-        "-Wno-fatal",          # warnings don't cause non-zero exit
-        "-Wno-UNUSED",         # unused signals (common in AI-generated code)
-        "-Wno-PINMISSING",     # missing port connections
-        "-Wno-CASEINCOMPLETE", # incomplete case (handled by default)
-        "-Wno-WIDTHEXPAND",    # zero-extension (harmless implicit widening)
-        "-Wno-WIDTHTRUNC",     # truncation (flag separately in semantic check)
-    ] + rtl_files
-    
-    try:
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, text=True,
-            timeout=30
-        )
-        stderr = result.stderr.strip()
-        
-        if result.returncode == 0:
-            # Check for remaining warnings (non-fatal)
-            if stderr:
-                # Parse for LATCH warnings — these are fixable and important
-                has_latch = bool(re.search(r'%Warning-LATCH:', stderr))
-                if has_latch:
-                    # LATCH is a real design issue — fail so the LLM can fix it
-                    return False, f"Verilator Lint Errors:\n{stderr}"
-                # Other warnings are informational, pass with report
-                return True, f"Lint OK (with warnings):\n{stderr}"
-            return True, "Lint OK"
-        
-        # Non-zero exit: check if there are REAL %Error lines (not just "Exiting due to N warning(s)")
-        real_errors = [
-            line for line in stderr.splitlines()
-            if line.strip().startswith("%Error") and "Exiting due to" not in line
-        ]
-        
-        if not real_errors:
-            # Only warnings caused the exit — try iverilog fallback
-            iverilog_ok, iverilog_report = run_iverilog_lint(file_path)
-            if iverilog_ok:
-                return True, f"Lint OK (Verilator warnings only, iverilog passed):\n{stderr}"
-            else:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, rtl_files)
+        cmd = [
+            "verilator", "--lint-only", "--sv", "--timing",
+            "-Wno-fatal",
+            "-Wno-UNUSED",
+            "-Wno-PINMISSING",
+            "-Wno-CASEINCOMPLETE",
+            "-Wno-WIDTHEXPAND",
+            "-Wno-WIDTHTRUNC",
+        ] + [os.path.basename(_stage_path(path, staged_map)) for path in rtl_files]
+
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir)
+            tool_result = _build_tool_result(
+                "verilator",
+                ok=completed.returncode == 0,
+                result="PASS" if completed.returncode == 0 else "FAIL",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                diagnostics=_collect_diag_lines((completed.stderr or completed.stdout or "").strip()),
+                metrics={"mode": "lint_check"},
+            )
+            tool_result = _rewrite_result_paths(tool_result, staged_map)
+            stderr = tool_result["stderr"].strip()
+
+            if tool_result["returncode"] == 0:
+                if stderr:
+                    has_latch = bool(re.search(r'%Warning-LATCH:', stderr))
+                    if has_latch:
+                        return False, f"Verilator Lint Errors:\n{stderr}"
+                    return True, f"Lint OK (with warnings):\n{stderr}"
+                return True, "Lint OK"
+
+            real_errors = [
+                line for line in stderr.splitlines()
+                if line.strip().startswith("%Error") and "Exiting due to" not in line
+            ]
+            if not real_errors:
+                iverilog_ok, iverilog_report = run_iverilog_lint(file_path)
+                if iverilog_ok:
+                    return True, f"Lint OK (Verilator warnings only, iverilog passed):\n{stderr}"
                 return False, f"Verilator Lint Errors:\n{stderr}\n\niverilog also failed:\n{iverilog_report}"
-        
-        return False, f"Verilator Lint Errors:\n{stderr}"
-        
-    except FileNotFoundError:
-         return True, "Verilator not found (Skipping Lint)"
-    except subprocess.TimeoutExpired:
-         return False, "Lint check timed out."
+
+            return False, f"Verilator Lint Errors:\n{stderr}"
+        except FileNotFoundError:
+            return True, "Verilator not found (Skipping Lint)"
+        except subprocess.TimeoutExpired:
+            return False, "Lint check timed out."
 
 
 def run_iverilog_lint(file_path: str) -> tuple:
@@ -460,44 +618,54 @@ def run_iverilog_lint(file_path: str) -> tuple:
     """
     if not os.path.exists(file_path):
         return False, f"File not found: {file_path}"
-    
-    import glob
+
     src_dir = os.path.dirname(file_path)
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
-    if file_path not in rtl_files and os.path.exists(file_path):
+    rtl_files = _collect_design_rtl(src_dir, include_sv=False)
+    if file_path not in rtl_files:
         rtl_files.append(file_path)
 
-    # -g2012: IEEE 1800-2012 SystemVerilog standard
-    # -Wall: enable all warnings
-    # -o /dev/null: don't produce output binary (lint-only mode)
-    cmd = ["iverilog", "-g2012", "-Wall", "-o", "/dev/null"] + rtl_files
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True, text=True,
-            timeout=30
-        )
-        combined = (result.stdout + "\n" + result.stderr).strip()
-        
-        # iverilog returns 0 on success, non-zero on errors
-        if result.returncode == 0:
-            if combined:
-                return True, f"iverilog OK (with warnings):\n{combined}"
-            return True, "iverilog OK"
-        
-        return False, f"iverilog Lint Errors:\n{combined}"
-        
-    except FileNotFoundError:
-        return False, "iverilog not found (install with: apt install iverilog)"
-    except subprocess.TimeoutExpired:
-        return False, "iverilog lint check timed out."
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, rtl_files)
+        out_path = os.path.join(tmpdir, "iverilog_lint.out")
+        cmd = ["iverilog", "-g2012", "-Wall", "-o", out_path] + [
+            os.path.basename(_stage_path(path, staged_map)) for path in rtl_files
+        ]
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir)
+            tool_result = _build_tool_result(
+                "iverilog",
+                ok=completed.returncode == 0,
+                result="PASS" if completed.returncode == 0 else "FAIL",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                diagnostics=_collect_diag_lines(((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()),
+                metrics={"mode": "lint_check"},
+            )
+            tool_result = _rewrite_result_paths(tool_result, staged_map)
+            combined = ((tool_result["stdout"] or "") + "\n" + (tool_result["stderr"] or "")).strip()
+            if tool_result["ok"]:
+                if combined:
+                    return True, f"iverilog OK (with warnings):\n{combined}"
+                return True, "iverilog OK"
+            return False, f"iverilog Lint Errors:\n{combined}"
+        except FileNotFoundError:
+            return False, "iverilog not found (install with: apt install iverilog)"
+        except subprocess.TimeoutExpired:
+            return False, "iverilog lint check timed out."
 
 
 def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
     """Deterministic semantic preflight for width-safety and port-shadowing."""
     report: Dict[str, Any] = {
         "ok": True,
+        "tool": "verilator",
+        "returncode": -1,
+        "stdout": "",
+        "stderr": "",
+        "result": "ERROR",
+        "diagnostics": [],
+        "metrics": {},
         "width_issues": [],
         "port_shadowing": [],
         "details": "",
@@ -540,20 +708,36 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
         "signed",
         "truncat",
     )
-    cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wall", file_path]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        stderr = result.stderr or ""
-        width_lines = []
-        for line in stderr.splitlines():
-            upper = line.upper()
-            if any(p.upper() in upper for p in width_patterns):
-                width_lines.append(line.strip())
-        if width_lines:
-            report["width_issues"] = width_lines[:20]
-            report["details"] = "\n".join(width_lines[:20])
-    except Exception as exc:
-        report["details"] = f"Semantic width scan fallback triggered: {exc}"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, [file_path])
+        staged_file = _stage_path(file_path, staged_map)
+        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wall", os.path.basename(staged_file)]
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            tool_result = _build_tool_result(
+                "verilator",
+                ok=completed.returncode == 0,
+                result="PASS" if completed.returncode == 0 else "FAIL",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                diagnostics=_collect_diag_lines((completed.stderr or completed.stdout or "").strip()),
+                metrics={"mode": "semantic_rigor"},
+            )
+            tool_result = _rewrite_result_paths(tool_result, staged_map)
+            report.update(tool_result)
+            stderr = tool_result["stderr"] or ""
+            width_lines = []
+            for line in stderr.splitlines():
+                upper = line.upper()
+                if any(p.upper() in upper for p in width_patterns):
+                    width_lines.append(line.strip())
+            if width_lines:
+                report["width_issues"] = width_lines[:20]
+                report["details"] = "\n".join(width_lines[:20])
+                report["tool_result"] = tool_result
+        except Exception as exc:
+            report["details"] = f"Semantic width scan fallback triggered: {exc}"
 
     report["ok"] = not report["port_shadowing"] and not report["width_issues"]
     return report["ok"], report
@@ -666,20 +850,24 @@ def auto_fix_width_warnings(file_path: str) -> Tuple[bool, Dict[str, Any]]:
 
 def _collect_width_warnings(file_path: str) -> List[str]:
     """Run Verilator -Wall and return only WIDTH-related warning lines."""
-    cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wall", file_path]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        stderr = result.stderr or ""
-    except Exception:
-        return []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, [file_path])
+        staged_file = _stage_path(file_path, staged_map)
+        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wall", os.path.basename(staged_file)]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            stderr = _rewrite_temp_paths(result.stderr or "", staged_map)
+            _assert_no_temp_paths(stderr, staged_map)
+        except Exception:
+            return []
 
-    hit_keys = ("WIDTHTRUNC", "WIDTHEXPAND", "WIDTH")
-    out = []
-    for line in stderr.splitlines():
-        upper = line.upper()
-        if any(k in upper for k in hit_keys):
-            out.append(line.strip())
-    return out
+        hit_keys = ("WIDTHTRUNC", "WIDTHEXPAND", "WIDTH")
+        out = []
+        for line in stderr.splitlines():
+            upper = line.upper()
+            if any(k in upper for k in hit_keys):
+                out.append(line.strip())
+        return out
 
 
 def _parse_width_warning_record(warning: str) -> dict | None:
@@ -1281,38 +1469,21 @@ bind {module_name} {module_name}_sby_check sby_inst (.*);
 '''
     return yosys_code
 
-def write_sby_config(design_name, use_sby_check: bool = True):
-    """Writes a default SBY config for the design.
-    
-    Args:
-        design_name: Name of the design
-        use_sby_check: If True, use the Yosys-compatible _sby_check.sv file
-    """
-    import glob as _glob
+
+def _render_sby_config(design_name: str, use_sby_check: bool = True) -> Tuple[str, List[str]]:
     src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
-    formal_dir = f"{OPENLANE_ROOT}/designs/{design_name}/formal"
-    os.makedirs(formal_dir, exist_ok=True)
-    path = f"{formal_dir}/{design_name}.sby"
-    
     sva_file = f"{design_name}_sby_check.sv" if use_sby_check else f"{design_name}_sva.sv"
     sva_abs = f"{src_dir}/{sva_file}"
-    
-    # Glob all RTL files from src/ — same pattern as Verilator multi-file fix
-    # Exclude _sva.sv (raw LLM SVA — not Yosys-compatible) and _tb.v testbenches
     sva_raw = f"{src_dir}/{design_name}_sva.sv"
     rtl_files = sorted(
-        f for f in _glob.glob(os.path.join(src_dir, "*.v")) + _glob.glob(os.path.join(src_dir, "*.sv"))
-        if not f.endswith("_tb.v") and "regression" not in f
-        and f != sva_abs and f != sva_raw
+        f for f in _collect_design_rtl(src_dir)
+        if f != sva_abs and f != sva_raw
     )
-    # Ensure the Yosys-compatible SVA check file is included
     if os.path.exists(sva_abs):
         rtl_files.append(sva_abs)
-    
-    # Build [script] read commands and [files] entries from the globbed list
+
     read_cmds = "\n".join(f"read -formal {os.path.basename(f)}" for f in rtl_files)
-    files_entries = "\n".join(rtl_files)
-    
+    files_entries = "\n".join(os.path.basename(f) for f in rtl_files)
     config = f"""[options]
 mode prove
 
@@ -1326,36 +1497,57 @@ prep -top {design_name}
 [files]
 {files_entries}
 """
-    with open(path, "w") as f:
-        f.write(config)
-    return path
+    return config, rtl_files
+
+
+def write_sby_config(design_name, use_sby_check: bool = True):
+    """Render the default SBY config for compatibility.
+    
+    Args:
+        design_name: Name of the design
+        use_sby_check: If True, use the Yosys-compatible _sby_check.sv file
+    """
+    _render_sby_config(design_name, use_sby_check=use_sby_check)
+    return f"{OPENLANE_ROOT}/designs/{design_name}/formal/{design_name}.sby"
 
 def run_formal_verification(design_name):
     """Runs SymbiYosys (SBY) for formal verification."""
-    formal_dir = f"{OPENLANE_ROOT}/designs/{design_name}/formal"
-    sby_file = f"{formal_dir}/{design_name}.sby"
-    
-    if not os.path.exists(sby_file):
+    sby_cmd = _resolve_binary(SBY_BIN)
+    config_text, rtl_files = _render_sby_config(design_name, use_sby_check=True)
+    if not rtl_files:
         return False, "SBY configuration file not found."
 
-    # Run SBY from formal/ directory to avoid polluting src/
-    sby_cmd = _resolve_binary(SBY_BIN)
-    try:
-        result = subprocess.run(
-            [sby_cmd, "-f", f"{design_name}.sby"],
-            cwd=formal_dir,
-            capture_output=True,
-            text=True,
-            timeout=600  # 10 minute timeout for formal verification
-        )
-        if result.returncode == 0:
-            return True, f"Formal Verification PASSED.\n{result.stdout}"
-        else:
-            return False, f"Formal Verification FAILED:\n{result.stdout}\n{result.stderr}"
-    except subprocess.TimeoutExpired:
-        return False, "Formal Verification timed out (>10 mins). Design may be too complex for bounded model checking."
-    except FileNotFoundError:
-        return False, "SymbiYosys (sby) tool not installed/found in path."
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, rtl_files)
+        sby_file = os.path.join(tmpdir, f"{design_name}.sby")
+        with open(sby_file, "w") as f:
+            f.write(config_text)
+        try:
+            completed = subprocess.run(
+                [sby_cmd, "-f", os.path.basename(sby_file)],
+                cwd=tmpdir,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            tool_result = _build_tool_result(
+                "sby",
+                ok=completed.returncode == 0,
+                result="PASS" if completed.returncode == 0 else "FAIL",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                diagnostics=_collect_diag_lines(((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()),
+                metrics={"mode": "formal_verification"},
+            )
+            tool_result = _rewrite_result_paths(tool_result, staged_map)
+            if tool_result["ok"]:
+                return True, f"Formal Verification PASSED.\n{tool_result['stdout']}"
+            return False, f"Formal Verification FAILED:\n{tool_result['stdout']}\n{tool_result['stderr']}"
+        except subprocess.TimeoutExpired:
+            return False, "Formal Verification timed out (>10 mins). Design may be too complex for bounded model checking."
+        except FileNotFoundError:
+            return False, "SymbiYosys (sby) tool not installed/found in path."
 
 def read_file_content(file_path: str):
     """
@@ -1608,9 +1800,14 @@ def run_tb_compile_gate(design_name: str, tb_path: str, rtl_path: str) -> Tuple[
         "design_name": design_name,
         "tb_path": tb_path,
         "rtl_path": rtl_path,
+        "tool": "verilator",
         "returncode": -1,
+        "stdout": "",
+        "stderr": "",
+        "result": "ERROR",
         "issue_categories": [],
         "diagnostics": [],
+        "metrics": {},
         "compile_output": "",
         "timeout": False,
         "fingerprint": "",
@@ -1627,87 +1824,86 @@ def run_tb_compile_gate(design_name: str, tb_path: str, rtl_path: str) -> Tuple[
         report["fingerprint"] = hashlib.sha256(report["compile_output"].encode("utf-8")).hexdigest()[:16]
         return False, report
 
-    import glob
     src_dir = os.path.dirname(rtl_path)
-    all_rtl = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
-               if not f.endswith("_tb.v") and "regression" not in f]
-    if rtl_path not in all_rtl and os.path.exists(rtl_path):
+    all_rtl = _collect_design_rtl(src_dir)
+    if rtl_path not in all_rtl:
         all_rtl.append(rtl_path)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, all_rtl + [tb_path])
+        cmd = [
+            "verilator",
+            "--lint-only",
+            "--sv",
+            "--timing",
+            "-Wno-fatal",
+            *[os.path.basename(_stage_path(path, staged_map)) for path in all_rtl],
+            os.path.basename(_stage_path(tb_path, staged_map)),
+            "--top-module",
+            f"{design_name}_tb",
+        ]
+        report["command"] = cmd
 
-    cmd = [
-        "verilator",
-        "--lint-only",
-        "--sv",
-        "--timing",
-        "-Wno-fatal",
-        *all_rtl,
-        tb_path,
-        "--top-module",
-        f"{design_name}_tb",
-    ]
-    report["command"] = cmd
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=tmpdir)
+        except subprocess.TimeoutExpired:
+            report["timeout"] = True
+            report["compile_output"] = "TB compile gate timed out (>120s)."
+            report["issue_categories"] = ["compile_timeout"]
+            report["fingerprint"] = hashlib.sha256(report["compile_output"].encode("utf-8")).hexdigest()[:16]
+            return False, report
+        except FileNotFoundError:
+            report["compile_output"] = "Verilator binary not found."
+            report["issue_categories"] = ["verilator_missing"]
+            report["fingerprint"] = hashlib.sha256(report["compile_output"].encode("utf-8")).hexdigest()[:16]
+            return False, report
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except subprocess.TimeoutExpired:
-        report["timeout"] = True
-        report["compile_output"] = "TB compile gate timed out (>120s)."
-        report["issue_categories"] = ["compile_timeout"]
-        report["fingerprint"] = hashlib.sha256(report["compile_output"].encode("utf-8")).hexdigest()[:16]
-        return False, report
-    except FileNotFoundError:
-        report["compile_output"] = "Verilator binary not found."
-        report["issue_categories"] = ["verilator_missing"]
-        report["fingerprint"] = hashlib.sha256(report["compile_output"].encode("utf-8")).hexdigest()[:16]
-        return False, report
+        tool_result = _build_tool_result(
+            "verilator",
+            ok=completed.returncode == 0,
+            result="PASS" if completed.returncode == 0 else "FAIL",
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            diagnostics=_collect_diag_lines(((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()),
+            metrics={"mode": "tb_compile_gate"},
+        )
+        tool_result = _rewrite_result_paths(tool_result, staged_map)
+        raw = ((tool_result["stdout"] or "") + ("\n" + tool_result["stderr"] if tool_result["stderr"] else "")).strip()
+        report.update(tool_result)
+        report["returncode"] = tool_result["returncode"]
+        report["compile_output"] = raw[:16000]
+        report["diagnostics"] = list(tool_result["diagnostics"])[:12]
 
-    raw = ((result.stdout or "") + ("\n" + result.stderr if result.stderr else "")).strip()
-    report["returncode"] = result.returncode
-    report["compile_output"] = raw[:16000]
+        categories = set()
+        low = raw.lower()
+        if completed.returncode == 0:
+            categories.add("compile_ok")
+        else:
+            if "internal error" in low:
+                categories.add("parser_internal_state_error")
+            if "syntax error" in low:
+                categories.add("syntax_error")
+            if ("_if" in raw and ("unexpected IDENTIFIER" in raw or "expecting ')'" in raw)) or (
+                "unexpected identifier" in low and "expecting ')'" in low
+            ):
+                categories.add("interface_typing_error")
+            if "function new" in low and "_if" in low:
+                categories.add("constructor_interface_type_error")
+            if "covergroup" in low or "coverpoint" in low:
+                categories.add("covergroup_scope_error")
+            if "pin not found" in low or "pinnotfound" in low:
+                categories.add("pin_mismatch")
+            if "cannot find" in low and "interface" in low:
+                categories.add("missing_interface")
+            if "dotted reference" in low and ("missing module" in low or "missing interface" in low):
+                categories.add("dotted_ref_missing_interface")
+            if not categories:
+                categories.add("compile_error")
+        report["issue_categories"] = sorted(categories)
 
-    diag_lines: List[str] = []
-    for line in raw.splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        if s.startswith("%Error") or s.startswith("%Warning") or "syntax error" in s.lower() or "Internal Error" in s:
-            diag_lines.append(s)
-    if not diag_lines:
-        diag_lines = [x.strip() for x in raw.splitlines() if x.strip()][:12]
-    report["diagnostics"] = diag_lines[:12]
-
-    categories = set()
-    low = raw.lower()
-    if result.returncode == 0:
-        categories.add("compile_ok")
-    else:
-        if "internal error" in low:
-            categories.add("parser_internal_state_error")
-        if "syntax error" in low:
-            categories.add("syntax_error")
-        if ("_if" in raw and ("unexpected IDENTIFIER" in raw or "expecting ')'" in raw)) or (
-            "unexpected identifier" in low and "expecting ')'" in low
-        ):
-            categories.add("interface_typing_error")
-        if "function new" in low and "_if" in low:
-            categories.add("constructor_interface_type_error")
-        if "covergroup" in low or "coverpoint" in low:
-            categories.add("covergroup_scope_error")
-        if "pin not found" in low or "pinnotfound" in low:
-            categories.add("pin_mismatch")
-        # Missing interface definition (e.g. UVM-lite fallback references _if not in design)
-        if "cannot find" in low and "interface" in low:
-            categories.add("missing_interface")
-        # Dotted references to missing interfaces (cascade from above)
-        if "dotted reference" in low and ("missing module" in low or "missing interface" in low):
-            categories.add("dotted_ref_missing_interface")
-        if not categories:
-            categories.add("compile_error")
-    report["issue_categories"] = sorted(categories)
-
-    fp_base = "|".join(report["issue_categories"]) + "|" + "\n".join(report["diagnostics"][:6])
-    report["fingerprint"] = hashlib.sha256(fp_base.encode("utf-8", errors="ignore")).hexdigest()[:16]
-    report["ok"] = result.returncode == 0
+        fp_base = "|".join(report["issue_categories"]) + "|" + "\n".join(report["diagnostics"][:6])
+        report["fingerprint"] = hashlib.sha256(fp_base.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        report["ok"] = completed.returncode == 0
 
     # --- iverilog fallback ---
     # If Verilator rejects the TB (especially for interface/class issues),
@@ -1732,23 +1928,39 @@ def run_tb_compile_gate(design_name: str, tb_path: str, rtl_path: str) -> Tuple[
 
 def _iverilog_compile_tb(tb_path: str, rtl_path: str, design_name: str) -> Tuple[bool, str]:
     """Try compiling TB + RTL with iverilog as a Verilator fallback."""
-    import glob
     src_dir = os.path.dirname(rtl_path)
-    all_rtl = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
-               if not f.endswith("_tb.v") and "regression" not in f]
-    if rtl_path not in all_rtl and os.path.exists(rtl_path):
+    all_rtl = _collect_design_rtl(src_dir)
+    if rtl_path not in all_rtl:
         all_rtl.append(rtl_path)
-    cmd = ["iverilog", "-g2012", "-Wall", "-o", "/dev/null", *all_rtl, tb_path]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        combined = (result.stdout + "\n" + result.stderr).strip()
-        if result.returncode == 0:
-            return True, f"iverilog compile OK: {combined[:500]}" if combined else "iverilog compile OK"
-        return False, f"iverilog compile failed:\n{combined[:2000]}"
-    except FileNotFoundError:
-        return False, "iverilog not found"
-    except subprocess.TimeoutExpired:
-        return False, "iverilog compile timed out"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, all_rtl + [tb_path])
+        out_path = os.path.join(tmpdir, f"{design_name}_tb_compile.out")
+        cmd = [
+            "iverilog", "-g2012", "-Wall", "-o", out_path,
+            *[os.path.basename(_stage_path(path, staged_map)) for path in all_rtl],
+            os.path.basename(_stage_path(tb_path, staged_map)),
+        ]
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            tool_result = _build_tool_result(
+                "iverilog",
+                ok=completed.returncode == 0,
+                result="PASS" if completed.returncode == 0 else "FAIL",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                diagnostics=_collect_diag_lines(((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()),
+                metrics={"mode": "tb_compile_gate"},
+            )
+            tool_result = _rewrite_result_paths(tool_result, staged_map)
+            combined = ((tool_result["stdout"] or "") + "\n" + (tool_result["stderr"] or "")).strip()
+            if tool_result["ok"]:
+                return True, f"iverilog compile OK: {combined[:500]}" if combined else "iverilog compile OK"
+            return False, f"iverilog compile failed:\n{combined[:2000]}"
+        except FileNotFoundError:
+            return False, "iverilog not found"
+        except subprocess.TimeoutExpired:
+            return False, "iverilog compile timed out"
 
 
 # ---------------------------------------------------------------------------
@@ -2285,57 +2497,87 @@ def run_simulation(design_name: str) -> tuple:
         return False, f"RTL file not found: {rtl_file}"
     if not os.path.exists(tb_file):
         return False, f"Testbench file not found: {tb_file}"
-    
-    import glob
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
-                 if not f.endswith("_tb.v") and "regression" not in f]
 
-    # Compile & Build using Verilator --binary
-    # --binary: Build a binary executable
-    # -j 0: Use all cores
-    # --timing: Enable timing support (essential for delays like #5)
-    # --assert: Enable assertions
-    cmd = [
-        "verilator",
-        "--binary",
-        "--sv",
-        "-j", "0",
-        "--timing",
-        "--assert",
-        "-Wno-fatal", # Don't error out on warnings
-        *rtl_files, tb_file,
-        "--top-module", f"{design_name}_tb",
-        "--Mdir", obj_dir,
-        "-o", "sim_exec"
-    ]
-    
-    try:
-        compile_result = subprocess.run(
-            cmd,
-            capture_output=True, text=True,
-            timeout=120
+    rtl_files = _collect_design_rtl(src_dir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, rtl_files + [tb_file])
+        cmd = [
+            "verilator",
+            "--binary",
+            "--sv",
+            "-j", "0",
+            "--timing",
+            "--trace",
+            "--assert",
+            "-Wno-fatal",
+            *[os.path.basename(_stage_path(path, staged_map)) for path in rtl_files],
+            os.path.basename(_stage_path(tb_file, staged_map)),
+            "--top-module", f"{design_name}_tb",
+            "--Mdir", "obj_dir",
+            "-o", "sim_exec",
+        ]
+
+        try:
+            compile_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=tmpdir,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "Compilation timed out (>120s)."
+        except FileNotFoundError:
+            return False, "Verilator not found. Please install Verilator 5.0+."
+
+        compile_tool = _rewrite_result_paths(
+            _build_tool_result(
+                "verilator",
+                ok=compile_result.returncode == 0,
+                result="PASS" if compile_result.returncode == 0 else "FAIL",
+                returncode=compile_result.returncode,
+                stdout=compile_result.stdout,
+                stderr=compile_result.stderr,
+                diagnostics=_collect_diag_lines((compile_result.stderr or compile_result.stdout or "").strip()),
+                metrics={"mode": "simulation_compile"},
+            ),
+            staged_map,
         )
-    except subprocess.TimeoutExpired:
-        return False, "Compilation timed out (>120s)."
-    except FileNotFoundError:
-        return False, "Verilator not found. Please install Verilator 5.0+."
-        
-    if compile_result.returncode != 0:
-        return False, f"Verilator Compilation Failed:\n{compile_result.stderr}"
-    
-    # Run the generated binary
-    sim_exec_path = f"{obj_dir}/sim_exec"
-    try:
-        run_result = subprocess.run(
-            [sim_exec_path],
-            capture_output=True,
-            text=True,
-            timeout=300 
+        if compile_result.returncode != 0:
+            return False, f"Verilator Compilation Failed:\n{compile_tool['stderr']}"
+
+        sim_exec_path = os.path.join(tmpdir, "obj_dir", "sim_exec")
+        try:
+            run_result = subprocess.run(
+                [sim_exec_path],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=tmpdir,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "Simulation Timed Out (Exceeded 300s). Infinite loop likely."
+
+        _promote_vcd_artifacts(tmpdir, src_dir)
+        promoted_wave = os.path.join(src_dir, f"{design_name}_wave.vcd")
+        run_tool = _rewrite_result_paths(
+            _build_tool_result(
+                "verilator",
+                ok=run_result.returncode == 0,
+                result="PASS" if run_result.returncode == 0 else "FAIL",
+                returncode=run_result.returncode,
+                stdout=run_result.stdout,
+                stderr=run_result.stderr,
+                diagnostics=_collect_diag_lines(((run_result.stdout or "") + "\n" + (run_result.stderr or "")).strip(), limit=20),
+                metrics={
+                    "mode": "simulation_run",
+                    "trace_enabled": True,
+                    "waveform_generated": os.path.exists(promoted_wave),
+                },
+            ),
+            staged_map,
         )
-    except subprocess.TimeoutExpired:
-        return False, "Simulation Timed Out (Exceeded 300s). Infinite loop likely."
-    
-    sim_text = (run_result.stdout or "") + ("\n" + run_result.stderr if run_result.stderr else "")
+        sim_text = (run_tool["stdout"] or "") + ("\n" + run_tool["stderr"] if run_tool["stderr"] else "")
 
     if "TEST PASSED" in sim_text:
         return True, sim_text
@@ -2343,7 +2585,7 @@ def run_simulation(design_name: str) -> tuple:
     if "TEST FAILED" in sim_text:
         return False, sim_text
 
-    if run_result.returncode != 0:
+    if run_tool["returncode"] != 0:
         return False, f"Simulation Crashed:\n{sim_text}"
         
     return False, sim_text
@@ -2524,33 +2766,70 @@ def run_gls_simulation(design_name: str) -> tuple:
 
     primitives_v = os.path.join(os.path.dirname(pdk_v_path), "primitives.v")
 
-    # Compile GLS
-    try:
-        cmd = ["iverilog", "-g2012", "-DFUNCTIONAL", "-DUNIT_DELAY=#1", "-o", sim_out, tb_file, gl_netlist, pdk_v_path, primitives_v]
-        compile_result = subprocess.run(
-            cmd,
-            capture_output=True, text=True,
-            timeout=300
-        )
-        if compile_result.returncode != 0:
-            return False, f"GLS Compilation failed:\n{compile_result.stderr}"
-    except subprocess.TimeoutExpired:
-        return False, "GLS Compilation timed out."
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, [tb_file, gl_netlist])
+        sim_out = os.path.join(tmpdir, "gls_sim")
+        try:
+            cmd = [
+                "iverilog", "-g2012", "-DFUNCTIONAL", "-DUNIT_DELAY=#1", "-o", sim_out,
+                os.path.basename(_stage_path(tb_file, staged_map)),
+                os.path.basename(_stage_path(gl_netlist, staged_map)),
+                pdk_v_path,
+                primitives_v,
+            ]
+            compile_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=tmpdir,
+            )
+            compile_tool = _rewrite_result_paths(
+                _build_tool_result(
+                    "iverilog",
+                    ok=compile_result.returncode == 0,
+                    result="PASS" if compile_result.returncode == 0 else "FAIL",
+                    returncode=compile_result.returncode,
+                    stdout=compile_result.stdout,
+                    stderr=compile_result.stderr,
+                    diagnostics=_collect_diag_lines(((compile_result.stdout or "") + "\n" + (compile_result.stderr or "")).strip()),
+                    metrics={"mode": "gls_compile"},
+                ),
+                staged_map,
+            )
+            if compile_result.returncode != 0:
+                return False, f"GLS Compilation failed:\n{compile_tool['stderr']}"
+        except subprocess.TimeoutExpired:
+            return False, "GLS Compilation timed out."
 
-    # Run GLS Simulation
-    try:
-        run_result = subprocess.run(
-            ["vvp", sim_out],
-            capture_output=True,
-            text=True,
-            timeout=600
-        )
-        sim_text = (run_result.stdout or "") + ("\n" + run_result.stderr if run_result.stderr else "")
-        if "TEST PASSED" in sim_text:
-            return True, f"GLS Simulation PASSED.\n{sim_text}"
-        return False, f"GLS Simulation FAILED or missing PASS marker.\n{sim_text}"
-    except subprocess.TimeoutExpired:
-        return False, "GLS Simulation Timed Out."
+        try:
+            run_result = subprocess.run(
+                ["vvp", sim_out],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                cwd=tmpdir,
+            )
+            _promote_vcd_artifacts(tmpdir, src_dir)
+            run_tool = _rewrite_result_paths(
+                _build_tool_result(
+                    "vvp",
+                    ok=run_result.returncode == 0,
+                    result="PASS" if run_result.returncode == 0 else "FAIL",
+                    returncode=run_result.returncode,
+                    stdout=run_result.stdout,
+                    stderr=run_result.stderr,
+                    diagnostics=_collect_diag_lines(((run_result.stdout or "") + "\n" + (run_result.stderr or "")).strip(), limit=20),
+                    metrics={"mode": "gls_run"},
+                ),
+                staged_map,
+            )
+            sim_text = (run_tool["stdout"] or "") + ("\n" + run_tool["stderr"] if run_tool["stderr"] else "")
+            if "TEST PASSED" in sim_text:
+                return True, f"GLS Simulation PASSED.\n{sim_text}"
+            return False, f"GLS Simulation FAILED or missing PASS marker.\n{sim_text}"
+        except subprocess.TimeoutExpired:
+            return False, "GLS Simulation Timed Out."
 
 
 def parse_eda_log_summary(log_path: str, kind: str, top_n: int = 10) -> Dict[str, Any]:
@@ -2802,6 +3081,12 @@ def get_coverage_thresholds(profile: str) -> Dict[str, float]:
 def _coverage_shell(design_name: str, backend: str, coverage_mode: str = "full_oss") -> Dict[str, Any]:
     return {
         "ok": False,
+        "tool": backend,
+        "returncode": -1,
+        "stdout": "",
+        "stderr": "",
+        "result": "ERROR",
+        "metrics": {},
         "backend": backend,
         "coverage_mode": coverage_mode,
         "infra_failure": False,
@@ -2853,42 +3138,43 @@ def _parse_verilator_coverage_dat(cov_dat: str, src_dir: str) -> Dict[str, float
     data = {"line_pct": 0.0, "toggle_pct": 0.0, "branch_pct": 0.0, "overall_pct": 0.0}
     if not os.path.exists(cov_dat):
         return data
-    annotate_dir = os.path.join(src_dir, "cov_annotate")
-    try:
-        os.makedirs(annotate_dir, exist_ok=True)
-        subprocess.run(
-            ["verilator_coverage", "--annotate", annotate_dir, cov_dat],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except Exception:
-        pass
+    with tempfile.TemporaryDirectory() as tmpdir:
+        annotate_dir = os.path.join(tmpdir, "cov_annotate")
+        try:
+            os.makedirs(annotate_dir, exist_ok=True)
+            subprocess.run(
+                ["verilator_coverage", "--annotate", annotate_dir, cov_dat],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception:
+            pass
 
-    total_points = 0
-    hit_points = 0
-    toggle_points = 0
-    toggle_hit = 0
-    if os.path.exists(annotate_dir):
-        for root, _, files in os.walk(annotate_dir):
-            for fname in files:
-                if not fname.endswith((".v", ".sv")):
-                    continue
-                with open(os.path.join(root, fname), "r", errors="ignore") as f:
-                    for line in f:
-                        s = line.strip()
-                        if not s:
-                            continue
-                        m = re.match(r"^(\d+)\s+", s)
-                        if m:
-                            total_points += 1
-                            if int(m.group(1)) > 0:
-                                hit_points += 1
-                        if s.startswith("%"):
-                            toggle_points += 1
-                            p = re.match(r"%0*(\d+)", s)
-                            if p and int(p.group(1)) > 0:
-                                toggle_hit += 1
+        total_points = 0
+        hit_points = 0
+        toggle_points = 0
+        toggle_hit = 0
+        if os.path.exists(annotate_dir):
+            for root, _, files in os.walk(annotate_dir):
+                for fname in files:
+                    if not fname.endswith((".v", ".sv")):
+                        continue
+                    with open(os.path.join(root, fname), "r", errors="ignore") as f:
+                        for line in f:
+                            s = line.strip()
+                            if not s:
+                                continue
+                            m = re.match(r"^(\d+)\s+", s)
+                            if m:
+                                total_points += 1
+                                if int(m.group(1)) > 0:
+                                    hit_points += 1
+                            if s.startswith("%"):
+                                toggle_points += 1
+                                p = re.match(r"%0*(\d+)", s)
+                                if p and int(p.group(1)) > 0:
+                                    toggle_hit += 1
 
     if total_points > 0:
         data["line_pct"] = round((hit_points / total_points) * 100.0, 2)
@@ -2903,12 +3189,9 @@ def _parse_verilator_coverage_dat(cov_dat: str, src_dir: str) -> Dict[str, float
 
 def run_verilator_coverage(design_name: str, rtl_file: str, tb_file: str, coverage_mode: str = "full_oss") -> Tuple[bool, str, Dict[str, Any]]:
     src_dir = os.path.dirname(rtl_file)
-    obj_dir = os.path.join(src_dir, "obj_dir_cov")
     sim_exec = "sim_cov_exec"
-    cov_dat = os.path.join(src_dir, "coverage.dat")
-    diag_path = os.path.join(src_dir, f"{design_name}_coverage_verilator.log")
     result = _coverage_shell(design_name, backend="verilator", coverage_mode=coverage_mode)
-    result["raw_diag_path"] = diag_path
+    result["raw_diag_path"] = ""
 
     if not os.path.exists(rtl_file):
         result["infra_failure"] = True
@@ -2924,126 +3207,165 @@ def run_verilator_coverage(design_name: str, rtl_file: str, tb_file: str, covera
     signals, rtl_line_count = _read_rtl_signal_stats(rtl_file)
     result["total_signals"] = len(signals)
     signal_set = set(signals)
+    rtl_files = _collect_design_rtl(src_dir)
 
-    if os.path.exists(cov_dat):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, rtl_files + [tb_file])
+        cov_dat = os.path.join(tmpdir, "coverage.dat")
+        compile_cmd = [
+            "verilator",
+            "--binary",
+            "--coverage",
+            "--trace",
+            "--sv",
+            "--timing",
+            "-Wno-fatal",
+            *[os.path.basename(_stage_path(path, staged_map)) for path in rtl_files],
+            os.path.basename(_stage_path(tb_file, staged_map)),
+            "--top-module",
+            f"{design_name}_tb",
+            "--Mdir",
+            "obj_dir_cov",
+            "-o",
+            sim_exec,
+        ]
+        run_cmd = [os.path.join(tmpdir, "obj_dir_cov", sim_exec), f"+verilator+coverage+file+{cov_dat}"]
         try:
-            os.remove(cov_dat)
-        except OSError:
-            pass
+            comp = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=240, cwd=tmpdir)
+        except FileNotFoundError:
+            result["infra_failure"] = True
+            result["error_kind"] = "tool_missing"
+            result["diagnostics"] = ["verilator binary not found."]
+            return False, result["diagnostics"][0], result
+        except subprocess.TimeoutExpired:
+            result["infra_failure"] = True
+            result["error_kind"] = "compile_timeout"
+            result["diagnostics"] = ["Verilator coverage compile timed out (>240s)."]
+            return False, result["diagnostics"][0], result
 
-    import glob
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))
-                 if not f.endswith("_tb.v") and "regression" not in f]
+        comp_tool = _rewrite_result_paths(
+            _build_tool_result(
+                "verilator",
+                ok=comp.returncode == 0,
+                result="PASS" if comp.returncode == 0 else "FAIL",
+                returncode=comp.returncode,
+                stdout=comp.stdout,
+                stderr=comp.stderr,
+                diagnostics=_collect_diag_lines((comp.stderr or comp.stdout or "").strip()),
+                metrics={"mode": "coverage_compile"},
+            ),
+            staged_map,
+        )
+        result.update(
+            {
+                "tool": comp_tool["tool"],
+                "returncode": comp_tool["returncode"],
+                "stdout": comp_tool["stdout"],
+                "stderr": comp_tool["stderr"],
+                "result": comp_tool["result"],
+                "metrics": dict(comp_tool["metrics"]),
+                "trace_enabled": True,
+            }
+        )
+        if comp.returncode != 0:
+            result["infra_failure"] = True
+            result["error_kind"] = "compile_error"
+            result["diagnostics"] = list(comp_tool["diagnostics"])[:12]
+            return False, ((comp_tool["stderr"] or comp_tool["stdout"] or "Verilator compile failed")[:1200]), result
 
-    compile_cmd = [
-        "verilator",
-        "--binary",
-        "--coverage",
-        "--sv",
-        "--timing",
-        "-Wno-fatal",
-        *rtl_files,
-        tb_file,
-        "--top-module",
-        f"{design_name}_tb",
-        "--Mdir",
-        obj_dir,
-        "-o",
-        sim_exec,
-    ]
-    run_cmd = [os.path.join(obj_dir, sim_exec), f"+verilator+coverage+file+{cov_dat}"]
-    try:
-        comp = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=240, cwd=src_dir)
-    except FileNotFoundError:
-        result["infra_failure"] = True
-        result["error_kind"] = "tool_missing"
-        result["diagnostics"] = ["verilator binary not found."]
-        return False, result["diagnostics"][0], result
-    except subprocess.TimeoutExpired:
-        result["infra_failure"] = True
-        result["error_kind"] = "compile_timeout"
-        result["diagnostics"] = ["Verilator coverage compile timed out (>240s)."]
-        return False, result["diagnostics"][0], result
+        try:
+            run = subprocess.run(run_cmd, capture_output=True, text=True, timeout=300, cwd=tmpdir)
+        except subprocess.TimeoutExpired:
+            result["infra_failure"] = True
+            result["error_kind"] = "run_timeout"
+            result["diagnostics"] = ["Verilator coverage simulation timed out (>300s)."]
+            return False, result["diagnostics"][0], result
 
-    if comp.returncode != 0:
-        result["infra_failure"] = True
-        result["error_kind"] = "compile_error"
-        result["diagnostics"] = [x.strip() for x in (comp.stderr or comp.stdout or "").splitlines() if x.strip()][:12]
-        with open(diag_path, "w") as f:
-            f.write(f"COMMAND: {' '.join(compile_cmd)}\n\n{comp.stdout}\n{comp.stderr}\n")
-        return False, (comp.stderr or comp.stdout or "Verilator compile failed")[:1200], result
+        _promote_vcd_artifacts(tmpdir, src_dir)
+        result["waveform_generated"] = os.path.exists(os.path.join(src_dir, f"{design_name}_wave.vcd"))
+        run_tool = _rewrite_result_paths(
+            _build_tool_result(
+                "verilator",
+                ok=run.returncode == 0,
+                result="PASS" if run.returncode == 0 else "FAIL",
+                returncode=run.returncode,
+                stdout=run.stdout,
+                stderr=run.stderr,
+                diagnostics=_collect_diag_lines(((run.stdout or "") + "\n" + (run.stderr or "")).strip(), limit=20),
+                metrics={"mode": "coverage_run"},
+            ),
+            staged_map,
+        )
+        sim_text = (run_tool["stdout"] or "") + ("\n" + run_tool["stderr"] if run_tool["stderr"] else "")
+        sim_passed = "TEST PASSED" in sim_text
+        result.update(
+            {
+                "tool": run_tool["tool"],
+                "returncode": run_tool["returncode"],
+                "stdout": run_tool["stdout"],
+                "stderr": run_tool["stderr"],
+                "result": "PASS" if sim_passed else ("FAIL" if run.returncode != 0 else "ERROR"),
+                "metrics": dict(run_tool["metrics"]),
+                "coverage_metrics_valid": False,
+            }
+        )
 
-    try:
-        run = subprocess.run(run_cmd, capture_output=True, text=True, timeout=300, cwd=src_dir)
-    except subprocess.TimeoutExpired:
-        result["infra_failure"] = True
-        result["error_kind"] = "run_timeout"
-        result["diagnostics"] = ["Verilator coverage simulation timed out (>300s)."]
-        return False, result["diagnostics"][0], result
+        metrics = _parse_verilator_coverage_dat(cov_dat, tmpdir)
+        if not os.path.exists(cov_dat):
+            result["infra_failure"] = True
+            result["error_kind"] = "parse_error"
+            result["diagnostics"] = ["coverage.dat not generated by Verilator run."]
+            return sim_passed, sim_text, result
 
-    sim_text = (run.stdout or "") + ("\n" + run.stderr if run.stderr else "")
-    sim_passed = "TEST PASSED" in sim_text
-    with open(diag_path, "w") as f:
-        f.write(f"COMPILE: {' '.join(compile_cmd)}\n")
-        f.write(f"RUN: {' '.join(run_cmd)}\n\n")
-        f.write(sim_text[:20000])
+        vcd_candidates = [
+            os.path.join(src_dir, f"{design_name}_cov.vcd"),
+            os.path.join(src_dir, f"{design_name}.vcd"),
+            os.path.join(src_dir, "dump.vcd"),
+        ]
+        toggled = 0
+        for vcd in vcd_candidates:
+            if os.path.exists(vcd):
+                toggled = max(toggled, _extract_vcd_toggles(vcd, signal_set))
+        result["signals_toggled"] = toggled
 
-    metrics = _parse_verilator_coverage_dat(cov_dat, src_dir)
-    if not os.path.exists(cov_dat):
-        result["infra_failure"] = True
-        result["error_kind"] = "parse_error"
-        result["diagnostics"] = ["coverage.dat not generated by Verilator run."]
+        line_pct = metrics["line_pct"]
+        toggle_pct = metrics["toggle_pct"]
+        branch_pct = metrics["branch_pct"]
+        if toggle_pct <= 0.0 and result["total_signals"] > 0:
+            toggle_pct = round((toggled / result["total_signals"]) * 100.0, 2)
+        functional_pct = round((line_pct * 0.6 + toggle_pct * 0.4), 2) if sim_passed else round((line_pct * 0.3), 2)
+        assertion_pct = 100.0 if sim_passed else 0.0
+
+        result.update(
+            {
+                "ok": True,
+                "line_pct": max(0.0, min(100.0, line_pct)),
+                "branch_pct": max(0.0, min(100.0, branch_pct)),
+                "toggle_pct": max(0.0, min(100.0, toggle_pct)),
+                "functional_pct": max(0.0, min(100.0, functional_pct)),
+                "assertion_pct": assertion_pct,
+                "report_path": "",
+            }
+        )
+        if run.returncode != 0 and not sim_passed:
+            result["ok"] = False
+            result["infra_failure"] = True
+            result["error_kind"] = "run_error"
+            result["diagnostics"] = [x.strip() for x in sim_text.splitlines() if x.strip()][:10]
+        elif rtl_line_count > 0 and result["line_pct"] <= 0.0 and sim_passed:
+            result["ok"] = False
+            result["infra_failure"] = True
+            result["error_kind"] = "parse_error"
+            result["diagnostics"] = ["Coverage metrics are empty despite passing simulation."]
+        else:
+            result["coverage_metrics_valid"] = True
         return sim_passed, sim_text, result
-
-    vcd_candidates = [
-        os.path.join(src_dir, f"{design_name}_cov.vcd"),
-        os.path.join(src_dir, f"{design_name}.vcd"),
-        os.path.join(src_dir, "dump.vcd"),
-    ]
-    toggled = 0
-    for vcd in vcd_candidates:
-        if os.path.exists(vcd):
-            toggled = max(toggled, _extract_vcd_toggles(vcd, signal_set))
-    result["signals_toggled"] = toggled
-
-    line_pct = metrics["line_pct"]
-    toggle_pct = metrics["toggle_pct"]
-    branch_pct = metrics["branch_pct"]
-    if toggle_pct <= 0.0 and result["total_signals"] > 0:
-        toggle_pct = round((toggled / result["total_signals"]) * 100.0, 2)
-    functional_pct = round((line_pct * 0.6 + toggle_pct * 0.4), 2) if sim_passed else round((line_pct * 0.3), 2)
-    assertion_pct = 100.0 if sim_passed else 0.0
-
-    result.update(
-        {
-            "ok": True,
-            "line_pct": max(0.0, min(100.0, line_pct)),
-            "branch_pct": max(0.0, min(100.0, branch_pct)),
-            "toggle_pct": max(0.0, min(100.0, toggle_pct)),
-            "functional_pct": max(0.0, min(100.0, functional_pct)),
-            "assertion_pct": assertion_pct,
-            "report_path": cov_dat,
-        }
-    )
-    if run.returncode != 0 and not sim_passed:
-        result["ok"] = False
-        result["infra_failure"] = True
-        result["error_kind"] = "run_error"
-        result["diagnostics"] = [x.strip() for x in sim_text.splitlines() if x.strip()][:10]
-    elif rtl_line_count > 0 and result["line_pct"] <= 0.0 and sim_passed:
-        result["ok"] = False
-        result["infra_failure"] = True
-        result["error_kind"] = "parse_error"
-        result["diagnostics"] = ["Coverage metrics are empty despite passing simulation."]
-    return sim_passed, sim_text, result
 
 
 def run_iverilog_coverage(design_name: str, rtl_file: str, tb_file: str, coverage_mode: str = "full_oss") -> Tuple[bool, str, Dict[str, Any]]:
     src_dir = os.path.dirname(rtl_file)
-    sim_out = os.path.join(src_dir, "sim_cov")
-    diag_path = os.path.join(src_dir, f"{design_name}_coverage_iverilog.log")
     result = _coverage_shell(design_name, backend="iverilog", coverage_mode=coverage_mode)
-    result["raw_diag_path"] = diag_path
+    result["raw_diag_path"] = ""
 
     with open(tb_file, "r", errors="ignore") as f:
         tb_code = f.read()
@@ -3052,96 +3374,150 @@ def run_iverilog_coverage(design_name: str, rtl_file: str, tb_file: str, coverag
     result["total_signals"] = len(signals)
     signal_set = set(signals)
 
-    import glob
-    rtl_files = [f for f in glob.glob(os.path.join(src_dir, "*.v")) if not f.endswith("_tb.v") and "regression" not in f]
+    rtl_files = _collect_design_rtl(src_dir, include_sv=False)
 
-    compile_cmd = ["iverilog", "-g2012", "-o", sim_out, *rtl_files, tb_file]
-    try:
-        comp = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=120, cwd=src_dir)
-    except FileNotFoundError:
-        result["infra_failure"] = True
-        result["error_kind"] = "tool_missing"
-        result["diagnostics"] = ["iverilog binary not found."]
-        return False, result["diagnostics"][0], result
-    except subprocess.TimeoutExpired:
-        result["infra_failure"] = True
-        result["error_kind"] = "compile_timeout"
-        result["diagnostics"] = ["Icarus compile timed out (>120s)."]
-        return False, result["diagnostics"][0], result
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, rtl_files + [tb_file])
+        sim_out = os.path.join(tmpdir, "sim_cov")
+        compile_cmd = [
+            "iverilog", "-g2012", "-o", sim_out,
+            *[os.path.basename(_stage_path(path, staged_map)) for path in rtl_files],
+            os.path.basename(_stage_path(tb_file, staged_map)),
+        ]
+        try:
+            comp = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=120, cwd=tmpdir)
+        except FileNotFoundError:
+            result["infra_failure"] = True
+            result["error_kind"] = "tool_missing"
+            result["diagnostics"] = ["iverilog binary not found."]
+            return False, result["diagnostics"][0], result
+        except subprocess.TimeoutExpired:
+            result["infra_failure"] = True
+            result["error_kind"] = "compile_timeout"
+            result["diagnostics"] = ["Icarus compile timed out (>120s)."]
+            return False, result["diagnostics"][0], result
 
-    if comp.returncode != 0:
-        result["infra_failure"] = True
-        result["error_kind"] = "compile_error"
-        result["diagnostics"] = [x.strip() for x in (comp.stderr or comp.stdout or "").splitlines() if x.strip()][:12]
-        if tb_style == "sv_class_based":
-            result["error_kind"] = "unsupported_tb_style"
-            result["diagnostics"].insert(0, "Class-based SV testbench is not supported by iVerilog coverage backend.")
-        with open(diag_path, "w") as f:
-            f.write(f"COMMAND: {' '.join(compile_cmd)}\n\n{comp.stdout}\n{comp.stderr}\n")
-        return False, (comp.stderr or comp.stdout or "Icarus compile failed")[:1200], result
+        comp_tool = _rewrite_result_paths(
+            _build_tool_result(
+                "iverilog",
+                ok=comp.returncode == 0,
+                result="PASS" if comp.returncode == 0 else "FAIL",
+                returncode=comp.returncode,
+                stdout=comp.stdout,
+                stderr=comp.stderr,
+                diagnostics=_collect_diag_lines(((comp.stdout or "") + "\n" + (comp.stderr or "")).strip()),
+                metrics={"mode": "coverage_compile"},
+            ),
+            staged_map,
+        )
+        result.update(
+            {
+                "tool": comp_tool["tool"],
+                "returncode": comp_tool["returncode"],
+                "stdout": comp_tool["stdout"],
+                "stderr": comp_tool["stderr"],
+                "result": comp_tool["result"],
+                "metrics": dict(comp_tool["metrics"]),
+                "trace_enabled": True,
+            }
+        )
+        if comp.returncode != 0:
+            result["infra_failure"] = True
+            result["error_kind"] = "compile_error"
+            result["diagnostics"] = list(comp_tool["diagnostics"])[:12]
+            if tb_style == "sv_class_based":
+                result["error_kind"] = "unsupported_tb_style"
+                result["diagnostics"].insert(0, "Class-based SV testbench is not supported by iVerilog coverage backend.")
+            return False, ((comp_tool["stderr"] or comp_tool["stdout"] or "Icarus compile failed")[:1200]), result
 
-    try:
-        run = subprocess.run(["vvp", sim_out], capture_output=True, text=True, timeout=300, cwd=src_dir)
-    except subprocess.TimeoutExpired:
-        result["infra_failure"] = True
-        result["error_kind"] = "run_timeout"
-        result["diagnostics"] = ["Icarus simulation timed out (>300s)."]
-        return False, result["diagnostics"][0], result
-    except FileNotFoundError:
-        result["infra_failure"] = True
-        result["error_kind"] = "tool_missing"
-        result["diagnostics"] = ["vvp binary not found."]
-        return False, result["diagnostics"][0], result
+        try:
+            run = subprocess.run(["vvp", sim_out], capture_output=True, text=True, timeout=300, cwd=tmpdir)
+        except subprocess.TimeoutExpired:
+            result["infra_failure"] = True
+            result["error_kind"] = "run_timeout"
+            result["diagnostics"] = ["Icarus simulation timed out (>300s)."]
+            return False, result["diagnostics"][0], result
+        except FileNotFoundError:
+            result["infra_failure"] = True
+            result["error_kind"] = "tool_missing"
+            result["diagnostics"] = ["vvp binary not found."]
+            return False, result["diagnostics"][0], result
 
-    sim_text = (run.stdout or "") + ("\n" + run.stderr if run.stderr else "")
-    sim_passed = "TEST PASSED" in sim_text
-    with open(diag_path, "w") as f:
-        f.write(sim_text[:20000])
+        _promote_vcd_artifacts(tmpdir, src_dir)
+        result["waveform_generated"] = os.path.exists(os.path.join(src_dir, f"{design_name}_wave.vcd"))
+        run_tool = _rewrite_result_paths(
+            _build_tool_result(
+                "iverilog",
+                ok=run.returncode == 0,
+                result="PASS" if run.returncode == 0 else "FAIL",
+                returncode=run.returncode,
+                stdout=run.stdout,
+                stderr=run.stderr,
+                diagnostics=_collect_diag_lines(((run.stdout or "") + "\n" + (run.stderr or "")).strip(), limit=20),
+                metrics={"mode": "coverage_run"},
+            ),
+            staged_map,
+        )
+        sim_text = (run_tool["stdout"] or "") + ("\n" + run_tool["stderr"] if run_tool["stderr"] else "")
+        sim_passed = "TEST PASSED" in sim_text
+        result.update(
+            {
+                "tool": run_tool["tool"],
+                "returncode": run_tool["returncode"],
+                "stdout": run_tool["stdout"],
+                "stderr": run_tool["stderr"],
+                "result": "PASS" if sim_passed else ("FAIL" if run.returncode != 0 else "ERROR"),
+                "metrics": dict(run_tool["metrics"]),
+                "coverage_metrics_valid": False,
+            }
+        )
 
-    toggled = 0
-    displayed_signals = set(re.findall(r'(\w+)\s*=\s*[0-9a-fxzXZhHbB_\']+', sim_text))
-    toggled = len(displayed_signals.intersection(signal_set))
-    vcd_candidates = [
-        os.path.join(src_dir, f"{design_name}_cov.vcd"),
-        os.path.join(src_dir, f"{design_name}.vcd"),
-        os.path.join(src_dir, "dump.vcd"),
-    ]
-    for vcd in vcd_candidates:
-        if os.path.exists(vcd):
-            toggled = max(toggled, _extract_vcd_toggles(vcd, signal_set))
-            break
-    result["signals_toggled"] = toggled
+        toggled = 0
+        displayed_signals = set(re.findall(r'(\w+)\s*=\s*[0-9a-fxzXZhHbB_\']+', sim_text))
+        toggled = len(displayed_signals.intersection(signal_set))
+        vcd_candidates = [
+            os.path.join(src_dir, f"{design_name}_cov.vcd"),
+            os.path.join(src_dir, f"{design_name}.vcd"),
+            os.path.join(src_dir, "dump.vcd"),
+        ]
+        for vcd in vcd_candidates:
+            if os.path.exists(vcd):
+                toggled = max(toggled, _extract_vcd_toggles(vcd, signal_set))
+                break
+        result["signals_toggled"] = toggled
 
-    line_pct = 85.0 if sim_passed else 20.0
-    if result["total_signals"] > 0:
-        line_pct += (toggled / result["total_signals"]) * 15.0
-    line_pct = max(0.0, min(100.0, round(line_pct, 2)))
-    toggle_pct = round((toggled / result["total_signals"]) * 100.0, 2) if result["total_signals"] > 0 else 0.0
-    branch_pct = round(line_pct * 0.9, 2) if line_pct > 0 else 0.0
-    functional_pct = round((line_pct * 0.65 + toggle_pct * 0.35), 2) if sim_passed else round(line_pct * 0.3, 2)
-    assertion_pct = 100.0 if sim_passed else 0.0
-    result.update(
-        {
-            "ok": True,
-            "line_pct": line_pct,
-            "branch_pct": max(0.0, min(100.0, branch_pct)),
-            "toggle_pct": max(0.0, min(100.0, toggle_pct)),
-            "functional_pct": max(0.0, min(100.0, functional_pct)),
-            "assertion_pct": assertion_pct,
-            "report_path": diag_path,
-        }
-    )
-    if rtl_line_count > 0 and line_pct <= 0.0 and sim_passed:
-        result["ok"] = False
-        result["infra_failure"] = True
-        result["error_kind"] = "parse_error"
-        result["diagnostics"] = ["Coverage estimate collapsed to zero despite passing simulation."]
-    if run.returncode != 0 and not sim_passed:
-        result["ok"] = False
-        result["infra_failure"] = True
-        result["error_kind"] = "run_error"
-        result["diagnostics"] = [x.strip() for x in sim_text.splitlines() if x.strip()][:10]
-    return sim_passed, sim_text, result
+        line_pct = 85.0 if sim_passed else 20.0
+        if result["total_signals"] > 0:
+            line_pct += (toggled / result["total_signals"]) * 15.0
+        line_pct = max(0.0, min(100.0, round(line_pct, 2)))
+        toggle_pct = round((toggled / result["total_signals"]) * 100.0, 2) if result["total_signals"] > 0 else 0.0
+        branch_pct = round(line_pct * 0.9, 2) if line_pct > 0 else 0.0
+        functional_pct = round((line_pct * 0.65 + toggle_pct * 0.35), 2) if sim_passed else round(line_pct * 0.3, 2)
+        assertion_pct = 100.0 if sim_passed else 0.0
+        result.update(
+            {
+                "ok": True,
+                "line_pct": line_pct,
+                "branch_pct": max(0.0, min(100.0, branch_pct)),
+                "toggle_pct": max(0.0, min(100.0, toggle_pct)),
+                "functional_pct": max(0.0, min(100.0, functional_pct)),
+                "assertion_pct": assertion_pct,
+                "report_path": "",
+            }
+        )
+        if rtl_line_count > 0 and line_pct <= 0.0 and sim_passed:
+            result["ok"] = False
+            result["infra_failure"] = True
+            result["error_kind"] = "parse_error"
+            result["diagnostics"] = ["Coverage estimate collapsed to zero despite passing simulation."]
+        else:
+            result["coverage_metrics_valid"] = True
+        if run.returncode != 0 and not sim_passed:
+            result["ok"] = False
+            result["infra_failure"] = True
+            result["error_kind"] = "run_error"
+            result["diagnostics"] = [x.strip() for x in sim_text.splitlines() if x.strip()][:10]
+        return sim_passed, sim_text, result
 
 
 def run_simulation_with_coverage(
@@ -3450,49 +3826,63 @@ def run_cdc_check(file_path: str) -> tuple:
     """
     if not os.path.exists(file_path):
         return False, f"File not found: {file_path}"
-    
-    cmd = [
-        "verilator", "--lint-only", "--timing",
-        "-Wall",
-        "-Wwarn-CDCRSTLOGIC",  # CDC reset logic warnings
-        file_path
-    ]
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True, text=True,
-            timeout=60
-        )
-        
-        stderr = result.stderr or ""
-        
-        # Filter for CDC-specific warnings
-        cdc_warnings = []
-        all_warnings = []
-        for line in stderr.split('\n'):
-            if line.strip():
-                all_warnings.append(line)
-                if any(kw in line.upper() for kw in ['CDC', 'CLOCK', 'DOMAIN', 'SYNC', 'METASTAB', 'CDCRSTLOGIC']):
-                    cdc_warnings.append(line)
-        
-        if not cdc_warnings and result.returncode == 0:
-            return True, f"CDC Analysis: CLEAN (no clock domain crossing issues detected)\nFull lint output:\n{stderr[:1000]}"
-        elif cdc_warnings:
-            report = "CDC Analysis: WARNINGS FOUND\n\n"
-            report += "CDC-Related Issues:\n"
-            for w in cdc_warnings:
-                report += f"  - {w}\n"
-            report += f"\nTotal lint warnings: {len(all_warnings)}"
-            return False, report
-        else:
-            # Non-CDC lint errors
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged_map = _stage_inputs(tmpdir, [file_path])
+        staged_file = _stage_path(file_path, staged_map)
+        cmd = [
+            "verilator", "--lint-only", "--timing",
+            "-Wall",
+            "-Wwarn-CDCRSTLOGIC",
+            os.path.basename(staged_file),
+        ]
+
+        try:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=tmpdir,
+            )
+            tool_result = _rewrite_result_paths(
+                _build_tool_result(
+                    "verilator",
+                    ok=completed.returncode == 0,
+                    result="PASS" if completed.returncode == 0 else "FAIL",
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    diagnostics=_collect_diag_lines((completed.stderr or completed.stdout or "").strip(), limit=20),
+                    metrics={"mode": "cdc_check"},
+                ),
+                staged_map,
+            )
+            stderr = tool_result["stderr"] or ""
+
+            cdc_warnings = []
+            all_warnings = []
+            for line in stderr.split('\n'):
+                if line.strip():
+                    all_warnings.append(line)
+                    if any(kw in line.upper() for kw in ['CDC', 'CLOCK', 'DOMAIN', 'SYNC', 'METASTAB', 'CDCRSTLOGIC']):
+                        cdc_warnings.append(line)
+
+            if not cdc_warnings and completed.returncode == 0:
+                return True, f"CDC Analysis: CLEAN (no clock domain crossing issues detected)\nFull lint output:\n{stderr[:1000]}"
+            if cdc_warnings:
+                report = "CDC Analysis: WARNINGS FOUND\n\n"
+                report += "CDC-Related Issues:\n"
+                for warning in cdc_warnings:
+                    report += f"  - {warning}\n"
+                report += f"\nTotal lint warnings: {len(all_warnings)}"
+                return False, report
             return True, f"CDC Analysis: CLEAN (lint has non-CDC warnings)\n{stderr[:1000]}"
-            
-    except FileNotFoundError:
-        return True, "Verilator not found (Skipping CDC Check)"
-    except subprocess.TimeoutExpired:
-        return False, "CDC check timed out."
+
+        except FileNotFoundError:
+            return True, "Verilator not found (Skipping CDC Check)"
+        except subprocess.TimeoutExpired:
+            return False, "CDC check timed out."
 
 
 def generate_design_doc(design_name: str, spec: str = "", metrics: dict = None) -> str:
@@ -3839,4 +4229,3 @@ def parse_power_signoff(design_name: str) -> dict:
         return result
     except Exception:
         return result
-

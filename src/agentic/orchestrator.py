@@ -10,7 +10,7 @@ import difflib
 import subprocess
 import threading
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from rich.console import Console
 from rich.panel import Panel
 from crewai import Agent, Task, Crew, LLM
@@ -34,6 +34,18 @@ from .agents.verifier import get_verification_agent, get_error_analyst_agent, ge
 from .agents.doc_agent import get_doc_agent
 from .agents.sdc_agent import get_sdc_agent
 from .core import ArchitectModule, SelfReflectPipeline, ReActAgent, WaveformExpertModule, DeepDebuggerModule
+from .contracts import (
+    AgentResult,
+    ArtifactRef,
+    FailureClass,
+    FailureRecord,
+    StageResult,
+    StageStatus,
+    extract_json_object,
+    infer_failure_class,
+    materially_changed,
+    validate_agent_payload,
+)
 from .tools.vlsi_tools import (
     write_verilog,
     run_syntax_check,
@@ -157,6 +169,7 @@ class BuildOrchestrator:
         max_retries: int = 5,
         verbose: bool = True,
         skip_openlane: bool = False,
+        skip_coverage: bool = False,
         full_signoff: bool = False,
         min_coverage: float = 80.0,
         strict_gates: bool = True,
@@ -182,6 +195,7 @@ class BuildOrchestrator:
         self.max_retries = max_retries
         self.verbose = verbose
         self.skip_openlane = skip_openlane
+        self.skip_coverage = skip_coverage
         self.full_signoff = full_signoff
         self.min_coverage = min_coverage
         self.strict_gates = strict_gates
@@ -230,6 +244,14 @@ class BuildOrchestrator:
         self.tb_failure_fingerprint_history: Dict[str, int] = {}
         self.tb_recovery_counts: Dict[str, int] = {}
         self.artifacts: Dict[str, Any] = {}  # Store paths to gathered files
+        self.artifact_bus: Dict[str, ArtifactRef] = {}
+        self.stage_contract_history: List[Dict[str, Any]] = []
+        self.retry_metadata: Dict[str, int] = {
+            "stage_retry": 0,
+            "regeneration_retry": 0,
+            "format_retry": 0,
+            "infrastructure_retry": 0,
+        }
         self.history: List[Dict[str, Any]] = []    # Log of state transitions and errors
         self.errors: List[str] = []     # List of error messages
 
@@ -283,6 +305,7 @@ class BuildOrchestrator:
         self.log(f"Transitioning: {self.state.name} -> {new_state.name}", refined=True)
         self.state = new_state
         if not preserve_retries:
+            self.retry_count = 0
             self.state_retry_counts[new_state.name] = 0
         # Emit a dedicated transition event for the web UI checkpoint timeline
         if self.event_sink is not None:
@@ -347,6 +370,308 @@ class BuildOrchestrator:
         base = f"{self.state.name}|{error_text[:500]}|{self._artifact_fingerprint()}"
         fp = hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
         self.failure_fingerprint_history.pop(fp, None)
+
+    def _set_artifact(
+        self,
+        key: str,
+        value: Any,
+        *,
+        producer: str,
+        consumer: str = "",
+        required: bool = False,
+        blocking: bool = False,
+    ) -> None:
+        self.artifacts[key] = value
+        self.artifact_bus[key] = ArtifactRef(
+            key=key,
+            producer=producer,
+            consumer=consumer,
+            required=required,
+            blocking=blocking,
+            value=value,
+        )
+
+    def _get_artifact(self, key: str, default: Any = None) -> Any:
+        return self.artifacts.get(key, default)
+
+    def _require_artifact(self, key: str, *, consumer: str, message: str) -> Any:
+        if key in self.artifacts and self.artifacts[key] not in (None, "", {}):
+            ref = self.artifact_bus.get(key)
+            if ref is not None:
+                ref.consumer = consumer
+            return self.artifacts[key]
+        self._record_stage_contract(
+            StageResult(
+                stage=self.state.name,
+                status=StageStatus.ERROR,
+                producer=consumer,
+                failure_class=FailureClass.ORCHESTRATOR_ROUTING_ERROR,
+                diagnostics=[message],
+                next_action="fail_closed",
+            )
+        )
+        raise RuntimeError(message)
+
+    def _consume_handoff(self, key: str, *, consumer: str, required: bool = False) -> Any:
+        value = self.artifacts.get(key)
+        if value in (None, "", {}):
+            if required:
+                msg = f"Missing artifact handoff '{key}' for {consumer}."
+                self._record_stage_contract(
+                    StageResult(
+                        stage=self.state.name,
+                        status=StageStatus.ERROR,
+                        producer=consumer,
+                        failure_class=FailureClass.ORCHESTRATOR_ROUTING_ERROR,
+                        diagnostics=[msg],
+                        next_action="fail_closed",
+                    )
+                )
+                raise RuntimeError(msg)
+            return None
+        ref = self.artifact_bus.get(key)
+        if ref is not None:
+            ref.consumer = consumer
+        return value
+
+    def _record_stage_contract(self, result: StageResult) -> None:
+        payload = result.to_dict()
+        self.stage_contract_history.append(payload)
+        self.artifacts["last_stage_result"] = payload
+        if hasattr(self, "logger"):
+            self.logger.info(f"STAGE RESULT:\n{json.dumps(payload, indent=2, default=str)}")
+
+    def _record_retry(self, bucket: str, *, consume_global: bool = False) -> int:
+        count = int(self.retry_metadata.get(bucket, 0)) + 1
+        self.retry_metadata[bucket] = count
+        self.artifacts["retry_metadata"] = dict(self.retry_metadata)
+        if consume_global:
+            self.global_retry_count += 1
+        return count
+
+    def _record_non_consumable_output(self, producer: str, raw_output: str, diagnostics: List[str]) -> None:
+        self._record_retry("format_retry", consume_global=False)
+        self._record_stage_contract(
+            StageResult(
+                stage=self.state.name,
+                status=StageStatus.RETRY,
+                producer=producer,
+                failure_class=FailureClass.LLM_FORMAT_ERROR,
+                diagnostics=diagnostics or ["LLM output could not be consumed."],
+                next_action="retry_generation",
+            )
+        )
+        self._set_artifact(
+            "last_non_consumable_output",
+            {
+                "producer": producer,
+                "raw_output": raw_output[:4000],
+                "diagnostics": diagnostics,
+            },
+            producer=producer,
+            consumer=self.state.name,
+            required=False,
+            blocking=False,
+        )
+
+    @staticmethod
+    def _extract_module_names(code: str) -> List[str]:
+        return re.findall(r"\bmodule\s+([A-Za-z_]\w*)", code or "")
+
+    def _is_hierarchical_design(self, code: str) -> bool:
+        return len(self._extract_module_names(code)) > 1
+
+    def _validate_rtl_candidate(self, candidate_code: str, previous_code: str) -> List[str]:
+        issues: List[str] = []
+        if not validate_llm_code_output(candidate_code):
+            issues.append("RTL candidate is not valid Verilog/SystemVerilog code output.")
+            return issues
+        modules = self._extract_module_names(candidate_code)
+        if self.name not in modules:
+            issues.append(f"RTL candidate is missing top module '{self.name}'.")
+        prev_modules = self._extract_module_names(previous_code)
+        if prev_modules and len(prev_modules) > 1:
+            if sorted(prev_modules) != sorted(modules):
+                issues.append(
+                    "Hierarchical RTL repair changed the module inventory; module-scoped preservation failed."
+                )
+        prev_ports = self._extract_module_interface(previous_code)
+        new_ports = self._extract_module_interface(candidate_code)
+        if prev_ports and new_ports and prev_ports != new_ports:
+            issues.append("RTL candidate changed the top-module interface.")
+        return issues
+
+    def _validate_tb_candidate(self, tb_code: str) -> List[str]:
+        issues: List[str] = []
+        if not validate_llm_code_output(tb_code):
+            issues.append("TB candidate is not valid Verilog/SystemVerilog code output.")
+            return issues
+        module_match = re.search(r"\bmodule\s+([A-Za-z_]\w*)", tb_code)
+        if not module_match or module_match.group(1) != f"{self.name}_tb":
+            issues.append(f"TB module name must be '{self.name}_tb'.")
+        if f'$dumpfile("{self.name}_wave.vcd")' not in tb_code:
+            issues.append("TB candidate is missing the required VCD dumpfile block.")
+        if "$dumpvars(0," not in tb_code:
+            issues.append("TB candidate is missing the required dumpvars block.")
+        if "TEST PASSED" not in tb_code or "TEST FAILED" not in tb_code:
+            issues.append("TB candidate must include TEST PASSED and TEST FAILED markers.")
+        return issues
+
+    def _validate_sva_candidate(self, sva_code: str, rtl_code: str) -> List[str]:
+        issues: List[str] = []
+        if not validate_llm_code_output(sva_code):
+            issues.append("SVA candidate is not valid SystemVerilog code output.")
+            return issues
+        if f"module {self.name}_sva" not in sva_code:
+            issues.append(f"SVA candidate is missing module '{self.name}_sva'.")
+        yosys_code = convert_sva_to_yosys(sva_code, self.name)
+        if not yosys_code:
+            issues.append("SVA candidate could not be translated to Yosys-compatible assertions.")
+            return issues
+        ok, report = validate_yosys_sby_check(yosys_code)
+        if not ok:
+            for issue in report.get("issues", []):
+                issues.append(issue.get("message", "Invalid Yosys preflight assertion output."))
+        signal_inventory = self._format_signal_inventory_for_prompt(rtl_code)
+        if "No signal inventory could be extracted" in signal_inventory:
+            issues.append("RTL signal inventory is unavailable for SVA validation.")
+        return issues
+
+    @staticmethod
+    def _simulation_capabilities(sim_output: str, vcd_path: str) -> Dict[str, Any]:
+        trace_enabled = "without --trace" not in (sim_output or "")
+        waveform_generated = bool(vcd_path and os.path.exists(vcd_path) and os.path.getsize(vcd_path) > 200)
+        return {
+            "trace_enabled": trace_enabled,
+            "waveform_generated": waveform_generated,
+        }
+
+    def _normalize_react_result(self, trace: Any) -> AgentResult:
+        final_answer = getattr(trace, "final_answer", "") or ""
+        code_match = re.search(r"```verilog\s*(.*?)```", final_answer, re.DOTALL)
+        payload = {
+            "code": code_match.group(1).strip() if code_match else "",
+            "self_check_status": "verified" if getattr(trace, "success", False) else "unverified",
+            "tool_observations": [getattr(step, "observation", "") for step in getattr(trace, "steps", []) if getattr(step, "observation", "")],
+            "final_decision": "accept" if code_match else "fallback",
+        }
+        failure_class = FailureClass.UNKNOWN if code_match else FailureClass.LLM_FORMAT_ERROR
+        return AgentResult(
+            agent="ReAct",
+            ok=bool(code_match),
+            producer="agent_react",
+            payload=payload,
+            diagnostics=[] if code_match else ["ReAct did not return fenced Verilog code."],
+            failure_class=failure_class,
+            raw_output=final_answer,
+        )
+
+    def _normalize_waveform_result(self, diagnosis: Any, raw_output: str = "") -> AgentResult:
+        if diagnosis is None:
+            return AgentResult(
+                agent="WaveformExpert",
+                ok=False,
+                producer="agent_waveform",
+                payload={"fallback_reason": "No waveform diagnosis available."},
+                diagnostics=["WaveformExpert returned no diagnosis."],
+                failure_class=FailureClass.UNKNOWN,
+                raw_output=raw_output,
+            )
+        payload = {
+            "failing_signal": diagnosis.failing_signal,
+            "mismatch_time": diagnosis.mismatch_time,
+            "expected_value": diagnosis.expected_value,
+            "actual_value": diagnosis.actual_value,
+            "trace_roots": [
+                {
+                    "signal_name": trace.signal_name,
+                    "source_file": trace.source_file,
+                    "source_line": trace.source_line,
+                    "assignment_type": trace.assignment_type,
+                }
+                for trace in diagnosis.root_cause_traces
+            ],
+            "suggested_fix_area": diagnosis.suggested_fix_area,
+            "fallback_reason": "" if diagnosis.root_cause_traces else "No AST trace roots found.",
+        }
+        return AgentResult(
+            agent="WaveformExpert",
+            ok=True,
+            producer="agent_waveform",
+            payload=payload,
+            diagnostics=[],
+            failure_class=FailureClass.UNKNOWN,
+            raw_output=raw_output,
+        )
+
+    def _normalize_deepdebug_result(self, verdict: Any, raw_output: str = "") -> AgentResult:
+        if verdict is None:
+            return AgentResult(
+                agent="DeepDebugger",
+                ok=False,
+                producer="agent_deepdebug",
+                payload={"usable_for_regeneration": False},
+                diagnostics=["DeepDebugger returned no verdict."],
+                failure_class=FailureClass.UNKNOWN,
+                raw_output=raw_output,
+            )
+        payload = {
+            "root_cause_signal": verdict.root_cause_signal,
+            "root_cause_line": verdict.root_cause_line,
+            "root_cause_file": verdict.root_cause_file,
+            "fix_description": verdict.fix_description,
+            "confidence": verdict.confidence,
+            "balanced_analysis_log": verdict.balanced_analysis_log,
+            "usable_for_regeneration": bool(verdict.root_cause_signal and verdict.fix_description),
+        }
+        return AgentResult(
+            agent="DeepDebugger",
+            ok=True,
+            producer="agent_deepdebug",
+            payload=payload,
+            diagnostics=[],
+            failure_class=FailureClass.UNKNOWN,
+            raw_output=raw_output,
+        )
+
+    def _parse_structured_agent_json(
+        self,
+        *,
+        agent_name: str,
+        raw_output: str,
+        required_keys: List[str],
+    ) -> AgentResult:
+        payload = extract_json_object(raw_output)
+        if payload is None:
+            return AgentResult(
+                agent=agent_name,
+                ok=False,
+                producer=f"agent_{agent_name.lower()}",
+                payload={},
+                diagnostics=["LLM output is not valid JSON."],
+                failure_class=FailureClass.LLM_FORMAT_ERROR,
+                raw_output=raw_output,
+            )
+        errors = validate_agent_payload(payload, required_keys)
+        if errors:
+            return AgentResult(
+                agent=agent_name,
+                ok=False,
+                producer=f"agent_{agent_name.lower()}",
+                payload=payload,
+                diagnostics=errors,
+                failure_class=FailureClass.LLM_FORMAT_ERROR,
+                raw_output=raw_output,
+            )
+        return AgentResult(
+            agent=agent_name,
+            ok=True,
+            producer=f"agent_{agent_name.lower()}",
+            payload=payload,
+            diagnostics=[],
+            failure_class=FailureClass.UNKNOWN,
+            raw_output=raw_output,
+        )
 
     def _build_llm_context(self, include_rtl: bool = True, max_rtl_chars: int = 15000) -> str:
         """Build cumulative context string for LLM calls.
@@ -823,6 +1148,97 @@ SPECIFICATION SECTIONS (Markdown):
             )
         return ports
 
+    @staticmethod
+    def _extract_rtl_signal_inventory(rtl_code: str) -> List[Dict[str, str]]:
+        """Extract DUT-visible signals and widths for downstream prompt grounding."""
+        text = rtl_code or ""
+        signals: List[Dict[str, str]] = []
+
+        param_defaults: Dict[str, str] = {}
+        param_pattern = re.compile(
+            r"parameter\s+(?:\w+\s+)?([A-Za-z_]\w*)\s*=\s*([^,;\)\n]+)",
+            re.IGNORECASE,
+        )
+        for pname, pval in param_pattern.findall(text):
+            param_defaults[pname.strip()] = pval.strip()
+
+        def _resolve_width(width: str) -> str:
+            resolved = (width or "").strip()
+            if not resolved:
+                return "[0:0]"
+            for pname, pval in param_defaults.items():
+                if pname not in resolved:
+                    continue
+                try:
+                    expr = resolved[1:-1]
+                    expr = expr.replace(pname, str(pval))
+                    parts = expr.split(":")
+                    evaluated = []
+                    for part in parts:
+                        part = part.strip()
+                        if re.match(r'^[\d\s\+\-\*\/\(\)]+$', part):
+                            evaluated.append(str(int(eval(part))))  # noqa: S307
+                        else:
+                            evaluated.append(part)
+                    resolved = f"[{':'.join(evaluated)}]"
+                except Exception:
+                    pass
+            return resolved
+
+        seen = set()
+        for port in BuildOrchestrator._extract_module_ports(text):
+            key = (port["name"], port["direction"])
+            if key in seen:
+                continue
+            seen.add(key)
+            signals.append(
+                {
+                    "name": port["name"],
+                    "category": port["direction"],
+                    "width": _resolve_width(port.get("width", "")),
+                }
+            )
+
+        scrubbed = re.sub(r"//.*", "", text)
+        scrubbed = re.sub(r"/\*[\s\S]*?\*/", "", scrubbed)
+        internal_pattern = re.compile(
+            r"^\s*(wire|reg|logic)\s*(?:signed\s+)?(\[[^\]]+\])?\s*([^;]+);",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        for kind, width, names_blob in internal_pattern.findall(scrubbed):
+            resolved_width = _resolve_width(width)
+            for raw_name in names_blob.split(","):
+                candidate = raw_name.strip()
+                if not candidate:
+                    continue
+                candidate = candidate.split("=")[0].strip()
+                candidate = re.sub(r"\[[^\]]+\]", "", candidate).strip()
+                if not re.fullmatch(r"[A-Za-z_]\w*", candidate):
+                    continue
+                key = (candidate, kind.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                signals.append(
+                    {
+                        "name": candidate,
+                        "category": kind.lower(),
+                        "width": resolved_width,
+                    }
+                )
+        return signals
+
+    @staticmethod
+    def _format_signal_inventory_for_prompt(rtl_code: str) -> str:
+        signals = BuildOrchestrator._extract_rtl_signal_inventory(rtl_code)
+        if not signals:
+            return "No signal inventory could be extracted from the RTL. Use only identifiers explicitly declared in the RTL."
+        lines = [
+            f"- {sig['name']}: category={sig['category']}, width={sig['width']}"
+            for sig in signals
+        ]
+        return "\n".join(lines)
+
     def _tb_gate_strict_enforced(self) -> bool:
         return self.strict_gates or self.tb_gate_mode == "strict"
 
@@ -1089,7 +1505,14 @@ SPECIFICATION SECTIONS (Markdown):
             return
 
         if cycle == 2:
-            self.artifacts["tb_regen_context"] = json.dumps(report, indent=2, default=str)[:5000]
+            self._set_artifact(
+                "tb_regen_context",
+                json.dumps(report, indent=2, default=str)[:5000],
+                producer="orchestrator_tb_gate",
+                consumer="VERIFICATION",
+                required=True,
+                blocking=True,
+            )
             tb_path = self.artifacts.get("tb_path")
             if tb_path and os.path.exists(tb_path):
                 try:
@@ -1763,41 +2186,69 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 self.logger.info(f"SEMANTIC RIGOR: {sem_report}")
                 if not sem_ok:
                     if self.strict_gates:
-                        # --- Mechanical width auto-fix (no LLM) ---
-                        self.log("Semantic rigor gate failed. Attempting mechanical width auto-fix.", refined=True)
-                        fix_ok, fix_report = auto_fix_width_warnings(path)
-                        self.logger.info(f"WIDTH AUTO-FIX: fixed={fix_report.get('fixed_count', 0)}, "
-                                         f"remaining={fix_report.get('remaining_count', 0)}")
-                        if fix_ok:
-                            self.log(f"Width auto-fix resolved all {fix_report['fixed_count']} warnings.", refined=True)
-                            # Re-read the patched RTL into artifacts
-                            with open(path, 'r') as f:
-                                self.artifacts['rtl_code'] = f.read()
-                            # Loop back to re-check syntax/lint on the patched file
-                            return
-                        elif fix_report.get("fixed_count", 0) > 0:
-                            self.log(f"Width auto-fix resolved {fix_report['fixed_count']} warnings; "
-                                     f"{fix_report['remaining_count']} remain. Re-checking.", refined=True)
-                            with open(path, 'r') as f:
-                                self.artifacts['rtl_code'] = f.read()
-                            # Loop back — the remaining warnings may resolve after re-lint
-                            return
-                        # Post-processor couldn't fix anything — fall through to LLM
-                        self.log("Mechanical auto-fix could not resolve width warnings. Routing to LLM fixer.", refined=True)
-                        # If the post-processor gathered rich context for unfixable warnings,
-                        # build a detailed prompt giving the LLM everything it needs.
-                        unfixable = fix_report.get("unfixable_context", [])
-                        if unfixable:
-                            errors = self._format_unfixable_width_errors(unfixable)
-                        else:
+                        width_issues = sem_report.get("width_issues", []) if isinstance(sem_report, dict) else []
+                        if not width_issues:
+                            self.log(
+                                "Semantic rigor failed on non-width issues. Routing directly to LLM fixer.",
+                                refined=True,
+                            )
                             errors = self._format_semantic_rigor_errors(sem_report)
+                        else:
+                            # --- Mechanical width auto-fix (no LLM) ---
+                            self.log("Semantic rigor gate failed. Attempting mechanical width auto-fix.", refined=True)
+                            fix_ok, fix_report = auto_fix_width_warnings(path)
+                            self.logger.info(f"WIDTH AUTO-FIX: fixed={fix_report.get('fixed_count', 0)}, "
+                                             f"remaining={fix_report.get('remaining_count', 0)}")
+                            if fix_ok:
+                                self.log(f"Width auto-fix resolved all {fix_report['fixed_count']} warnings.", refined=True)
+                                # Re-read the patched RTL into artifacts
+                                with open(path, 'r') as f:
+                                    self.artifacts['rtl_code'] = f.read()
+                                # Loop back to re-check syntax/lint on the patched file
+                                return
+                            elif fix_report.get("fixed_count", 0) > 0:
+                                self.log(f"Width auto-fix resolved {fix_report['fixed_count']} warnings; "
+                                         f"{fix_report['remaining_count']} remain. Re-checking.", refined=True)
+                                with open(path, 'r') as f:
+                                    self.artifacts['rtl_code'] = f.read()
+                                # Loop back — the remaining warnings may resolve after re-lint
+                                return
+                            # Post-processor couldn't fix anything — fall through to LLM
+                            self.log("Mechanical auto-fix could not resolve width warnings. Routing to LLM fixer.", refined=True)
+                            # If the post-processor gathered rich context for unfixable warnings,
+                            # build a detailed prompt giving the LLM everything it needs.
+                            unfixable = fix_report.get("unfixable_context", [])
+                            if unfixable:
+                                errors = self._format_unfixable_width_errors(unfixable)
+                            else:
+                                errors = self._format_semantic_rigor_errors(sem_report)
                     else:
                         self.log("Semantic rigor warnings detected (non-blocking).", refined=True)
                         self.artifacts["semantic_report"] = sem_report
+                        self._record_stage_contract(
+                            StageResult(
+                                stage=self.state.name,
+                                status=StageStatus.PASS,
+                                producer="orchestrator_rtl_fix",
+                                consumable_payload={"semantic_report": bool(sem_report)},
+                                artifacts_written=["semantic_report"],
+                                next_action=BuildState.VERIFICATION.name,
+                            )
+                        )
                         self.transition(BuildState.VERIFICATION)
                         return
                 else:
                     self.artifacts["semantic_report"] = sem_report
+                    self._record_stage_contract(
+                        StageResult(
+                            stage=self.state.name,
+                            status=StageStatus.PASS,
+                            producer="orchestrator_rtl_fix",
+                            consumable_payload={"semantic_report": True},
+                            artifacts_written=["semantic_report"],
+                            next_action=BuildState.VERIFICATION.name,
+                        )
+                    )
                     self.transition(BuildState.VERIFICATION)
                     return
 
@@ -1868,15 +2319,31 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 ),
                 context=_react_context,
             )
-            if _react_trace.success and _react_trace.final_answer:
-                _vlog = re.search(r'```verilog\s*(.*?)```', _react_trace.final_answer, re.DOTALL)
-                if _vlog:
-                    _react_fixed_code = _vlog.group(1).strip()
-                    self.logger.info(
-                        f"[ReAct] RTL fix done in {_react_trace.total_steps} steps "
-                        f"({_react_trace.total_duration_s:.1f}s)"
-                    )
+            react_result = self._normalize_react_result(_react_trace)
+            self._set_artifact(
+                "react_last_result",
+                react_result.to_dict(),
+                producer="agent_react",
+                consumer="RTL_FIX",
+            )
+            if react_result.ok:
+                _react_fixed_code = react_result.payload.get("code", "")
+                self.logger.info(
+                    f"[ReAct] RTL fix done in {_react_trace.total_steps} steps "
+                    f"({_react_trace.total_duration_s:.1f}s)"
+                )
             if not _react_fixed_code:
+                self._record_stage_contract(
+                    StageResult(
+                        stage=self.state.name,
+                        status=StageStatus.RETRY,
+                        producer="agent_react",
+                        failure_class=react_result.failure_class,
+                        diagnostics=react_result.diagnostics,
+                        artifacts_written=["react_last_result"],
+                        next_action="fallback_to_single_shot",
+                    )
+                )
                 self.logger.info(
                     f"[ReAct] No valid code produced "
                     f"(success={_react_trace.success}, steps={_react_trace.total_steps}). "
@@ -1939,6 +2406,11 @@ You explain what you changed and why.""",
                     new_code = str(result)
                     # --- Universal code output validation (RTL fix) ---
                     if not validate_llm_code_output(new_code):
+                        self._record_non_consumable_output(
+                            "llm_rtl_fix",
+                            new_code,
+                            ["RTL fix returned prose instead of code."],
+                        )
                         self.log("RTL fix returned prose instead of code. Retrying once.", refined=True)
                         self.logger.warning(f"RTL FIX VALIDATION FAIL (prose detected):\n{new_code[:500]}")
                         new_code = str(Crew(agents=[fixer], tasks=[task]).kickoff())
@@ -1956,6 +2428,20 @@ You explain what you changed and why.""",
                     return
 
         self.logger.info(f"FIXED RTL:\n{new_code}")
+        rtl_validation_issues = self._validate_rtl_candidate(new_code, self.artifacts.get("rtl_code", ""))
+        if rtl_validation_issues:
+            self._record_stage_contract(
+                StageResult(
+                    stage=self.state.name,
+                    status=StageStatus.RETRY,
+                    producer="orchestrator_rtl_validator",
+                    failure_class=FailureClass.LLM_SEMANTIC_ERROR,
+                    diagnostics=rtl_validation_issues,
+                    next_action="retry_rtl_fix",
+                )
+            )
+            self.log(f"RTL candidate rejected: {rtl_validation_issues[0]}", refined=True)
+            return
         
         # --- Inner retry loop for LLM parse errors ---
         # If write_verilog fails (LLM didn't output valid code), re-prompt immediately
@@ -2021,10 +2507,11 @@ Original errors to fix:
         # 1. Generate Testbench (Only if missing)
         # We reuse existing TB to ensure consistent verification targets
         tb_exists = 'tb_path' in self.artifacts and os.path.exists(self.artifacts['tb_path'])
+        regen_context = self._consume_handoff("tb_regen_context", consumer="VERIFICATION", required=False) or ""
         
         if not tb_exists:
             # Check if we have a golden testbench from template matching
-            if self.artifacts.get('golden_tb'):
+            if self.artifacts.get('golden_tb') and not regen_context:
                 self.log("Using Golden Reference Testbench (pre-verified).", refined=True)
                 tb_code = self.artifacts['golden_tb']
                 # Replace template module name with actual design name
@@ -2040,7 +2527,6 @@ Original errors to fix:
                 tb_agent = get_testbench_agent(self.llm, f"Verify {self.name}", verbose=self.verbose, strategy=self.strategy.name)
                 
                 tb_strategy_prompt = self._get_tb_strategy_prompt()
-                regen_context = self.artifacts.pop("tb_regen_context", "")
                 
                 # --- Extract module port signature from RTL ---
                 # This prevents the most common TB failure: port name mismatches
@@ -2116,6 +2602,11 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                         )
                         # --- Universal code output validation (TB gen) ---
                         if not validate_llm_code_output(tb_code):
+                            self._record_non_consumable_output(
+                                "llm_tb_generation",
+                                tb_code,
+                                ["TB generation returned prose instead of code."],
+                            )
                             self.log("TB generation returned prose instead of code. Retrying once.", refined=True)
                             self.logger.warning(f"TB VALIDATION FAIL (prose detected):\n{tb_code[:500]}")
                             tb_code = self._kickoff_with_timeout(
@@ -2131,6 +2622,20 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 if "module" not in tb_code or "endmodule" not in tb_code:
                     self.log("TB generation returned invalid code. Using deterministic fallback TB.", refined=True)
                     tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
+                tb_validation_issues = self._validate_tb_candidate(tb_code)
+                if tb_validation_issues:
+                    self._record_stage_contract(
+                        StageResult(
+                            stage=self.state.name,
+                            status=StageStatus.RETRY,
+                            producer="orchestrator_tb_validator",
+                            failure_class=FailureClass.LLM_SEMANTIC_ERROR,
+                            diagnostics=tb_validation_issues,
+                            next_action="deterministic_tb_fallback",
+                        )
+                    )
+                    self.log(f"TB candidate rejected: {tb_validation_issues[0]}. Using deterministic fallback TB.", refined=True)
+                    tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
                 self.logger.info(f"GENERATED TESTBENCH:\n{tb_code}")
                 
                 tb_path = write_verilog(self.name, tb_code, is_testbench=True)
@@ -2143,6 +2648,15 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                         self.state = BuildState.FAIL
                         return
                 self.artifacts['tb_path'] = tb_path
+                self._set_artifact(
+                    "tb_candidate",
+                    {
+                        "tb_path": tb_path,
+                        "regen_context_used": bool(regen_context),
+                    },
+                    producer="orchestrator_verification",
+                    consumer="VERIFICATION",
+                )
                 self._clear_tb_fingerprints()  # New TB → fresh gate attempts
         else:
             self.log(f"Verifying with existing Testbench (Attempt {self.retry_count}).", refined=True)
@@ -2284,17 +2798,21 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 "rtl_path",
                 os.path.join(OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}.v"),
             )
-            if (
-                os.path.exists(_vcd_path)
-                and os.path.getsize(_vcd_path) > 200
-                and os.path.exists(_rtl_path)
-            ):
+            sim_caps = self._simulation_capabilities(output, _vcd_path)
+            if sim_caps["trace_enabled"] and sim_caps["waveform_generated"] and os.path.exists(_rtl_path):
                 _waveform_mod = WaveformExpertModule()
                 _diagnosis = _waveform_mod.analyze_failure(
                     rtl_path=_rtl_path,
                     vcd_path=_vcd_path,
                     sim_log=output,          # 'output' is the sim stdout/stderr
                     design_name=self.name,
+                )
+                waveform_result = self._normalize_waveform_result(_diagnosis, output)
+                self._set_artifact(
+                    "waveform_diagnosis",
+                    waveform_result.to_dict(),
+                    producer="agent_waveform",
+                    consumer="VERIFICATION",
                 )
                 if _diagnosis is not None:
                     _waveform_context = (
@@ -2310,6 +2828,19 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                     self.logger.info("[WaveformExpert] No signal mismatch found in VCD")
             else:
                 _vcd_size = os.path.getsize(_vcd_path) if os.path.exists(_vcd_path) else 0
+                self._record_stage_contract(
+                    StageResult(
+                        stage=self.state.name,
+                        status=StageStatus.RETRY,
+                        producer="orchestrator_waveform_gate",
+                        failure_class=FailureClass.ORCHESTRATOR_ROUTING_ERROR,
+                        diagnostics=[
+                            f"WaveformExpert gated off: trace_enabled={sim_caps['trace_enabled']}, "
+                            f"waveform_generated={sim_caps['waveform_generated']}, rtl_exists={os.path.exists(_rtl_path)}"
+                        ],
+                        next_action="continue_without_waveform",
+                    )
+                )
                 self.logger.info(
                     f"[WaveformExpert] Skipping — VCD exists={os.path.exists(_vcd_path)}, "
                     f"size={_vcd_size}, rtl_exists={os.path.exists(_rtl_path)}"
@@ -2332,21 +2863,23 @@ CURRENT TESTBENCH (first 3000 chars):
 Use your read_file tool to read the full RTL and TB files if needed.
 
 Classify the failure as ONE of:
-A) TESTBENCH_SYNTAX — TB compilation/syntax error (missing semicolons, undeclared signals, class errors)
-B) RTL_LOGIC_BUG — Functional error in RTL design (wrong state transitions, bad arithmetic, logic errors)
-C) PORT_MISMATCH — TB and RTL have incompatible port names, widths, or missing connections
-D) TIMING_RACE — Clock/reset timing issue in TB stimulus (setup/hold violations, race conditions)
-E) ARCHITECTURAL — Design spec is ambiguous, contradictory, or fundamentally flawed
+A) TESTBENCH_SYNTAX
+B) RTL_LOGIC_BUG
+C) PORT_MISMATCH
+D) TIMING_RACE
+E) ARCHITECTURAL
 
-Reply in this EXACT format (one field per line):
-CLASS: <letter A-E>
-FAILING_OUTPUT: <the exact $display message from the simulation log that indicates failure, e.g. "Data mismatch at pop 0">
-FAILING_SIGNALS: <comma-separated list of signal names whose values are wrong>
-EXPECTED_VS_ACTUAL: <expected value vs actual value if determinable, otherwise "undetermined">
-RESPONSIBLE_CONSTRUCT: <the specific always_ff/always_comb/assign statement and its line number in the RTL that most likely causes the wrong value, e.g. "always_ff block at line 23 driving write_ptr">
-ROOT_CAUSE: <1-line description naming the specific signal and logic error, e.g. "write_ptr increments on push but the counter does not gate on the full flag">
-FIX_HINT: <surgical fix instruction referencing specific line numbers or signal names, e.g. "Change line 25: gate the write_ptr increment with !full">''',
-                expected_output='Structured signal-level failure classification with CLASS, FAILING_OUTPUT, FAILING_SIGNALS, EXPECTED_VS_ACTUAL, RESPONSIBLE_CONSTRUCT, ROOT_CAUSE, and FIX_HINT',
+Reply with JSON only, no prose, using this exact schema:
+{{
+  "class": "A|B|C|D|E",
+  "failing_output": "exact failing display or summary",
+  "failing_signals": ["sig1", "sig2"],
+  "expected_vs_actual": "expected vs actual or undetermined",
+  "responsible_construct": "specific RTL construct and line number",
+  "root_cause": "1-line root cause",
+  "fix_hint": "surgical fix hint"
+}}''',
+                expected_output='JSON object with class, failing_output, failing_signals, expected_vs_actual, responsible_construct, root_cause, and fix_hint',
                 agent=analyst
             )
             
@@ -2354,33 +2887,63 @@ FIX_HINT: <surgical fix instruction referencing specific line numbers or signal 
                 analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
             
             self.logger.info(f"FAILURE ANALYSIS:\n{analysis}")
-            
-            # Parse structured response
-            failure_class = "A"  # default fallback
-            root_cause = ""
-            fix_hint = ""
-            failing_output = ""
-            failing_signals = ""
-            expected_vs_actual = ""
-            responsible_construct = ""
-            for line in analysis.split("\n"):
-                line_stripped = line.strip()
-                if line_stripped.startswith("CLASS:"):
-                    letter = line_stripped.replace("CLASS:", "").strip().upper()
-                    if letter and letter[0] in "ABCDE":
-                        failure_class = letter[0]
-                elif line_stripped.startswith("ROOT_CAUSE:"):
-                    root_cause = line_stripped.replace("ROOT_CAUSE:", "").strip()
-                elif line_stripped.startswith("FIX_HINT:"):
-                    fix_hint = line_stripped.replace("FIX_HINT:", "").strip()
-                elif line_stripped.startswith("FAILING_OUTPUT:"):
-                    failing_output = line_stripped.replace("FAILING_OUTPUT:", "").strip()
-                elif line_stripped.startswith("FAILING_SIGNALS:"):
-                    failing_signals = line_stripped.replace("FAILING_SIGNALS:", "").strip()
-                elif line_stripped.startswith("EXPECTED_VS_ACTUAL:"):
-                    expected_vs_actual = line_stripped.replace("EXPECTED_VS_ACTUAL:", "").strip()
-                elif line_stripped.startswith("RESPONSIBLE_CONSTRUCT:"):
-                    responsible_construct = line_stripped.replace("RESPONSIBLE_CONSTRUCT:", "").strip()
+            analyst_result = self._parse_structured_agent_json(
+                agent_name="VerificationAnalyst",
+                raw_output=analysis,
+                required_keys=[
+                    "class",
+                    "failing_output",
+                    "failing_signals",
+                    "expected_vs_actual",
+                    "responsible_construct",
+                    "root_cause",
+                    "fix_hint",
+                ],
+            )
+            if not analyst_result.ok:
+                self._record_non_consumable_output(
+                    "agent_verificationanalyst",
+                    analysis,
+                    analyst_result.diagnostics,
+                )
+                with console.status("[bold red]Retrying Failure Analysis (JSON)...[/bold red]"):
+                    analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
+                self.logger.info(f"FAILURE ANALYSIS RETRY:\n{analysis}")
+                analyst_result = self._parse_structured_agent_json(
+                    agent_name="VerificationAnalyst",
+                    raw_output=analysis,
+                    required_keys=[
+                        "class",
+                        "failing_output",
+                        "failing_signals",
+                        "expected_vs_actual",
+                        "responsible_construct",
+                        "root_cause",
+                        "fix_hint",
+                    ],
+                )
+                if not analyst_result.ok:
+                    self.log("Verification analysis returned invalid JSON twice. Failing closed.", refined=True)
+                    self.state = BuildState.FAIL
+                    return
+            self._set_artifact(
+                "verification_analysis",
+                analyst_result.to_dict(),
+                producer="agent_verificationanalyst",
+                consumer="VERIFICATION",
+            )
+            analysis_payload = analyst_result.payload
+            failure_class = str(analysis_payload.get("class", "A")).upper()[:1] or "A"
+            root_cause = str(analysis_payload.get("root_cause", "")).strip()
+            fix_hint = str(analysis_payload.get("fix_hint", "")).strip()
+            failing_output = str(analysis_payload.get("failing_output", "")).strip()
+            failing_signals_list = analysis_payload.get("failing_signals", [])
+            if isinstance(failing_signals_list, list):
+                failing_signals = ", ".join(str(x) for x in failing_signals_list)
+            else:
+                failing_signals = str(failing_signals_list)
+            expected_vs_actual = str(analysis_payload.get("expected_vs_actual", "")).strip()
+            responsible_construct = str(analysis_payload.get("responsible_construct", "")).strip()
             
             # Build structured diagnosis string for downstream fix prompts
             structured_diagnosis = (
@@ -2654,10 +3217,27 @@ Return the complete module with ONLY the minimal fix applied.
             
             # Bug 3: Inject DeepDebugger diagnostic context into the SVA generation prompt
             formal_debug = self.artifacts.get("formal_debug_context", "")
+            formal_preflight_error = self._consume_handoff(
+                "formal_preflight_error",
+                consumer="FORMAL_VERIFY",
+                required=False,
+            ) or self.artifacts.get("sva_preflight_error", "")
             if formal_debug:
                 formal_debug_str = f"\n\nPREVIOUS FORMAL VERIFICATION FAILURE DIAGNOSIS:\n{formal_debug}\n\nPlease use this diagnosis to correct the flawed assertions.\n"
             else:
                 formal_debug_str = ""
+            if formal_preflight_error:
+                formal_debug_str += (
+                    "\n\nPREVIOUS YOSYS/SVA PREFLIGHT FAILURE:\n"
+                    f"{formal_preflight_error}\n"
+                    "You must correct the assertions so this exact failure does not recur.\n"
+                )
+            try:
+                with open(rtl_path, "r") as rtl_file:
+                    rtl_for_sva = rtl_file.read()
+            except OSError:
+                rtl_for_sva = self.artifacts.get("rtl_code", "")
+            signal_inventory = self._format_signal_inventory_for_prompt(rtl_for_sva)
             
             verif_agent = get_verification_agent(self.llm, verbose=self.verbose)
             sva_task = Task(
@@ -2667,8 +3247,12 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 
                 RTL Code:
                 ```verilog
-                {self.artifacts.get('rtl_code', '')}
+                {rtl_for_sva}
                 ```
+
+                The DUT has the following signals with these exact widths:
+                {signal_inventory}
+                Use only these signals and these exact widths in every assertion. Do not invent signals, aliases, or widths.
                 
                 SPECIFICATION:
                 {self.artifacts.get('spec', '')}
@@ -2700,6 +3284,11 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             
             # --- Universal code output validation (SVA) ---
             if not validate_llm_code_output(sva_result):
+                self._record_non_consumable_output(
+                    "llm_sva_generation",
+                    sva_result,
+                    ["SVA generation returned prose instead of code."],
+                )
                 self.log("SVA generation returned prose instead of code. Retrying once.", refined=True)
                 self.logger.warning(f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}")
                 sva_result = str(Crew(agents=[verif_agent], tasks=[sva_task]).kickoff())
@@ -2707,6 +3296,23 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     self.log("SVA retry also returned invalid output. Skipping formal.", refined=True)
                     self.transition(BuildState.COVERAGE_CHECK)
                     return
+            sva_validation_issues = self._validate_sva_candidate(sva_result, rtl_for_sva)
+            if sva_validation_issues:
+                self._record_stage_contract(
+                    StageResult(
+                        stage=self.state.name,
+                        status=StageStatus.RETRY,
+                        producer="orchestrator_sva_validator",
+                        failure_class=FailureClass.LLM_SEMANTIC_ERROR,
+                        diagnostics=sva_validation_issues,
+                        next_action="retry_sva_generation",
+                    )
+                )
+                self.log(f"SVA candidate rejected: {sva_validation_issues[0]}", refined=True)
+                for stale in (sva_path,):
+                    if os.path.exists(stale):
+                        os.remove(stale)
+                return
             
             self.logger.info(f"GENERATED SVA:\n{sva_result}")
             
@@ -2739,8 +3345,20 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 json.dump(preflight_report, f, indent=2)
             self.artifacts["formal_preflight"] = preflight_report
             self.artifacts["formal_preflight_path"] = formal_diag_path
+            self._set_artifact(
+                "formal_preflight_report",
+                preflight_report,
+                producer="orchestrator_formal_preflight",
+                consumer="FORMAL_VERIFY",
+            )
 
             if not preflight_ok:
+                self._set_artifact(
+                    "formal_preflight_error",
+                    json.dumps(preflight_report, indent=2)[:2000],
+                    producer="orchestrator_formal_preflight",
+                    consumer="FORMAL_VERIFY",
+                )
                 self.log(f"Formal preflight failed: {preflight_report.get('issue_count', 0)} issue(s).", refined=True)
                 self.artifacts['formal_result'] = 'FAIL'
                 if self.strict_gates:
@@ -2763,15 +3381,36 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 pf = subprocess.run(preflight_cmd, capture_output=True, text=True, timeout=30)
                 if pf.returncode != 0:
                     yosys_err = (pf.stderr or pf.stdout or "").strip()
-                    self.log(f"Yosys SVA preflight failed. Regenerating SVA with error context.", refined=True)
                     self.logger.info(f"YOSYS SVA PREFLIGHT FAIL:\n{yosys_err}")
+                    prev_err = self.artifacts.get("sva_preflight_error_last", "")
+                    if prev_err == yosys_err:
+                        streak = int(self.artifacts.get("sva_preflight_error_streak", 0)) + 1
+                    else:
+                        streak = 1
+                    self.artifacts["sva_preflight_error_last"] = yosys_err
+                    self.artifacts["sva_preflight_error_streak"] = streak
+                    self.artifacts["sva_preflight_error"] = yosys_err[:2000]
+                    self._set_artifact(
+                        "formal_preflight_error",
+                        yosys_err[:2000],
+                        producer="yosys_preflight",
+                        consumer="FORMAL_VERIFY",
+                    )
+                    if streak >= 2:
+                        self.log("Repeated Yosys SVA preflight failure detected. Skipping formal instead of regenerating again.", refined=True)
+                        self.artifacts["formal_result"] = "SKIP"
+                        self.artifacts["sva_preflight_skip_reason"] = yosys_err[:2000]
+                        self.transition(BuildState.COVERAGE_CHECK)
+                        return
+                    self.log("Yosys SVA preflight failed. Regenerating SVA with error context.", refined=True)
                     # Remove stale SVA files so the next iteration regenerates
                     for stale in (sva_path, sby_check_path):
                         if os.path.exists(stale):
                             os.remove(stale)
-                    self.artifacts["sva_preflight_error"] = yosys_err[:2000]
                     # Stay in FORMAL_VERIFY — will regenerate SVA on re-entry
                     return
+                self.artifacts.pop("sva_preflight_error_last", None)
+                self.artifacts.pop("sva_preflight_error_streak", None)
             except Exception as pf_exc:
                 self.logger.warning(f"Yosys SVA preflight exception: {pf_exc}")
 
@@ -2815,6 +3454,13 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                         design_name=self.name,
                         rtl_code=self.artifacts.get("rtl_code", ""),
                     )
+                    debug_result = self._normalize_deepdebug_result(_verdict, result)
+                    self._set_artifact(
+                        "formal_debug_result",
+                        debug_result.to_dict(),
+                        producer="agent_deepdebug",
+                        consumer="FORMAL_VERIFY",
+                    )
                     if _verdict is not None:
                         _formal_debug_context = (
                             f"\n\nFVDEBUG ROOT CAUSE:\n"
@@ -2836,7 +3482,12 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                         f"sby_cfg_exists={os.path.exists(_sby_cfg)}, "
                         f"rtl_exists={os.path.exists(_rtl_path_fv)}"
                     )
-                self.artifacts["formal_debug_context"] = _formal_debug_context
+                self._set_artifact(
+                    "formal_debug_context",
+                    _formal_debug_context,
+                    producer="agent_deepdebug",
+                    consumer="FORMAL_VERIFY",
+                )
 
                 self.artifacts['formal_result'] = 'FAIL'
                 if self.strict_gates:
@@ -2866,6 +3517,11 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 self.state = BuildState.FAIL
                 return
         
+        if self.skip_coverage:
+            self.log("Skipping Coverage Analysis (--skip-coverage).", refined=True)
+            self.transition(BuildState.REGRESSION)
+            return
+
         self.transition(BuildState.COVERAGE_CHECK)
 
     def do_coverage_check(self):
@@ -2912,6 +3568,15 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         self.artifacts["coverage"] = coverage_data
         self.artifacts["coverage_backend_used"] = coverage_data.get("backend", self.coverage_backend)
         self.artifacts["coverage_mode"] = coverage_data.get("coverage_mode", "unknown")
+        self._set_artifact(
+            "coverage_improvement_context",
+            {
+                "coverage_data": coverage_data,
+                "sim_output": sim_output[:4000] if isinstance(sim_output, str) else str(sim_output),
+            },
+            producer="orchestrator_coverage",
+            consumer="COVERAGE_CHECK",
+        )
 
         src_dir = os.path.join(OPENLANE_ROOT, "designs", self.name, "src")
         os.makedirs(src_dir, exist_ok=True)
@@ -3048,6 +3713,8 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         improve_prompt = f"""The current testbench for "{self.name}" does not meet coverage thresholds.
         TARGET: Branch >={branch_target:.1f}%, Line >={float(thresholds['line']):.1f}%.
         Current Coverage Data: {coverage_data}
+        PREVIOUS FAILED ATTEMPTS:
+        {self._format_failure_history()}
         
         Current RTL:
         ```verilog
@@ -3090,9 +3757,28 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         improved_tb = str(result)
         # --- Universal code output validation (coverage TB improvement) ---
         if not validate_llm_code_output(improved_tb):
+            self._record_non_consumable_output(
+                "llm_coverage_tb",
+                improved_tb,
+                ["Coverage TB improvement returned prose instead of code."],
+            )
             self.log("Coverage TB improvement returned prose instead of code. Retrying once.", refined=True)
             self.logger.warning(f"COVERAGE TB VALIDATION FAIL (prose detected):\n{improved_tb[:500]}")
             improved_tb = str(Crew(agents=[tb_agent], tasks=[improve_task]).kickoff())
+        tb_validation_issues = self._validate_tb_candidate(improved_tb)
+        if tb_validation_issues:
+            self._record_stage_contract(
+                StageResult(
+                    stage=self.state.name,
+                    status=StageStatus.RETRY,
+                    producer="orchestrator_coverage_tb_validator",
+                    failure_class=FailureClass.LLM_SEMANTIC_ERROR,
+                    diagnostics=tb_validation_issues,
+                    next_action="keep_previous_tb",
+                )
+            )
+            self.log(f"Coverage TB candidate rejected: {tb_validation_issues[0]}", refined=True)
+            return
         self.logger.info(f"IMPROVED TB:\n{improved_tb}")
 
         tb_path = write_verilog(self.name, improved_tb, is_testbench=True)

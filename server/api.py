@@ -199,6 +199,7 @@ class BuildRequest(BaseModel):
     design_name: str
     description: str
     skip_openlane: bool = False
+    skip_coverage: bool = False
     full_signoff: bool = False
     max_retries: int = 5
     show_thinking: bool = False
@@ -309,6 +310,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             max_retries=req.max_retries,
             verbose=req.show_thinking,
             skip_openlane=req.skip_openlane,
+            skip_coverage=req.skip_coverage,
             full_signoff=req.full_signoff,
             min_coverage=req.min_coverage,
             strict_gates=req.strict_gates,
@@ -554,15 +556,12 @@ def _run_with_approval_gates(job_id: str, orchestrator, req, llm):
                 
                 if not approved:
                     # User rejected — loop back to retry the CURRENT state
-                    # (which is now new_state after transition)
-                    # Actually, set state back to the stage that just completed so it retries
+                    # Reset state back to the completed stage so the next loop iteration
+                    # actually reruns it with the stored rejection feedback.
                     _emit_agent_thought(job_id, "Orchestrator", "decision", 
                         f"Stage {completed_stage} rejected by user. Retrying...", 
                         new_state.name)
-                    # The state already transitioned. If rejected, we need to figure out
-                    # what to do. For most stages, retrying means going back.
-                    # However, the rejection feedback was already stored and will be
-                    # picked up at the top of the next iteration.
+                    orchestrator.state = prev_state
                     continue
             else:
                 # State didn't change — this can happen for retry loops within a stage
@@ -809,6 +808,7 @@ def get_build_options_contract():
                     {"key": "strict_gates", "type": "boolean", "default": True, "description": "Enable strict gate enforcement with bounded self-healing."},
                     {"key": "full_signoff", "type": "boolean", "default": False, "description": "Run full physical signoff checks when available."},
                     {"key": "skip_openlane", "type": "boolean", "default": False, "description": "Skip physical implementation stages for faster RTL-only iteration."},
+                    {"key": "skip_coverage", "type": "boolean", "default": False, "description": "Skip the coverage stage and continue from formal verification to regression."},
                     {"key": "max_retries", "type": "int", "default": 5, "min": 1, "max": 12, "description": "Max repair retries per stage."},
                 ],
             },

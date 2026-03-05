@@ -48,6 +48,7 @@ export const DesignStudio = () => {
 
     // Build Options
     const [skipOpenlane, setSkipOpenlane] = useState(false);
+    const [skipCoverage, setSkipCoverage] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [fullSignoff, setFullSignoff] = useState(false);
     const [maxRetries, setMaxRetries] = useState(5);
@@ -83,6 +84,7 @@ export const DesignStudio = () => {
                 design_name: designName || slugify(prompt),
                 description: prompt,
                 skip_openlane: skipOpenlane,
+                skip_coverage: skipCoverage,
                 full_signoff: fullSignoff,
                 max_retries: maxRetries,
                 show_thinking: showThinking,
@@ -357,6 +359,10 @@ export const DesignStudio = () => {
                                         </div>
 
                                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', marginTop: '0.5rem', background: 'var(--bg)', padding: '1rem', borderRadius: 'var(--radius)', border: '1px solid var(--border-mid)' }}>
+                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
+                                                <input type="checkbox" checked={skipCoverage} onChange={e => setSkipCoverage(e.target.checked)} />
+                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Skip Coverage</span>
+                                            </label>
                                             <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
                                                 <input type="checkbox" checked={fullSignoff} onChange={e => setFullSignoff(e.target.checked)} />
                                                 <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Full Signoff</span>
