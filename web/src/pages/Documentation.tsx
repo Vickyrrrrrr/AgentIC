@@ -202,12 +202,12 @@ export const Documentation = () => {
               <h2>Key Capabilities</h2>
               <div className="adoc-cap-grid">
                 {[
-                  { icon: '🧠', title: 'AI‑Driven RTL Generation', desc: 'SystemVerilog or Verilog‑2005 from natural language via CrewAI agent chains.' },
+                  { icon: '🧠', title: 'AI‑Driven RTL Generation', desc: 'SystemVerilog or Verilog‑2005 from natural language via multi-agent collaboration.' },
                   { icon: '🔁', title: 'Self‑Healing Pipeline', desc: 'Per‑stage guards, fingerprint dedup, bounded retries, and deterministic fallbacks.' },
-                  { icon: '📊', title: 'Formal Verification', desc: 'SVA generation, Yosys SBY integration, CDC heuristic checks.' },
+                  { icon: '📊', title: 'Formal Verification', desc: 'Assertion generation, formal property checking, and clock-domain analysis.' },
                   { icon: '📈', title: 'Coverage Closure', desc: 'Profile‑based (balanced / aggressive / relaxed) with anti‑regression backup.' },
-                  { icon: '🏗️', title: 'Physical Implementation', desc: 'OpenLane integration with convergence review and ECO patch loops.' },
-                  { icon: '✅', title: 'Silicon Signoff', desc: 'DRC/LVS, STA, power/IR‑drop, LEC checks before tapeout.' },
+                  { icon: '🏗️', title: 'Physical Implementation', desc: 'RTL-to-GDSII flow integration with convergence review and optimization loops.' },
+                  { icon: '✅', title: 'Silicon Signoff', desc: 'DRC/LVS, STA, power/IR‑drop, equivalence checks before tapeout.' },
                 ].map((cap) => (
                   <div className="adoc-cap-item" key={cap.title}>
                     <span className="adoc-cap-icon">{cap.icon}</span>
@@ -229,18 +229,18 @@ export const Documentation = () => {
                     <tr>
                       <th>Gate</th>
                       <th>Check</th>
-                      <th>Self‑Healing Response</th>
+                      <th>Recovery</th>
                       <th>Fallback</th>
                     </tr>
                   </thead>
                   <tbody>
                     {[
-                      ['Syntax', 'Verilator --lint-only', 'LLM auto-repair loop (bounded)', 'SV→Verilog strategy pivot'],
-                      ['TB Compile', 'Icarus iverilog compile', '3-cycle recovery (repair → regen → fallback)', 'Deterministic template TB'],
-                      ['Simulation', 'Runtime: TEST PASSED', 'Re-generate testbench with error analysis', 'Fingerprint dedup + skip'],
-                      ['Formal', 'SVA via Yosys SBY', 'Bounded SVA regeneration', 'Graceful degrade to coverage'],
-                      ['Coverage', 'Profile-based thresholds', 'LLM TB improvement + anti-regression', 'Restore best TB snapshot'],
-                      ['DRC/LVS', 'OpenLane signoff reports', 'ECO patch (gate → RTL fallback)', 'Fail-closed or pivot'],
+                      ['Syntax', 'Static Analysis', 'Automated Recovery', 'Strategy pivot'],
+                      ['TB Compile', 'Compilation Check', 'Automated Recovery', 'Deterministic template TB'],
+                      ['Simulation', 'Simulation Check', 'Automated Recovery', 'Dedup + skip'],
+                      ['Formal', 'Formal Property Verification', 'Automated Recovery', 'Graceful degrade to coverage'],
+                      ['Coverage', 'Profile-based thresholds', 'Automated Recovery', 'Restore best snapshot'],
+                      ['DRC/LVS', 'Physical signoff reports', 'Automated Recovery', 'Fail-closed or pivot'],
                     ].map(([gate, check, heal, fallback]) => (
                       <tr key={gate}>
                         <td><strong>{gate}</strong></td>
@@ -440,20 +440,20 @@ export const Documentation = () => {
 
 /* ── Stage descriptions ──────────────────────────── */
 const stageDescriptions: Record<string, string> = {
-  INIT: 'Create workspace directory structure, validate dependencies (Verilator, Icarus Verilog, OpenLane), and initialize build artifacts dictionary.',
-  SPEC: 'LLM generates a detailed architecture specification from the natural-language prompt, including module interfaces, FSM descriptions, and clock/reset requirements.',
-  RTL_GEN: 'Generate synthesizable RTL (SystemVerilog or Verilog-2005) from the architecture spec using a CrewAI RTL agent. Falls back to golden template library when available.',
-  RTL_FIX: 'Run Verilator lint, pre-synthesis semantic checks, and iterative LLM-based auto-repair. Supports strategy pivot (SV → Verilog-2005) when fixes stall.',
-  VERIFICATION: 'Generate self-checking testbenches, compile with Icarus Verilog, run simulation, and check for TEST PASSED. Includes TB static contract checking and fingerprint deduplication.',
-  FORMAL_VERIFY: 'Generate SVA properties, convert to Yosys SBY format, run formal property checking. Includes CDC heuristic analysis.',
-  COVERAGE_CHECK: 'Run coverage analysis with Verilator or Icarus backend. Compare against profile-based thresholds (line, branch, toggle, functional). Anti-regression guard restores best TB on coverage drop.',
+  INIT: 'Create workspace directory structure, validate dependencies, and initialize build artifacts dictionary.',
+  SPEC: 'Generate a detailed architecture specification from the natural-language prompt, including module interfaces, FSM descriptions, and clock/reset requirements.',
+  RTL_GEN: 'Generate synthesizable RTL (SystemVerilog or Verilog-2005) from the architecture spec using multi-agent collaboration. Falls back to template library when available.',
+  RTL_FIX: 'Run static analysis, pre-synthesis semantic checks, and iterative auto-repair. Supports strategy pivot (SV → Verilog-2005) when fixes stall.',
+  VERIFICATION: 'Generate self-checking testbenches, compile, run simulation, and check for passing results. Includes static contract checking and fingerprint deduplication.',
+  FORMAL_VERIFY: 'Generate formal assertions, run formal property checking. Includes clock-domain analysis.',
+  COVERAGE_CHECK: 'Run coverage analysis against profile-based thresholds (line, branch, toggle, functional). Anti-regression guard restores best testbench on coverage drop.',
   REGRESSION: 'Generate and run multiple directed test scenarios (corner cases, reset stress, rapid fire) to verify robustness beyond basic functional verification.',
-  SDC_GEN: 'Generate SDC timing constraints from the RTL module interface. Auto-detects clock ports and applies post-processing to fix multi-port get_ports syntax.',
-  FLOORPLAN: 'LLM-driven floorplan estimation based on gate count, wire routing complexity, and PDK parameters. Produces die area and utilization targets.',
-  HARDENING: 'Generate OpenLane config.tcl and run the full RTL-to-GDSII flow inside Docker. Collects metrics.csv for convergence analysis.',
+  SDC_GEN: 'Generate SDC timing constraints from the RTL module interface. Auto-detects clock ports and applies constraint post-processing.',
+  FLOORPLAN: 'Floorplan estimation based on gate count, wire routing complexity, and PDK parameters. Produces die area and utilization targets.',
+  HARDENING: 'Generate physical design configuration and run the full RTL-to-GDSII flow. Collects metrics for convergence analysis.',
   CONVERGENCE_REVIEW: 'Analyze PPA metrics (WNS, TNS, area, power, congestion) across iteration history. Determines whether to accept, resize die, or pivot strategy.',
   ECO_PATCH: 'Apply engineering change orders — gate-level patch first, RTL micro-patch fallback. Re-enters hardening loop after successful application.',
-  SIGNOFF: 'Multi-dimensional check: DRC/LVS compliance, STA timing closure, power/IR-drop analysis, logic equivalence checking, and coverage re-validation.',
+  SIGNOFF: 'Multi-dimensional check: DRC/LVS compliance, STA timing closure, power/IR-drop analysis, equivalence checking, and coverage re-validation.',
   SUCCESS: 'Build completed — all quality gates passed. GDSII, metrics, and documentation artifacts are finalized.',
   FAIL: 'Build terminated — one or more quality gates failed after exhausting retry budgets.',
 };

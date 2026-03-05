@@ -98,7 +98,7 @@ const App = () => {
           >
             {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
           </button>
-          <div className="app-version">v4.0 · Multi-Agent · 2026</div>
+          <div className="app-version">AgentIC · 2026</div>
         </div>
       </aside>
 
@@ -116,8 +116,8 @@ const App = () => {
                 <h2 className="home-hero-title">Autonomous Chip Design Studio</h2>
                 <p className="home-hero-desc">
                   From natural language to fabrication-ready GDSII — powered by multi-agent
-                  collaboration, structured spec decomposition, self-healing loops, and
-                  15-stage autonomous pipeline.
+                  collaboration, intelligent specification analysis, self-healing loops, and
+                  a fully autonomous pipeline.
                 </p>
               </div>
 
@@ -125,7 +125,7 @@ const App = () => {
                 <div className="home-kpi">{designs.length}<span>Designs</span></div>
                 <div className="home-kpi">15<span>Pipeline Stages</span></div>
                 <div className="home-kpi">5<span>Core Modules</span></div>
-                <div className="home-kpi">12<span>AI Agents</span></div>
+                <div className="home-kpi">AI<span>Agents</span></div>
               </div>
 
               <div className="home-section">
@@ -133,33 +133,33 @@ const App = () => {
                 <div className="home-agent-grid">
                   <div className="agent-card">
                     <div className="agent-icon">🏗️</div>
-                    <div className="agent-name">ArchitectModule</div>
-                    <div className="agent-desc">Spec → Structured JSON (SID) contract</div>
+                    <div className="agent-name">Architect</div>
+                    <div className="agent-desc">Specification analysis and structured design decomposition</div>
                   </div>
                   <div className="agent-card">
                     <div className="agent-icon">💻</div>
                     <div className="agent-name">RTL Designer + Reviewer</div>
-                    <div className="agent-desc">Collaborative 2-agent Crew with tools</div>
+                    <div className="agent-desc">Multi-agent collaborative generation</div>
                   </div>
                   <div className="agent-card">
                     <div className="agent-icon">🧪</div>
                     <div className="agent-name">TB Designer</div>
-                    <div className="agent-desc">Verilator-safe flat procedural TBs</div>
+                    <div className="agent-desc">Automated testbench generation and validation</div>
                   </div>
                   <div className="agent-card">
                     <div className="agent-icon">🔍</div>
                     <div className="agent-name">Error Analyst</div>
-                    <div className="agent-desc">Multi-class failure diagnosis (A–E)</div>
+                    <div className="agent-desc">Intelligent failure classification</div>
                   </div>
                   <div className="agent-card">
                     <div className="agent-icon">🔄</div>
-                    <div className="agent-name">SelfReflectPipeline</div>
-                    <div className="agent-desc">Convergence-aware hardening retry</div>
+                    <div className="agent-name">Self-Healing Engine</div>
+                    <div className="agent-desc">Convergence-aware optimization and recovery</div>
                   </div>
                   <div className="agent-card">
                     <div className="agent-icon">🧠</div>
-                    <div className="agent-name">DeepDebugger</div>
-                    <div className="agent-desc">FVDebug causal graphs + for-and-against</div>
+                    <div className="agent-name">Deep Debugger</div>
+                    <div className="agent-desc">Causal failure analysis</div>
                   </div>
                 </div>
               </div>
@@ -168,15 +168,15 @@ const App = () => {
                 <h3 className="home-section-title">Pipeline Flow</h3>
                 <div className="pipeline-flow">
                   {[
-                    { icon: '📐', label: 'SPEC', sub: 'SID Decompose' },
-                    { icon: '💻', label: 'RTL_GEN', sub: '2-Agent Crew' },
-                    { icon: '🔨', label: 'RTL_FIX', sub: 'Lint + Rigor' },
-                    { icon: '🧪', label: 'VERIFY', sub: 'Sim + TB Gate' },
-                    { icon: '📊', label: 'FORMAL', sub: 'SVA + SBY' },
-                    { icon: '📈', label: 'COVERAGE', sub: 'Anti-regress' },
+                    { icon: '📐', label: 'SPEC', sub: 'Spec Analysis' },
+                    { icon: '💻', label: 'RTL_GEN', sub: 'RTL Generation' },
+                    { icon: '🔨', label: 'RTL_FIX', sub: 'Code Quality' },
+                    { icon: '🧪', label: 'VERIFY', sub: 'Functional Verify' },
+                    { icon: '📊', label: 'FORMAL', sub: 'Formal Verify' },
+                    { icon: '📈', label: 'COVERAGE', sub: 'Coverage' },
                     { icon: '🗺️', label: 'FLOOR', sub: 'Floorplan' },
-                    { icon: '🏗️', label: 'HARDEN', sub: 'Self-Reflect' },
-                    { icon: '✅', label: 'SIGNOFF', sub: 'DRC/LVS/STA' },
+                    { icon: '🏗️', label: 'HARDEN', sub: 'Optimization' },
+                    { icon: '✅', label: 'SIGNOFF', sub: 'Signoff' },
                   ].map((s, i) => (
                     <div className="pipeline-stage" key={s.label}>
                       <div className="pipeline-stage-icon">{s.icon}</div>
@@ -197,7 +197,7 @@ const App = () => {
                   </div>
                   <div className="quickstart-step">
                     <div className="quickstart-num">2</div>
-                    <div>Watch 12 AI agents build it through 15 stages</div>
+                    <div>Watch AI agents autonomously build and verify your chip</div>
                   </div>
                   <div className="quickstart-step">
                     <div className="quickstart-num">3</div>

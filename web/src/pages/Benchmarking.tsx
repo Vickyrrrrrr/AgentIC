@@ -28,22 +28,22 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
                         </tr>
                         <tr>
                             <td>Spec Decomposition</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>ArchitectModule SID (automated)</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Automated specification analysis</td>
                             <td>Manual architecture review (weeks)</td>
                         </tr>
                         <tr>
                             <td>Verification Methodology</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Multi-agent diagnosis (5-class)</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Intelligent multi-class diagnosis</td>
                             <td>Manual waveform debugging</td>
                         </tr>
                         <tr>
                             <td>Agent Collaboration</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>12 agents with tools + Crews</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Multi-agent collaborative pipeline</td>
                             <td>Siloed engineer teams</td>
                         </tr>
                         <tr>
                             <td>Self-Healing</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>SelfReflectPipeline + convergence</td>
+                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Convergence-aware automated recovery</td>
                             <td>Manual iteration</td>
                         </tr>
                         <tr>
@@ -71,35 +71,29 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
                     <thead>
                         <tr>
                             <th>Module</th>
-                            <th>Based On</th>
-                            <th>Stage</th>
+                            <th>Capability</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td style={{ fontWeight: 600 }}>ArchitectModule</td>
-                            <td>Spec2RTL-Agent</td>
-                            <td>SPEC → SID JSON decomposition</td>
+                            <td style={{ fontWeight: 600 }}>Architect</td>
+                            <td>Natural language specification decomposition and structured contract generation</td>
                         </tr>
                         <tr>
-                            <td style={{ fontWeight: 600 }}>ReActAgent</td>
-                            <td>Yao et al., 2023</td>
-                            <td>Thought→Action→Observation loops</td>
+                            <td style={{ fontWeight: 600 }}>Reasoning Agent</td>
+                            <td>Iterative reasoning with observation-driven action planning</td>
                         </tr>
                         <tr>
-                            <td style={{ fontWeight: 600 }}>SelfReflectPipeline</td>
-                            <td>Self-Reflection Retry</td>
-                            <td>HARDENING with convergence tracking</td>
+                            <td style={{ fontWeight: 600 }}>Self-Healing Pipeline</td>
+                            <td>Convergence-aware retry with metric-driven optimization</td>
                         </tr>
                         <tr>
-                            <td style={{ fontWeight: 600 }}>DeepDebuggerModule</td>
-                            <td>FVDebug</td>
-                            <td>Formal — causal graphs + For-and-Against</td>
+                            <td style={{ fontWeight: 600 }}>Deep Debugger</td>
+                            <td>Causal failure analysis with multi-perspective reasoning</td>
                         </tr>
                         <tr>
-                            <td style={{ fontWeight: 600 }}>WaveformExpertModule</td>
-                            <td>VerilogCoder</td>
-                            <td>VCD + AST back-trace diagnosis</td>
+                            <td style={{ fontWeight: 600 }}>Waveform Analyst</td>
+                            <td>Signal-level diagnostic analysis and root cause identification</td>
                         </tr>
                     </tbody>
                 </table>
