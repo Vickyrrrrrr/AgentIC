@@ -10,9 +10,117 @@ app_port: 7860
 
 # AgentIC
 
-AgentIC is an autonomous digital design pipeline that takes a natural-language chip specification and drives it through RTL generation, verification, formal checks, coverage, regression, and optional physical implementation. The system is built as a gated flow around standard EDA tools and AI-assisted generation and debugging.
+AgentIC is an autonomous RTL-to-GDSII pipeline. Give it a natural-language chip specification — it generates RTL, writes testbenches, runs simulation, formal verification, coverage, and regression, and optionally drives physical implementation through GDSII hardening. Every stage is AI-assisted, EDA-tool-verified, and gated behind a Human-in-the-Loop approval checkpoint.
 
-This README is written for both technical readers and non-specialists. It explains what the system does, what the build stages mean, and what the repository contains, without exposing internal proprietary logic.
+## How It Runs
+
+AgentIC is deployed as a Docker container on HuggingFace Spaces. The backend is a FastAPI server (`server/api.py`) running on port 7860. The frontend is a React app (`web/`) that connects to it via HTTP and Server-Sent Events.
+
+```
+Browser (React frontend)
+    │  HTTP + SSE (real-time streaming)
+    ▼
+FastAPI  — uvicorn server.api:app :7860   ← HuggingFace Space
+    │
+    ├── CrewAI agents  →  LLM (NVIDIA API)   ← remote call
+    └── EDA tools (iverilog, verilator, yosys, sby)  ← installed in Docker
+```
+
+## Build Stages
+
+| Stage | What happens |
+|---|---|
+| **SPEC** | LLM structures the natural-language description into a hardware spec |
+| **RTL_GEN** | Designer agent generates synthesizable Verilog |
+| **RTL_FIX** | Syntax errors are caught and repaired in a repair loop |
+| **VERIFICATION** | Testbench agent writes a testbench; iverilog/verilator runs simulation |
+| **FORMAL_VERIFY** | yosys + sby runs bounded model checking on the RTL |
+| **COVERAGE_CHECK** | Verilator coverage analysis; fails if below threshold |
+| **REGRESSION** | Multi-seed regression run across corner cases |
+| **SDC_GEN** | Timing constraints file generated |
+| **FLOORPLAN** | *(requires skip_openlane: false)* OpenLane floorplanning |
+| **HARDENING** | *(requires skip_openlane: false)* GDSII hardening |
+| **SIGNOFF** | *(requires skip_openlane: false)* DRC/LVS sign-off |
+| **SUCCESS** | All gates passed; artifacts available |
+
+## Human-in-the-Loop (HITL)
+
+Before physical implementation begins (FLOORPLAN), the build pauses and sends an `approval_required` event over the SSE stream. The Human-in-the-Loop Build page in the frontend shows the RTL summary, verification results, and formal proof status. You approve or reject before hardening starts.
+
+- **Approve** → build continues into FLOORPLAN → HARDENING → SIGNOFF
+- **Reject** → build stops with a full failure record
+
+To run RTL-only (no physical stages, no HITL pause), set `skip_openlane: true` in the build request. This is the default on HuggingFace since OpenLane requires a full PDK installation.
+
+## EDA Tools
+
+All EDA tools run inside the Docker container:
+
+| Tool | Installed via | Used for |
+|---|---|---|
+| `iverilog` | apt | Verilog compilation + simulation |
+| `verilator` | apt | Coverage analysis |
+| `yosys` | apt | Synthesis + formal prep |
+| `sby` (SymbiYosys) | built from source | Formal verification |
+
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/build` | Start a build job |
+| `GET` | `/build/stream/{job_id}` | Real-time SSE event stream |
+| `GET` | `/build/status/{job_id}` | Job status |
+| `GET` | `/build/result/{job_id}` | Final artifacts |
+| `GET` | `/approval/status` | Check if waiting for HITL |
+| `POST` | `/approve` | Approve pending stage |
+| `POST` | `/reject` | Reject pending stage |
+| `GET` | `/designs` | List completed designs |
+| `GET` | `/metrics/{design_name}` | Physical metrics for a design |
+
+Interactive docs: `https://huggingface.co/spaces/vxkyyy/AgentIC` → `/docs`
+
+## Deployment
+
+AgentIC is deployed to HuggingFace Spaces via Docker. Every push to `main` on GitHub automatically deploys via GitHub Actions.
+
+See [docs/DEPLOY_HUGGINGFACE.md](docs/DEPLOY_HUGGINGFACE.md) for the full deployment guide, CI/CD explanation, and HITL operational details.
+
+## Local Development
+
+```bash
+# Build and run the backend locally
+docker build -t agentic:local .
+docker compose up
+
+# API available at http://localhost:7860
+# Docs at http://localhost:7860/docs
+```
+
+```bash
+# Run the frontend (separate process)
+cd web
+npm install
+npm run dev
+# Frontend at http://localhost:5173
+```
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in your keys:
+
+```bash
+cp .env.example .env
+# Edit .env — set NVIDIA_API_KEY at minimum
+```
+
+| Variable | Required | Description |
+|---|---|---|
+| `NVIDIA_API_KEY` | Yes | Cloud LLM API key |
+| `NVIDIA_MODEL` | No | Default: `meta/llama-3.3-70b-instruct` |
+| `NVIDIA_BASE_URL` | No | Default: `https://integrate.api.nvidia.com/v1` |
+| `GROQ_API_KEY` | No | Optional fallback LLM |
+| `LLM_MODEL` | No | Local Ollama model override |
+| `LLM_BASE_URL` | No | Local LLM endpoint |
 
 ## What AgentIC Actually Does
 
