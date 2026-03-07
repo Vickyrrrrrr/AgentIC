@@ -1,0 +1,72 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Git
+.git/
+.gitignore
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+.venv-agentic/
+venv/
+env/
+agentic_env/
+
+# Benchmark results (large data, not needed at runtime)
+benchmark/results/
+
+# SymbiYosys workdirs
+*.sby
+**/*.sby
+**/workdir/
+**/*_workdir/
+
+# Verilator object directories
+obj_dir/
+**/obj_dir/
+
+# OpenLane designs (skip entirely)
+OpenLane/
+designs/
+
+# IDE and OS files
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Node / web build artifacts
+web/node_modules/
+web/dist/
+client/node_modules/
+client/dist/
+
+# Large artifacts not needed at runtime
+artifacts/*.gds
+oss-cad-suite/
+
+# Docs and non-runtime
+docs/
+training/
+
+# Log files
+*.log
+run_log.txt
+
+# Test files
+tests/__pycache__/

@@ -1,3 +1,13 @@
+---
+title: AgentIC
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 7860
+---
+
 # AgentIC
 
 AgentIC is an autonomous digital design pipeline that takes a natural-language chip specification and drives it through RTL generation, verification, formal checks, coverage, regression, and optional physical implementation. The system is built as a gated flow around standard EDA tools and AI-assisted generation and debugging.

@@ -1,0 +1,15 @@
+services:
+  agentic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentic:local
+    container_name: agentic_local
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./training:/app/training
+    restart: unless-stopped
