@@ -155,7 +155,11 @@ export const HumanInLoopBuild = () => {
             setPhase('building');
             startStreaming(job_id);
         } catch (e: any) {
-            setError(e?.response?.data?.detail || 'Failed to start build. Is the backend running?');
+            if (e?.code === 'ERR_NETWORK' || !e?.response) {
+                setError('Backend is offline. Start the server with: uvicorn server.api:app --port 7860');
+            } else {
+                setError(e?.response?.data?.detail || 'Build failed. Check the backend logs.');
+            }
         }
     };
 
