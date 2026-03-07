@@ -26,7 +26,7 @@ const App = () => {
   }, [theme]);
 
   useEffect(() => {
-    const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+    const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
     axios.get(`${API_BASE_URL}/designs`)
       .then(res => {
         const data = res.data?.designs || [];

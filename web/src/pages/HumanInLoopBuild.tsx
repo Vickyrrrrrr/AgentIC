@@ -6,7 +6,7 @@ import { StageProgressBar } from '../components/StageProgressBar';
 import { ApprovalCard } from '../components/ApprovalCard';
 import '../hitl.css';
 
-const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
 
 const PIPELINE_STAGES = [
     'INIT', 'SPEC', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'FORMAL_VERIFY',

@@ -5,7 +5,7 @@ import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 
-const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
 
 type Phase = 'prompt' | 'building' | 'done';
 

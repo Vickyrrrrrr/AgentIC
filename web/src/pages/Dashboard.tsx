@@ -17,7 +17,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ selectedDesign }) => {
         if (!selectedDesign) return;
         setLoading(true);
 
-        const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+        const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
 
         // Fetch Quick Metrics
         axios.get(`${API_BASE_URL}/metrics/${selectedDesign}`)
