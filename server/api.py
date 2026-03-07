@@ -12,12 +12,23 @@ import glob
 import threading
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from server.approval import approval_manager
+from server.auth import (
+    AUTH_ENABLED,
+    check_build_allowed,
+    encrypt_api_key,
+    get_current_user,
+    get_llm_key_for_user,
+    record_build_failure,
+    record_build_start,
+    record_build_success,
+)
+from server.billing import router as billing_router
 from server.stage_summary import (
     build_stage_complete_payload,
     get_next_stage,
@@ -34,6 +45,7 @@ if src_path not in sys.path:
 
 # ─── App ─────────────────────────────────────────────────────────────
 app = FastAPI(title="AgentIC Backend API", version="3.0.0")
+app.include_router(billing_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -78,9 +90,11 @@ STAGE_META: Dict[str, Dict[str, str]] = {
 }
 
 
-def _get_llm():
+def _get_llm(byok_api_key: str = None):
     """Mirrors CLI's get_llm() — tries cloud first, falls back to local.
     Priority: NVIDIA Nemotron → GLM5 Cloud → VeriReason Local
+
+    If byok_api_key is provided (BYOK plan), it overrides the cloud config key.
     """
     from agentic.config import CLOUD_CONFIG, LOCAL_CONFIG
     from crewai import LLM
@@ -91,7 +105,7 @@ def _get_llm():
     ]
 
     for name, cfg in configs:
-        key = cfg.get("api_key", "")
+        key = byok_api_key if (byok_api_key and "Cloud" in name) else cfg.get("api_key", "")
         # Skip cloud configs with no valid key
         if "Cloud" in name and (not key or key.strip() in ("", "mock-key", "NA")):
             continue
@@ -300,7 +314,8 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
                 _emit_agent_thought(job_id, agent_name, thought_type, message, state)
 
         # Use smart LLM selection: Cloud first (Nemotron → GLM5) → Local fallback
-        llm, llm_name = _get_llm()
+        byok_key = JOB_STORE[job_id].get("byok_key")
+        llm, llm_name = _get_llm(byok_api_key=byok_key)
         _emit_event(job_id, "checkpoint", "INIT", f"🤖 Compute engine ready", step=1)
 
         orchestrator = BuildOrchestrator(
@@ -367,6 +382,13 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         JOB_STORE[job_id]["result"] = result
         JOB_STORE[job_id]["status"] = "done" if success else "failed"
 
+        # ── Record build outcome in Supabase ───────────────────────
+        user_profile = JOB_STORE[job_id].get("user_profile")
+        if success:
+            record_build_success(user_profile, job_id)
+        else:
+            record_build_failure(job_id)
+
         final_type = "done" if success else "error"
         final_msg = "✅ Chip build completed successfully!" if success else "❌ Build failed. See logs for details."
         _emit_event(job_id, final_type, orchestrator.state.name, final_msg, step=TOTAL_STEPS)
@@ -380,6 +402,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         JOB_STORE[job_id]["status"] = "failed"
         JOB_STORE[job_id]["result"] = {"error": str(e), "traceback": err}
         _emit_event(job_id, "error", "FAIL", f"💥 Critical error: {str(e)}", step=0)
+        record_build_failure(job_id)
     finally:
         # Cleanup approval gates
         design_name = JOB_STORE.get(job_id, {}).get("design_name", "")
@@ -785,6 +808,26 @@ def read_root():
     return {"message": "AgentIC API is online", "version": "3.0.0"}
 
 
+@app.get("/health")
+def health_check():
+    """Health probe — verifies the LLM backend is reachable."""
+    from agentic.config import CLOUD_CONFIG, LOCAL_CONFIG
+    llm_ok = False
+    llm_name = "none"
+    try:
+        _, llm_name = _get_llm()
+        llm_ok = True
+    except Exception:
+        pass
+    return {
+        "status": "ok" if llm_ok else "degraded",
+        "llm_backend": llm_name,
+        "llm_ok": llm_ok,
+        "cloud_key_set": bool(CLOUD_CONFIG.get("api_key", "").strip()),
+        "version": "3.0.0",
+    }
+
+
 @app.get("/pipeline/schema")
 def get_pipeline_schema():
     """Canonical pipeline schema for frontend timeline rendering."""
@@ -886,8 +929,15 @@ def get_doc_content(doc_id: str):
 
 
 @app.post("/build")
-def trigger_build(req: BuildRequest):
-    """Start a new chip build. Returns job_id immediately."""
+async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_user)):
+    """Start a new chip build. Returns job_id immediately.
+
+    When auth is enabled, checks plan quota and uses BYOK key if applicable.
+    """
+    # ── Auth guard: check plan + build count ──
+    check_build_allowed(profile)
+    byok_key = get_llm_key_for_user(profile)
+
     # Sanitize design name — Verilog identifiers cannot start with a digit
     import re as _re
     design_name = req.design_name.strip().lower()
@@ -908,9 +958,14 @@ def trigger_build(req: BuildRequest):
         "events": [],
         "result": {},
         "created_at": int(time.time()),
+        "user_profile": profile,
+        "byok_key": byok_key,
     }
 
     req.design_name = design_name
+
+    # Record build start in Supabase
+    record_build_start(profile, job_id, design_name)
 
     thread = threading.Thread(
         target=_run_agentic_build,
@@ -1190,3 +1245,39 @@ def _classify_artifact(filename: str) -> str:
         '.csv': 'report',
     }
     return classifications.get(ext, 'other')
+
+
+# ─── Auth & Profile Routes ──────────────────────────────────────────
+class SetApiKeyRequest(BaseModel):
+    api_key: str
+
+
+@app.get("/profile")
+async def get_profile(profile: dict = Depends(get_current_user)):
+    """Return the authenticated user's profile (plan, build count, etc.)."""
+    if profile is None:
+        return {"auth_enabled": False}
+    return {
+        "auth_enabled": True,
+        "id": profile["id"],
+        "email": profile.get("email"),
+        "full_name": profile.get("full_name"),
+        "plan": profile.get("plan", "free"),
+        "successful_builds": profile.get("successful_builds", 0),
+        "has_byok_key": bool(profile.get("llm_api_key")),
+    }
+
+
+@app.post("/profile/api-key")
+async def set_byok_key(req: SetApiKeyRequest, profile: dict = Depends(get_current_user)):
+    """Store an encrypted LLM API key for BYOK plan users."""
+    if profile is None:
+        raise HTTPException(status_code=403, detail="Auth not enabled")
+    if profile.get("plan") != "byok":
+        raise HTTPException(status_code=400, detail="Only BYOK plan users can set an API key")
+
+    from server.auth import _supabase_update
+    encrypted = encrypt_api_key(req.api_key)
+    _supabase_update("profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted})
+    return {"success": True, "message": "API key stored securely"}
+

@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
-import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-
-const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
+import { api } from '../api';
 
 interface DocItem {
   id: string;
@@ -66,9 +64,9 @@ export const Documentation = () => {
     const loadIndex = async () => {
       try {
         const [docsRes, optionsRes, schemaRes] = await Promise.all([
-          axios.get(`${API}/docs/index`),
-          axios.get(`${API}/build/options`),
-          axios.get(`${API}/pipeline/schema`),
+          api.get(`/docs/index`),
+          api.get(`/build/options`),
+          api.get(`/pipeline/schema`),
         ]);
         const docsData: DocItem[] = docsRes.data?.docs || [];
         setDocs(docsData);
@@ -88,7 +86,7 @@ export const Documentation = () => {
   useEffect(() => {
     if (!selectedDoc) return;
     setLoading(true);
-    axios.get(`${API}/docs/content/${selectedDoc}`)
+    api.get(`/docs/content/${selectedDoc}`)
       .then((res) => {
         setDocTitle(res.data?.title || selectedDoc);
         setContent(res.data?.content || 'No content available.');

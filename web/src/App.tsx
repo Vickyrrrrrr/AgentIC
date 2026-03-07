@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import axios from 'axios';
 import { Dashboard } from './pages/Dashboard';
 import { DesignStudio } from './pages/DesignStudio';
 import { HumanInLoopBuild } from './pages/HumanInLoopBuild';
 import { Benchmarking } from './pages/Benchmarking';
 import { Fabrication } from './pages/Fabrication';
 import { Documentation } from './pages/Documentation';
+import { api } from './api';
 import './index.css';
 
 const App = () => {
@@ -17,8 +17,7 @@ const App = () => {
     return saved === 'dark' ? 'dark' : 'light';
   });
 
-  // Bypass Ngrok browser warning for all Axios requests
-  axios.defaults.headers.common['ngrok-skip-browser-warning'] = 'true';
+
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -26,8 +25,7 @@ const App = () => {
   }, [theme]);
 
   useEffect(() => {
-    const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
-    axios.get(`${API_BASE_URL}/designs`)
+    api.get('/designs')
       .then(res => {
         const data = res.data?.designs || [];
         setDesigns(data);

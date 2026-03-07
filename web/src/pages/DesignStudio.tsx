@@ -1,11 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import axios from 'axios';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
-
-const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
+import { api, API_BASE } from '../api';
 
 type Phase = 'prompt' | 'building' | 'done';
 
@@ -80,7 +78,7 @@ export const DesignStudio = () => {
         if (!prompt.trim()) return;
         setError('');
         try {
-            const res = await axios.post(`${API}/build`, {
+            const res = await api.post(`/build`, {
                 design_name: designName || slugify(prompt),
                 description: prompt,
                 skip_openlane: skipOpenlane,
@@ -123,7 +121,7 @@ export const DesignStudio = () => {
         // (server replays all events from the beginning on each connection)
         setEvents([]);
 
-        fetchEventSource(`${API}/build/stream/${jid}`, {
+        fetchEventSource(`${API_BASE}/build/stream/${jid}`, {
             method: 'GET',
             headers: {
                 'ngrok-skip-browser-warning': 'true',
@@ -160,7 +158,7 @@ export const DesignStudio = () => {
     const fetchResult = async (jid: string, status: string) => {
         setJobStatus(status === 'done' ? 'done' : 'failed');
         try {
-            const res = await axios.get(`${API}/build/result/${jid}`);
+            const res = await api.get(`/build/result/${jid}`);
             setResult(res.data.result);
         } catch { /* result might not exist if failed early */ }
         setPhase('done');
@@ -190,7 +188,7 @@ export const DesignStudio = () => {
         if ('Notification' in window && Notification.permission === 'default') {
             Notification.requestPermission();
         }
-        axios.get(`${API}/pipeline/schema`)
+        api.get(`/pipeline/schema`)
             .then(res => setStageSchema(res.data?.stages || []))
             .catch(() => setStageSchema([]));
         return () => abortCtrlRef.current?.abort();

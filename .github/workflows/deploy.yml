@@ -25,5 +25,9 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote add hf https://vxkyyy:${HF_TOKEN}@huggingface.co/spaces/vxkyyy/AgentIC
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set. Go to repo Settings → Secrets → Actions → New secret"
+            exit 1
+          fi
+          git remote add hf "https://hf_user:${HF_TOKEN}@huggingface.co/spaces/vxkyyy/AgentIC"
           git push hf main --force

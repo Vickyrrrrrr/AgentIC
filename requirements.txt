@@ -10,3 +10,4 @@ streamlit-option-menu
 plotly
 streamlit-ace
 gdstk
+httpx

@@ -1,8 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import axios from 'axios';
-
-const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
+import { api } from '../api';
 
 const STATES_DISPLAY: Record<string, { label: string; icon: string }> = {
     INIT: { label: 'Initializing Workspace', icon: '🔧' },
@@ -92,7 +90,7 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
         if (!jobId || cancelling) return;
         setCancelling(true);
         try {
-            await axios.post(`${API}/build/cancel/${jobId}`);
+            await api.post(`/build/cancel/${jobId}`);
         } catch {
             setCancelling(false);
         }

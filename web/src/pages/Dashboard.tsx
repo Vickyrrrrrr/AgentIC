@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import { api } from '../api';
 
 interface DashboardProps {
     selectedDesign: string;
@@ -17,10 +17,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ selectedDesign }) => {
         if (!selectedDesign) return;
         setLoading(true);
 
-        const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
-
         // Fetch Quick Metrics
-        axios.get(`${API_BASE_URL}/metrics/${selectedDesign}`)
+        api.get(`/metrics/${selectedDesign}`)
             .then(res => {
                 if (res.data.metrics) setMetrics(res.data.metrics);
             })
@@ -29,7 +27,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ selectedDesign }) => {
             });
 
         // Fetch Full LLM Signoff Report
-        axios.get(`${API_BASE_URL}/signoff/${selectedDesign}`)
+        api.get(`/signoff/${selectedDesign}`)
             .then(res => {
                 setSignoffData({ report: res.data.report, pass: res.data.success });
             })
@@ -39,7 +37,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ selectedDesign }) => {
             .finally(() => setLoading(false));
 
         // Fetch recent jobs
-        axios.get(`${API_BASE_URL}/jobs`)
+        api.get(`/jobs`)
             .then(res => {
                 const jobs = (res.data?.jobs || [])
                     .filter((j: any) => j.design_name === selectedDesign)

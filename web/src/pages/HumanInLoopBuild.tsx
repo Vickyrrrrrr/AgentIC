@@ -1,12 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { StageProgressBar } from '../components/StageProgressBar';
 import { ApprovalCard } from '../components/ApprovalCard';
+import { api, API_BASE } from '../api';
 import '../hitl.css';
-
-const API = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
 
 const PIPELINE_STAGES = [
     'INIT', 'SPEC', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'FORMAL_VERIFY',
@@ -136,7 +134,7 @@ export const HumanInLoopBuild = () => {
         const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
         const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
         try {
-            const res = await axios.post(`${API}/build`, {
+            const res = await api.post(`/build`, {
                 design_name: designName || slugify(prompt),
                 description: prompt,
                 skip_openlane: effectiveSkipOpenlane,
@@ -169,7 +167,7 @@ export const HumanInLoopBuild = () => {
         abortCtrlRef.current = ctrl;
         setEvents([]);
 
-        fetchEventSource(`${API}/build/stream/${jid}`, {
+        fetchEventSource(`${API_BASE}/build/stream/${jid}`, {
             method: 'GET',
             headers: {
                 'ngrok-skip-browser-warning': 'true',
@@ -259,13 +257,13 @@ export const HumanInLoopBuild = () => {
     const fetchResult = async (jid: string, status: string) => {
         setJobStatus(status === 'done' ? 'done' : 'failed');
         try {
-            const res = await axios.get(`${API}/build/result/${jid}`);
+            const res = await api.get(`/build/result/${jid}`);
             setResult(res.data.result);
         } catch { /* */ }
         // On failure, fetch partial artifacts from disk
         if (status !== 'done' && designName) {
             try {
-                const artRes = await axios.get(`${API}/build/artifacts/${designName}`);
+                const artRes = await api.get(`/build/artifacts/${designName}`);
                 setPartialArtifacts(artRes.data.artifacts || []);
             } catch { /* */ }
         }
@@ -276,7 +274,7 @@ export const HumanInLoopBuild = () => {
         if (!approvalData || isSubmitting) return;
         setIsSubmitting(true);
         try {
-            await axios.post(`${API}/approve`, {
+            await api.post(`/approve`, {
                 stage: approvalData.stage_name,
                 design_name: designName,
             });
@@ -309,7 +307,7 @@ export const HumanInLoopBuild = () => {
         if (!approvalData || isSubmitting) return;
         setIsSubmitting(true);
         try {
-            await axios.post(`${API}/reject`, {
+            await api.post(`/reject`, {
                 stage: approvalData.stage_name,
                 design_name: designName,
                 feedback: feedback || undefined,
@@ -370,7 +368,7 @@ export const HumanInLoopBuild = () => {
     const handleCancel = async () => {
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         if (jobId) {
-            try { await axios.post(`${API}/build/cancel/${jobId}`); } catch { /* */ }
+            try { await api.post(`/build/cancel/${jobId}`); } catch { /* */ }
         }
         handleReset();
     };
@@ -719,7 +717,7 @@ export const HumanInLoopBuild = () => {
                                                                 {a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`}
                                                             </span>
                                                             <a
-                                                                href={`${API}/build/artifacts/${designName}/${encodeURIComponent(a.name)}`}
+                                                                href={`${API_BASE}/build/artifacts/${designName}/${encodeURIComponent(a.name)}`}
                                                                 className="hitl-fail-artifact-dl"
                                                                 download
                                                             >
