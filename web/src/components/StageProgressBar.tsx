@@ -17,6 +17,27 @@ const STAGES = [
     { key: 'SIGNOFF', label: 'Signoff' },
 ];
 
+// Brief, encouraging descriptions shown when a stage is active or just completed
+const STAGE_DESCRIPTIONS: Record<string, string> = {
+    INIT:              'Setting up build context',
+    SPEC:              'Translating your idea into chip spec',
+    RTL_GEN:           'Writing synthesizable Verilog',
+    RTL_FIX:           'Resolving any RTL issues',
+    VERIFICATION:      'Running simulation testbench',
+    FORMAL_VERIFY:     'Proving correctness mathematically',
+    COVERAGE_CHECK:    'Checking test coverage',
+    REGRESSION:        'Running regression suite',
+    SDC_GEN:           'Generating timing constraints',
+    FLOORPLAN:         'Laying out chip floorplan',
+    HARDENING:         'Physical design & routing',
+    CONVERGENCE_REVIEW:'Checking timing convergence',
+    ECO_PATCH:         'Patching for final sign-off',
+    SIGNOFF:           'Final LVS/DRC checks',
+};
+
+// Key milestones displayed with a special accent in the sidebar
+const MILESTONES = new Set(['RTL_GEN', 'VERIFICATION', 'HARDENING', 'SIGNOFF']);
+
 interface Props {
     currentStage: string;
     completedStages: Set<string>;
@@ -42,6 +63,7 @@ export const StageProgressBar: React.FC<Props> = ({
                     const isFailed = stage.key === failedStage;
                     const isWaiting = isCurrent && waitingForApproval;
                     const isSkipped = skippedStages?.has(stage.key) && !isCompleted && !isCurrent && !isFailed;
+                    const isMilestone = MILESTONES.has(stage.key);
 
                     let status = 'pending';
                     if (isSkipped) status = 'skipped';
@@ -50,8 +72,13 @@ export const StageProgressBar: React.FC<Props> = ({
                     if (isWaiting) status = 'waiting';
                     if (isFailed) status = 'failed';
 
+                    const showDesc = (isCurrent || isCompleted) && !isSkipped && !isFailed;
+
                     return (
-                        <div key={stage.key} className={`hitl-sidebar-stage hitl-stage--${status}`}>
+                        <div
+                            key={stage.key}
+                            className={`hitl-sidebar-stage hitl-stage--${status}${isMilestone ? ' hitl-stage--milestone' : ''}`}
+                        >
                             <div className="hitl-sidebar-indicator">
                                 {isCompleted && (
                                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -75,7 +102,17 @@ export const StageProgressBar: React.FC<Props> = ({
                                     <span className="hitl-sidebar-dot-empty" />
                                 )}
                             </div>
-                            <span className="hitl-sidebar-stage-name">{stage.label}</span>
+                            <div className="hitl-sidebar-stage-info">
+                                <span className="hitl-sidebar-stage-name">{stage.label}</span>
+                                {showDesc && (
+                                    <span className="hitl-sidebar-stage-desc">
+                                        {STAGE_DESCRIPTIONS[stage.key]}
+                                    </span>
+                                )}
+                            </div>
+                            {isMilestone && isCompleted && (
+                                <span className="hitl-sidebar-milestone-dot" title="Milestone reached" />
+                            )}
                         </div>
                     );
                 })}

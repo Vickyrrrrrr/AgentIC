@@ -17,12 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     yosys \
     && rm -rf /var/lib/apt/lists/*
 
-# Install SymbiYosys from source
-RUN git clone --depth 1 https://github.com/YosysHQ/sby /tmp/sby \
-    && cd /tmp/sby && make install \
-    && rm -rf /tmp/sby
+# Install SymbiYosys (try pip first, fall back to source)
+RUN pip install --no-cache-dir symbiyosys 2>/dev/null || \
+    (git clone --depth 1 https://github.com/YosysHQ/sby /tmp/sby \
+     && cd /tmp/sby && make install && rm -rf /tmp/sby) || true
 
 WORKDIR /app
+
+# Ensure module resolution works from /app
+ENV PYTHONPATH=/app
 
 # Install Python dependencies first (layer cache)
 COPY requirements.txt .
@@ -32,6 +35,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy application code
 COPY . .
+
+# Create runtime directories that the build pipeline writes into
+RUN mkdir -p /app/designs /app/artifacts
 
 # HuggingFace Spaces runs as non-root user 1000
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

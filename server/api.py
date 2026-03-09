@@ -251,11 +251,11 @@ def _repo_root() -> str:
 def _docs_index() -> Dict[str, Dict[str, str]]:
     root = _repo_root()
     return {
-        "readme": {
-            "title": "README",
+        "getting_started": {
+            "title": "Getting Started",
             "section": "Product",
-            "path": os.path.join(root, "README.md"),
-            "summary": "Full platform overview, flow, quality gates, and upgrade details.",
+            "path": os.path.join(root, "docs", "USER_GUIDE.md"),
+            "summary": "Quick-start guide — build your first chip in minutes.",
         },
         "web_guide": {
             "title": "Web App Guide",
@@ -269,11 +269,11 @@ def _docs_index() -> Dict[str, Dict[str, str]]:
             "path": os.path.join(root, "docs", "INSTALL.md"),
             "summary": "Installation and environment setup steps.",
         },
-        "user_guide": {
-            "title": "User Guide",
-            "section": "Usage",
-            "path": os.path.join(root, "docs", "USER_GUIDE.md"),
-            "summary": "Operator guide for build flows and outputs.",
+        "cloud_deploy": {
+            "title": "Cloud Deployment",
+            "section": "Setup",
+            "path": os.path.join(root, "docs", "CLOUD_DEPLOY.md"),
+            "summary": "Deploy AgentIC on HuggingFace Spaces or any cloud.",
         },
     }
 

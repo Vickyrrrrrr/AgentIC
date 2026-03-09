@@ -13,6 +13,32 @@ const PIPELINE_STAGES = [
 ];
 const TOTAL = PIPELINE_STAGES.length;
 
+// Contextual messages for the bottom status bar — what the agent is doing right now
+const STAGE_ENCOURAGEMENTS: Record<string, string> = {
+    INIT:              'Setting up your build environment…',
+    SPEC:              'Translating your description into a chip specification…',
+    RTL_GEN:           'Writing Verilog — your chip is taking shape…',
+    RTL_FIX:           'Fixing any RTL issues automatically…',
+    VERIFICATION:      'Running simulation — making sure your logic is correct…',
+    FORMAL_VERIFY:     'Proving your chip is correct with formal methods…',
+    COVERAGE_CHECK:    'Measuring how thoroughly the tests cover your design…',
+    REGRESSION:        'Running the full regression suite…',
+    SDC_GEN:           'Generating timing constraints for physical design…',
+    FLOORPLAN:         'Planning the physical layout of your chip…',
+    HARDENING:         'Running place-and-route — turning RTL into real silicon…',
+    CONVERGENCE_REVIEW:'Checking that timing is met across all corners…',
+    ECO_PATCH:         'Applying final tweaks for clean sign-off…',
+    SIGNOFF:           'Almost there — running final LVS/DRC checks…',
+};
+
+// Milestone stages that deserve a special celebration toast
+const MILESTONE_TOASTS: Record<string, { title: string; msg: string }> = {
+    RTL_GEN:   { title: 'RTL Complete', msg: 'Your chip can now run instructions. Verilog is ready.' },
+    VERIFICATION: { title: 'Verification Passed', msg: 'All simulation tests passed. Design is logically correct.' },
+    HARDENING: { title: 'Silicon Layout Done', msg: 'Place-and-route complete. Your chip has a physical form.' },
+    SIGNOFF:   { title: 'Chip Signed Off', msg: 'All checks passed. Ready for tape-out.' },
+};
+
 // Human-readable stage names
 const STAGE_LABELS: Record<string, string> = {
     INIT: 'Initialization', SPEC: 'Specification', RTL_GEN: 'RTL Generation',
@@ -120,6 +146,10 @@ export const HumanInLoopBuild = () => {
 
     // Thinking indicator (Improvement 1)
     const [thinkingData, setThinkingData] = useState<{ agent_name: string; message: string } | null>(null);
+
+    // Milestone toast: shown briefly when a key stage completes
+    const [milestoneToast, setMilestoneToast] = useState<{ title: string; msg: string } | null>(null);
+    const milestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         if (prompt.length > 8) {
@@ -297,6 +327,13 @@ export const HumanInLoopBuild = () => {
                 next.add(approvalData.stage_name);
                 return next;
             });
+            // Fire milestone toast if this is a key stage
+            const toast = MILESTONE_TOASTS[approvalData.stage_name];
+            if (toast) {
+                if (milestoneTimerRef.current) clearTimeout(milestoneTimerRef.current);
+                setMilestoneToast(toast);
+                milestoneTimerRef.current = setTimeout(() => setMilestoneToast(null), 5000);
+            }
         } catch (e: any) {
             setError(e?.response?.data?.detail || 'Failed to approve');
         }
@@ -571,6 +608,18 @@ export const HumanInLoopBuild = () => {
                         </div>
                     </header>
 
+                    {/* Milestone celebration toast */}
+                    {milestoneToast && (
+                        <div className="hitl-milestone-toast" onClick={() => setMilestoneToast(null)}>
+                            <span className="hitl-milestone-toast-icon">✦</span>
+                            <div className="hitl-milestone-toast-body">
+                                <span className="hitl-milestone-toast-title">{milestoneToast.title}</span>
+                                <span className="hitl-milestone-toast-msg">{milestoneToast.msg}</span>
+                            </div>
+                            <button className="hitl-milestone-toast-close">×</button>
+                        </div>
+                    )}
+
                     {/* Body: sidebar + main */}
                     <div className="hitl-build-body">
                         <StageProgressBar
@@ -598,8 +647,13 @@ export const HumanInLoopBuild = () => {
                     <footer className="hitl-bottombar">
                         <span className="hitl-bottombar-msg">
                             {thinkingData && <span className="hitl-thinking-pulse" />}
-                            {waitingForApproval ? 'Awaiting approval' : thinkingData ? thinkingData.message : 'Building autonomously'} · Step {stepNum} of {TOTAL}
-                            {estMinutes > 0 ? ` · ~${estMinutes} min remaining` : ''}
+                            {waitingForApproval
+                                ? 'Your review is needed — inspect the stage output above'
+                                : thinkingData
+                                    ? thinkingData.message
+                                    : (STAGE_ENCOURAGEMENTS[currentStage] || 'Building autonomously…')}
+                            {' · '}{pct}% complete
+                            {estMinutes > 0 ? ` · ~${estMinutes} min left` : ''}
                         </span>
                         <div className="hitl-bottombar-progress">
                             <div className="hitl-bottombar-track">
