@@ -18,8 +18,16 @@ interface Props {
     isSubmitting: boolean;
 }
 
-function fmt(name: string): string {
-    return name.replace(/_/g, ' ');
+const STAGE_ICONS: Record<string, string> = {
+    INIT: '⚙', SPEC: '◈', RTL_GEN: '⌨', RTL_FIX: '◪',
+    VERIFICATION: '◉', FORMAL_VERIFY: '◈', COVERAGE_CHECK: '◎',
+    REGRESSION: '↺', SDC_GEN: '⧗', FLOORPLAN: '▣',
+    HARDENING: '⬡', CONVERGENCE_REVIEW: '◎', ECO_PATCH: '⟴',
+    SIGNOFF: '✓', SUCCESS: '✦', FAIL: '✗',
+};
+
+function fmtStage(name: string): string {
+    return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 export const ApprovalCard: React.FC<Props> = ({ data, onApprove, onReject, isSubmitting }) => {
@@ -27,7 +35,10 @@ export const ApprovalCard: React.FC<Props> = ({ data, onApprove, onReject, isSub
     const [feedback, setFeedback] = useState('');
 
     const hasWarnings = data.warnings && data.warnings.length > 0;
-    const hasErrors = data.decisions?.some(d => /error|fail/i.test(d));
+    const hasErrors = data.decisions?.some((d: string) => /error|fail/i.test(d));
+    const artifactCount = data.artifacts?.length || 0;
+    const hasNext = data.next_stage_name && data.next_stage_name !== 'DONE';
+    const icon = STAGE_ICONS[data.stage_name] || '◆';
 
     const handleReject = () => {
         onReject(feedback);
@@ -36,72 +47,71 @@ export const ApprovalCard: React.FC<Props> = ({ data, onApprove, onReject, isSub
     };
 
     return (
-        <div className="hitl-approval">
-            {/* Main single-line content */}
-            <div className="hitl-approval-row">
-                <div className="hitl-approval-left">
-                    {(hasWarnings || hasErrors) && (
-                        <span
-                            className={`hitl-approval-dot ${hasErrors ? 'hitl-dot--error' : 'hitl-dot--warn'}`}
-                        />
-                    )}
-                    <span className="hitl-approval-stage">{fmt(data.stage_name)}</span>
+        <div className={`ac-card ${hasErrors ? 'ac-card--error' : hasWarnings ? 'ac-card--warn' : 'ac-card--ok'}`}>
+
+            {/* Header — stage identity */}
+            <div className="ac-header">
+                <div className="ac-stage-id">
+                    <span className="ac-stage-symbol">{icon}</span>
+                    <span className="ac-stage-label">{fmtStage(data.stage_name)}</span>
+                    {hasErrors && <span className="ac-badge ac-badge--error">Issue detected</span>}
+                    {!hasErrors && hasWarnings && <span className="ac-badge ac-badge--warn">Warning</span>}
                 </div>
-                <p className="hitl-approval-summary">
-                    {data.summary || `${fmt(data.stage_name)} completed successfully.`}
-                </p>
-                <div className="hitl-approval-actions">
-                    {!showFeedback && (
-                        <button className="hitl-fb-link" onClick={() => setShowFeedback(true)}>
-                            give feedback
-                        </button>
-                    )}
-                    <button
-                        className="hitl-continue"
-                        onClick={onApprove}
-                        disabled={isSubmitting}
-                    >
-                        {isSubmitting ? 'Continuing…' : 'Continue →'}
-                    </button>
-                </div>
+                {artifactCount > 0 && (
+                    <span className="ac-artifact-pill">
+                        {artifactCount} artifact{artifactCount !== 1 ? 's' : ''}
+                    </span>
+                )}
             </div>
 
-            {/* Inline feedback field */}
-            {showFeedback && (
-                <div className="hitl-approval-feedback">
-                    <input
-                        className="hitl-fb-input"
-                        type="text"
-                        placeholder="What should the agent do differently?"
-                        value={feedback}
-                        onChange={e => setFeedback(e.target.value)}
-                        autoFocus
-                        onKeyDown={e => {
-                            if (e.key === 'Enter') handleReject();
-                            if (e.key === 'Escape') {
-                                setShowFeedback(false);
-                                setFeedback('');
-                            }
-                        }}
-                    />
-                    <button
-                        className="hitl-reject-pill"
-                        onClick={handleReject}
-                        disabled={isSubmitting}
-                    >
-                        {isSubmitting ? 'Rejecting…' : 'Reject'}
-                    </button>
-                    <button
-                        className="hitl-fb-cancel"
-                        onClick={() => {
-                            setShowFeedback(false);
-                            setFeedback('');
-                        }}
-                    >
-                        ×
-                    </button>
+            {/* Summary — primary content */}
+            <p className="ac-summary">
+                {data.summary || `${fmtStage(data.stage_name)} completed successfully.`}
+            </p>
+
+            {/* Next stage preview */}
+            {hasNext && data.next_stage_preview && (
+                <div className="ac-next-hint">
+                    <span className="ac-next-arrow">↓</span>
+                    <span className="ac-next-text">{data.next_stage_preview}</span>
                 </div>
             )}
+
+            {/* Action footer */}
+            <div className="ac-footer">
+                {!showFeedback ? (
+                    <>
+                        <button className="ac-give-feedback" onClick={() => setShowFeedback(true)}>
+                            Give feedback
+                        </button>
+                        <button className="ac-continue-btn" onClick={onApprove} disabled={isSubmitting}>
+                            {isSubmitting ? 'Continuing…' : 'Continue'}
+                            {!isSubmitting && <span className="ac-chevron">→</span>}
+                        </button>
+                    </>
+                ) : (
+                    <div className="ac-feedback-row">
+                        <input
+                            className="ac-feedback-input"
+                            type="text"
+                            placeholder="What should the agent do differently?"
+                            value={feedback}
+                            onChange={e => setFeedback(e.target.value)}
+                            autoFocus
+                            onKeyDown={e => {
+                                if (e.key === 'Enter') handleReject();
+                                if (e.key === 'Escape') { setShowFeedback(false); setFeedback(''); }
+                            }}
+                        />
+                        <button className="ac-reject-btn" onClick={handleReject} disabled={isSubmitting}>
+                            {isSubmitting ? 'Sending…' : 'Reject & redirect'}
+                        </button>
+                        <button className="ac-cancel-btn" onClick={() => { setShowFeedback(false); setFeedback(''); }}>
+                            Cancel
+                        </button>
+                    </div>
+                )}
+            </div>
         </div>
     );
 };
