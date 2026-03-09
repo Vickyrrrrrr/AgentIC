@@ -822,19 +822,23 @@ def read_root():
 @app.get("/health")
 def health_check():
     """Health probe — verifies the LLM backend is reachable."""
-    from agentic.config import CLOUD_CONFIG, LOCAL_CONFIG
+    import traceback
+    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG
     llm_ok = False
     llm_name = "none"
+    llm_error = None
     try:
         _, llm_name = _get_llm()
         llm_ok = True
-    except Exception:
-        pass
+    except Exception as e:
+        llm_error = traceback.format_exc()
     return {
         "status": "ok" if llm_ok else "degraded",
         "llm_backend": llm_name,
         "llm_ok": llm_ok,
         "cloud_key_set": bool(CLOUD_CONFIG.get("api_key", "").strip()),
+        "groq_key_set": bool(GROQ_CONFIG.get("api_key", "").strip()),
+        "llm_error": llm_error,
         "version": "3.0.0",
     }
 

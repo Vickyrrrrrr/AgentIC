@@ -1,7 +1,8 @@
 # ── Core AI agent framework ──────────────────────────────────────────
-crewai
+crewai==1.9.3
 crewai-tools
 langchain_openai
+litellm==1.81.8
 
 # ── CLI & Logging ─────────────────────────────────────────────────────
 typer
