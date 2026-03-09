@@ -97,7 +97,11 @@ def _get_llm(byok_api_key: str = None):
     If byok_api_key is provided (BYOK plan), it overrides the cloud config key.
     """
     from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG
-    from crewai import LLM
+
+    try:
+        from crewai import LLM
+    except Exception as imp_err:
+        raise RuntimeError(f"Cannot import crewai.LLM: {imp_err}")
 
     configs = [
         ("Cloud Compute Engine", CLOUD_CONFIG),
@@ -111,18 +115,29 @@ def _get_llm(byok_api_key: str = None):
         key = byok_api_key if (byok_api_key and not is_local) else cfg.get("api_key", "")
         # Skip hosted configs that have no valid API key configured
         if not is_local and (not key or key.strip() in ("", "mock-key", "NA")):
-            backend_errors.append(f"{name}: skipped (no key)")
+            backend_errors.append(f"{name}: skipped – no API key")
             continue
         try:
-            # Use only core params — avoid extra/vendor-specific kwargs that
-            # may be rejected by crewai's pydantic model in this version
+            model = cfg["model"]
+
+            # ── Auto-prefix for OpenAI-compatible endpoints ──
+            # If a base_url is set but the model lacks a litellm provider
+            # prefix, prepend "openai/" so litellm routes it correctly.
+            _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/",
+                       "azure/", "huggingface/", "together_ai/", "mistral/")
+            if cfg.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
+                model = f"openai/{model}"
+
+            # ── Inject provider env-vars that litellm resolves internally ──
+            if model.startswith("groq/"):
+                os.environ["GROQ_API_KEY"] = key
+            if model.startswith("openai/") and cfg.get("base_url"):
+                os.environ["OPENAI_API_KEY"] = key
+
             llm_kwargs: dict = dict(
-                model=cfg["model"],
-                api_key=key if key and key not in ("NA", "") else "mock-key",
-                temperature=0.60,
-                top_p=0.95,
-                max_tokens=16384,
-                timeout=300,
+                model=model,
+                api_key=key,
+                temperature=0.6,
             )
             if cfg.get("base_url"):
                 llm_kwargs["base_url"] = cfg["base_url"]
@@ -130,7 +145,7 @@ def _get_llm(byok_api_key: str = None):
             llm = LLM(**llm_kwargs)
             return llm, name
         except Exception as e:
-            backend_errors.append(f"{name}: {type(e).__name__}: {e}")
+            backend_errors.append(f"{name} ({cfg.get('model','?')}): {type(e).__name__}: {e}")
             continue
 
     raise RuntimeError(
@@ -832,7 +847,9 @@ def health_check():
         "llm_backend": llm_name,
         "llm_ok": llm_ok,
         "cloud_key_set": bool(CLOUD_CONFIG.get("api_key", "").strip()),
+        "cloud_model": CLOUD_CONFIG.get("model", ""),
         "groq_key_set": bool(GROQ_CONFIG.get("api_key", "").strip()),
+        "groq_model": GROQ_CONFIG.get("model", ""),
         "llm_error": llm_error,
         "version": "3.0.0",
     }
