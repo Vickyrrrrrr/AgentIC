@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { API_BASE } from '../api';
 
 interface StageCompleteData {
     stage_name: string;
@@ -26,13 +27,30 @@ const STAGE_ICONS: Record<string, string> = {
     SIGNOFF: '✓', SUCCESS: '✦', FAIL: '✗',
 };
 
+const ARTIFACT_TYPE_LABELS: Record<string, string> = {
+    rtl: 'RTL', waveform: 'Waveform', layout: 'Layout',
+    constraints: 'SDC', config: 'Config', script: 'Script',
+    formal: 'Formal', log: 'Log', report: 'Report', other: 'File',
+};
+
 function fmtStage(name: string): string {
     return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-export const ApprovalCard: React.FC<Props> = ({ data, onApprove, onReject, isSubmitting }) => {
+function guessType(name: string): string {
+    const ext = name.split('.').pop()?.toLowerCase() || '';
+    const map: Record<string, string> = {
+        v: 'rtl', sv: 'rtl', vcd: 'waveform', gds: 'layout', def: 'layout',
+        sdc: 'constraints', json: 'config', tcl: 'script', sby: 'formal',
+        log: 'log', csv: 'report',
+    };
+    return map[ext] || 'other';
+}
+
+export const ApprovalCard: React.FC<Props> = ({ data, designName, onApprove, onReject, isSubmitting }) => {
     const [showFeedback, setShowFeedback] = useState(false);
     const [feedback, setFeedback] = useState('');
+    const [artifactsExpanded, setArtifactsExpanded] = useState(false);
 
     const hasWarnings = data.warnings && data.warnings.length > 0;
     const hasErrors = data.decisions?.some((d: string) => /error|fail/i.test(d));
@@ -58,9 +76,13 @@ export const ApprovalCard: React.FC<Props> = ({ data, onApprove, onReject, isSub
                     {!hasErrors && hasWarnings && <span className="ac-badge ac-badge--warn">Warning</span>}
                 </div>
                 {artifactCount > 0 && (
-                    <span className="ac-artifact-pill">
+                    <button
+                        className="ac-artifact-pill ac-artifact-toggle"
+                        onClick={() => setArtifactsExpanded(v => !v)}
+                    >
                         {artifactCount} artifact{artifactCount !== 1 ? 's' : ''}
-                    </span>
+                        <span className={`ac-artifact-chevron ${artifactsExpanded ? 'ac-artifact-chevron--open' : ''}`}>›</span>
+                    </button>
                 )}
             </div>
 
@@ -68,6 +90,34 @@ export const ApprovalCard: React.FC<Props> = ({ data, onApprove, onReject, isSub
             <p className="ac-summary">
                 {data.summary || `${fmtStage(data.stage_name)} completed successfully.`}
             </p>
+
+            {/* Artifact file list */}
+            {artifactsExpanded && data.artifacts && data.artifacts.length > 0 && (
+                <div className="ac-artifacts">
+                    {data.artifacts.map((a, i) => {
+                        const aType = guessType(a.name);
+                        return (
+                            <div key={i} className="ac-artifact-row">
+                                <span className={`ac-artifact-type ac-artifact-type--${aType}`}>
+                                    {ARTIFACT_TYPE_LABELS[aType] || aType}
+                                </span>
+                                <span className="ac-artifact-name">{a.name}</span>
+                                {a.description && (
+                                    <span className="ac-artifact-desc">{a.description}</span>
+                                )}
+                                <a
+                                    className="ac-artifact-dl"
+                                    href={`${API_BASE}/build/artifacts/${designName}/${encodeURIComponent(a.name)}`}
+                                    download
+                                    title={`Download ${a.name}`}
+                                >
+                                    ↓
+                                </a>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
 
             {/* Next stage preview */}
             {hasNext && data.next_stage_preview && (

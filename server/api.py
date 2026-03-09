@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from server.approval import approval_manager
@@ -1228,6 +1228,30 @@ def get_partial_artifacts(design_name: str):
                     })
     
     return {"design_name": design_name, "artifacts": artifacts[:50]}  # Cap at 50
+
+
+@app.get("/build/artifacts/{design_name}/{filename}")
+def download_artifact(design_name: str, filename: str):
+    """Download an individual artifact file from a design's output directory."""
+    # Sanitize filename to prevent path traversal
+    safe_name = os.path.basename(filename)
+    if safe_name != filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Search workspace designs/ first, then OpenLane designs/
+    search_dirs = [os.path.join(_repo_root(), "designs", design_name)]
+    openlane_root = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
+    search_dirs.append(os.path.join(openlane_root, "designs", design_name))
+
+    for base_dir in search_dirs:
+        if not os.path.isdir(base_dir):
+            continue
+        for root_dir, _dirs, files in os.walk(base_dir):
+            if safe_name in files:
+                fpath = os.path.join(root_dir, safe_name)
+                return FileResponse(fpath, filename=safe_name)
+
+    raise HTTPException(status_code=404, detail="Artifact not found")
 
 
 def _classify_artifact(filename: str) -> str:
