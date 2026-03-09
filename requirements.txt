@@ -1,13 +1,12 @@
+# ── Core AI agent framework ──────────────────────────────────────────
 crewai
 crewai-tools
 langchain_openai
+
+# ── CLI & Logging ─────────────────────────────────────────────────────
 typer
 rich
 python-dotenv
-streamlit
-pandas
-streamlit-option-menu
-plotly
-streamlit-ace
-gdstk
+
+# ── Server runtime ────────────────────────────────────────────────────
 httpx

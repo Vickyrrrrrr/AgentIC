@@ -938,6 +938,15 @@ async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_u
     check_build_allowed(profile)
     byok_key = get_llm_key_for_user(profile)
 
+    # ── LLM pre-flight: fail fast with a clear message ──
+    try:
+        _get_llm(byok_api_key=byok_key)
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e) + " Set NVIDIA_API_KEY in HuggingFace Space secrets.",
+        )
+
     # Sanitize design name — Verilog identifiers cannot start with a digit
     import re as _re
     design_name = req.design_name.strip().lower()
