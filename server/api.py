@@ -105,42 +105,37 @@ def _get_llm(byok_api_key: str = None):
         ("Local Compute Engine", LOCAL_CONFIG),
     ]
 
+    backend_errors: list = []
     for name, cfg in configs:
         is_local = "Local" in name
         key = byok_api_key if (byok_api_key and not is_local) else cfg.get("api_key", "")
         # Skip hosted configs that have no valid API key configured
         if not is_local and (not key or key.strip() in ("", "mock-key", "NA")):
+            backend_errors.append(f"{name}: skipped (no key)")
             continue
         try:
-            extra = {}
-            if "glm5" in cfg["model"].lower():
-                extra = {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
-
+            # Use only core params — avoid extra/vendor-specific kwargs that
+            # may be rejected by crewai's pydantic model in this version
             llm_kwargs: dict = dict(
                 model=cfg["model"],
                 api_key=key if key and key not in ("NA", "") else "mock-key",
                 temperature=0.60,
                 top_p=0.95,
-                max_completion_tokens=16384,
                 max_tokens=16384,
                 timeout=300,
             )
             if cfg.get("base_url"):
                 llm_kwargs["base_url"] = cfg["base_url"]
-            if extra:
-                llm_kwargs["extra_body"] = extra
-            # NVIDIA NIM / Ollama accept these extra sampling params; Groq does not
-            if "Groq" not in name:
-                llm_kwargs["model_kwargs"] = {"top_k": 20, "min_p": 0.0, "presence_penalty": 0, "repetition_penalty": 1}
 
             llm = LLM(**llm_kwargs)
             return llm, name
-        except Exception:
+        except Exception as e:
+            backend_errors.append(f"{name}: {type(e).__name__}: {e}")
             continue
 
     raise RuntimeError(
         "No valid LLM backend found. "
-        "Set NVIDIA_API_KEY or GROQ_API_KEY in HuggingFace Space secrets."
+        + " | ".join(backend_errors)
     )
 
 
