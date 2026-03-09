@@ -26,6 +26,12 @@ LOCAL_CONFIG = {
     "api_key": os.environ.get("LLM_API_KEY", "NA"),
 }
 
+GROQ_CONFIG = {
+    "model": os.environ.get("GROQ_MODEL", "groq/llama-3.3-70b-versatile"),
+    "base_url": "",  # litellm resolves groq routing from the model prefix
+    "api_key": os.environ.get("GROQ_API_KEY", ""),
+}
+
 # Backward-compat alias used by parts of the codebase/docs
 NVIDIA_CONFIG = CLOUD_CONFIG
 

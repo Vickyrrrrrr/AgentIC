@@ -91,46 +91,57 @@ STAGE_META: Dict[str, Dict[str, str]] = {
 
 
 def _get_llm(byok_api_key: str = None):
-    """Mirrors CLI's get_llm() — tries cloud first, falls back to local.
-    Priority: NVIDIA Nemotron → GLM5 Cloud → VeriReason Local
+    """Tries cloud backends first, then local Ollama.
+    Priority: NVIDIA Nemotron → Groq LLaMA-3.3 → VeriReason Local
 
     If byok_api_key is provided (BYOK plan), it overrides the cloud config key.
     """
-    from agentic.config import CLOUD_CONFIG, LOCAL_CONFIG
+    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG
     from crewai import LLM
 
     configs = [
-        ("Cloud Compute Engine",  CLOUD_CONFIG),
-        ("Local Compute Engine",      LOCAL_CONFIG),
+        ("Cloud Compute Engine", CLOUD_CONFIG),
+        ("Groq Compute Engine",  GROQ_CONFIG),
+        ("Local Compute Engine", LOCAL_CONFIG),
     ]
 
     for name, cfg in configs:
-        key = byok_api_key if (byok_api_key and "Cloud" in name) else cfg.get("api_key", "")
-        # Skip cloud configs with no valid key
-        if "Cloud" in name and (not key or key.strip() in ("", "mock-key", "NA")):
+        is_local = "Local" in name
+        key = byok_api_key if (byok_api_key and not is_local) else cfg.get("api_key", "")
+        # Skip hosted configs that have no valid API key configured
+        if not is_local and (not key or key.strip() in ("", "mock-key", "NA")):
             continue
         try:
             extra = {}
             if "glm5" in cfg["model"].lower():
                 extra = {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
 
-            llm = LLM(
+            llm_kwargs: dict = dict(
                 model=cfg["model"],
-                base_url=cfg["base_url"],
                 api_key=key if key and key not in ("NA", "") else "mock-key",
                 temperature=0.60,
                 top_p=0.95,
                 max_completion_tokens=16384,
                 max_tokens=16384,
                 timeout=300,
-                extra_body=extra,
-                model_kwargs={"top_k": 20, "min_p": 0.0, "presence_penalty": 0, "repetition_penalty": 1}
             )
+            if cfg.get("base_url"):
+                llm_kwargs["base_url"] = cfg["base_url"]
+            if extra:
+                llm_kwargs["extra_body"] = extra
+            # NVIDIA NIM / Ollama accept these extra sampling params; Groq does not
+            if "Groq" not in name:
+                llm_kwargs["model_kwargs"] = {"top_k": 20, "min_p": 0.0, "presence_penalty": 0, "repetition_penalty": 1}
+
+            llm = LLM(**llm_kwargs)
             return llm, name
         except Exception:
             continue
 
-    raise RuntimeError("No valid LLM backend found. Check NVIDIA_API_KEY or local Ollama.")
+    raise RuntimeError(
+        "No valid LLM backend found. "
+        "Set NVIDIA_API_KEY or GROQ_API_KEY in HuggingFace Space secrets."
+    )
 
 
 def _emit_event(job_id: str, event_type: str, state: str, message: str, step: int = 0, extra: dict = None):
@@ -944,7 +955,7 @@ async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_u
     except RuntimeError as e:
         raise HTTPException(
             status_code=503,
-            detail=str(e) + " Set NVIDIA_API_KEY in HuggingFace Space secrets.",
+            detail=str(e),
         )
 
     # Sanitize design name — Verilog identifiers cannot start with a digit
