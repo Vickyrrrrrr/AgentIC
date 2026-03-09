@@ -9,6 +9,7 @@ jobs:
   deploy:
     name: Push to HuggingFace Space
     runs-on: ubuntu-latest
+    environment: HF_TOKEN
     steps:
       - name: Checkout full history
         uses: actions/checkout@v4
@@ -23,7 +24,7 @@ jobs:
 
       - name: Push to Hugging Face Space
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF }}
         run: |
           if [ -z "$HF_TOKEN" ]; then
             echo "::error::HF_TOKEN secret is not set. Go to repo Settings → Secrets → Actions → New secret"
@@ -34,7 +35,7 @@ jobs:
 
       - name: Sync LLM secrets to HuggingFace Space
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
           NVIDIA_BASE_URL: ${{ secrets.NVIDIA_BASE_URL }}
