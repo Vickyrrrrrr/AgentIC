@@ -31,3 +31,43 @@ jobs:
           fi
           git remote add hf "https://hf_user:${HF_TOKEN}@huggingface.co/spaces/vxkyyy/AgentIC"
           git push hf main --force
+
+      - name: Sync LLM secrets to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
+          NVIDIA_BASE_URL: ${{ secrets.NVIDIA_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          HF_SPACE="vxkyyy/AgentIC"
+          API="https://huggingface.co/api/spaces/${HF_SPACE}/secrets"
+
+          set_secret() {
+            local key="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "⏭  Skipping ${key} (not set in GitHub secrets)"
+              return
+            fi
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$API" \
+              -H "Authorization: Bearer ${HF_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "[{\"key\":\"${key}\",\"value\":\"${value}\"}]")
+            if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+              echo "✓  ${key} synced to HF Space"
+            else
+              echo "::warning::Failed to sync ${key} (HTTP ${HTTP})"
+            fi
+          }
+
+          set_secret "NVIDIA_API_KEY"  "$NVIDIA_API_KEY"
+          set_secret "NVIDIA_MODEL"    "$NVIDIA_MODEL"
+          set_secret "NVIDIA_BASE_URL" "$NVIDIA_BASE_URL"
+          set_secret "LLM_API_KEY"     "$LLM_API_KEY"
+          set_secret "LLM_MODEL"       "$LLM_MODEL"
+          set_secret "LLM_BASE_URL"    "$LLM_BASE_URL"
+          set_secret "GROQ_API_KEY"    "$GROQ_API_KEY"
