@@ -1,0 +1,1 @@
+Design a synchronous FIFO with depth 8 and width 8 bits. Single clock domain. Inputs: clk, rst_n, wr_en, rd_en, wr_data (8-bit). Outputs: rd_data (8-bit), full, empty. On reset all pointers reset to zero and empty asserts. Simultaneous read and write when not full and not empty is allowed. Module name is sync_fifo.

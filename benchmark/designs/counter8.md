@@ -1,0 +1,1 @@
+Design an 8-bit synchronous counter with active-low reset and enable signal. The counter increments by 1 on every rising clock edge when enable is high. When rst_n is low the counter resets to 0 synchronously. Output is an 8-bit value called count. Module name is counter8.

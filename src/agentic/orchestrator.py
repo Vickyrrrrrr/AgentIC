@@ -33,7 +33,8 @@ from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent, get_regression_agent
 from .agents.doc_agent import get_doc_agent
 from .agents.sdc_agent import get_sdc_agent
-from .core import ArchitectModule, SelfReflectPipeline, ReActAgent, WaveformExpertModule, DeepDebuggerModule
+from . import prompts as agentic_prompts
+from .core import ArchitectModule, SelfReflectPipeline, ReActAgent, WaveformExpertModule, DeepDebuggerModule, HardwareSpecGenerator, HierarchyExpander, FeasibilityChecker, CDCAnalyzer, VerificationPlanner
 from .contracts import (
     AgentResult,
     ArtifactRef,
@@ -128,6 +129,11 @@ class BuildStrategy(enum.Enum):
 class BuildState(enum.Enum):
     INIT = "Initializing"
     SPEC = "Architectural Planning"
+    SPEC_VALIDATE = "Specification Validation"
+    HIERARCHY_EXPAND = "Hierarchy Expansion"
+    FEASIBILITY_CHECK = "Feasibility Check"
+    CDC_ANALYZE = "CDC Analysis"
+    VERIFICATION_PLAN = "Verification Planning"
     RTL_GEN = "RTL Generation"
     RTL_FIX = "RTL Syntax Fixing"
     VERIFICATION = "Verification & Testbench"
@@ -300,6 +306,16 @@ class BuildOrchestrator:
              if refined:
                 style = "bold green"
                 console.print(f"[{style}][{self.state.name}][/] {message}")
+
+    def _status(self, msg: str):
+        """Return a Rich status context manager, or a no-op when running under
+        the web server (event_sink is set).  Avoids the Rich 'Only one live
+        display may be active at once' error when the server drives the
+        orchestrator from a background thread."""
+        import contextlib
+        if self.event_sink is not None:
+            return contextlib.nullcontext()
+        return console.status(msg)
 
     def transition(self, new_state: BuildState, preserve_retries: bool = False):
         self.log(f"Transitioning: {self.state.name} -> {new_state.name}", refined=True)
@@ -808,6 +824,16 @@ class BuildOrchestrator:
                     self.do_init()
                 elif self.state == BuildState.SPEC:
                     self.do_spec()
+                elif self.state == BuildState.SPEC_VALIDATE:
+                    self.do_spec_validate()
+                elif self.state == BuildState.HIERARCHY_EXPAND:
+                    self.do_hierarchy_expand()
+                elif self.state == BuildState.FEASIBILITY_CHECK:
+                    self.do_feasibility_check()
+                elif self.state == BuildState.CDC_ANALYZE:
+                    self.do_cdc_analyze()
+                elif self.state == BuildState.VERIFICATION_PLAN:
+                    self.do_verification_plan()
                 elif self.state == BuildState.RTL_GEN:
                     self.do_rtl_gen()
                 elif self.state == BuildState.RTL_FIX:
@@ -861,7 +887,7 @@ class BuildOrchestrator:
     # --- ACTION HANDLERS ---
 
     def do_init(self):
-        with console.status("[bold green]Initializing Workspace...[/bold green]"):
+        with self._status("[bold green]Initializing Workspace...[/bold green]"):
             # Setup directories, check tools
             self.artifacts['root'] = f"{OPENLANE_ROOT}/designs/{self.name}"
             self.setup_logger() # Setup logging to file
@@ -909,126 +935,566 @@ class BuildOrchestrator:
             return
 
         self.log("Architecture Plan Generated (SID validated)", refined=True)
-        self.transition(BuildState.RTL_GEN)
+        self.transition(BuildState.SPEC_VALIDATE)
 
     def _do_spec_fallback(self):
         """Fallback spec generation using a single CrewAI agent."""
         arch_agent = Agent(
-            role='Chief System Architect',
-            goal=f'Define a robust micro-architecture for {self.name}',
-            backstory=(
-                "Veteran Silicon Architect with 20+ years spanning CPUs, DSPs, FIFOs, "
-                "crypto cores, interface bridges, and SoC peripherals. "
-                "Defines clean, complete, production-ready interfaces, FSMs, and datapaths. "
-                "Never uses placeholders or simplified approximations."
-            ),
+            role=agentic_prompts.SPEC_FALLBACK_ARCHITECT_ROLE,
+            goal=agentic_prompts.get_spec_fallback_architect_goal(self.name),
+            backstory=agentic_prompts.SPEC_FALLBACK_ARCHITECT_BACKSTORY,
             llm=self.llm,
             verbose=self.verbose
         )
         
         spec_task = Task(
-            description=(
-                f"""Create a DETAILED Micro-Architecture Specification (MAS) for the chip below.
-
-CHIP IDENTIFIER : {self.name}
-REQUIREMENT     : {self.desc}
-
-CRITICAL RULES:
-1. RTL module name MUST be exactly: {self.name}  (starts with a letter — enforced).
-2. Identify the chip family (counter / ALU / FIFO / FSM / UART / SPI / AXI / CPU / DSP / crypto / SoC).
-3. List ALL I/O ports with direction, bit-width, and purpose. Always include clk and rst_n.
-4. Define all parameters with default values (DATA_WIDTH, ADDR_WIDTH, DEPTH, etc.).
-5. For sequential designs: specify reset style (sync/async) and reset values for every register.
-6. For FSMs: enumerate all states, transitions, and output conditions.
-
-SPECIFICATION SECTIONS (Markdown):
-## Module: {self.name}
-## Chip Family
-## Port List
-## Parameters
-## Internal Signals & Registers
-## FSM States (if applicable)
-## Functional Description
-## Timing & Reset
-"""
-            ),
-            expected_output='Complete Markdown Specification with all sections filled in',
+            description=agentic_prompts.get_spec_fallback_task_description(self.name, self.desc),
+            expected_output=agentic_prompts.SPEC_FALLBACK_EXPECTED_OUTPUT,
             agent=arch_agent
         )
 
-        with console.status("[bold cyan]Architecting Chip Specification...[/bold cyan]"):
+        with self._status("[bold cyan]Architecting Chip Specification...[/bold cyan]"):
             result = Crew(agents=[arch_agent], tasks=[spec_task]).kickoff()
 
         self.artifacts['spec'] = str(result)
         self.log("Architecture Plan Generated (fallback)", refined=True)
+        self.transition(BuildState.SPEC_VALIDATE)
+
+    def do_spec_validate(self):
+        """SPEC_VALIDATE: Run the 6-stage hardware specification generator.
+
+        Takes the natural-language description and produces a rigorous
+        HardwareSpec (JSON) with:
+          1. Design classification (PROCESSOR/MEMORY/INTERFACE/etc.)
+          2. Completeness check against mandatory fields
+          3. Module decomposition with domain validation
+          4. Top-level interface specification
+          5. Behavioral contract (GIVEN/WHEN/THEN assertions)
+          6. Structured JSON output with warnings
+
+        The output enriches the existing SID and feeds verification hints
+        downstream to the testbench and formal verification stages.
+        """
+        self.log("Running rigorous hardware spec validation (6-stage pipeline)", refined=True)
+
+        try:
+            spec_gen = HardwareSpecGenerator(
+                llm=self.llm,
+                verbose=self.verbose,
+                max_retries=3,
+            )
+            pdk = self.pdk_profile.get("profile", "sky130") if isinstance(self.pdk_profile, dict) else "sky130"
+            hw_spec, issues = spec_gen.generate(
+                design_name=self.name,
+                description=self.desc,
+                target_pdk=pdk,
+            )
+
+            # Store the hardware spec artifact
+            self._set_artifact(
+                "hardware_spec",
+                hw_spec.to_json(),
+                producer="SPEC_VALIDATE",
+                consumer="RTL_GEN",
+                required=False,
+            )
+            self._set_artifact(
+                "hardware_spec_dict",
+                hw_spec.to_dict(),
+                producer="SPEC_VALIDATE",
+                consumer="VERIFICATION",
+                required=False,
+            )
+
+            # Check for rejection
+            if hw_spec.design_category == "REJECTED":
+                self.log(f"Spec REJECTED: {hw_spec.warnings}", refined=True)
+                # Don't fail — fall through with existing spec from SPEC stage
+                self.log("Proceeding with existing SID spec (validation rejected)", refined=True)
+                self.transition(BuildState.HIERARCHY_EXPAND)
+                return
+
+            # Log classification and stats
+            self.log(
+                f"Design classified as: {hw_spec.design_category} | "
+                f"{len(hw_spec.submodules)} submodules | "
+                f"{len(hw_spec.behavioral_contract)} contract assertions | "
+                f"{len(hw_spec.warnings)} warnings",
+                refined=True,
+            )
+
+            # Enrich the SID with behavioral contract verification hints
+            enrichment = spec_gen.to_sid_enrichment(hw_spec)
+            self._set_artifact(
+                "spec_enrichment",
+                enrichment,
+                producer="SPEC_VALIDATE",
+                consumer="VERIFICATION",
+            )
+
+            # Append verification hints from behavioral contract to existing spec
+            existing_spec = self.artifacts.get("spec", "")
+            if existing_spec and enrichment.get("verification_hints_from_spec"):
+                hint_section = "\n\n## Behavioral Contract (Auto-Generated Assertions)\n"
+                for hint in enrichment["verification_hints_from_spec"]:
+                    hint_section += f"  - {hint}\n"
+                if enrichment.get("spec_warnings"):
+                    hint_section += "\n## Spec Warnings\n"
+                    for w in enrichment["spec_warnings"]:
+                        hint_section += f"  - {w}\n"
+                self.artifacts["spec"] = existing_spec + hint_section
+
+            # Log any issues
+            if issues:
+                for issue in issues[:5]:  # Cap at 5
+                    self.log(f"  Spec issue: {issue}", refined=False)
+
+            # Record stage contract
+            self._record_stage_contract(
+                StageResult(
+                    stage="SPEC_VALIDATE",
+                    status=StageStatus.PASS,
+                    producer="HardwareSpecGenerator",
+                    consumable_payload={
+                        "design_category": hw_spec.design_category,
+                        "submodule_count": len(hw_spec.submodules),
+                        "contract_count": len(hw_spec.behavioral_contract),
+                        "warning_count": len(hw_spec.warnings),
+                        "issues": issues[:5],
+                    },
+                    diagnostics=issues[:5],
+                    artifacts_written=["hardware_spec", "spec_enrichment"],
+                    next_action="proceed_to_rtl_gen",
+                )
+            )
+
+            self.log("Hardware spec validation complete", refined=True)
+
+        except Exception as e:
+            self.log(f"Spec validation failed ({e}) — proceeding with existing spec", refined=True)
+            if hasattr(self, "logger"):
+                import traceback
+                self.logger.warning(f"SPEC_VALIDATE error: {traceback.format_exc()}")
+
+        self.transition(BuildState.HIERARCHY_EXPAND)
+
+    def do_hierarchy_expand(self):
+        """HIERARCHY_EXPAND: Evaluate submodule complexity and recursively expand.
+
+        Takes the HardwareSpec from SPEC_VALIDATE and determines whether any
+        sub-module is too complex for direct RTL implementation.  Complex
+        sub-modules receive their own full nested specification (ports,
+        sub-sub-modules, behavioral contracts) before RTL generation.
+
+        Complexity triggers:
+          - Pipeline / arbitration / protocol handling / cache / DMA / etc.
+          - Port count > 8
+          - Cross-category submodule (e.g. UART inside PROCESSOR)
+          - Memory > 256 bits (non-register)
+          - Ambiguous short description for non-trivial names
+
+        Maximum recursion depth: 3 levels.
+        Non-blocking: falls through to RTL_GEN on any failure.
+        """
+        self.log("Running hierarchy expansion on submodules", refined=True)
+
+        try:
+            # Retrieve hardware spec from SPEC_VALIDATE
+            hw_spec_json = self._get_artifact("hardware_spec")
+            if not hw_spec_json:
+                self.log(
+                    "No hardware_spec artifact found — skipping hierarchy expansion",
+                    refined=True,
+                )
+                self.transition(BuildState.FEASIBILITY_CHECK)
+                return
+
+            # Import HardwareSpec here to parse it
+            from .core.spec_generator import HardwareSpec as HWSpec
+
+            hw_spec = HWSpec.from_json(hw_spec_json)
+
+            # Skip expansion for REJECTED specs
+            if hw_spec.design_category == "REJECTED":
+                self.log("Spec was rejected — skipping hierarchy expansion", refined=True)
+                self.transition(BuildState.FEASIBILITY_CHECK)
+                return
+
+            # Skip expansion if there are no submodules
+            if not hw_spec.submodules:
+                self.log("No submodules to expand — skipping", refined=True)
+                self.transition(BuildState.FEASIBILITY_CHECK)
+                return
+
+            expander = HierarchyExpander(
+                llm=self.llm,
+                verbose=self.verbose,
+                max_retries=2,
+            )
+
+            result = expander.expand(hw_spec)
+
+            # Store hierarchy result
+            self._set_artifact(
+                "hierarchy_result",
+                result.to_json(),
+                producer="HIERARCHY_EXPAND",
+                consumer="RTL_GEN",
+                required=False,
+            )
+
+            # Log expansion summary
+            if result.expansion_count == 0:
+                self.log(
+                    f"No submodules required expansion — hierarchy depth 1, "
+                    f"{len(result.submodules)} submodules unchanged",
+                    refined=True,
+                )
+            else:
+                expanded_names = [
+                    s.name for s in result.submodules if s.requires_expansion
+                ]
+                self.log(
+                    f"Expanded {result.expansion_count} submodule(s): "
+                    f"{expanded_names} | hierarchy depth: {result.hierarchy_depth}",
+                    refined=True,
+                )
+
+            # Generate enrichment for downstream spec
+            enrichment = expander.to_hierarchy_enrichment(result)
+            self._set_artifact(
+                "hierarchy_enrichment",
+                enrichment,
+                producer="HIERARCHY_EXPAND",
+                consumer="RTL_GEN",
+            )
+
+            # Append hierarchy info to existing spec text
+            existing_spec = self.artifacts.get("spec", "")
+            if existing_spec and result.expansion_count > 0:
+                hier_section = "\n\n## Hierarchy Expansion (Auto-Generated)\n"
+                hier_section += f"  - Depth: {result.hierarchy_depth}\n"
+                hier_section += f"  - Expansions: {result.expansion_count}\n"
+                for sm in result.submodules:
+                    if sm.requires_expansion and sm.nested_spec:
+                        nested_subs = sm.nested_spec.get("submodules", [])
+                        nested_bc = sm.nested_spec.get("behavioral_contract", [])
+                        hier_section += (
+                            f"  - {sm.name}: {len(nested_subs)} sub-blocks, "
+                            f"{len(nested_bc)} assertions\n"
+                        )
+                if enrichment.get("consistency_fixes"):
+                    hier_section += "\n### Consistency Fixes\n"
+                    for fix in enrichment["consistency_fixes"]:
+                        hier_section += f"  - {fix}\n"
+                if enrichment.get("hierarchy_warnings"):
+                    hier_section += "\n### Hierarchy Warnings\n"
+                    for w in enrichment["hierarchy_warnings"]:
+                        hier_section += f"  - {w}\n"
+                self.artifacts["spec"] = existing_spec + hier_section
+
+            # Log warnings
+            hierarchy_warnings = [
+                w for w in result.warnings if w.startswith("HIERARCHY_WARNING")
+            ]
+            consistency_fixes = [
+                w for w in result.warnings if w.startswith("CONSISTENCY_FIX")
+            ]
+            if hierarchy_warnings:
+                for w in hierarchy_warnings:
+                    self.log(f"  ⚠ {w}", refined=True)
+            if consistency_fixes:
+                for f in consistency_fixes[:5]:
+                    self.log(f"  🔧 {f}", refined=False)
+
+            # Record stage contract
+            self._record_stage_contract(
+                StageResult(
+                    stage="HIERARCHY_EXPAND",
+                    status=StageStatus.PASS,
+                    producer="HierarchyExpander",
+                    consumable_payload={
+                        "hierarchy_depth": result.hierarchy_depth,
+                        "expansion_count": result.expansion_count,
+                        "expanded_modules": [
+                            s.name
+                            for s in result.submodules
+                            if s.requires_expansion
+                        ],
+                        "consistency_fixes": len(consistency_fixes),
+                        "hierarchy_warnings": len(hierarchy_warnings),
+                    },
+                    diagnostics=hierarchy_warnings + consistency_fixes[:5],
+                    artifacts_written=["hierarchy_result", "hierarchy_enrichment"],
+                    next_action="proceed_to_rtl_gen",
+                )
+            )
+
+            self.log("Hierarchy expansion complete", refined=True)
+
+        except Exception as e:
+            self.log(
+                f"Hierarchy expansion failed ({e}) — proceeding with flat spec",
+                refined=True,
+            )
+            if hasattr(self, "logger"):
+                import traceback
+                self.logger.warning(
+                    f"HIERARCHY_EXPAND error: {traceback.format_exc()}"
+                )
+
+        self.transition(BuildState.FEASIBILITY_CHECK)
+
+    # ── Phase 3: Feasibility Check ────────────────────────────────────
+    def do_feasibility_check(self):
+        """Evaluate Sky130/OpenLane physical design feasibility before RTL generation."""
+        self.log("Running physical design feasibility check…", refined=True)
+
+        spec_data = self.artifacts.get("hardware_spec") or self.artifacts.get("sid")
+        if not spec_data:
+            self.log("No specification found for feasibility check — skipping", refined=True)
+            self.transition(BuildState.RTL_GEN)
+            return
+
+        try:
+            if isinstance(spec_data, str):
+                spec_dict = json.loads(spec_data)
+            elif hasattr(spec_data, "to_json"):
+                spec_dict = json.loads(spec_data.to_json())
+            elif isinstance(spec_data, dict):
+                spec_dict = spec_data
+            else:
+                spec_dict = dict(spec_data)
+
+            checker = FeasibilityChecker()
+            result = checker.check(spec_dict)
+
+            self.artifacts["feasibility_result"] = result.to_json()
+
+            status = result.feasibility_status
+            self.log(
+                f"Feasibility verdict: {status} "
+                f"(total_ge={result.estimated_gate_equivalents:,}, "
+                f"warnings={len(result.feasibility_warnings)}, "
+                f"rejections={len(result.feasibility_rejections)})",
+                refined=True,
+            )
+
+            if status == "REJECT":
+                rejection_reasons = "; ".join(result.feasibility_rejections[:5])
+                self.log(
+                    f"Design REJECTED — not physically realizable on Sky130: {rejection_reasons}",
+                    refined=True,
+                )
+                self.artifacts["feasibility_enrichment"] = json.dumps({
+                    "feasibility_status": "REJECT",
+                    "rejections": result.feasibility_rejections,
+                    "warnings": result.feasibility_warnings,
+                    "total_ge": result.estimated_gate_equivalents,
+                    "floorplan_recommendation": result.recommended_floorplan_size_um,
+                })
+                self.transition(BuildState.FAIL)
+                return
+
+            enrichment = {
+                "feasibility_status": status,
+                "total_ge": result.estimated_gate_equivalents,
+                "floorplan_recommendation": result.recommended_floorplan_size_um,
+                "warnings": result.feasibility_warnings,
+                "macro_requirements": [
+                    m.to_dict() for m in result.memory_macros_required
+                ],
+            }
+            self.artifacts["feasibility_enrichment"] = json.dumps(enrichment)
+
+            if status == "WARN":
+                self.log(
+                    f"Feasibility WARNINGS detected — proceeding with caveats: "
+                    f"{'; '.join(result.feasibility_warnings[:3])}",
+                    refined=True,
+                )
+
+        except Exception as e:
+            self.log(
+                f"Feasibility check failed ({e}) — proceeding to RTL generation",
+                refined=True,
+            )
+            if hasattr(self, "logger"):
+                import traceback
+                self.logger.warning(
+                    f"FEASIBILITY_CHECK error: {traceback.format_exc()}"
+                )
+
+        self.transition(BuildState.CDC_ANALYZE)
+
+    # ── Phase 4: CDC Analysis ───────────────────────────────────────
+    def do_cdc_analyze(self):
+        """Identify clock domain crossings and assign synchronization strategies."""
+        self.log("Running clock domain crossing analysis…", refined=True)
+
+        spec_data = self.artifacts.get("hardware_spec") or self.artifacts.get("sid")
+        if not spec_data:
+            self.log("No specification found for CDC analysis — skipping", refined=True)
+            self.transition(BuildState.RTL_GEN)
+            return
+
+        try:
+            if isinstance(spec_data, str):
+                spec_dict = json.loads(spec_data)
+            elif hasattr(spec_data, "to_json"):
+                spec_dict = json.loads(spec_data.to_json())
+            elif isinstance(spec_data, dict):
+                spec_dict = spec_data
+            else:
+                spec_dict = dict(spec_data)
+
+            # Optional hierarchy data for richer analysis
+            hierarchy_data = None
+            hr_raw = self.artifacts.get("hierarchy_result")
+            if hr_raw:
+                if isinstance(hr_raw, str):
+                    hierarchy_data = json.loads(hr_raw)
+                elif isinstance(hr_raw, dict):
+                    hierarchy_data = hr_raw
+
+            analyzer = CDCAnalyzer()
+            result = analyzer.analyze(spec_dict, hierarchy_data)
+
+            self.artifacts["cdc_result"] = result.to_json()
+
+            cdc_status = result.cdc_status
+            self.log(
+                f"CDC verdict: {cdc_status} "
+                f"(domains={result.domain_count}, "
+                f"crossings={len(result.crossing_signals)}, "
+                f"submodules_added={len(result.cdc_submodules_added)}, "
+                f"warnings={len(result.cdc_warnings)}, "
+                f"unresolved={len(result.cdc_unresolved)})",
+                refined=True,
+            )
+
+            if cdc_status == "SINGLE_DOMAIN":
+                self.log("Single clock domain — no CDC synchronizers needed", refined=True)
+                self.artifacts["cdc_enrichment"] = json.dumps({
+                    "cdc_status": "SINGLE_DOMAIN",
+                    "domain_count": result.domain_count,
+                })
+
+            elif cdc_status == "UNRESOLVED":
+                unresolved_summary = "; ".join(result.cdc_unresolved[:5])
+                self.log(
+                    f"CDC UNRESOLVED — {len(result.cdc_unresolved)} crossing(s) "
+                    f"require manual review: {unresolved_summary}",
+                    refined=True,
+                )
+                self.artifacts["cdc_enrichment"] = json.dumps({
+                    "cdc_status": "UNRESOLVED",
+                    "domain_count": result.domain_count,
+                    "cdc_warnings": result.cdc_warnings,
+                    "cdc_unresolved": result.cdc_unresolved,
+                    "cdc_submodules_added": [
+                        s.to_dict() for s in result.cdc_submodules_added
+                    ],
+                })
+                self.transition(BuildState.FAIL)
+                return
+
+            else:  # MULTI_DOMAIN
+                self.log(
+                    f"CDC analysis complete — {len(result.cdc_submodules_added)} "
+                    f"synchronization submodule(s) added to hierarchy",
+                    refined=True,
+                )
+                enrichment = {
+                    "cdc_status": "MULTI_DOMAIN",
+                    "domain_count": result.domain_count,
+                    "cdc_warnings": result.cdc_warnings,
+                    "cdc_submodules_added": [
+                        s.to_dict() for s in result.cdc_submodules_added
+                    ],
+                    "crossing_count": len(result.crossing_signals),
+                }
+                self.artifacts["cdc_enrichment"] = json.dumps(enrichment)
+
+        except Exception as e:
+            self.log(
+                f"CDC analysis failed ({e}) — proceeding to RTL generation",
+                refined=True,
+            )
+            if hasattr(self, "logger"):
+                import traceback
+                self.logger.warning(
+                    f"CDC_ANALYZE error: {traceback.format_exc()}"
+                )
+
+        self.transition(BuildState.VERIFICATION_PLAN)
+
+    def do_verification_plan(self) -> None:
+        """VERIFICATION_PLAN — generate structured verification plan before RTL."""
+        self.log("Generating verification plan...", refined=True)
+
+        try:
+            hardware_spec = self.artifacts.get("hardware_spec")
+            if not hardware_spec:
+                self.log("No hardware_spec found — skipping verification plan", refined=True)
+                self.transition(BuildState.RTL_GEN)
+                return
+
+            # Gather optional upstream results
+            cdc_result = self.artifacts.get("cdc_result")
+            hierarchy_result = self.artifacts.get("hierarchy_result")
+
+            planner = VerificationPlanner()
+            result = planner.plan(hardware_spec, cdc_result, hierarchy_result)
+
+            self.log(
+                f"Verification plan: {result.total_tests} tests "
+                f"(P0={result.p0_count}, P1={result.p1_count}, P2={result.p2_count}), "
+                f"{len(result.sva_properties)} SVA properties, "
+                f"{len(result.coverage_points)} coverage points",
+                refined=True,
+            )
+
+            if result.warnings:
+                for w in result.warnings:
+                    self.log(f"  ⚠ {w}", refined=True)
+
+            # Store artifacts
+            self.artifacts["verification_plan"] = result.to_json()
+
+            enrichment = {
+                "total_tests": result.total_tests,
+                "p0_count": result.p0_count,
+                "p1_count": result.p1_count,
+                "p2_count": result.p2_count,
+                "sva_count": len(result.sva_properties),
+                "coverage_points": len(result.coverage_points),
+                "warnings": result.warnings,
+            }
+            self.artifacts["verification_enrichment"] = json.dumps(enrichment)
+
+        except Exception as e:
+            self.log(
+                f"Verification plan generation failed ({e}) — proceeding to RTL generation",
+                refined=True,
+            )
+            if hasattr(self, "logger"):
+                import traceback
+                self.logger.warning(
+                    f"VERIFICATION_PLAN error: {traceback.format_exc()}"
+                )
+
         self.transition(BuildState.RTL_GEN)
 
     def _get_strategy_prompt(self) -> str:
         if self.strategy == BuildStrategy.SV_MODULAR:
-            return """Use SystemVerilog: 
-            - Use `logic` for all signals.
-            - Use `always_ff @(posedge clk or negedge rst_n)` for registers.
-            - Use `always_comb` for combinational logic.
-            - FSM Rules: MUST use separate `state` (register) and `next_state` (logic) signals. DO NOT assign to `state` inside `always_comb`.
-            - Use `enum` for states: `typedef enum logic [1:0] {IDLE, ...} state_t;`
-            - Output Style: Use standard indentation (4 spaces). DO NOT minify code into single lines.
-            
-            # STRICT PROHIBITIONS:
-            - **NO PLACEHOLDERS**: Do not write `// Simplified check` or `assign data = 0;`. Implement the ACTUAL LOGIC.
-            - **NO PARTIAL IMPLEMENTATIONS**: If it's a 4x4 array, enable ALL cells.
-            - **NO HARDCODING**: Use `parameter` for widths and depths.
-            - **HARDWARE RIGOR**: Validate bit-width compatibility on every assignment and never shadow module ports with internal signals.
-            """
-        else:
-            return """
-            USE CLASSIC VERILOG-2005 (Robust/Safe):
-            - `reg` and `wire` types explicitly
-            - `always @(posedge clk or negedge rst_n)`
-            - `localparam` for FSM states (NO enums)
-            - Simple flat module structure
-            """
+            return agentic_prompts.SYSTEMVERILOG_STRATEGY_PROMPT
+        return agentic_prompts.VERILOG_CLASSIC_STRATEGY_PROMPT
 
     def _get_tb_strategy_prompt(self) -> str:
         if self.strategy == BuildStrategy.SV_MODULAR:
-            return """Use FLAT PROCEDURAL SystemVerilog Verification (Verilator-safe):
-
-            CRITICAL VERILATOR CONSTRAINTS — MUST FOLLOW:
-            ─────────────────────────────────────────────
-            • Do NOT use `interface` blocks — Verilator REJECTS them.
-            • Do NOT use `class` (Transaction, Driver, Monitor, Scoreboard) — Verilator REJECTS classes inside modules.
-            • Do NOT use `covergroup` / `coverpoint` — Verilator does NOT support them.
-            • Do NOT use `virtual interface` handles or `vif.signal` — Verilator REJECTS these.
-            • Do NOT use `program` blocks — Verilator REJECTS them.
-            • Do NOT use `new()`, `rand`, or any OOP construct.
-
-            WHAT TO DO INSTEAD:
-            ─────────────────────
-            • Declare ALL DUT signals as `reg` (inputs) or `wire` (outputs) in the TB module.
-            • Instantiate DUT with direct port connections: `.port_name(port_name)`
-            • Use `initial` blocks for reset, stimulus, and checking.
-            • Use `$urandom` for randomized stimulus (Verilator-safe).
-            • Use `always #5 clk = ~clk;` for clock generation.
-            • Check outputs directly with `if` statements and `$display`.
-            • Track errors with `integer fail_count;` — print TEST PASSED/FAILED at end.
-            • Add a timeout watchdog: `initial begin #100000; $display("TEST FAILED: Timeout"); $finish; end`
-            • Dump waveforms: `$dumpfile("design.vcd"); $dumpvars(0, <tb_name>);`
-
-            STRUCTURE:
-            ───────────
-            1. `timescale 1ns/1ps
-            2. module <name>_tb;
-            3. Signal declarations (reg for inputs, wire for outputs)
-            4. DUT instantiation
-            5. Clock generation
-            6. initial block: reset → stimulus → checks → PASS/FAIL → $finish
-            7. Timeout watchdog
-            8. endmodule"""
-        else:
-            return """Use Verilog-2005 Procedural Verification:
-            - Use `initial` blocks for stimulus.
-            - Use `$monitor` to print changes.
-            - Check results directly in the `initial` block.
-            - Simple, linear test flow."""
+            return agentic_prompts.TESTBENCH_SYSTEMVERILOG_STRATEGY_PROMPT
+        return agentic_prompts.TESTBENCH_VERILOG_CLASSIC_STRATEGY_PROMPT
 
     @staticmethod
     def _extract_module_interface(rtl_code: str) -> str:
@@ -2039,23 +2505,16 @@ endclass
             
             rtl_agent = get_designer_agent(
                 self.llm, 
-                goal=f"Create {self.strategy.name} RTL for {self.name}", 
+                goal=agentic_prompts.get_rtl_generation_goal(self.strategy.name, self.name), 
                 verbose=self.verbose,
                 strategy=self.strategy.name
             )
 
             # Reviewer agent — checks the designer's output for common issues
             reviewer = Agent(
-                role="RTL Reviewer",
-                goal="Review generated RTL for completeness, lint issues, and Verilator compatibility",
-                backstory="""Senior RTL reviewer who catches missing reset logic, width mismatches,
-undriven outputs, and Verilator-incompatible constructs. You verify that:
-1. All outputs are driven in all code paths
-2. All registers are reset
-3. Width mismatches are flagged
-4. Module name matches the design name
-5. No placeholders or TODO comments remain
-You return the FINAL corrected code in ```verilog``` fences.""",
+                role=agentic_prompts.RTL_REVIEWER_ROLE,
+                goal=agentic_prompts.RTL_REVIEWER_GOAL,
+                backstory=agentic_prompts.RTL_REVIEWER_BACKSTORY,
                 llm=self.llm,
                 verbose=False,
                 tools=[syntax_check_tool, read_file_tool],
@@ -2063,49 +2522,23 @@ You return the FINAL corrected code in ```verilog``` fences.""",
             )
             
             rtl_task = Task(
-                description=f"""Design module "{self.name}" based on SPEC.
-            
-SPECIFICATION:
-{self.artifacts.get('spec', '')}
-
-STRATEGY GUIDELINES:
-{strategy_prompt}
-
-LOGIC DECOUPLING HINT:
-{self.artifacts.get('logic_decoupling_hint', 'N/A')}
-
-CRITICAL RULES:
-1. Top-level module name MUST be "{self.name}"
-2. Async active-low reset `rst_n`
-3. Flatten ports on the TOP module (no multi-dim arrays on top-level ports). Internal modules can use them.
-4. **IMPLEMENT EVERYTHING**: Do not leave any logic as "to be implemented" or "simplified".
-5. **MODULAR HIERARCHY**: For complex designs, break them into smaller sub-modules. Output ALL modules in your response.
-6. Return code in ```verilog fence.
-""",
-                expected_output='Complete Verilog RTL Code',
+                description=agentic_prompts.get_rtl_generation_task_description(
+                    self.name,
+                    self.artifacts.get('spec', ''),
+                    strategy_prompt,
+                    self.artifacts.get('logic_decoupling_hint', 'N/A'),
+                ),
+                expected_output=agentic_prompts.COMPLETE_VERILOG_RTL_CODE_EXPECTED_OUTPUT,
                 agent=rtl_agent
             )
 
             review_task = Task(
-                description=f"""Review the RTL code generated by the designer for module "{self.name}".
-
-Check for these common issues:
-1. Module name must be exactly "{self.name}"
-2. All always_comb blocks must assign ALL variables in ALL branches (no latches)
-3. Width mismatches (e.g., 2-bit signal assigned to 3-bit variable)
-4. All outputs must be driven
-5. All registers must be reset in the reset branch
-6. No placeholders, TODOs, or simplified logic
-
-If you find issues, FIX them and output the corrected code.
-If the code is correct, output it unchanged.
-ALWAYS return the COMPLETE code in ```verilog``` fences.
-""",
-                expected_output='Reviewed and corrected Verilog RTL Code in ```verilog``` fences',
+                description=agentic_prompts.get_rtl_review_task_description(self.name),
+                expected_output=agentic_prompts.REVIEWED_RTL_EXPECTED_OUTPUT,
                 agent=reviewer
             )
             
-            with console.status(f"[bold yellow]Generating RTL ({self.strategy.name})...[/bold yellow]"):
+            with self._status(f"[bold yellow]Generating RTL ({self.strategy.name})...[/bold yellow]"):
                 try:
                     result = Crew(
                         agents=[rtl_agent, reviewer],
@@ -2161,7 +2594,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             self.log("Syntax Check Passed (Verilator)", refined=True)
             
             # --- START VERILATOR LINT CHECK ---
-            with console.status("[bold yellow]Running Verilator Lint...[/bold yellow]"):
+            with self._status("[bold yellow]Running Verilator Lint...[/bold yellow]"):
                  lint_success, lint_report = run_lint_check(path)
             
             self.logger.info(f"LINT REPORT:\n{lint_report}")
@@ -2291,7 +2724,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         if os.path.exists(path) and errors_for_llm.strip():
             _react_agent = ReActAgent(
                 llm=self.llm,
-                role="RTL Syntax Fixer",
+                role=agentic_prompts.REACT_RTL_FIXER_ROLE,
                 max_steps=6,
                 verbose=self.verbose,
             )
@@ -2306,17 +2739,13 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 "Read contents of an absolute file path.",
                 lambda p: open(p.strip()).read() if os.path.exists(p.strip()) else f"Not found: {p}",
             )
-            _react_context = (
-                f"RTL file path: {path}\n\n"
-                f"Errors:\n{errors_for_llm}\n\n"
-                f"Current RTL:\n```verilog\n{self.artifacts['rtl_code']}\n```"
+            _react_context = agentic_prompts.get_react_rtl_fix_context(
+                path,
+                errors_for_llm,
+                self.artifacts['rtl_code'],
             )
             _react_trace = _react_agent.run(
-                task=(
-                    f"Fix all syntax and lint errors in Verilog module '{self.name}'. "
-                    f"Use syntax_check tool to verify your fix compiles clean. "
-                    f"Final Answer must be ONLY corrected Verilog inside ```verilog fences."
-                ),
+                task=agentic_prompts.get_react_rtl_fix_task(self.name),
                 context=_react_context,
             )
             react_result = self._normalize_react_result(_react_trace)
@@ -2355,40 +2784,20 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             new_code = _react_fixed_code
         else:
             # Agents fix syntax — with full build context and failure history
-            fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
-
-Fix Syntax/Lint Errors in "{self.name}".
-
-BUILD CONTEXT:
-{self._build_llm_context()}
-
-ERROR LOG:
-{errors_for_llm}
-
-PREVIOUS FIX ATTEMPTS (do NOT repeat these):
-{self._format_failure_history()}
-
-Strategy: {self.strategy.name} (Keep consistency!)
-
-IMPORTANT: The compiler is Verilator 5.0+ (SystemVerilog 2017+).
-- Use modern SystemVerilog features (`logic`, `always_comb`, `always_ff`).
-- Ensure strict 2-state logic handling (reset all registers).
-- Avoid 4-state logic (x/z) reliance as Verilator is 2-state optimized.
-
-Code:
-```verilog
-{self.artifacts['rtl_code']}
-```
-"""
+            fix_prompt = agentic_prompts.get_rtl_fix_prompt(
+                self.name,
+                self._build_llm_context(),
+                errors_for_llm,
+                self._format_failure_history(),
+                self.strategy.name,
+                self.artifacts['rtl_code'],
+            )
 
             # Use a fixer agent with enhanced backstory
             fixer = Agent(
-                role="Syntax Rectifier",
-                goal="Fix Verilog Compilation & Lint Errors while preserving design intent",
-                backstory="""Expert in Verilator error messages, SystemVerilog lint warnings, and RTL debugging.
-You analyze the ARCHITECTURE SPEC to understand design intent before fixing.
-You review PREVIOUS FIX ATTEMPTS to avoid repeating ineffective patches.
-You explain what you changed and why.""",
+                role=agentic_prompts.SYNTAX_RECTIFIER_ROLE,
+                goal=agentic_prompts.SYNTAX_RECTIFIER_GOAL,
+                backstory=agentic_prompts.SYNTAX_RECTIFIER_BACKSTORY,
                 llm=self.llm,
                 verbose=self.verbose,
                 tools=[syntax_check_tool, read_file_tool]
@@ -2396,11 +2805,11 @@ You explain what you changed and why.""",
 
             task = Task(
                  description=fix_prompt,
-                 expected_output="Fixed Verilog Code",
+                 expected_output=agentic_prompts.FIXED_VERILOG_CODE_EXPECTED_OUTPUT,
                  agent=fixer
             )
 
-            with console.status("[bold red]AI fixing Syntax/Lint Errors...[/bold red]"):
+            with self._status("[bold red]AI fixing Syntax/Lint Errors...[/bold red]"):
                 try:
                     result = Crew(agents=[fixer], tasks=[task]).kickoff()
                     new_code = str(result)
@@ -2468,22 +2877,16 @@ You explain what you changed and why.""",
                 return
 
             # Re-prompt the LLM immediately with explicit format instructions
-            reformat_prompt = f"""Your previous response contained no Verilog code. Respond now with ONLY the complete corrected Verilog module inside ```verilog fences. Nothing else.
-
-Here is the current code that needs the lint fixes applied:
-```verilog
-{self.artifacts['rtl_code']}
-```
-
-Original errors to fix:
-{errors_for_llm}
-"""
+            reformat_prompt = agentic_prompts.get_rtl_reformat_prompt(
+                self.artifacts['rtl_code'],
+                errors_for_llm,
+            )
             reformat_task = Task(
                 description=reformat_prompt,
-                expected_output="Complete fixed Verilog code inside ```verilog``` fences",
+                expected_output=agentic_prompts.COMPLETE_FIXED_VERILOG_EXPECTED_OUTPUT,
                 agent=fixer
             )
-            with console.status("[bold yellow]Re-prompting LLM for valid Verilog output...[/bold yellow]"):
+            with self._status("[bold yellow]Re-prompting LLM for valid Verilog output...[/bold yellow]"):
                 reformat_result = Crew(agents=[fixer], tasks=[reformat_task]).kickoff()
             _inner_code = str(reformat_result)
             self.logger.info(f"REFORMATTED RTL (parse retry {_parse_retry + 1}):\n{_inner_code}")
@@ -2524,7 +2927,12 @@ Original errors to fix:
                 self._clear_tb_fingerprints()  # New TB → fresh gate attempts
             else:
                 self.log("Generating Testbench...", refined=True)
-                tb_agent = get_testbench_agent(self.llm, f"Verify {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+                tb_agent = get_testbench_agent(
+                    self.llm,
+                    agentic_prompts.get_testbench_generation_goal(self.name),
+                    verbose=self.verbose,
+                    strategy=self.strategy.name,
+                )
                 
                 tb_strategy_prompt = self._get_tb_strategy_prompt()
                 
@@ -2534,66 +2942,18 @@ Original errors to fix:
                 port_info = self._extract_module_interface(rtl_code)
                 
                 tb_task = Task(
-                    description=f"""Create a self-checking Testbench for module `{self.name}`.
-
-MODULE INTERFACE (use these EXACT port names):
-{port_info}
-
-FULL RTL (for understanding behavior):
-```verilog
-{rtl_code}
-```
-
-MANDATORY DUT INSTANTIATION (copy this exactly, connect all ports):
-    {self.name} dut (
-        // Connect ALL ports listed above by name: .port_name(port_name)
-    );
-
-STRATEGY GUIDELINES:
-{tb_strategy_prompt}
-
-PREVIOUS TB FAILURES (must fix if present):
-{regen_context if regen_context else "N/A"}
-
-RULES:
-- Use `timescale 1ns / 1ps
-- Module name: {self.name}_tb
-- MANDATORY: Add this VCD block immediately after the `timescale directive:
-      initial begin
-          $dumpfile("{self.name}_wave.vcd");
-          $dumpvars(0, {self.name}_tb);
-      end
-  This is required for waveform debugging. Do not omit it.
-- Clock generation: write TWO separate module-level statements (NEVER put `always` inside `initial begin`):
-      initial clk = 1'b0;
-      always #5 clk = ~clk;
-  WARNING: `always` is a module-level construct. Placing it inside `initial begin...end` causes a Verilator compile error.
-- All variable declarations (integer, int, reg, logic) MUST appear at the TOP of a begin...end block,
-  BEFORE any procedural statements (#delay, assignments, if/for). Verilator rejects mid-block declarations.
-- Assert rst_n low for 50ns, then release
-- Print "TEST PASSED" on success, "TEST FAILED" on failure
-- End with $finish
-- Do NOT invent ports that aren't in the MODULE INTERFACE above
-
-SYNCHRONOUS DUT TIMING RULE (mandatory for ALL designs):
-This DUT is synchronous. All registered outputs update on the rising clock edge.
-After applying any stimulus (reset deassertion, enable assertion, data input),
-always wait for at least one complete clock cycle (`@(posedge clk);` or
-`repeat(N) @(posedge clk);`) before sampling or comparing any DUT output.
-Never sample a DUT output in the same time step that stimulus is applied.
-Failure to observe this rule causes off-by-one timing mismatches.
-
-SELF-CHECK (do this before returning code):
-Before returning any testbench code, mentally simulate the entire testbench execution against the DUT. Ask yourself: if this DUT had a bug, would this testbench catch it? If the testbench would pass even with a broken DUT, it is not a valid testbench — rewrite it. Every checking statement must compare the DUT output against a value that was computed independently of the DUT.
-
-COMPILATION SELF-CHECK (do this before returning code):
-Before returning any testbench code, mentally compile it with strict SystemVerilog rules. Every construct you use must be valid in the Verilator strict mode environment. If you are unsure whether a construct is valid, use a simpler equivalent that you are certain is valid.
-""",
-                    expected_output="SystemVerilog Testbench",
+                    description=agentic_prompts.get_testbench_generation_task_description(
+                        self.name,
+                        port_info,
+                        rtl_code,
+                        tb_strategy_prompt,
+                        regen_context if regen_context else "N/A",
+                    ),
+                    expected_output=agentic_prompts.SYSTEMVERILOG_TESTBENCH_EXPECTED_OUTPUT,
                     agent=tb_agent
                 )
                 
-                with console.status("[bold magenta]Generating Testbench...[/bold magenta]"):
+                with self._status("[bold magenta]Generating Testbench...[/bold magenta]"):
                     try:
                         tb_code = self._kickoff_with_timeout(
                             agents=[tb_agent],
@@ -2747,7 +3107,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
         self._record_tb_gate_history("compile", True, "gate_pass", compile_report)
         
         # Run Sim
-        with console.status("[bold magenta]Running Simulation...[/bold magenta]"):
+        with self._status("[bold magenta]Running Simulation...[/bold magenta]"):
             success, output = run_simulation(self.name)
         
         self.logger.info(f"SIMULATION OUTPUT:\n{output}")
@@ -2849,41 +3209,17 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
             # --- LLM ERROR ANALYSIS + FIX: Collaborative 2-agent Crew ---
             analyst = get_error_analyst_agent(self.llm, verbose=self.verbose)
             analysis_task = Task(
-                description=f'''Analyze this Verification Failure for "{self.name}".
-
-BUILD CONTEXT:
-{self._build_llm_context(include_rtl=False)}
-
-ERROR LOG:
-{output_for_llm}{_waveform_context}
-
-CURRENT TESTBENCH (first 3000 chars):
-{tb_code[:3000]}
-
-Use your read_file tool to read the full RTL and TB files if needed.
-
-Classify the failure as ONE of:
-A) TESTBENCH_SYNTAX
-B) RTL_LOGIC_BUG
-C) PORT_MISMATCH
-D) TIMING_RACE
-E) ARCHITECTURAL
-
-Reply with JSON only, no prose, using this exact schema:
-{{
-  "class": "A|B|C|D|E",
-  "failing_output": "exact failing display or summary",
-  "failing_signals": ["sig1", "sig2"],
-  "expected_vs_actual": "expected vs actual or undetermined",
-  "responsible_construct": "specific RTL construct and line number",
-  "root_cause": "1-line root cause",
-  "fix_hint": "surgical fix hint"
-}}''',
-                expected_output='JSON object with class, failing_output, failing_signals, expected_vs_actual, responsible_construct, root_cause, and fix_hint',
+                description=agentic_prompts.get_verification_failure_analysis_task_description(
+                    self.name,
+                    self._build_llm_context(include_rtl=False),
+                    f"{output_for_llm}{_waveform_context}",
+                    tb_code[:3000],
+                ),
+                expected_output=agentic_prompts.VERIFICATION_FAILURE_ANALYSIS_EXPECTED_OUTPUT,
                 agent=analyst
             )
             
-            with console.status("[bold red]Analyzing Failure (Multi-Class)...[/bold red]"):
+            with self._status("[bold red]Analyzing Failure (Multi-Class)...[/bold red]"):
                 analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
             
             self.logger.info(f"FAILURE ANALYSIS:\n{analysis}")
@@ -2906,7 +3242,7 @@ Reply with JSON only, no prose, using this exact schema:
                     analysis,
                     analyst_result.diagnostics,
                 )
-                with console.status("[bold red]Retrying Failure Analysis (JSON)...[/bold red]"):
+                with self._status("[bold red]Retrying Failure Analysis (JSON)...[/bold red]"):
                     analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
                 self.logger.info(f"FAILURE ANALYSIS RETRY:\n{analysis}")
                 analyst_result = self._parse_structured_agent_json(
@@ -3010,99 +3346,51 @@ Reply with JSON only, no prose, using this exact schema:
             
             if is_tb_issue:
                 self.log("Analyst identified Testbench Error. Fixing TB...", refined=True)
-                fixer = get_testbench_agent(self.llm, f"Fix TB for {self.name}", verbose=self.verbose)
+                fixer = get_testbench_agent(
+                    self.llm,
+                    agentic_prompts.get_testbench_fix_goal(self.name),
+                    verbose=self.verbose,
+                )
                 port_info = self._extract_module_interface(self.artifacts['rtl_code'])
-                fix_prompt = f"""Fix the Testbench logic/syntax.
-
-DIAGNOSIS FROM ERROR ANALYST:
-ROOT CAUSE: {root_cause}
-FIX HINT: {fix_hint}
-
-ERROR LOG:
-{output_for_llm}
-
-MODULE INTERFACE (use EXACT port names):
-{port_info}
-
-Current TB:
-```verilog
-{tb_code}
-```
-
-Ref RTL:
-```verilog
-{self.artifacts['rtl_code']}
-```
-
-PREVIOUS ATTEMPTS:
-{self._format_failure_history()}
-
-CRITICAL RULES:
-- Return ONLY the fixed Testbench code in ```verilog fences.
-- Do NOT invent ports that aren't in the MODULE INTERFACE above.
-- Module name of DUT is "{self.name}"
-- NEVER use: class, interface, covergroup, program, rand, virtual, new()
-- Use flat procedural style: reg/wire declarations, initial/always blocks
-- Use your syntax_check tool to verify the fix compiles before returning it
-
-SYNCHRONOUS DUT TIMING RULE (mandatory for ALL designs):
-This DUT is synchronous. All registered outputs update on the rising clock edge.
-After applying any stimulus (reset deassertion, enable assertion, data input),
-always wait for at least one complete clock cycle (`@(posedge clk);` or
-`repeat(N) @(posedge clk);`) before sampling or comparing any DUT output.
-Never sample a DUT output in the same time step that stimulus is applied.
-"""
+                fix_prompt = agentic_prompts.get_testbench_fix_prompt(
+                    root_cause,
+                    fix_hint,
+                    output_for_llm,
+                    port_info,
+                    tb_code,
+                    self.artifacts['rtl_code'],
+                    self._format_failure_history(),
+                    self.name,
+                )
             else:
                 self.log("Analyst identified RTL Logic Error. Fixing RTL...", refined=True)
-                fixer = get_designer_agent(self.llm, f"Fix RTL for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+                fixer = get_designer_agent(
+                    self.llm,
+                    agentic_prompts.get_rtl_fix_goal(self.name),
+                    verbose=self.verbose,
+                    strategy=self.strategy.name,
+                )
                 error_lines = [line for line in output.split('\n') if "Error" in line or "fail" in line.lower()]
                 error_summary = "\n".join(error_lines)
                 
-                fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. No explanation, no commentary, no "Thought:" prefixes.
-
-SURGICAL FIX REQUIRED — make the MINIMUM change to fix the specific issue identified.
-
-SIGNAL-LEVEL DIAGNOSIS FROM ERROR ANALYST:
-{structured_diagnosis}
-
-Specific Issues Detected:
-{error_summary}
-
-Full Log:
-{output_for_llm}
-
-Current RTL:
-```verilog
-{self.artifacts['rtl_code']}
-```
-
-Ref TB:
-```verilog
-{tb_code}
-```
-
-PREVIOUS ATTEMPTS:
-{self._format_failure_history()}
-
-CRITICAL RULES:
-- You MUST make the minimum possible change to fix the specific issue identified.
-- Do NOT rewrite the module. Do NOT restructure the design.
-- Identify the exact lines responsible for the failure and change ONLY those lines.
-- Do NOT remove sub-module instantiations or flatten a hierarchical design.
-- Do NOT change port names, port widths, or module interfaces.
-- Return the complete module with only the specific buggy lines changed.
-- Use your syntax_check tool to verify the fix compiles before returning it.
-- Return ONLY the fixed {self.strategy.name} code in ```verilog fences.
-"""
+                fix_prompt = agentic_prompts.get_rtl_logic_fix_prompt(
+                    structured_diagnosis,
+                    error_summary,
+                    output_for_llm,
+                    self.artifacts['rtl_code'],
+                    tb_code,
+                    self._format_failure_history(),
+                    self.strategy.name,
+                )
             
             # Execute Fix — fixer uses analyst's diagnosis as context
             fix_task = Task(
                 description=fix_prompt,
-                expected_output="Fixed Verilog Code in ```verilog fences",
+                expected_output=agentic_prompts.FIXED_VERILOG_FENCED_EXPECTED_OUTPUT,
                 agent=fixer
             )
             
-            with console.status("[bold yellow]AI Implementing Fix...[/bold yellow]"):
+            with self._status("[bold yellow]AI Implementing Fix...[/bold yellow]"):
                  result = Crew(
                      agents=[fixer],
                      tasks=[fix_task],
@@ -3139,27 +3427,17 @@ CRITICAL RULES:
                         self.log(f"RTL fix rejected: {changed_ratio:.0%} of lines changed (>30%). "
                                  "Requesting surgical retry.", refined=True)
                         # Re-prompt with explicit rejection context
-                        retry_prompt = f"""RESPOND WITH VERILOG CODE ONLY.
-
-Your previous fix was REJECTED because it changed {changed_ratio:.0%} of the code (>30% threshold).
-You must make a SURGICAL fix — change ONLY the specific lines that cause the bug.
-
-DIAGNOSIS:
-{structured_diagnosis}
-
-Original RTL (DO NOT REWRITE — change only the buggy lines):
-```verilog
-{original_code}
-```
-
-Return the complete module with ONLY the minimal fix applied.
-"""
+                        retry_prompt = agentic_prompts.get_rtl_surgical_retry_prompt(
+                            changed_ratio,
+                            structured_diagnosis,
+                            original_code,
+                        )
                         retry_task = Task(
                             description=retry_prompt,
-                            expected_output="Fixed Verilog Code in ```verilog fences",
+                            expected_output=agentic_prompts.FIXED_VERILOG_FENCED_EXPECTED_OUTPUT,
                             agent=fixer
                         )
-                        with console.status("[bold yellow]AI Implementing Surgical Fix (retry)...[/bold yellow]"):
+                        with self._status("[bold yellow]AI Implementing Surgical Fix (retry)...[/bold yellow]"):
                             result2 = Crew(agents=[fixer], tasks=[retry_task], verbose=self.verbose).kickoff()
                         fixed_code = str(result2)
                         # --- Universal code output validation (surgical RTL retry) ---
@@ -3241,45 +3519,18 @@ Return the complete module with ONLY the minimal fix applied.
             
             verif_agent = get_verification_agent(self.llm, verbose=self.verbose)
             sva_task = Task(
-                description=f"""Generate SystemVerilog Assertions (SVA) for module "{self.name}".
-
-Generate SVA assertions that are compatible with the Yosys formal verification engine. Yosys has limited SVA support. Before writing any assertion syntax, reason about whether Yosys can parse it. Use the simplest correct assertion style. If unsure whether a construct is Yosys-compatible, use a simpler equivalent.
-                
-                RTL Code:
-                ```verilog
-                {rtl_for_sva}
-                ```
-
-                The DUT has the following signals with these exact widths:
-                {signal_inventory}
-                Use only these signals and these exact widths in every assertion. Do not invent signals, aliases, or widths.
-                
-                SPECIFICATION:
-                {self.artifacts.get('spec', '')}
-                {formal_debug_str}
-                Requirements:
-                1. Create a separate SVA module named "{self.name}_sva"
-                2. **CRITICAL FOR SYMBIYOSYS/YOSYS COMPATIBILITY:**
-                   - Use **Concurrent Assertions** (`assert property`) at the **MODULE LEVEL**.
-                   - **DO NOT** wrap assertions inside `always` blocks.
-                   - **DO NOT** use `disable iff` inside procedural code.
-                   - Example of correct style:
-                     `assert property (@(posedge clk) disable iff (!rst_n) req |-> ##1 ack);`
-                3. Include properties for:
-                   - Reset behavior
-                   - Protocol compliance
-                   - State machine reachability
-                4. Include cover properties (`cover property`)
-                5. Return code inside ```verilog fences
-
-                OUTPUT FORMAT CONSTRAINT (mandatory):
-                Your entire response must be valid SystemVerilog code only. No explanations, no prose, no comments before the module declaration. Your response must begin with the keyword `module`. Any response that does not begin with `module` will be rejected and retried.
-                """,
-                expected_output='SystemVerilog SVA module',
+                description=agentic_prompts.get_sva_task_description(
+                    self.name,
+                    rtl_for_sva,
+                    signal_inventory,
+                    self.artifacts.get('spec', ''),
+                    formal_debug_str,
+                ),
+                expected_output=agentic_prompts.SVA_EXPECTED_OUTPUT,
                 agent=verif_agent
             )
             
-            with console.status("[bold cyan]AI Generating SVA Assertions...[/bold cyan]"):
+            with self._status("[bold cyan]AI Generating SVA Assertions...[/bold cyan]"):
                 sva_result = str(Crew(agents=[verif_agent], tasks=[sva_task]).kickoff())
             
             # --- Universal code output validation (SVA) ---
@@ -3417,7 +3668,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             # 4. Write SBY config and run
             write_sby_config(self.name, use_sby_check=True)
             
-            with console.status("[bold cyan]Running Formal Verification (SymbiYosys)...[/bold cyan]"):
+            with self._status("[bold cyan]Running Formal Verification (SymbiYosys)...[/bold cyan]"):
                 success, result = run_formal_verification(self.name)
             
             self.logger.info(f"FORMAL RESULT:\n{result}")
@@ -3502,7 +3753,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 return
         
         # 4. Run CDC check
-        with console.status("[bold cyan]Running CDC Analysis...[/bold cyan]"):
+        with self._status("[bold cyan]Running CDC Analysis...[/bold cyan]"):
             cdc_clean, cdc_report = run_cdc_check(rtl_path)
         
         self.logger.info(f"CDC REPORT:\n{cdc_report}")
@@ -3537,7 +3788,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        with console.status("[bold magenta]Running Coverage-Instrumented Simulation...[/bold magenta]"):
+        with self._status("[bold magenta]Running Coverage-Instrumented Simulation...[/bold magenta]"):
             sim_passed, sim_output, coverage_data = run_simulation_with_coverage(
                 self.name,
                 backend=self.coverage_backend,
@@ -3707,51 +3958,33 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        tb_agent = get_testbench_agent(self.llm, f"Improve coverage for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+        tb_agent = get_testbench_agent(
+            self.llm,
+            agentic_prompts.get_coverage_improvement_goal(self.name),
+            verbose=self.verbose,
+            strategy=self.strategy.name,
+        )
 
         branch_target = float(thresholds['branch'])
-        improve_prompt = f"""The current testbench for "{self.name}" does not meet coverage thresholds.
-        TARGET: Branch >={branch_target:.1f}%, Line >={float(thresholds['line']):.1f}%.
-        Current Coverage Data: {coverage_data}
-        PREVIOUS FAILED ATTEMPTS:
-        {self._format_failure_history()}
-        
-        Current RTL:
-        ```verilog
-        {self.artifacts.get('rtl_code', '')}
-        ```
-        
-        Current Testbench:
-        ```verilog
-        {open(self.artifacts['tb_path'], 'r').read() if 'tb_path' in self.artifacts and os.path.exists(self.artifacts.get('tb_path', '')) else 'NOT AVAILABLE'}
-        ```
-        
-        Create an IMPROVED self-checking testbench that:
-        1. Achieves >={branch_target:.1f}% branch coverage by hitting all missing branches.
-        2. Tests all FSM states (not just happy path)
-        3. Exercises all conditional branches (if/else, case)
-        3. Tests reset behavior mid-operation
-        4. Tests boundary values (max/min inputs)
-        5. Includes back-to-back operations
-        6. Must print "TEST PASSED" on success
-        
-        SYNCHRONOUS DUT TIMING RULE (mandatory for ALL designs):
-        This DUT is synchronous. All registered outputs update on the rising clock edge.
-        After applying any stimulus (reset deassertion, enable assertion, data input),
-        always wait for at least one complete clock cycle before sampling or comparing
-        any DUT output. Never sample a DUT output in the same time step that stimulus
-        is applied.
-
-        Return ONLY the complete testbench in ```verilog fences.
-        """
+        improve_prompt = agentic_prompts.get_coverage_improvement_prompt(
+            self.name,
+            branch_target,
+            float(thresholds['line']),
+            coverage_data,
+            self._format_failure_history(),
+            self.artifacts.get('rtl_code', ''),
+            open(self.artifacts['tb_path'], 'r').read()
+            if 'tb_path' in self.artifacts and os.path.exists(self.artifacts.get('tb_path', ''))
+            else 'NOT AVAILABLE',
+        )
 
         improve_task = Task(
             description=improve_prompt,
-            expected_output='Improved SystemVerilog Testbench',
+            expected_output=agentic_prompts.IMPROVED_TESTBENCH_EXPECTED_OUTPUT,
             agent=tb_agent
         )
 
-        with console.status("[bold yellow]AI Improving Test Coverage...[/bold yellow]"):
+        with self._status("[bold yellow]AI Improving Test Coverage...[/bold yellow]"):
             result = Crew(agents=[tb_agent], tasks=[improve_task]).kickoff()
 
         improved_tb = str(result)
@@ -3792,37 +4025,22 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         
         regression_agent = get_regression_agent(
             self.llm, 
-            f"Generate regression tests for {self.name}", 
+            agentic_prompts.get_regression_goal(self.name), 
             verbose=self.verbose
         )
         
         # Generate regression test plan
         regression_task = Task(
-            description=f"""Generate 3 directed regression test scenarios for module "{self.name}".
-            
-            RTL:
-            ```verilog
-            {self.artifacts.get('rtl_code', '')}
-            ```
-            
-            SPEC:
-            {self.artifacts.get('spec', '')}
-            
-            Create 3 separate self-checking testbenches, each targeting a different scenario:
-            1. CORNER CASE TEST - Test with extreme values (max/min/zero/overflow)
-            2. RESET STRESS TEST - Apply reset during active operations  
-            3. RAPID FIRE TEST - Back-to-back operations with no idle cycles
-            
-            For each test, output a COMPLETE testbench in a separate ```verilog block.
-            Label each block with a comment: // TEST 1: Corner Case, // TEST 2: Reset Stress, // TEST 3: Rapid Fire
-            Each test must print "TEST PASSED" on success or "TEST FAILED" on failure.
-            Each must use $finish to terminate.
-            """,
-            expected_output='3 separate Verilog testbench code blocks',
+            description=agentic_prompts.get_regression_task_description(
+                self.name,
+                self.artifacts.get('rtl_code', ''),
+                self.artifacts.get('spec', ''),
+            ),
+            expected_output=agentic_prompts.REGRESSION_EXPECTED_OUTPUT,
             agent=regression_agent
         )
         
-        with console.status("[bold magenta]AI Generating Regression Tests...[/bold magenta]"):
+        with self._status("[bold magenta]AI Generating Regression Tests...[/bold magenta]"):
             result = str(Crew(agents=[regression_agent], tasks=[regression_task]).kickoff())
         
         self.logger.info(f"REGRESSION TESTS:\n{result}")
@@ -3939,25 +4157,16 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         sdc_path = os.path.join(src_dir, f"{self.name}.sdc")
         
         self.log("Generating SDC Timing Constraints...", refined=True)
-        sdc_agent = get_sdc_agent(self.llm, "Generate Synthesis Design Constraints", self.verbose)
+        sdc_agent = get_sdc_agent(self.llm, agentic_prompts.SDC_GENERATION_GOAL, self.verbose)
         
         arch_spec = self.artifacts.get('spec', 'No spec generated.')
         sdc_task = Task(
-            description=f"""Generate an SDC file for module '{self.name}'.
-            
-Architecture Specification:
-{arch_spec}
-
-REQUIREMENTS:
-1. Identify the clock port and requested frequency/period.
-2. If unspecified, assume 100MHz (10.0ns period).
-3. Output ONLY the raw SDC constraints. DO NOT output code blocks or markdown wrappers (no ```sdc).
-""",
-            expected_output="Raw SDC constraints text cleanly formatted.",
+            description=agentic_prompts.get_sdc_task_description(self.name, arch_spec),
+            expected_output=agentic_prompts.SDC_EXPECTED_OUTPUT,
             agent=sdc_agent
         )
         
-        with console.status("[bold cyan]Generating Timing Constraints (SDC)...[/bold cyan]"):
+        with self._status("[bold cyan]Generating Timing Constraints (SDC)...[/bold cyan]"):
             sdc_content = str(Crew(agents=[sdc_agent], tasks=[sdc_task]).kickoff()).strip()
             
             # Clean up potential markdown wrappers created by LLM anyway
@@ -3994,32 +4203,30 @@ REQUIREMENTS:
         try:
             module_count = len(re.findall(r"\bmodule\b", rtl_code))
             estimator = Agent(
-                role='Physical Design Estimator',
-                goal='Estimate die area, utilization, and clock period for floorplanning',
-                backstory='Senior PD engineer who estimates area from RTL complexity, gate count, and PDK constraints.',
+                role=agentic_prompts.PHYSICAL_DESIGN_ESTIMATOR_ROLE,
+                goal=agentic_prompts.PHYSICAL_DESIGN_ESTIMATOR_GOAL,
+                backstory=agentic_prompts.PHYSICAL_DESIGN_ESTIMATOR_BACKSTORY,
                 llm=self.llm,
                 verbose=False,
                 allow_delegation=False,
             )
             estimate_task = Task(
-                description=f"""Estimate floorplan parameters for "{self.name}".
-
-DESIGN METRICS:
-- RTL: {line_count} non-blank lines, {module_count} modules, ~{cell_count_est} estimated cells
-- PDK: {self.pdk_profile.get('profile', 'sky130')} ({self.pdk_profile.get('pdk', 'sky130A')})
-- Previous convergence: {[{'wns': s.wns, 'cong': s.congestion, 'area': s.area_um2} for s in self.convergence_history[-2:]] if self.convergence_history else 'First attempt'}
-- Floorplan attempt: {self.floorplan_attempts}
-
-Reply in this EXACT format (4 lines):
-DIE_AREA: <integer 200-2000>
-UTILIZATION: <integer 30-70>
-CLOCK_PERIOD: <float like 10.0>
-REASONING: <1-line explanation>""",
-                expected_output='Floorplan parameters in structured format',
+                description=agentic_prompts.get_floorplan_estimate_task_description(
+                    self.name,
+                    line_count,
+                    module_count,
+                    cell_count_est,
+                    self.pdk_profile.get('profile', 'sky130'),
+                    self.pdk_profile.get('pdk', 'sky130A'),
+                    [{'wns': s.wns, 'cong': s.congestion, 'area': s.area_um2} for s in self.convergence_history[-2:]]
+                    if self.convergence_history else 'First attempt',
+                    self.floorplan_attempts,
+                ),
+                expected_output=agentic_prompts.FLOORPLAN_PARAMETERS_EXPECTED_OUTPUT,
                 agent=estimator,
             )
 
-            with console.status("[bold cyan]LLM Estimating Floorplan...[/bold cyan]"):
+            with self._status("[bold cyan]LLM Estimating Floorplan...[/bold cyan]"):
                 est_result = str(Crew(agents=[estimator], tasks=[estimate_task]).kickoff()).strip()
             self.logger.info(f"FLOORPLAN LLM ESTIMATE:\n{est_result}")
 
@@ -4187,42 +4394,30 @@ REASONING: <1-line explanation>""",
         # --- LLM-driven convergence analysis with hardcoded fallback ---
         try:
             conv_analyst = Agent(
-                role='PPA Convergence Analyst',
-                goal='Decide whether to continue, pivot, or accept current PPA metrics',
-                backstory='Expert in timing closure, congestion mitigation, and PPA trade-offs for ASIC designs.',
+                role=agentic_prompts.PPA_CONVERGENCE_ANALYST_ROLE,
+                goal=agentic_prompts.PPA_CONVERGENCE_ANALYST_GOAL,
+                backstory=agentic_prompts.PPA_CONVERGENCE_ANALYST_BACKSTORY,
                 llm=self.llm,
                 verbose=False,
                 allow_delegation=False,
             )
             convergence_task = Task(
-                description=f"""Analyze convergence for "{self.name}".
-
-CONVERGENCE HISTORY:
-{json.dumps([asdict(s) for s in self.convergence_history], indent=2)}
-
-CURRENT METRICS:
-- WNS: {wns:.3f}ns (negative = timing violation)
-- Congestion: {cong_pct:.2f}% (threshold: {self.congestion_threshold:.1f}%)
-- Area: {area_um2:.1f}um²
-- Power: {power_w:.6f}W
-- Pivot budget remaining: {self.max_pivots - self.pivot_count}
-- Area expansions done: {self.artifacts.get('area_expansions', 0)}
-
-DECIDE one of:
-A) CONVERGED — Metrics are acceptable (WNS >= 0, congestion within threshold), proceed to signoff
-B) TUNE_TIMING — Relax clock period by 10% and re-run hardening
-C) EXPAND_AREA — Increase die area by 15% and re-run hardening
-D) DECOUPLE_LOGIC — Need RTL pipeline restructuring to reduce congestion
-E) FAIL — No convergence possible within remaining budget
-
-Reply in this EXACT format (2 lines):
-DECISION: <letter A-E>
-REASONING: <1-line explanation>""",
-                expected_output='Convergence decision with DECISION and REASONING',
+                description=agentic_prompts.get_convergence_task_description(
+                    self.name,
+                    json.dumps([asdict(s) for s in self.convergence_history], indent=2),
+                    wns,
+                    cong_pct,
+                    self.congestion_threshold,
+                    area_um2,
+                    power_w,
+                    self.max_pivots - self.pivot_count,
+                    self.artifacts.get('area_expansions', 0),
+                ),
+                expected_output=agentic_prompts.CONVERGENCE_DECISION_EXPECTED_OUTPUT,
                 agent=conv_analyst,
             )
 
-            with console.status("[bold cyan]LLM Analyzing Convergence...[/bold cyan]"):
+            with self._status("[bold cyan]LLM Analyzing Convergence...[/bold cyan]"):
                 conv_result = str(Crew(agents=[conv_analyst], tasks=[convergence_task]).kickoff()).strip()
             self.logger.info(f"CONVERGENCE LLM ANALYSIS:\n{conv_result}")
 
@@ -4388,7 +4583,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # 2. Run OpenLane
         run_tag = f"agentrun_{self.global_step_count}"
         floorplan_tcl = self.artifacts.get("floorplan_tcl", "")
-        with console.status("[bold blue]Hardening Layout (OpenLane)...[/bold blue]"):
+        with self._status("[bold blue]Hardening Layout (OpenLane)...[/bold blue]"):
             success, result = run_openlane(
                 self.name,
                 background=False,
@@ -4482,7 +4677,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.log("LEC: skipped (missing RTL or gate netlist)", refined=True)
         
         # ── 1. DRC / LVS ──
-        with console.status("[bold blue]Checking DRC/LVS Reports...[/bold blue]"):
+        with self._status("[bold blue]Checking DRC/LVS Reports...[/bold blue]"):
             signoff_pass, signoff_details = parse_drc_lvs_reports(self.name)
         
         self.logger.info(f"SIGNOFF DETAILS:\n{signoff_details}")
@@ -4499,7 +4694,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         
         # ── 2. TIMING CLOSURE (multi-corner STA) ──
         self.log("Checking Timing Closure (all corners)...", refined=True)
-        with console.status("[bold blue]Parsing STA Reports...[/bold blue]"):
+        with self._status("[bold blue]Parsing STA Reports...[/bold blue]"):
             sta = parse_sta_signoff(self.name)
         
         self.logger.info(f"STA RESULTS: {sta}")
@@ -4521,7 +4716,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         
         # ── 3. POWER & IR-DROP ──
         self.log("Analyzing Power & IR-Drop...", refined=True)
-        with console.status("[bold blue]Parsing Power Reports...[/bold blue]"):
+        with self._status("[bold blue]Parsing Power Reports...[/bold blue]"):
             power = parse_power_signoff(self.name)
         
         self.logger.info(f"POWER RESULTS: {power}")
@@ -4541,7 +4736,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                     self.log("IR-Drop: Within limits ✓", refined=True)
         
         # 4. Physical Metrics
-        with console.status("[bold blue]Analyzing Physical Metrics...[/bold blue]"):
+        with self._status("[bold blue]Analyzing Physical Metrics...[/bold blue]"):
             metrics, metrics_status = check_physical_metrics(self.name)
         
         if metrics:
@@ -4554,36 +4749,17 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         doc_agent = get_doc_agent(self.llm, verbose=self.verbose)
         
         doc_task = Task(
-            description=f"""Generate a comprehensive Datasheet (Markdown) for "{self.name}".
-            
-            1. **Architecture Spec**:
-            {self.artifacts.get('spec', 'N/A')}
-            
-            2. **Physical Metrics**:
-            {metrics if metrics else 'N/A'}
-            
-            3. **RTL Source Code**:
-            ```verilog
-            {self.artifacts.get('rtl_code', '')[:15000]} 
-            // ... truncated if too long
-            ```
-            
-            **REQUIREMENTS**:
-            - Title: "{self.name} Datasheet"
-            - Section 1: **Overview** (High-level functionality and design intent).
-            - Section 2: **Block Diagram Description** (Explain the data flow).
-            - Section 3: **Interface** (Table of ports with DETAILED descriptions).
-            - Section 4: **Register Map** (Address, Name, Access Type, Description).
-            - Section 5: **Timing & Performance** (Max Freq, Latency, Throughput).
-            - Section 6: **Integration Guide** (How to instantiate and use it).
-            
-            Return ONLY the Markdown content.
-            """,
-            expected_output='Markdown Datasheet',
+            description=agentic_prompts.get_datasheet_task_description(
+                self.name,
+                self.artifacts.get('spec', 'N/A'),
+                metrics if metrics else 'N/A',
+                self.artifacts.get('rtl_code', '')[:15000],
+            ),
+            expected_output=agentic_prompts.MARKDOWN_DATASHEET_EXPECTED_OUTPUT,
             agent=doc_agent
         )
         
-        with console.status("[bold cyan]AI Writing Datasheet...[/bold cyan]"):
+        with self._status("[bold cyan]AI Writing Datasheet...[/bold cyan]"):
             doc_content = str(Crew(agents=[doc_agent], tasks=[doc_task]).kickoff())
         
         # Save to file
@@ -4656,33 +4832,32 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             if self.strict_gates and self.eco_attempts < 2:
                 try:
                     signoff_analyst = Agent(
-                        role='Signoff Failure Analyst',
-                        goal='Identify root cause of signoff failure and recommend fix path',
-                        backstory='Expert in DRC/LVS debugging, timing closure, IR-drop mitigation, and ECO strategies.',
+                        role=agentic_prompts.SIGNOFF_FAILURE_ANALYST_ROLE,
+                        goal=agentic_prompts.SIGNOFF_FAILURE_ANALYST_GOAL,
+                        backstory=agentic_prompts.SIGNOFF_FAILURE_ANALYST_BACKSTORY,
                         llm=self.llm,
                         verbose=False,
                         allow_delegation=False,
                     )
                     signoff_analysis_task = Task(
-                        description=f"""Signoff failed for "{self.name}". Analyze the failure:
-
-DRC: {drc_v} violations | LVS: {lvs_e} errors | Antenna: {ant_v}
-Timing: {timing_status} (WNS={sta.get('worst_setup', 0):.2f}ns)
-Power: {power_status} | IR-Drop: {irdrop_status}
-LEC: {self.artifacts.get('lec_result', 'N/A')}
-
-CONVERGENCE HISTORY:
-{json.dumps([asdict(s) for s in self.convergence_history[-3:]], indent=2) if self.convergence_history else 'N/A'}
-
-What is the most likely root cause and what ECO strategy should we use?
-Reply in this EXACT format (2 lines):
-ROOT_CAUSE: <description of the primary issue>
-FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
-                        expected_output='Root cause and fix recommendation',
+                        description=agentic_prompts.get_signoff_failure_task_description(
+                            self.name,
+                            drc_v,
+                            lvs_e,
+                            ant_v,
+                            timing_status,
+                            sta.get('worst_setup', 0),
+                            power_status,
+                            irdrop_status,
+                            self.artifacts.get('lec_result', 'N/A'),
+                            json.dumps([asdict(s) for s in self.convergence_history[-3:]], indent=2)
+                            if self.convergence_history else 'N/A',
+                        ),
+                        expected_output=agentic_prompts.SIGNOFF_FAILURE_ANALYSIS_EXPECTED_OUTPUT,
                         agent=signoff_analyst,
                     )
 
-                    with console.status("[bold red]LLM Analyzing Signoff Failure...[/bold red]"):
+                    with self._status("[bold red]LLM Analyzing Signoff Failure...[/bold red]"):
                         signoff_analysis = str(Crew(agents=[signoff_analyst], tasks=[signoff_analysis_task]).kickoff()).strip()
                     self.logger.info(f"SIGNOFF FAILURE ANALYSIS:\n{signoff_analysis}")
 
@@ -4731,3 +4906,6 @@ FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
             self.artifacts['signoff_result'] = 'FAIL'
             self.errors.append("Signoff failed (see report).")
             self.state = BuildState.FAIL
+
+
+Orchestrator = BuildOrchestrator
