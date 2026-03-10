@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from server.auth import (
     AUTH_ENABLED,
+    get_current_user,
     _supabase_insert,
     _supabase_query,
     _supabase_update,
@@ -103,10 +104,22 @@ async def create_order(req: CreateOrderRequest):
 
 # ─── Verify Payment (client-side callback) ─────────────────────────
 @router.post("/verify-payment")
-async def verify_payment(req: VerifyPaymentRequest):
+async def verify_payment(req: VerifyPaymentRequest, profile: dict = Depends(get_current_user)):
     """Verify Razorpay payment signature and upgrade user plan."""
     if not RAZORPAY_KEY_SECRET:
         raise HTTPException(status_code=503, detail="Payment system not configured")
+
+    # Validate plan to prevent arbitrary plan escalation
+    if req.plan not in ("starter", "pro"):
+        raise HTTPException(status_code=400, detail="Invalid plan")
+
+    # Validate user_id is a well-formed UUID to prevent PostgREST filter injection
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", req.user_id):
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    # Enforce that the authenticated user can only upgrade their own account
+    if profile is not None and profile.get("id") != req.user_id:
+        raise HTTPException(status_code=403, detail="Cannot upgrade another user's plan")
 
     # Verify signature: SHA256 HMAC of order_id|payment_id
     message = f"{req.razorpay_order_id}|{req.razorpay_payment_id}"

@@ -5,6 +5,7 @@ Real-time SSE streaming, job management, human-in-the-loop approval, and chip re
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -267,6 +268,15 @@ class RejectRequest(BaseModel):
 
 def _repo_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+_SAFE_DESIGN_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+def _validate_design_name(design_name: str) -> None:
+    """Raise 400 if design_name contains path-traversal characters or unsafe patterns."""
+    if not design_name or not _SAFE_DESIGN_NAME_RE.match(design_name) or ".." in design_name:
+        raise HTTPException(status_code=400, detail="Invalid design name")
 
 
 def _docs_index() -> Dict[str, Dict[str, str]]:
@@ -1121,43 +1131,20 @@ def cancel_build(job_id: str):
 
 
 @app.get("/designs")
-def list_designs(request: Request):
-    """List all chip designs on disk, but ONLY if accessed locally."""
-    origin = request.headers.get("origin", "")
-    host = request.headers.get("host", "")
-    
-    # Check if request is coming from public internet (Ngrok/Vercel)
-    is_local = any(loc in origin for loc in ["localhost", "127.0.0.1", "0.0.0.0"]) or \
-               any(loc in host for loc in ["localhost", "127.0.0.1", "0.0.0.0"])
-               
-    if not is_local:
-        # SECURITY HOTFIX: Public web app disabled listing local OpenLane designs
-        return {"designs": []}
+def list_designs():
+    """List chip designs built in this session (job store only).
 
-    des_dir = os.path.join(os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane")), "designs")
-    if not os.path.exists(des_dir):
-        return {"designs": []}
-
-    designs_info = []
-    for d in os.listdir(des_dir):
-        d_path = os.path.join(des_dir, d)
-        if os.path.isdir(d_path):
-            has_gds = False
-            runs_dir = os.path.join(d_path, "runs")
-            if os.path.exists(runs_dir):
-                for run in os.listdir(runs_dir):
-                    gds_path = os.path.join(runs_dir, run, "results", "signoff", f"{d}.gds")
-                    if os.path.exists(gds_path):
-                        has_gds = True
-                        break
-            designs_info.append({"name": d, "has_gds": has_gds})
-
-    return {"designs": designs_info}
+    NOTE: Listing raw filesystem paths is disabled unconditionally on the public
+    deployment — the previous Origin/Host-header check was spoofable and leaked
+    internal directory structure. Jobs are tracked via JOB_STORE instead.
+    """
+    return {"designs": []}
 
 
 @app.get("/metrics/{design_name}")
 def get_metrics(design_name: str):
     """Return latest OpenLane metrics for a design."""
+    _validate_design_name(design_name)
     des_dir = os.path.join(os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane")), "designs", design_name)
     runs_dir = os.path.join(des_dir, "runs")
 
@@ -1193,6 +1180,7 @@ def get_metrics(design_name: str):
 
 @app.get("/signoff/{design_name}")
 def get_signoff_report(design_name: str):
+    _validate_design_name(design_name)
     try:
         from agentic.tools.vlsi_tools import check_physical_metrics
         metrics, report = check_physical_metrics(design_name)
@@ -1237,6 +1225,7 @@ def get_partial_artifacts(design_name: str):
     """Scan the design's output directory for any partial artifacts produced during a build.
     Used by the failure summary card to show what was generated before the build failed.
     """
+    _validate_design_name(design_name)
     artifacts = []
     
     # Check designs/ workspace directory
@@ -1275,6 +1264,7 @@ def get_partial_artifacts(design_name: str):
 @app.get("/build/artifacts/{design_name}/{filename}")
 def download_artifact(design_name: str, filename: str):
     """Download an individual artifact file from a design's output directory."""
+    _validate_design_name(design_name)
     # Sanitize filename to prevent path traversal
     safe_name = os.path.basename(filename)
     if safe_name != filename or ".." in filename:

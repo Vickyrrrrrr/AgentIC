@@ -24,7 +24,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")
-ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "change-me-in-production-32chars!")
+# ENCRYPTION_KEY must be set in production via env var — never rely on a default.
+# If unset, BYOK key storage is disabled with a clear error rather than silently
+# using a publicly-known default key that would let anyone decrypt stored keys.
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 
 AUTH_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY and SUPABASE_JWT_SECRET)
 
@@ -129,9 +132,12 @@ def _supabase_update(table: str, filters: str, data: dict) -> dict:
 
 # ─── BYOK Encryption ────────────────────────────────────────────────
 def encrypt_api_key(plaintext: str) -> str:
-    """XOR-based encryption with HMAC integrity check. Not AES-grade,
-    but avoids requiring `cryptography` in Docker. Good enough for
-    API keys at rest that are already scoped to a single user."""
+    """XOR-based encryption with HMAC integrity check."""
+    if not ENCRYPTION_KEY:
+        raise RuntimeError(
+            "ENCRYPTION_KEY env var is not set. "
+            "Set a secret 32+ character value in HuggingFace Spaces secrets before storing BYOK keys."
+        )
     key_bytes = hashlib.sha256(ENCRYPTION_KEY.encode()).digest()
     ct = bytes(a ^ b for a, b in zip(plaintext.encode(), (key_bytes * ((len(plaintext) // 32) + 1))))
     mac = hmac.new(key_bytes, ct, hashlib.sha256).hexdigest()
@@ -141,6 +147,8 @@ def encrypt_api_key(plaintext: str) -> str:
 
 def decrypt_api_key(ciphertext: str) -> str:
     import base64
+    if not ENCRYPTION_KEY:
+        raise RuntimeError("ENCRYPTION_KEY env var is not set — cannot decrypt stored API key.")
     parts = ciphertext.split(".", 1)
     if len(parts) != 2:
         raise ValueError("Malformed encrypted key")
