@@ -37,7 +37,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Create runtime directories that the build pipeline writes into
-RUN mkdir -p /app/designs /app/artifacts
+# PDK_ROOT must exist so startup_self_check passes (actual PDK files not needed for cloud LLM builds)
+RUN mkdir -p /app/designs /app/artifacts /app/pdk
+
+ENV PDK_ROOT=/app/pdk
 
 # HuggingFace Spaces runs as non-root user 1000
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

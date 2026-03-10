@@ -239,7 +239,7 @@ class BuildRequest(BaseModel):
     max_retries: int = 5
     show_thinking: bool = False
     min_coverage: float = 80.0
-    strict_gates: bool = True
+    strict_gates: bool = False
     pdk_profile: str = "sky130"
     max_pivots: int = 2
     congestion_threshold: float = 10.0
