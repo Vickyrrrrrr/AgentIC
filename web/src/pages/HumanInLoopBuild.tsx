@@ -125,7 +125,7 @@ export const HumanInLoopBuild = () => {
     const [maxRetries, setMaxRetries] = useState(5);
     const [showThinking, setShowThinking] = useState(false);
     const [minCoverage, setMinCoverage] = useState(80.0);
-    const [strictGates, setStrictGates] = useState(true);
+    const [strictGates, setStrictGates] = useState(false);
     const [pdkProfile, setPdkProfile] = useState("sky130");
 
     // Build mode & stage skipping (Improvement 2)

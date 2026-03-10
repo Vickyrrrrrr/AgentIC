@@ -93,7 +93,7 @@ STAGE_META: Dict[str, Dict[str, str]] = {
 
 def _get_llm(byok_api_key: str = None):
     """Tries cloud backends first, then local Ollama.
-    Priority: NVIDIA Nemotron → Groq LLaMA-3.3 → VeriReason Local
+    Priority: NVIDIA Cloud → Groq LLaMA-3.3 → Local Ollama
 
     If byok_api_key is provided (BYOK plan), it overrides the cloud config key.
     """
@@ -344,7 +344,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
                 thought_type = _infer_thought_type(message)
                 _emit_agent_thought(job_id, agent_name, thought_type, message, state)
 
-        # Use smart LLM selection: Cloud first (Nemotron → GLM5) → Local fallback
+        # Use smart LLM selection: Cloud first (NVIDIA → Groq) → Local fallback
         byok_key = JOB_STORE[job_id].get("byok_key")
         llm, llm_name = _get_llm(byok_api_key=byok_key)
         _emit_event(job_id, "checkpoint", "INIT", f"🤖 Compute engine ready", step=1)

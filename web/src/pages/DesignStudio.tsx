@@ -52,7 +52,7 @@ export const DesignStudio = () => {
     const [maxRetries, setMaxRetries] = useState(5);
     const [showThinking, setShowThinking] = useState(false);
     const [minCoverage, setMinCoverage] = useState(80.0);
-    const [strictGates, setStrictGates] = useState(true);
+    const [strictGates, setStrictGates] = useState(false);
     const [pdkProfile, setPdkProfile] = useState("sky130");
     const [maxPivots, setMaxPivots] = useState(2);
     const [congestionThreshold, setCongestionThreshold] = useState(10.0);

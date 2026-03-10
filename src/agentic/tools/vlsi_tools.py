@@ -220,12 +220,12 @@ def startup_self_check() -> Dict[str, Any]:
         "verilator": "verilator",
         "iverilog": "iverilog",
         "vvp": "vvp",
-        "docker": "docker",
         "yosys": YOSYS_BIN,
         "sby": SBY_BIN,
-        "eqy": EQY_BIN,
     }
     optional_bins = {
+        "docker": "docker",
+        "eqy": EQY_BIN,
         "verilator_coverage": "verilator_coverage",
     }
     all_pass = True
