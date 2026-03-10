@@ -431,6 +431,7 @@ export const DesignStudio = () => {
                             result={result}
                             jobStatus={jobStatus}
                             events={events}
+                            jobId={jobId}
                             onReset={handleReset}
                         />
                     </motion.div>

@@ -1,11 +1,13 @@
 import React from 'react';
 import { motion } from 'framer-motion';
+import { API_BASE } from '../api';
 
 interface Props {
     designName: string;
     result: any;
     jobStatus: string;
     events: any[];
+    jobId?: string;
     onReset: () => void;
 }
 
@@ -35,7 +37,7 @@ function CheckRow({ label, passed, detail }: { label: string; passed: boolean | 
     );
 }
 
-export const ChipSummary: React.FC<Props> = ({ designName, result, jobStatus, events, onReset }) => {
+export const ChipSummary: React.FC<Props> = ({ designName, result, jobStatus, events, jobId, onReset }) => {
     const success = jobStatus === 'done';
     const metrics = result?.metrics || {};
     const convergence = result?.convergence_history || [];
@@ -273,6 +275,28 @@ export const ChipSummary: React.FC<Props> = ({ designName, result, jobStatus, ev
 
             {/* ── Actions ─────────────────────────────── */}
             <div className="cs-actions">
+                {/* Full build report downloads */}
+                {jobId && (
+                    <div className="cs-report-downloads">
+                        <span className="cs-report-label">Download Build Report:</span>
+                        <a
+                            className="cs-report-btn"
+                            href={`${API_BASE}/report/${jobId}/full.pdf`}
+                            download
+                            title="Download full build report as PDF"
+                        >
+                            ↓ PDF Report
+                        </a>
+                        <a
+                            className="cs-report-btn"
+                            href={`${API_BASE}/report/${jobId}/full.docx`}
+                            download
+                            title="Download full build report as DOCX"
+                        >
+                            ↓ DOCX Report
+                        </a>
+                    </div>
+                )}
                 <motion.button
                     className="cs-reset-btn"
                     onClick={onReset}

@@ -2947,8 +2947,48 @@ body {
 /* ── Actions ─────────────────────────────────────── */
 .cs-actions {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
   padding: 0.5rem 0 2.5rem;
+}
+
+/* Full build report download row in ChipSummary */
+.cs-report-downloads {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.cs-report-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary, #888);
+  margin-right: 0.25rem;
+}
+
+.cs-report-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 120, 31, 0.3);
+  background: rgba(245, 120, 31, 0.08);
+  color: #f5781f;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+}
+
+.cs-report-btn:hover {
+  background: rgba(245, 120, 31, 0.18);
+  border-color: rgba(245, 120, 31, 0.5);
+  text-decoration: none;
 }
 
 .cs-reset-btn {

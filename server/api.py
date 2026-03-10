@@ -10,6 +10,7 @@ import sys
 import time
 import uuid
 import glob
+import io
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,12 @@ from server.auth import (
     record_build_success,
 )
 from server.billing import router as billing_router
+from server.report_gen import (
+    generate_stage_report_pdf,
+    generate_stage_report_docx,
+    generate_full_report_pdf,
+    generate_full_report_docx,
+)
 from server.stage_summary import (
     build_stage_complete_payload,
     get_next_stage,
@@ -228,6 +235,9 @@ def _emit_stage_complete(job_id: str, payload: dict):
     JOB_STORE[job_id]["current_state"] = payload.get("stage_name", "UNKNOWN")
     JOB_STORE[job_id]["waiting_approval"] = True
     JOB_STORE[job_id]["waiting_stage"] = payload.get("stage_name", "")
+    # Store payload so report endpoints can access it
+    stage_name = payload.get("stage_name", "UNKNOWN")
+    JOB_STORE[job_id].setdefault("stages", {})[stage_name] = payload
 
 
 # ─── Models ──────────────────────────────────────────────────────────
@@ -412,6 +422,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         
         JOB_STORE[job_id]["result"] = result
         JOB_STORE[job_id]["status"] = "done" if success else "failed"
+        JOB_STORE[job_id]["build_status"] = "success" if success else "failed"
 
         # ── Record build outcome in Supabase ───────────────────────
         user_profile = JOB_STORE[job_id].get("user_profile")
@@ -431,6 +442,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         import traceback
         err = traceback.format_exc()
         JOB_STORE[job_id]["status"] = "failed"
+        JOB_STORE[job_id]["build_status"] = "failed"
         JOB_STORE[job_id]["result"] = {"error": str(e), "traceback": err}
         _emit_event(job_id, "error", "FAIL", f"💥 Critical error: {str(e)}", step=0)
         record_build_failure(job_id)
@@ -1012,6 +1024,8 @@ async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_u
         "created_at": int(time.time()),
         "user_profile": profile,
         "byok_key": byok_key,
+        "stages": {},          # stage_name -> stage_complete payload
+        "build_status": "running",
     }
 
     req.design_name = design_name
@@ -1336,4 +1350,94 @@ async def set_byok_key(req: SetApiKeyRequest, profile: dict = Depends(get_curren
     encrypted = encrypt_api_key(req.api_key)
     _supabase_update("profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted})
     return {"success": True, "message": "API key stored securely"}
+
+
+# ─── Report Download Endpoints ────────────────────────────────────────
+# Single-stage reports (HITL flow) and full-build reports (both flows).
+
+def _get_job_or_404(job_id: str) -> dict:
+    if not re.match(r"^[0-9a-f-]{36}$", job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID")
+    job = JOB_STORE.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.get("/report/{job_id}/full.pdf",
+         summary="Download full build report as PDF")
+def download_full_report_pdf(job_id: str):
+    job = _get_job_or_404(job_id)
+    design_name  = job.get("design_name", "design")
+    build_status = job.get("build_status", "unknown")
+    stages       = job.get("stages", {})
+    events       = job.get("events", [])
+    pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events)
+    safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{safe_name}_full_report.pdf"'},
+    )
+
+
+@app.get("/report/{job_id}/full.docx",
+         summary="Download full build report as DOCX")
+def download_full_report_docx(job_id: str):
+    job = _get_job_or_404(job_id)
+    design_name  = job.get("design_name", "design")
+    build_status = job.get("build_status", "unknown")
+    stages       = job.get("stages", {})
+    events       = job.get("events", [])
+    docx_bytes = generate_full_report_docx(stages, design_name, build_status, events)
+    safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
+    return StreamingResponse(
+        io.BytesIO(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{safe_name}_full_report.docx"'},
+    )
+
+
+@app.get("/report/{job_id}/stage/{stage_name}.pdf",
+         summary="Download a single-stage report as PDF")
+def download_stage_report_pdf(job_id: str, stage_name: str):
+    if not re.match(r"^[A-Z_]{2,30}$", stage_name):
+        raise HTTPException(status_code=400, detail="Invalid stage name")
+    job = _get_job_or_404(job_id)
+    stages = job.get("stages", {})
+    if stage_name not in stages:
+        raise HTTPException(status_code=404,
+                            detail=f"Stage '{stage_name}' not found in this job")
+    design_name = job.get("design_name", "design")
+    pdf_bytes = generate_stage_report_pdf(stages[stage_name], design_name)
+    safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{safe_name}_{stage_name}_report.pdf"'},
+    )
+
+
+@app.get("/report/{job_id}/stage/{stage_name}.docx",
+         summary="Download a single-stage report as DOCX")
+def download_stage_report_docx(job_id: str, stage_name: str):
+    if not re.match(r"^[A-Z_]{2,30}$", stage_name):
+        raise HTTPException(status_code=400, detail="Invalid stage name")
+    job = _get_job_or_404(job_id)
+    stages = job.get("stages", {})
+    if stage_name not in stages:
+        raise HTTPException(status_code=404,
+                            detail=f"Stage '{stage_name}' not found in this job")
+    design_name = job.get("design_name", "design")
+    docx_bytes = generate_stage_report_docx(stages[stage_name], design_name)
+    safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
+    return StreamingResponse(
+        io.BytesIO(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{safe_name}_{stage_name}_report.docx"'},
+    )
 

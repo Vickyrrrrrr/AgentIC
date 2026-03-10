@@ -635,6 +635,7 @@ export const HumanInLoopBuild = () => {
                                 <ApprovalCard
                                     data={approvalData}
                                     designName={designName}
+                                    jobId={jobId}
                                     onApprove={handleApprove}
                                     onReject={handleReject}
                                     isSubmitting={isSubmitting}
@@ -694,6 +695,25 @@ export const HumanInLoopBuild = () => {
                                 <button className="hitl-reset-btn" onClick={handleReset}>
                                     ← Build Another Chip
                                 </button>
+                                {jobId && (
+                                    <div className="hitl-report-downloads">
+                                        <span className="hitl-report-label">Download Report:</span>
+                                        <a
+                                            className="hitl-report-btn"
+                                            href={`${API_BASE}/report/${jobId}/full.pdf`}
+                                            download
+                                        >
+                                            ↓ PDF
+                                        </a>
+                                        <a
+                                            className="hitl-report-btn"
+                                            href={`${API_BASE}/report/${jobId}/full.docx`}
+                                            download
+                                        >
+                                            ↓ DOCX
+                                        </a>
+                                    </div>
+                                )}
                             </>
                         )}
 

@@ -14,6 +14,7 @@ interface StageCompleteData {
 interface Props {
     data: StageCompleteData;
     designName: string;
+    jobId: string;
     onApprove: () => void;
     onReject: (feedback: string) => void;
     isSubmitting: boolean;
@@ -47,7 +48,7 @@ function guessType(name: string): string {
     return map[ext] || 'other';
 }
 
-export const ApprovalCard: React.FC<Props> = ({ data, designName, onApprove, onReject, isSubmitting }) => {
+export const ApprovalCard: React.FC<Props> = ({ data, designName, jobId, onApprove, onReject, isSubmitting }) => {
     const [showFeedback, setShowFeedback] = useState(false);
     const [feedback, setFeedback] = useState('');
     const [artifactsExpanded, setArtifactsExpanded] = useState(false);
@@ -129,6 +130,27 @@ export const ApprovalCard: React.FC<Props> = ({ data, designName, onApprove, onR
 
             {/* Action footer */}
             <div className="ac-footer">
+                {/* Stage report downloads */}
+                {jobId && (
+                    <div className="ac-report-downloads">
+                        <a
+                            className="ac-report-btn"
+                            href={`${API_BASE}/report/${jobId}/stage/${data.stage_name}.pdf`}
+                            download
+                            title="Download stage report as PDF"
+                        >
+                            ↓ PDF
+                        </a>
+                        <a
+                            className="ac-report-btn"
+                            href={`${API_BASE}/report/${jobId}/stage/${data.stage_name}.docx`}
+                            download
+                            title="Download stage report as DOCX"
+                        >
+                            ↓ DOCX
+                        </a>
+                    </div>
+                )}
                 {!showFeedback ? (
                     <>
                         <button className="ac-give-feedback" onClick={() => setShowFeedback(true)}>
