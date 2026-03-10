@@ -4,8 +4,12 @@ from dotenv import load_dotenv
 
 # Project Paths
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-load_dotenv(os.path.join(WORKSPACE_ROOT, ".env"))
-load_dotenv()
+
+# Load .env file ONLY if it exists, and NEVER override environment variables
+# already set by the platform (e.g. HuggingFace Spaces secrets).
+_dotenv_path = os.path.join(WORKSPACE_ROOT, ".env")
+if os.path.isfile(_dotenv_path):
+    load_dotenv(_dotenv_path, override=False)
 
 OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")

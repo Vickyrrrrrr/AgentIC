@@ -1,0 +1,66 @@
+# AgentIC Benchmark Suite
+
+Drop this entire `benchmark/` folder into your AgentIC root directory and run.
+
+## Quick Start
+
+```bash
+# From AgentIC root directory:
+
+# Run all 10 designs (full pipeline including OpenLane)
+python3 benchmark/run_benchmark.py
+
+# Run RTL-only (faster, skips physical flow — good for first pass)
+python3 benchmark/run_benchmark.py --skip-openlane
+
+# Run a single design to test
+python3 benchmark/run_benchmark.py --design uart_tx
+
+# Use GF180 instead of Sky130
+python3 benchmark/run_benchmark.py --pdk gf180
+
+# Run each design 3 times (for statistical reliability)
+python3 benchmark/run_benchmark.py --attempts 3
+```
+
+## What It Produces
+
+After running you get two files in `benchmark/results/`:
+
+- `benchmark_YYYY-MM-DD.md` — human readable report with tables, analysis, bottleneck identification
+- `benchmark_YYYY-MM-DD.json` — raw data for programmatic use
+
+Results are also saved after every single build as `interim_YYYY-MM-DD.json`
+so you never lose data if a build crashes halfway through.
+
+## The 10 Test Designs
+
+| # | Design | Complexity | Tests |
+|---|--------|-----------|-------|
+| 1 | counter_8bit | Simple | Basic sequential logic |
+| 2 | uart_tx | Simple | Serial communication |
+| 3 | pwm_generator | Simple | Configurable output + registers |
+| 4 | spi_master | Simple | SPI protocol state machine |
+| 5 | fifo_sync | Simple | Memory + pointer logic |
+| 6 | alu_8bit | Medium | Combinational logic, flags |
+| 7 | i2c_master | Medium | Complex protocol, open-drain |
+| 8 | apb_timer | Medium | APB bus interface + interrupt |
+| 9 | vga_controller | Medium | Timing generation, counters |
+| 10 | wishbone_uart | Complex | Full bus interface + FIFOs |
+
+## Which Steps Matter in Industry
+
+| Stage | Matters For | Skip OK? |
+|-------|------------|----------|
+| RTL_GEN + RTL_FIX | Everything — this is the chip | Never |
+| VERIFICATION | Proving functionality | Never |
+| HARDENING | Physical layout | Never |
+| SIGNOFF | Fab acceptance | Never |
+| FORMAL_VERIFY | Safety-critical designs | Simple designs: yes |
+| COVERAGE_CHECK | Test completeness | If sim passes: yes |
+| REGRESSION | Robustness | Yes |
+| ECO_PATCH | Post-signoff fixes | First attempt: yes |
+| CONVERGENCE | Timing closure | Simple designs: yes |
+
+**The 4 things a fab actually cares about:**
+RTL correctness → Functional simulation → Place & Route → DRC/LVS/STA Signoff

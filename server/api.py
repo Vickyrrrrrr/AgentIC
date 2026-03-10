@@ -829,6 +829,12 @@ def read_root():
     return {"message": "AgentIC API is online", "version": "3.0.0"}
 
 
+@app.get("/ping")
+def ping():
+    """Zero-processing liveness probe for uptime monitors."""
+    return {"status": "ok"}
+
+
 @app.get("/health")
 def health_check():
     """Health probe — verifies the LLM backend is reachable."""

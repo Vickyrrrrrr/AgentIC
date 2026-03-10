@@ -2,6 +2,8 @@
 crewai==1.9.3
 crewai-tools
 langchain_openai
+litellm>=1.0.0
+openai>=1.0.0
 
 # ── CLI & Logging ─────────────────────────────────────────────────────
 typer
