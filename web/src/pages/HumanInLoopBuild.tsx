@@ -7,7 +7,7 @@ import { api, API_BASE } from '../api';
 import '../hitl.css';
 
 const PIPELINE_STAGES = [
-    'INIT', 'SPEC', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'FORMAL_VERIFY',
+    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'FEASIBILITY_CHECK', 'CDC_ANALYZE', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'FORMAL_VERIFY',
     'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'FLOORPLAN', 'HARDENING',
     'CONVERGENCE_REVIEW', 'ECO_PATCH', 'SIGNOFF',
 ];
@@ -17,6 +17,11 @@ const TOTAL = PIPELINE_STAGES.length;
 const STAGE_ENCOURAGEMENTS: Record<string, string> = {
     INIT:              'Setting up your build environment…',
     SPEC:              'Translating your description into a chip specification…',
+    SPEC_VALIDATE:     'Validating spec — classifying design, checking completeness, generating assertions…',
+    HIERARCHY_EXPAND:   'Expanding complex submodules into nested specifications…',
+    FEASIBILITY_CHECK:  'Evaluating Sky130 physical design feasibility…',
+    CDC_ANALYZE:        'Analyzing clock domain crossings…',
+    VERIFICATION_PLAN:  'Building verification plan & SVA properties…',
     RTL_GEN:           'Writing Verilog — your chip is taking shape…',
     RTL_FIX:           'Fixing any RTL issues automatically…',
     VERIFICATION:      'Running simulation — making sure your logic is correct…',
@@ -41,7 +46,7 @@ const MILESTONE_TOASTS: Record<string, { title: string; msg: string }> = {
 
 // Human-readable stage names
 const STAGE_LABELS: Record<string, string> = {
-    INIT: 'Initialization', SPEC: 'Specification', RTL_GEN: 'RTL Generation',
+    INIT: 'Initialization', SPEC: 'Specification', SPEC_VALIDATE: 'Spec Validation', HIERARCHY_EXPAND: 'Hierarchy Expansion', FEASIBILITY_CHECK: 'Feasibility Check', CDC_ANALYZE: 'CDC Analysis', VERIFICATION_PLAN: 'Verification Plan', RTL_GEN: 'RTL Generation',
     RTL_FIX: 'RTL Fix', VERIFICATION: 'Verification', FORMAL_VERIFY: 'Formal Verification',
     COVERAGE_CHECK: 'Coverage Check', REGRESSION: 'Regression', SDC_GEN: 'SDC Generation',
     FLOORPLAN: 'Floorplan', HARDENING: 'Hardening', CONVERGENCE_REVIEW: 'Convergence',
@@ -50,7 +55,7 @@ const STAGE_LABELS: Record<string, string> = {
 
 // Mandatory stages (cannot be skipped)
 const MANDATORY_STAGES = new Set([
-    'INIT', 'SPEC', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'HARDENING', 'SIGNOFF',
+    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'FEASIBILITY_CHECK', 'CDC_ANALYZE', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'HARDENING', 'SIGNOFF',
 ]);
 
 // Build mode presets
@@ -147,6 +152,9 @@ export const HumanInLoopBuild = () => {
     // Thinking indicator (Improvement 1)
     const [thinkingData, setThinkingData] = useState<{ agent_name: string; message: string } | null>(null);
 
+    // Stall detection — shown when LLM is silent for 5+ minutes
+    const [stallWarning, setStallWarning] = useState<string | null>(null);
+
     // Milestone toast: shown briefly when a key stage completes
     const [milestoneToast, setMilestoneToast] = useState<{ title: string; msg: string } | null>(null);
     const milestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -213,6 +221,17 @@ export const HumanInLoopBuild = () => {
                         ctrl.abort();
                         fetchResult(jid, data.status as any);
                         return;
+                    }
+
+                    // Handle stall warning: LLM silent for 5+ minutes
+                    if (data.type === 'stall_warning') {
+                        setStallWarning(data.message || '⚠️ No activity for 5 minutes — the LLM may be stuck. You can cancel and retry.');
+                        return;
+                    }
+
+                    // Any real event clears the stall warning and thinking indicator
+                    if (data.type === 'log' || data.type === 'checkpoint' || data.type === 'transition') {
+                        setStallWarning(null);
                     }
 
                     // Handle agent_thinking: show pulsing indicator
@@ -394,6 +413,7 @@ export const HumanInLoopBuild = () => {
         setWaitingForApproval(false);
         setApprovalData(null);
         setThinkingData(null);
+        setStallWarning(null);
         setBuildMode('verified');
         setSkipStages(new Set(BUILD_MODE_SKIPS.verified));
         setSkipCoverage(false);
@@ -630,6 +650,18 @@ export const HumanInLoopBuild = () => {
                             skippedStages={skipStages}
                         />
                         <div className="hitl-main">
+                            {stallWarning && (
+                                <div className="hitl-stall-banner">
+                                    <div className="hitl-stall-body">
+                                        <span className="hitl-stall-icon">⚠️</span>
+                                        <span className="hitl-stall-msg">{stallWarning}</span>
+                                    </div>
+                                    <div className="hitl-stall-actions">
+                                        <button className="hitl-stall-cancel-btn" onClick={handleCancel}>Cancel Build</button>
+                                        <button className="hitl-stall-dismiss-btn" onClick={() => setStallWarning(null)}>Dismiss</button>
+                                    </div>
+                                </div>
+                            )}
                             <ActivityFeed events={events} thinkingData={thinkingData} />
                             {approvalData && (
                                 <ApprovalCard

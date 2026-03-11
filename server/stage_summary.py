@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Next stage mapping
 STAGE_FLOW = [
-    "INIT", "SPEC", "RTL_GEN", "RTL_FIX", "VERIFICATION",
+    "INIT", "SPEC", "SPEC_VALIDATE", "HIERARCHY_EXPAND", "FEASIBILITY_CHECK", "CDC_ANALYZE", "VERIFICATION_PLAN", "RTL_GEN", "RTL_FIX", "VERIFICATION",
     "FORMAL_VERIFY", "COVERAGE_CHECK", "REGRESSION",
     "SDC_GEN", "FLOORPLAN", "HARDENING", "CONVERGENCE_REVIEW",
     "ECO_PATCH", "SIGNOFF", "SUCCESS",
@@ -20,6 +20,10 @@ STAGE_FLOW = [
 STAGE_DESCRIPTIONS = {
     "INIT": "Initialize workspace, check tool availability, and prepare build directories",
     "SPEC": "Decompose natural language description into a structured architecture specification (SID JSON)",
+    "SPEC_VALIDATE": "Run 6-stage hardware spec validation: classify design, check completeness, decompose modules, define interfaces, generate behavioral contract",
+    "HIERARCHY_EXPAND": "Evaluate submodule complexity, recursively expand complex submodules into nested specs, and verify interface consistency across the full hierarchy",
+    "FEASIBILITY_CHECK": "Evaluate Sky130/OpenLane physical design feasibility: frequency limits, memory sizing, arithmetic complexity, area budget, and PDK-specific rules",
+    "CDC_ANALYZE": "Identify clock domain crossings, assign synchronization strategies (2-flop sync, pulse sync, async FIFO, handshake, reset sync), and generate CDC submodule specifications",
     "RTL_GEN": "Generate Verilog/SystemVerilog RTL code from the architecture specification",
     "RTL_FIX": "Run syntax checks and fix any Verilog syntax errors in the generated RTL",
     "VERIFICATION": "Generate a testbench and run functional simulation to verify RTL correctness",
@@ -61,6 +65,26 @@ def collect_stage_artifacts(orchestrator, stage_name: str) -> List[Dict[str, str
         "SPEC": [
             ("sid", "Structured Interface Document (SID JSON)"),
             ("spec", "Detailed RTL generation prompt from SID"),
+        ],
+        "SPEC_VALIDATE": [
+            ("hardware_spec", "Validated hardware specification (JSON)"),
+            ("spec_enrichment", "Behavioral contract and verification hints from spec validation"),
+        ],
+        "HIERARCHY_EXPAND": [
+            ("hierarchy_result", "Expanded hierarchy specification (JSON)"),
+            ("hierarchy_enrichment", "Hierarchy depth, expansion count, and consistency fixes"),
+        ],
+        "FEASIBILITY_CHECK": [
+            ("feasibility_result", "Physical design feasibility analysis (JSON)"),
+            ("feasibility_enrichment", "Feasibility verdict, GE estimate, floorplan recommendation, warnings"),
+        ],
+        "CDC_ANALYZE": [
+            ("cdc_result", "Clock domain crossing analysis (JSON)"),
+            ("cdc_enrichment", "CDC status, domain count, crossing signals, synchronization submodules"),
+        ],
+        "VERIFICATION_PLAN": [
+            ("verification_plan", "Structured verification plan (JSON)"),
+            ("verification_enrichment", "Test counts, SVA count, coverage points, warnings"),
         ],
         "RTL_GEN": [
             ("rtl_path", "Generated Verilog RTL file"),
@@ -275,6 +299,11 @@ def build_stage_complete_payload(orchestrator, stage_name: str, design_name: str
 STAGE_HUMAN_NAMES = {
     "INIT": "Initialization",
     "SPEC": "Architecture Specification",
+    "SPEC_VALIDATE": "Specification Validation",
+    "HIERARCHY_EXPAND": "Hierarchy Expansion",
+    "FEASIBILITY_CHECK": "Feasibility Check",
+    "CDC_ANALYZE": "CDC Analysis",
+    "VERIFICATION_PLAN": "Verification Planning",
     "RTL_GEN": "RTL Generation",
     "RTL_FIX": "RTL Syntax Fixing",
     "VERIFICATION": "Verification",

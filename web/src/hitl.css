@@ -542,6 +542,74 @@
   line-height: 1;
 }
 
+/* Stall warning banner ────────────────────────────────────────────── */
+.hitl-stall-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.40);
+  border-left: 3px solid #fbbf24;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+  animation: hitl-toast-in 280ms cubic-bezier(0.22,1,0.36,1) both;
+}
+
+.hitl-stall-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.hitl-stall-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.hitl-stall-msg {
+  font-size: 0.8125rem;
+  color: #fef3c7;
+  line-height: 1.5;
+}
+
+.hitl-stall-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.hitl-stall-cancel-btn {
+  padding: 0.3rem 0.75rem;
+  border-radius: 5px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #dc2626;
+  color: #fff;
+  border: none;
+  transition: background 0.15s;
+}
+.hitl-stall-cancel-btn:hover { background: #b91c1c; }
+
+.hitl-stall-dismiss-btn {
+  padding: 0.3rem 0.75rem;
+  border-radius: 5px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  background: rgba(255,255,255,0.08);
+  color: var(--text-secondary, #9a9590);
+  border: 1px solid rgba(255,255,255,0.12);
+  transition: background 0.15s;
+}
+.hitl-stall-dismiss-btn:hover { background: rgba(255,255,255,0.14); }
+
 .hitl-stage--failed {
   border-left-color: var(--red);
 }

@@ -5,6 +5,11 @@ import { api } from '../api';
 const STATES_DISPLAY: Record<string, { label: string; icon: string }> = {
     INIT: { label: 'Initializing Workspace', icon: '🔧' },
     SPEC: { label: 'Architectural Planning', icon: '📐' },
+    SPEC_VALIDATE: { label: 'Specification Validation', icon: '🔍' },
+    HIERARCHY_EXPAND: { label: 'Hierarchy Expansion', icon: '🌲' },
+    FEASIBILITY_CHECK: { label: 'Feasibility Check', icon: '⚖️' },
+    CDC_ANALYZE: { label: 'CDC Analysis', icon: '🔀' },
+    VERIFICATION_PLAN: { label: 'Verification Planning', icon: '📋' },
     RTL_GEN: { label: 'RTL Generation', icon: '💻' },
     RTL_FIX: { label: 'RTL Syntax Fixing', icon: '🔨' },
     VERIFICATION: { label: 'Verification & Testbench', icon: '🧪' },

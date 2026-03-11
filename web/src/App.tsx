@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { Session } from '@supabase/supabase-js';
+import { supabase } from './supabaseClient';
+import { AuthPage } from './components/AuthPage';
 import { Dashboard } from './pages/Dashboard';
 import { DesignStudio } from './pages/DesignStudio';
 import { HumanInLoopBuild } from './pages/HumanInLoopBuild';
@@ -9,6 +12,8 @@ import { api } from './api';
 import './index.css';
 
 const App = () => {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [selectedPage, setSelectedPage] = useState('Design Studio');
   const [designs, setDesigns] = useState<{ name: string, has_gds: boolean }[]>([]);
   const [selectedDesign, setSelectedDesign] = useState<string>('');
@@ -17,14 +22,26 @@ const App = () => {
     return saved === 'dark' ? 'dark' : 'light';
   });
 
-
+  // ── Auth state ──
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
+      setSession(s);
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('agentic-theme', theme);
   }, [theme]);
 
+  // Fetch designs only when authenticated
   useEffect(() => {
+    if (!session) return;
     api.get('/designs')
       .then(res => {
         const data = res.data?.designs || [];
@@ -35,7 +52,13 @@ const App = () => {
         }
       })
       .catch(err => console.error("Failed to fetch designs", err));
-  }, []);
+  }, [session]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setSelectedPage('Design Studio');
+  };
 
   const navItems = useMemo(
     () => [
@@ -49,6 +72,21 @@ const App = () => {
     ],
     []
   );
+
+  // ── Auth loading spinner ──
+  if (authLoading) {
+    return (
+      <div className="auth-loading">
+        <div className="auth-loading-spinner" />
+        <span>Loading AgentIC…</span>
+      </div>
+    );
+  }
+
+  // ── Auth gate ──
+  if (!session) {
+    return <AuthPage onAuth={() => supabase.auth.getSession().then(({ data: { session: s } }) => setSession(s))} />;
+  }
 
   return (
     <div className="app-shell">
@@ -90,11 +128,23 @@ const App = () => {
         </nav>
 
         <div className="app-sidebar-footer">
+          {/* User info */}
+          <div className="app-user-info">
+            <div className="app-user-avatar">
+              {session.user.email?.[0]?.toUpperCase() || '?'}
+            </div>
+            <div className="app-user-details">
+              <div className="app-user-email">{session.user.email}</div>
+            </div>
+          </div>
           <button
             className="theme-toggle"
             onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
           >
             {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
+          </button>
+          <button className="logout-btn" onClick={handleLogout}>
+            ↩ Sign Out
           </button>
           <div className="app-version">AgentIC · 2026</div>
         </div>
@@ -121,7 +171,7 @@ const App = () => {
 
               <div className="home-card-grid">
                 <div className="home-kpi">{designs.length}<span>Designs</span></div>
-                <div className="home-kpi">15<span>Pipeline Stages</span></div>
+                <div className="home-kpi">19<span>Pipeline Stages</span></div>
                 <div className="home-kpi">5<span>Core Modules</span></div>
                 <div className="home-kpi">AI<span>Agents</span></div>
               </div>
@@ -166,21 +216,26 @@ const App = () => {
                 <h3 className="home-section-title">Pipeline Flow</h3>
                 <div className="pipeline-flow">
                   {[
-                    { icon: '📐', label: 'SPEC', sub: 'Spec Analysis' },
-                    { icon: '💻', label: 'RTL_GEN', sub: 'RTL Generation' },
-                    { icon: '🔨', label: 'RTL_FIX', sub: 'Code Quality' },
-                    { icon: '🧪', label: 'VERIFY', sub: 'Functional Verify' },
-                    { icon: '📊', label: 'FORMAL', sub: 'Formal Verify' },
-                    { icon: '📈', label: 'COVERAGE', sub: 'Coverage' },
+                    { icon: '📐', label: 'SPEC', sub: 'Specification' },
+                    { icon: '🔍', label: 'VALIDATE', sub: 'Spec Validation' },
+                    { icon: '🌲', label: 'EXPAND', sub: 'Hierarchy' },
+                    { icon: '⚖️', label: 'FEASIBLE', sub: 'Feasibility' },
+                    { icon: '🔀', label: 'CDC', sub: 'Clock Domains' },
+                    { icon: '📋', label: 'V-PLAN', sub: 'Verify Plan' },
+                    { icon: '💻', label: 'RTL', sub: 'Generation' },
+                    { icon: '🔨', label: 'FIX', sub: 'Code Quality' },
+                    { icon: '🧪', label: 'VERIFY', sub: 'Simulation' },
+                    { icon: '📊', label: 'FORMAL', sub: 'Formal' },
+                    { icon: '📈', label: 'COV', sub: 'Coverage' },
                     { icon: '🗺️', label: 'FLOOR', sub: 'Floorplan' },
-                    { icon: '🏗️', label: 'HARDEN', sub: 'Optimization' },
-                    { icon: '✅', label: 'SIGNOFF', sub: 'Signoff' },
+                    { icon: '🏗️', label: 'HARDEN', sub: 'Place+Route' },
+                    { icon: '✅', label: 'SIGNOFF', sub: 'Tape-out' },
                   ].map((s, i) => (
                     <div className="pipeline-stage" key={s.label}>
                       <div className="pipeline-stage-icon">{s.icon}</div>
                       <div className="pipeline-stage-label">{s.label}</div>
                       <div className="pipeline-stage-sub">{s.sub}</div>
-                      {i < 8 && <div className="pipeline-arrow">→</div>}
+                      {i < 13 && <div className="pipeline-arrow">→</div>}
                     </div>
                   ))}
                 </div>

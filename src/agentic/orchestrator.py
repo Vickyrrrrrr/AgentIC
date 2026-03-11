@@ -34,6 +34,7 @@ from .agents.verifier import get_verification_agent, get_error_analyst_agent, ge
 from .agents.doc_agent import get_doc_agent
 from .agents.sdc_agent import get_sdc_agent
 from .core import ArchitectModule, SelfReflectPipeline, ReActAgent, WaveformExpertModule, DeepDebuggerModule
+from .core import HardwareSpecGenerator, HardwareSpec, HierarchyExpander, FeasibilityChecker, CDCAnalyzer, VerificationPlanner
 from .contracts import (
     AgentResult,
     ArtifactRef,
@@ -128,6 +129,11 @@ class BuildStrategy(enum.Enum):
 class BuildState(enum.Enum):
     INIT = "Initializing"
     SPEC = "Architectural Planning"
+    SPEC_VALIDATE = "Specification Validation"
+    HIERARCHY_EXPAND = "Hierarchy Expansion"
+    FEASIBILITY_CHECK = "Feasibility Check"
+    CDC_ANALYZE = "CDC Analysis"
+    VERIFICATION_PLAN = "Verification Planning"
     RTL_GEN = "RTL Generation"
     RTL_FIX = "RTL Syntax Fixing"
     VERIFICATION = "Verification & Testbench"
@@ -808,6 +814,16 @@ class BuildOrchestrator:
                     self.do_init()
                 elif self.state == BuildState.SPEC:
                     self.do_spec()
+                elif self.state == BuildState.SPEC_VALIDATE:
+                    self.do_spec_validate()
+                elif self.state == BuildState.HIERARCHY_EXPAND:
+                    self.do_hierarchy_expand()
+                elif self.state == BuildState.FEASIBILITY_CHECK:
+                    self.do_feasibility_check()
+                elif self.state == BuildState.CDC_ANALYZE:
+                    self.do_cdc_analyze()
+                elif self.state == BuildState.VERIFICATION_PLAN:
+                    self.do_verification_plan()
                 elif self.state == BuildState.RTL_GEN:
                     self.do_rtl_gen()
                 elif self.state == BuildState.RTL_FIX:
@@ -909,7 +925,7 @@ class BuildOrchestrator:
             return
 
         self.log("Architecture Plan Generated (SID validated)", refined=True)
-        self.transition(BuildState.RTL_GEN)
+        self.transition(BuildState.SPEC_VALIDATE)
 
     def _do_spec_fallback(self):
         """Fallback spec generation using a single CrewAI agent."""
@@ -961,7 +977,389 @@ SPECIFICATION SECTIONS (Markdown):
 
         self.artifacts['spec'] = str(result)
         self.log("Architecture Plan Generated (fallback)", refined=True)
-        self.transition(BuildState.RTL_GEN)
+        self.transition(BuildState.SPEC_VALIDATE)
+
+    # ─── NEW PIPELINE STAGES ─────────────────────────────────────────
+
+    def do_spec_validate(self):
+        """Stage: Validate and enrich the spec via HardwareSpecGenerator (6-stage pipeline)."""
+        self.log("Running HardwareSpecGenerator (classify → complete → decompose → interface → contract → output)...", refined=True)
+
+        try:
+            spec_gen = HardwareSpecGenerator(llm=self.llm, verbose=self.verbose)
+            hw_spec, issues = spec_gen.generate(
+                design_name=self.name,
+                description=self.desc,
+                target_pdk=self.pdk_profile.get("profile", "sky130"),
+            )
+
+            # Store the spec as structured JSON
+            self.artifacts['hw_spec'] = hw_spec.to_dict()
+            self.artifacts['hw_spec_json'] = hw_spec.to_json()
+            self.artifacts['hw_spec_object'] = hw_spec
+
+            # Log classification and stats
+            self.log(f"Design classified as: {hw_spec.design_category}", refined=True)
+            self.log(f"Ports: {len(hw_spec.ports)} | Submodules: {len(hw_spec.submodules)} | "
+                     f"Contract statements: {len(hw_spec.behavioral_contract)}", refined=True)
+
+            if issues:
+                for issue in issues[:5]:
+                    self.log(f"  ⚠ {issue}", refined=True)
+
+            # Handle ELABORATION_NEEDED — present 3 options to user
+            if hw_spec.design_category == "ELABORATION_NEEDED":
+                options = [w for w in hw_spec.warnings if w.startswith("OPTION_")]
+                self.log(f"📋 Description is brief — generated {len(options)} design options.", refined=True)
+
+                # Store options in artifact bus for the web API to surface
+                parsed_options = []
+                for opt_str in options:
+                    # Format: OPTION_1: title | Category: X | Freq: Y MHz | Ports: ... | Details: ...
+                    parts = {p.split(":")[0].strip(): ":".join(p.split(":")[1:]).strip()
+                             for p in opt_str.split(" | ") if ":" in p}
+                    parsed_options.append(parts)
+                self.artifacts['spec_elaboration_options'] = parsed_options
+                self.artifacts['spec_elaboration_needed'] = True
+
+                # ── CLI: Rich interactive display ──
+                try:
+                    import typer
+                    from rich.table import Table
+
+                    table = Table(title=f"💡 AgentIC VLSI Design Advisor — 3 Options for '{self.name}'",
+                                  show_lines=True)
+                    table.add_column("#", style="bold cyan", width=3)
+                    table.add_column("Design Variant", style="bold white", width=30)
+                    table.add_column("Category", style="yellow", width=12)
+                    table.add_column("Freq", style="green", width=8)
+                    table.add_column("Details", style="dim")
+
+                    for i, opt in enumerate(parsed_options, 1):
+                        opt_id = str(opt.get("OPTION_1".replace("1", str(i)), i))
+                        title = (opt.get("OPTION_1", opt.get(f"OPTION_{i}", f"Option {i}")))
+                        # Get key from dynamic OPTION_N key
+                        option_key = [k for k in opt if k.startswith("OPTION_")]
+                        title = opt[option_key[0]] if option_key else f"Option {i}"
+                        category = opt.get("Category", "")
+                        freq = opt.get("Freq", "")
+                        details = opt.get("Details", "")[:80] + "…" if len(opt.get("Details", "")) > 80 else opt.get("Details", "")
+                        table.add_row(str(i), title, category, freq, details)
+
+                    console.print(table)
+                    console.print()
+
+                    # Prompt user to choose
+                    choice_str = typer.prompt(
+                        f"Choose an option (1-{len(parsed_options)}) or type a custom description",
+                        default="1"
+                    )
+
+                    chosen_desc = None
+                    if choice_str.strip().isdigit():
+                        idx = int(choice_str.strip()) - 1
+                        if 0 <= idx < len(parsed_options):
+                            opt = parsed_options[idx]
+                            option_key = [k for k in opt if k.startswith("OPTION_")]
+                            title = opt[option_key[0]] if option_key else f"Option {idx+1}"
+                            details = opt.get("Details", "")
+                            ports = opt.get("Ports", "")
+                            category = opt.get("Category", "")
+                            freq = opt.get("Freq", "50 MHz")
+                            chosen_desc = (
+                                f"{self.name}: {title}. {details} "
+                                f"Category: {category}. Target frequency: {freq}. "
+                                f"Key ports: {ports}. Module name: {self.name}."
+                            )
+                            self.log(f"✅ Selected option {idx+1}: {title}", refined=True)
+                    else:
+                        # Custom description entered directly
+                        chosen_desc = choice_str.strip()
+                        self.log(f"✅ Using custom description: {chosen_desc[:80]}…", refined=True)
+
+                    if chosen_desc:
+                        # Store the enriched description and retry spec validation
+                        self.desc = chosen_desc
+                        self.artifacts['original_desc'] = hw_spec.design_description
+                        self.artifacts['elaborated_desc'] = chosen_desc
+                        self.log("🔄 Re-running spec generation with elaborated description…", refined=True)
+                        # Re-enter this stage to regenerate with the full description
+                        self.state = BuildState.SPEC_VALIDATE
+                        return
+
+                except Exception as prompt_err:
+                    # If running non-interactively (e.g. web API), use the first option automatically
+                    self.log(f"Non-interactive mode — auto-selecting option 1 ({prompt_err})", refined=True)
+                    if parsed_options:
+                        opt = parsed_options[0]
+                        option_key = [k for k in opt if k.startswith("OPTION_")]
+                        title = opt[option_key[0]] if option_key else "Option 1"
+                        details = opt.get("Details", "")
+                        ports = opt.get("Ports", "")
+                        freq = opt.get("Freq", "50 MHz")
+                        self.desc = (
+                            f"{self.name}: {title}. {details} "
+                            f"Target frequency: {freq}. Key ports: {ports}. Module name: {self.name}."
+                        )
+                        self.artifacts['elaborated_desc'] = self.desc
+                        self.state = BuildState.SPEC_VALIDATE
+                        return
+
+                # If we got here without a valid choice, fail gracefully
+                self.log("❌ No valid design option selected.", refined=True)
+                self.state = BuildState.FAIL
+                return
+
+            # Check for hard rejection
+            if hw_spec.design_category == "REJECTED":
+                rejection_reason = hw_spec.warnings[0] if hw_spec.warnings else "Specification rejected"
+                self.log(f"❌ SPEC REJECTED: {rejection_reason}", refined=True)
+                self.errors.append(f"Specification rejected: {rejection_reason}")
+                self.artifacts['spec_rejection_reason'] = rejection_reason
+                self.state = BuildState.FAIL
+                return
+
+            # Enrich the existing spec artifact with structured data
+            enrichment = spec_gen.to_sid_enrichment(hw_spec)
+            self.artifacts['spec_enrichment'] = enrichment
+
+            # Append behavioral verification hints to spec for downstream RTL gen
+            if enrichment.get('verification_hints_from_spec'):
+                existing_spec = self.artifacts.get('spec', '')
+                hints = "\n".join(enrichment['verification_hints_from_spec'])
+                self.artifacts['spec'] = (
+                    existing_spec +
+                    f"\n\n## Behavioral Contract (Auto-Generated Assertions)\n{hints}\n"
+                )
+
+            self.log(f"Spec validation complete: {hw_spec.design_category} "
+                     f"({len(hw_spec.inferred_fields)} fields inferred, "
+                     f"{len(hw_spec.warnings)} warnings)", refined=True)
+            self.transition(BuildState.HIERARCHY_EXPAND)
+
+        except Exception as e:
+            self.log(f"HardwareSpecGenerator failed ({e}); skipping to HIERARCHY_EXPAND with basic spec.", refined=True)
+            self.logger.warning(f"HardwareSpecGenerator error: {e}")
+            # Create a minimal hw_spec so downstream stages can still run
+            self.artifacts['hw_spec'] = {
+                'design_category': 'CONTROL',
+                'top_module_name': self.name,
+                'target_pdk': self.pdk_profile.get("profile", "sky130"),
+                'target_frequency_mhz': 50,
+                'ports': [], 'submodules': [],
+                'behavioral_contract': [], 'warnings': ['Spec validation was skipped due to error'],
+            }
+            self.transition(BuildState.HIERARCHY_EXPAND)
+
+    def do_hierarchy_expand(self):
+        """Stage: Evaluate submodule complexity and recursively expand complex ones."""
+        self.log("Running HierarchyExpander (evaluate → expand → consistency check)...", refined=True)
+
+        hw_spec_dict = self.artifacts.get('hw_spec', {})
+
+        # If we have a full HardwareSpec object, use it directly
+        hw_spec_obj = self.artifacts.get('hw_spec_object')
+        if hw_spec_obj is None:
+            # Reconstruct from dict
+            try:
+                hw_spec_obj = HardwareSpec.from_json(json.dumps(hw_spec_dict))
+            except Exception:
+                self.log("No valid HardwareSpec for hierarchy expansion; skipping.", refined=True)
+                self.artifacts['hierarchy_result'] = {}
+                self.transition(BuildState.FEASIBILITY_CHECK)
+                return
+
+        try:
+            expander = HierarchyExpander(llm=self.llm, verbose=self.verbose)
+            result = expander.expand(hw_spec_obj)
+
+            self.artifacts['hierarchy_result'] = result.to_dict()
+            self.artifacts['hierarchy_result_json'] = result.to_json()
+
+            self.log(f"Hierarchy: depth={result.hierarchy_depth}, "
+                     f"expansions={result.expansion_count}, "
+                     f"submodules={len(result.submodules)}", refined=True)
+
+            # Log any consistency fixes
+            consistency_fixes = [w for w in result.warnings if w.startswith("CONSISTENCY_FIX")]
+            for fix in consistency_fixes[:3]:
+                self.log(f"  🔧 {fix}", refined=True)
+
+            # Store enrichment for downstream
+            enrichment = expander.to_hierarchy_enrichment(result)
+            self.artifacts['hierarchy_enrichment'] = enrichment
+
+            self.transition(BuildState.FEASIBILITY_CHECK)
+
+        except Exception as e:
+            self.log(f"HierarchyExpander failed ({e}); skipping to FEASIBILITY_CHECK.", refined=True)
+            self.logger.warning(f"HierarchyExpander error: {e}")
+            self.artifacts['hierarchy_result'] = {}
+            self.transition(BuildState.FEASIBILITY_CHECK)
+
+    def do_feasibility_check(self):
+        """Stage: Check physical realizability on Sky130 before RTL generation."""
+        self.log("Running FeasibilityChecker (frequency → memory → arithmetic → area → Sky130 rules)...", refined=True)
+
+        hw_spec_dict = self.artifacts.get('hw_spec', {})
+        hierarchy_result_dict = self.artifacts.get('hierarchy_result', None)
+
+        try:
+            checker = FeasibilityChecker(pdk=self.pdk_profile.get("profile", "sky130"))
+            result = checker.check(hw_spec_dict, hierarchy_result_dict)
+
+            self.artifacts['feasibility_result'] = result.to_dict()
+            self.artifacts['feasibility_result_json'] = result.to_json()
+
+            self.log(f"Feasibility: {result.feasibility_status} | "
+                     f"~{result.estimated_gate_equivalents} GE | "
+                     f"Floorplan: {result.recommended_floorplan_size_um}", refined=True)
+
+            if result.feasibility_warnings:
+                for w in result.feasibility_warnings[:5]:
+                    self.log(f"  ⚠ {w[:120]}", refined=True)
+
+            if result.feasibility_status == "REJECT":
+                for r in result.feasibility_rejections:
+                    self.log(f"  ❌ {r}", refined=True)
+                self.log("❌ FEASIBILITY REJECTED — pipeline halted before RTL generation.", refined=True)
+                self.errors.append(f"Feasibility rejected: {'; '.join(result.feasibility_rejections[:3])}")
+                self.artifacts['feasibility_rejection_reasons'] = result.feasibility_rejections
+                self.state = BuildState.FAIL
+                return
+
+            if result.memory_macros_required:
+                for macro in result.memory_macros_required:
+                    self.log(f"  📦 OpenRAM macro needed: {macro.submodule_name} "
+                             f"({macro.width_bits}×{macro.depth_words})", refined=True)
+
+            # Store enrichment
+            enrichment = checker.to_feasibility_enrichment(result)
+            self.artifacts['feasibility_enrichment'] = enrichment
+
+            self.transition(BuildState.CDC_ANALYZE)
+
+        except Exception as e:
+            self.log(f"FeasibilityChecker failed ({e}); skipping to CDC_ANALYZE.", refined=True)
+            self.logger.warning(f"FeasibilityChecker error: {e}")
+            self.artifacts['feasibility_result'] = {'feasibility_status': 'WARN', 'feasibility_warnings': [f'Check skipped: {e}']}
+            self.transition(BuildState.CDC_ANALYZE)
+
+    def do_cdc_analyze(self):
+        """Stage: Identify clock domain crossings and assign synchronization strategies."""
+        self.log("Running CDCAnalyzer (identify domains → crossings → sync strategies → submodules)...", refined=True)
+
+        hw_spec_dict = self.artifacts.get('hw_spec', {})
+        hierarchy_result_dict = self.artifacts.get('hierarchy_result', None)
+
+        try:
+            analyzer = CDCAnalyzer()
+            result = analyzer.analyze(hw_spec_dict, hierarchy_result_dict)
+
+            self.artifacts['cdc_result'] = result.to_dict()
+            self.artifacts['cdc_result_json'] = result.to_json()
+
+            if result.cdc_status == "SINGLE_DOMAIN":
+                self.log("CDC: Single clock domain detected — no CDC analysis required.", refined=True)
+            else:
+                self.log(f"CDC: {result.domain_count} clock domains, "
+                         f"{len(result.crossing_signals)} crossing signals, "
+                         f"{len(result.cdc_submodules_added)} sync submodules generated.", refined=True)
+
+                for crossing in result.crossing_signals[:5]:
+                    self.log(f"  🔀 {crossing.signal_name}: {crossing.source_domain} → "
+                             f"{crossing.destination_domain} [{crossing.sync_strategy}]", refined=True)
+
+                if result.cdc_unresolved:
+                    for u in result.cdc_unresolved:
+                        self.log(f"  ⚠ {u}", refined=True)
+
+                # Inject CDC submodule specs into the spec artifact for RTL gen
+                if result.cdc_submodules_added:
+                    cdc_section = "\n\n## CDC Synchronization Submodules (Auto-Generated)\n"
+                    for sub in result.cdc_submodules_added:
+                        cdc_section += (
+                            f"\n### {sub.module_name} ({sub.strategy})\n"
+                            f"- Source: {sub.source_domain} → Destination: {sub.destination_domain}\n"
+                            f"- Behavior: {sub.behavior}\n"
+                            f"- Ports: {json.dumps(sub.ports, indent=2)}\n"
+                        )
+                    existing_spec = self.artifacts.get('spec', '')
+                    self.artifacts['spec'] = existing_spec + cdc_section
+
+            self.transition(BuildState.VERIFICATION_PLAN)
+
+        except Exception as e:
+            self.log(f"CDCAnalyzer failed ({e}); skipping to VERIFICATION_PLAN.", refined=True)
+            self.logger.warning(f"CDCAnalyzer error: {e}")
+            self.artifacts['cdc_result'] = {'cdc_status': 'SINGLE_DOMAIN', 'cdc_warnings': [f'Analysis skipped: {e}']}
+            self.transition(BuildState.VERIFICATION_PLAN)
+
+    def do_verification_plan(self):
+        """Stage: Generate structured verification plan with test cases, SVA, and coverage."""
+        self.log("Running VerificationPlanner (behaviors → mandatory tests → SVA → coverage → finalize)...", refined=True)
+
+        hw_spec_obj = self.artifacts.get('hw_spec_object')
+        if hw_spec_obj is None:
+            # Try to reconstruct
+            hw_spec_dict = self.artifacts.get('hw_spec', {})
+            try:
+                hw_spec_obj = HardwareSpec.from_json(json.dumps(hw_spec_dict))
+            except Exception:
+                self.log("No valid HardwareSpec for verification planning; skipping.", refined=True)
+                self.transition(BuildState.RTL_GEN)
+                return
+
+        # Get optional CDC and hierarchy results for coverage planning
+        cdc_result_dict = self.artifacts.get('cdc_result', {})
+        hierarchy_result_dict = self.artifacts.get('hierarchy_result', {})
+
+        try:
+            planner = VerificationPlanner()
+            plan = planner.plan(
+                hardware_spec=hw_spec_obj,
+                cdc_result=cdc_result_dict if cdc_result_dict else None,
+                hierarchy_result=hierarchy_result_dict if hierarchy_result_dict else None,
+            )
+
+            self.artifacts['verification_plan'] = plan.to_dict()
+            self.artifacts['verification_plan_json'] = plan.to_json()
+
+            self.log(f"Verification Plan: {plan.total_tests} tests "
+                     f"(P0={plan.p0_count}, P1={plan.p1_count}, P2={plan.p2_count})", refined=True)
+            self.log(f"SVA properties: {len(plan.sva_properties)} | "
+                     f"Coverage points: {len(plan.coverage_points)}", refined=True)
+
+            if plan.warnings:
+                for w in plan.warnings[:3]:
+                    self.log(f"  ⚠ {w}", refined=True)
+
+            # Inject verification plan context into spec for testbench generation
+            vplan_section = "\n\n## Verification Plan (Auto-Generated)\n"
+            for tc in plan.test_cases:
+                vplan_section += f"- [{tc.priority}] {tc.test_id}: {tc.title}\n"
+                vplan_section += f"  Stimulus: {tc.stimulus}\n"
+                vplan_section += f"  Expected: {tc.expected}\n"
+
+            # Inject SVA assertions into spec for formal verification stage
+            if plan.sva_properties:
+                vplan_section += "\n### SVA Assertions\n```systemverilog\n"
+                for sva in plan.sva_properties:
+                    vplan_section += f"// {sva.description}\n{sva.sva_code}\n\n"
+                vplan_section += "```\n"
+
+            existing_spec = self.artifacts.get('spec', '')
+            self.artifacts['spec'] = existing_spec + vplan_section
+
+            self.transition(BuildState.RTL_GEN)
+
+        except Exception as e:
+            self.log(f"VerificationPlanner failed ({e}); skipping to RTL_GEN.", refined=True)
+            self.logger.warning(f"VerificationPlanner error: {e}")
+            self.artifacts['verification_plan'] = {}
+            self.transition(BuildState.RTL_GEN)
+
+    # ─── END NEW PIPELINE STAGES ─────────────────────────────────────
 
     def _get_strategy_prompt(self) -> str:
         if self.strategy == BuildStrategy.SV_MODULAR:
@@ -1291,9 +1689,12 @@ SPECIFICATION SECTIONS (Markdown):
         return count >= 2
 
     def _clear_tb_fingerprints(self) -> None:
-        """Reset all TB failure fingerprints.
-        """
-        pass # Bug 2: Do not clear fingerprints or retry counters to prevent infinite loops
+        """Reset all TB failure fingerprints so gate-level retries start fresh."""
+        self.tb_failure_fingerprint_history.clear()
+        self.tb_failed_code_by_fingerprint.clear()
+        self.tb_static_fail_count = 0
+        self.tb_compile_fail_count = 0
+        self.tb_repair_fail_count = 0
 
     def generate_uvm_lite_tb_from_rtl_ports(self, design_name: str, rtl_code: str) -> str:
         """Deterministic Verilator-safe testbench generated from RTL ports.
@@ -2772,7 +3173,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                          self.log("Skipping Hardening (User Cancelled).", refined=True)
                          self.transition(BuildState.FORMAL_VERIFY)
         else:
-            output_for_llm = self._condense_failure_log(output, kind="timing")
+            output_for_llm = self._condense_failure_log(output, kind="simulation")
             if self._record_failure_fingerprint(output_for_llm):
                 self.log("Detected repeated simulation failure fingerprint. Failing closed.", refined=True)
                 self.state = BuildState.FAIL
@@ -2983,11 +3384,11 @@ Reply with JSON only, no prose, using this exact schema:
                 # Add post-reset stabilization: insert wait cycles after reset de-assertion
                 if "reset_phase" in fixed_tb and "// post-reset-stab" not in fixed_tb:
                     # After rst_n = 1'b1 (or 1'b0 for active-high), add stabilization
-                    for deassert in ["vif.rst_n = 1'b1;", "vif.reset = 1'b0;"]:
+                    for deassert in ["rst_n = 1'b1;", "reset = 1'b0;"]:
                         if deassert in fixed_tb:
                             fixed_tb = fixed_tb.replace(
                                 deassert,
-                                f"{deassert}\n    repeat (3) @(posedge vif.clk); // post-reset-stab"
+                                f"{deassert}\n    repeat (3) @(posedge clk); // post-reset-stab"
                             )
                             break
                 if fixed_tb != tb_code:
@@ -3647,7 +4048,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         }
         coverage_pass = all(coverage_checks.values())
 
-        if self.retry_count == 0:
+        if not hasattr(self, 'best_coverage') or self.best_coverage is None:
             self.best_coverage = -1.0
             self.best_tb_backup = None
 
@@ -3828,8 +4229,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         self.logger.info(f"REGRESSION TESTS:\n{result}")
         
         # Parse out individual tests from the LLM output
-        import re as regex
-        test_blocks = regex.findall(r'```(?:verilog|v)?\s*\n(.*?)```', result, regex.DOTALL)
+        test_blocks = re.findall(r'```(?:verilog|v)?\s*\n(.*?)```', result, re.DOTALL)
         
         if not test_blocks:
             self.log("No regression tests extracted. Skipping regression.", refined=True)
@@ -3867,8 +4267,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 try:
                     with open(test_path, 'r') as f:
                         tb_content = f.read()
-                    import re as _re
-                    m = _re.search(r'module\s+(\w+)', tb_content)
+                    m = re.search(r'module\s+(\w+)', tb_content)
                     if m:
                         tb_module = m.group(1)
                 except Exception:

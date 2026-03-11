@@ -12,6 +12,11 @@ Modules:
 """
 
 from .architect import ArchitectModule, StructuredSpecDict
+from .spec_generator import HardwareSpecGenerator, HardwareSpec
+from .hierarchy_expander import HierarchyExpander, HierarchyResult
+from .feasibility_checker import FeasibilityChecker, FeasibilityResult
+from .cdc_analyzer import CDCAnalyzer, CDCResult
+from .verification_planner import VerificationPlanner, VerificationPlan
 from .waveform_expert import WaveformExpertModule
 from .deep_debugger import DeepDebuggerModule
 from .react_agent import ReActAgent, ReActStep
@@ -20,6 +25,16 @@ from .self_reflect import SelfReflectPipeline
 __all__ = [
     "ArchitectModule",
     "StructuredSpecDict",
+    "HardwareSpecGenerator",
+    "HardwareSpec",
+    "HierarchyExpander",
+    "HierarchyResult",
+    "FeasibilityChecker",
+    "FeasibilityResult",
+    "CDCAnalyzer",
+    "CDCResult",
+    "VerificationPlanner",
+    "VerificationPlan",
     "WaveformExpertModule",
     "DeepDebuggerModule",
     "ReActAgent",

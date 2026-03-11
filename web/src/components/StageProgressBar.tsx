@@ -3,6 +3,11 @@ import React from 'react';
 const STAGES = [
     { key: 'INIT', label: 'Initialization' },
     { key: 'SPEC', label: 'Specification' },
+    { key: 'SPEC_VALIDATE', label: 'Spec Validation' },
+    { key: 'HIERARCHY_EXPAND', label: 'Hierarchy Expansion' },
+    { key: 'FEASIBILITY_CHECK', label: 'Feasibility Check' },
+    { key: 'CDC_ANALYZE', label: 'CDC Analysis' },
+    { key: 'VERIFICATION_PLAN', label: 'Verification Plan' },
     { key: 'RTL_GEN', label: 'RTL Generation' },
     { key: 'RTL_FIX', label: 'RTL Fix' },
     { key: 'VERIFICATION', label: 'Verification' },
@@ -21,6 +26,11 @@ const STAGES = [
 const STAGE_DESCRIPTIONS: Record<string, string> = {
     INIT:              'Setting up build context',
     SPEC:              'Translating your idea into chip spec',
+    SPEC_VALIDATE:     'Validating spec completeness & generating assertions',
+    HIERARCHY_EXPAND:   'Expanding complex submodules into nested specs',
+    FEASIBILITY_CHECK:  'Evaluating Sky130 physical design feasibility',
+    CDC_ANALYZE:        'Identifying clock domain crossings',
+    VERIFICATION_PLAN:  'Generating verification plan & SVA properties',
     RTL_GEN:           'Writing synthesizable Verilog',
     RTL_FIX:           'Resolving any RTL issues',
     VERIFICATION:      'Running simulation testbench',

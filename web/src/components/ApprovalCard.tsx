@@ -21,7 +21,7 @@ interface Props {
 }
 
 const STAGE_ICONS: Record<string, string> = {
-    INIT: '⚙', SPEC: '◈', RTL_GEN: '⌨', RTL_FIX: '◪',
+    INIT: '⚙', SPEC: '◈', SPEC_VALIDATE: '⊘', HIERARCHY_EXPAND: '⊞', FEASIBILITY_CHECK: '⚖', CDC_ANALYZE: '↔', VERIFICATION_PLAN: '☑', RTL_GEN: '⌨', RTL_FIX: '◪',
     VERIFICATION: '◉', FORMAL_VERIFY: '◈', COVERAGE_CHECK: '◎',
     REGRESSION: '↺', SDC_GEN: '⧗', FLOORPLAN: '▣',
     HARDENING: '⬡', CONVERGENCE_REVIEW: '◎', ECO_PATCH: '⟴',

@@ -70,7 +70,7 @@ JOB_STORE: Dict[str, Dict[str, Any]] = {}
 TRAINING_JSONL = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "training", "agentic_sft_data.jsonl"))
 
 BUILD_STATES_ORDER = [
-    "INIT", "SPEC", "RTL_GEN", "RTL_FIX", "VERIFICATION",
+    "INIT", "SPEC", "SPEC_VALIDATE", "HIERARCHY_EXPAND", "FEASIBILITY_CHECK", "CDC_ANALYZE", "VERIFICATION_PLAN", "RTL_GEN", "RTL_FIX", "VERIFICATION",
     "FORMAL_VERIFY", "COVERAGE_CHECK", "REGRESSION",
     "SDC_GEN",
     "FLOORPLAN", "HARDENING", "CONVERGENCE_REVIEW",
@@ -81,6 +81,11 @@ TOTAL_STEPS = len(BUILD_STATES_ORDER)
 STAGE_META: Dict[str, Dict[str, str]] = {
     "INIT": {"label": "Initializing Workspace", "icon": "🔧"},
     "SPEC": {"label": "Architectural Planning", "icon": "📐"},
+    "SPEC_VALIDATE": {"label": "Specification Validation", "icon": "🔍"},
+    "HIERARCHY_EXPAND": {"label": "Hierarchy Expansion", "icon": "🌲"},
+    "FEASIBILITY_CHECK": {"label": "Feasibility Check", "icon": "⚖️"},
+    "CDC_ANALYZE": {"label": "CDC Analysis", "icon": "🔀"},
+    "VERIFICATION_PLAN": {"label": "Verification Planning", "icon": "📋"},
     "RTL_GEN": {"label": "RTL Generation", "icon": "💻"},
     "RTL_FIX": {"label": "RTL Syntax Fixing", "icon": "🔨"},
     "VERIFICATION": {"label": "Verification & Testbench", "icon": "🧪"},
@@ -492,6 +497,11 @@ def _infer_agent_name(state: str, message: str) -> str:
     state_agents = {
         "INIT": "Orchestrator",
         "SPEC": "ArchitectModule",
+        "SPEC_VALIDATE": "Spec Validator",
+        "HIERARCHY_EXPAND": "Hierarchy Expander",
+        "FEASIBILITY_CHECK": "Feasibility Checker",
+        "CDC_ANALYZE": "CDC Analyzer",
+        "VERIFICATION_PLAN": "Verification Planner",
         "RTL_GEN": "RTL Designer",
         "RTL_FIX": "Error Analyst",
         "VERIFICATION": "Testbench Designer",
@@ -529,6 +539,11 @@ def _get_thinking_message(state_name: str, design_name: str) -> str:
     messages = {
         "INIT": f"Setting up workspace for {design_name}...",
         "SPEC": f"Decomposing architecture for {design_name}...",
+        "SPEC_VALIDATE": f"Validating hardware spec for {design_name}...",
+        "HIERARCHY_EXPAND": f"Expanding submodule hierarchy for {design_name}...",
+        "FEASIBILITY_CHECK": f"Checking Sky130 feasibility for {design_name}...",
+        "CDC_ANALYZE": f"Analyzing clock domain crossings for {design_name}...",
+        "VERIFICATION_PLAN": f"Generating verification plan for {design_name}...",
         "RTL_GEN": f"Generating Verilog RTL for {design_name}...",
         "RTL_FIX": f"Running syntax checks and applying fixes...",
         "VERIFICATION": f"Generating testbench and running simulation...",
@@ -604,7 +619,25 @@ def _run_with_approval_gates(job_id: str, orchestrator, req, llm):
             prev_state = orchestrator.state
             _execute_stage(orchestrator, current_state_name)
             new_state = orchestrator.state
-            
+
+            # ── Spec elaboration options event ──
+            # If spec_generator produced 3 design options (short description), emit them
+            # so the web UI can surface an interactive option picker card.
+            if orchestrator.artifacts.get("spec_elaboration_needed"):
+                options = orchestrator.artifacts.get("spec_elaboration_options", [])
+                elaboration_payload = {
+                    "job_id": job_id,
+                    "event": "design_options",
+                    "stage": "SPEC_VALIDATE",
+                    "design_name": design_name,
+                    "message": "Your description was brief — here are 3 expert design interpretations:",
+                    "options": options,
+                    "auto_selected": orchestrator.artifacts.get("elaborated_desc", ""),
+                }
+                _emit_event(job_id, elaboration_payload)
+                # Clear the flag so we don't re-emit on the retry
+                orchestrator.artifacts.pop("spec_elaboration_needed", None)
+
             # If the stage transitioned to a new state, the stage completed successfully
             # Generate approval card and wait
             if new_state != prev_state or new_state in (BuildState.SUCCESS, BuildState.FAIL):
@@ -667,6 +700,11 @@ def _execute_stage(orchestrator, state_name: str):
     stage_handlers = {
         "INIT": orchestrator.do_init,
         "SPEC": orchestrator.do_spec,
+        "SPEC_VALIDATE": orchestrator.do_spec_validate,
+        "HIERARCHY_EXPAND": orchestrator.do_hierarchy_expand,
+        "FEASIBILITY_CHECK": orchestrator.do_feasibility_check,
+        "CDC_ANALYZE": orchestrator.do_cdc_analyze,
+        "VERIFICATION_PLAN": orchestrator.do_verification_plan,
         "RTL_GEN": orchestrator.do_rtl_gen,
         "RTL_FIX": orchestrator.do_rtl_fix,
         "VERIFICATION": orchestrator.do_verification,
@@ -1067,6 +1105,9 @@ async def stream_build_events(job_id: str):
 
     async def event_generator():
         sent_index = 0
+        last_event_sent_at = time.time()
+        stall_warned = False
+        STALL_TIMEOUT = 300  # 5 minutes of silence → stall warning
         # Send a ping immediately so the browser knows the connection is alive
         yield "data: {\"type\": \"ping\", \"message\": \"connected\"}\n\n"
 
@@ -1080,11 +1121,35 @@ async def stream_build_events(job_id: str):
                 event = events[sent_index]
                 yield f"data: {json.dumps(event)}\n\n"
                 sent_index += 1
+                last_event_sent_at = time.time()
+                stall_warned = False  # new event arrived — reset warning
 
             # Stop streaming when done, failed, or cancelled
             if job["status"] in ("done", "failed", "cancelled") and sent_index >= len(events):
                 yield f"data: {json.dumps({'type': 'stream_end', 'status': job['status']})}\n\n"
                 break
+
+            # Emit a stall warning if no events have arrived for STALL_TIMEOUT seconds
+            if (
+                not stall_warned
+                and job["status"] == "running"
+                and (time.time() - last_event_sent_at) >= STALL_TIMEOUT
+            ):
+                stage = job.get("current_state", "UNKNOWN")
+                stall_event = {
+                    "type": "stall_warning",
+                    "state": stage,
+                    "message": (
+                        f"⚠️ No activity for 5 minutes at stage {stage} — "
+                        "the LLM may be stuck or unresponsive. "
+                        "You can cancel and retry."
+                    ),
+                    "step": 0,
+                    "total_steps": TOTAL_STEPS,
+                    "timestamp": int(time.time()),
+                }
+                yield f"data: {json.dumps(stall_event)}\n\n"
+                stall_warned = True
 
             await asyncio.sleep(0.4)
 

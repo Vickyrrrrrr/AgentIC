@@ -3019,3 +3019,325 @@ body {
   .cs-stat-divider { width: auto; height: 1px; margin: 0; }
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   AUTH PAGE — Premium Login/Signup
+   ═══════════════════════════════════════════════════════════════════ */
+.auth-root {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  position: relative;
+  overflow: hidden;
+  padding: 2rem;
+}
+
+.auth-glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.auth-glow-1 {
+  width: 500px;
+  height: 500px;
+  background: var(--accent-glow);
+  top: -10%;
+  right: -5%;
+  animation: auth-float 8s ease-in-out infinite alternate;
+}
+
+.auth-glow-2 {
+  width: 400px;
+  height: 400px;
+  background: rgba(58, 120, 86, 0.12);
+  bottom: -10%;
+  left: -5%;
+  animation: auth-float 10s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes auth-float {
+  from { transform: translate(0, 0) scale(1); }
+  to   { transform: translate(30px, -20px) scale(1.08); }
+}
+
+.auth-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 420px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 2.5rem 2rem 2rem;
+  box-shadow: var(--shadow-lg);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 1.75rem;
+}
+
+.auth-brand-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--text-inverse);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 1.1rem;
+}
+
+.auth-brand-title {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.auth-brand-sub {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.auth-heading {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
+}
+
+.auth-subheading {
+  color: var(--text-mid);
+  font-size: 0.85rem;
+  margin-bottom: 1.25rem;
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 0.55rem;
+  border: none;
+  background: transparent;
+  color: var(--text-mid);
+  font-family: inherit;
+  font-size: 0.84rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--fast);
+}
+
+.auth-tab--active {
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-weight: 600;
+}
+
+.auth-tab:not(.auth-tab--active):hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.auth-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-mid);
+  letter-spacing: 0.02em;
+}
+
+.auth-input {
+  padding: 0.65rem 0.85rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color var(--fast), box-shadow var(--fast);
+}
+
+.auth-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.auth-input::placeholder {
+  color: var(--text-dim);
+}
+
+.auth-error {
+  background: var(--fail-bg);
+  border: 1px solid var(--fail-bdr);
+  color: var(--fail);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.75rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.auth-success {
+  background: var(--success-bg);
+  border: 1px solid var(--success-bdr);
+  color: var(--success);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.75rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.auth-submit {
+  padding: 0.7rem;
+  background: var(--accent);
+  color: var(--text-inverse);
+  border: none;
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--fast), transform var(--fast), box-shadow var(--fast);
+  margin-top: 0.25rem;
+}
+
+.auth-submit:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px var(--accent-glow);
+}
+
+.auth-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.auth-footer-text {
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--text-mid);
+  margin-top: 1.25rem;
+}
+
+.auth-switch-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.auth-switch-btn:hover {
+  color: var(--accent-light);
+}
+
+/* Auth loading spinner */
+.auth-loading {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  background: var(--bg);
+  color: var(--text-mid);
+  font-size: 0.9rem;
+}
+
+.auth-loading-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: auth-spin 0.7s linear infinite;
+}
+
+@keyframes auth-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Sidebar user info + logout ──────────────────── */
+.app-user-info {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+
+.app-user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 0.78rem;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+
+.app-user-details {
+  min-width: 0;
+}
+
+.app-user-email {
+  font-size: 0.75rem;
+  color: var(--text-mid);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.logout-btn {
+  border: 1px solid var(--fail-bdr);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--fail);
+  padding: 0.4rem 0.55rem;
+  font-size: 0.78rem;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--fast);
+}
+
+.logout-btn:hover {
+  background: var(--fail);
+  color: var(--text-inverse);
+  border-color: var(--fail);
+}

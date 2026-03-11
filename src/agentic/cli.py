@@ -6,7 +6,7 @@ Uses CrewAI + LLM (DeepSeek/Llama/Groq) to generate chips from natural language.
 
 
 Usage:
-    python main.py build --name counter --desc "8-bit counter with enable and reset"
+    python3 main.py build --name counter --desc "8-bit counter with enable and reset"
 """
 
 import os

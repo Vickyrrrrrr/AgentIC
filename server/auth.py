@@ -88,7 +88,7 @@ def _supabase_query(table: str, select: str = "*", filters: str = "") -> list:
         url,
         headers={
             "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY},",
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
         },
         timeout=10,
     )
