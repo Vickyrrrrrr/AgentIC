@@ -57,7 +57,12 @@ app.include_router(billing_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",       # Vite dev server
+        "http://localhost:3000",        # Alternative dev port
+        "https://agent-ic.vercel.app",  # Production Vercel
+        os.environ.get("CORS_ORIGIN", ""),  # Custom override
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )

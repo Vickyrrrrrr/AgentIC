@@ -100,7 +100,6 @@ def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
     if oss_home:
         roots.append(oss_home)
     roots.append(os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
-    roots.append("/home/vickynishad/oss-cad-suite")
 
     for root in roots:
         candidate = os.path.join(root, "bin", bin_name)

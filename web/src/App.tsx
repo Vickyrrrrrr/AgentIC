@@ -11,6 +11,8 @@ import { Documentation } from './pages/Documentation';
 import { api } from './api';
 import './index.css';
 
+const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
+
 const App = () => {
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -22,12 +24,16 @@ const App = () => {
     return saved === 'dark' ? 'dark' : 'light';
   });
 
-  // ── Auth state ──
+  // ── Auth state (skip when Supabase not configured) ──
   useEffect(() => {
+    if (!AUTH_ENABLED) {
+      setAuthLoading(false);
+      return;
+    }
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       setSession(s);
       setAuthLoading(false);
-    });
+    }).catch(() => setAuthLoading(false));
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
       setSession(s);
     });
@@ -39,9 +45,9 @@ const App = () => {
     localStorage.setItem('agentic-theme', theme);
   }, [theme]);
 
-  // Fetch designs only when authenticated
+  // Fetch designs when authenticated (or always in local dev without auth)
   useEffect(() => {
-    if (!session) return;
+    if (AUTH_ENABLED && !session) return;
     api.get('/designs')
       .then(res => {
         const data = res.data?.designs || [];
@@ -83,8 +89,8 @@ const App = () => {
     );
   }
 
-  // ── Auth gate ──
-  if (!session) {
+  // ── Auth gate (skip in local dev when Supabase not configured) ──
+  if (AUTH_ENABLED && !session) {
     return <AuthPage onAuth={() => supabase.auth.getSession().then(({ data: { session: s } }) => setSession(s))} />;
   }
 
@@ -128,24 +134,28 @@ const App = () => {
         </nav>
 
         <div className="app-sidebar-footer">
-          {/* User info */}
-          <div className="app-user-info">
-            <div className="app-user-avatar">
-              {session.user.email?.[0]?.toUpperCase() || '?'}
+          {/* User info — only show when authenticated */}
+          {session && (
+            <div className="app-user-info">
+              <div className="app-user-avatar">
+                {session.user.email?.[0]?.toUpperCase() || '?'}
+              </div>
+              <div className="app-user-details">
+                <div className="app-user-email">{session.user.email}</div>
+              </div>
             </div>
-            <div className="app-user-details">
-              <div className="app-user-email">{session.user.email}</div>
-            </div>
-          </div>
+          )}
           <button
             className="theme-toggle"
             onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
           >
             {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
           </button>
-          <button className="logout-btn" onClick={handleLogout}>
-            ↩ Sign Out
-          </button>
+          {session && (
+            <button className="logout-btn" onClick={handleLogout}>
+              ↩ Sign Out
+            </button>
+          )}
           <div className="app-version">AgentIC · 2026</div>
         </div>
       </aside>
@@ -171,7 +181,7 @@ const App = () => {
 
               <div className="home-card-grid">
                 <div className="home-kpi">{designs.length}<span>Designs</span></div>
-                <div className="home-kpi">19<span>Pipeline Stages</span></div>
+                <div className="home-kpi">14<span>Pipeline Stages</span></div>
                 <div className="home-kpi">5<span>Core Modules</span></div>
                 <div className="home-kpi">AI<span>Agents</span></div>
               </div>

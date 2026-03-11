@@ -72,3 +72,7 @@ scripts/remote_setup.sh
 *.jsonl
 leaderboard.md
 verieval_results.json
+
+# PLY parser cache (auto-generated, 2+ MB)
+parser.out
+parsetab.py

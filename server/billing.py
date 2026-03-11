@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from typing import Optional
 
 import httpx
@@ -53,7 +54,7 @@ class VerifyPaymentRequest(BaseModel):
 
 # ─── Create Razorpay Order ──────────────────────────────────────────
 @router.post("/create-order")
-async def create_order(req: CreateOrderRequest):
+async def create_order(req: CreateOrderRequest, profile: dict = Depends(get_current_user)):
     """Create a Razorpay order for plan upgrade."""
     if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
         raise HTTPException(status_code=503, detail="Payment system not configured")
@@ -188,7 +189,14 @@ async def razorpay_webhook(request: Request):
         user_id = notes.get("user_id", "")
         plan = notes.get("plan", "")
 
-        if user_id and plan and AUTH_ENABLED:
+        # Sanitize inputs to prevent PostgREST filter injection
+        _uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        _order_re = re.compile(r'^order_[a-zA-Z0-9]+$')
+        if not (user_id and _uuid_re.match(user_id)):
+            user_id = ""
+        if not (order_id and _order_re.match(order_id)):
+            order_id = ""
+        if user_id and plan and order_id and AUTH_ENABLED:
             # Update payment status
             _supabase_update(
                 "payments",
