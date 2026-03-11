@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
+import { BillingModal } from '../components/BillingModal';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { api, API_BASE } from '../api';
 
@@ -44,6 +45,10 @@ export const DesignStudio = () => {
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
 
+    // Billing / Profile State
+    const [profile, setProfile] = useState<{ auth_enabled: boolean, plan: string, successful_builds: number, has_byok_key: boolean } | null>(null);
+    const [showBillingModal, setShowBillingModal] = useState(false);
+
     // Build Options
     const [skipOpenlane, setSkipOpenlane] = useState(false);
     const [skipCoverage, setSkipCoverage] = useState(false);
@@ -74,9 +79,26 @@ export const DesignStudio = () => {
         }
     }, [prompt]);
 
+    // Fetch Profile Limits
+    useEffect(() => {
+        api.get('/profile')
+            .then(res => setProfile(res.data))
+            .catch(() => setProfile(null)); // Ignored explicitly if no auth
+    }, []);
+
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
         setError('');
+
+        // Billing Guard: enforce 2 free successful builds
+        if (profile?.auth_enabled) {
+            const { plan, successful_builds, has_byok_key } = profile;
+            if (plan === 'free' && successful_builds >= 2 && !has_byok_key) {
+                setShowBillingModal(true);
+                return;
+            }
+        }
+
         try {
             const res = await api.post(`/build`, {
                 design_name: designName || slugify(prompt),
@@ -438,6 +460,15 @@ export const DesignStudio = () => {
                 )}
 
             </AnimatePresence>
+
+            <BillingModal 
+                isOpen={showBillingModal}
+                onClose={() => setShowBillingModal(false)}
+                onKeySaved={() => {
+                    // Update profile locally to unblock
+                    setProfile(prev => prev ? { ...prev, has_byok_key: true } : null);
+                }}
+            />
         </div>
     );
 };
