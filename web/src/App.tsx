@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Session } from '@supabase/supabase-js';
+import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import { AuthPage } from './components/AuthPage';
 import { Dashboard } from './pages/Dashboard';
@@ -30,11 +30,11 @@ const App = () => {
       setAuthLoading(false);
       return;
     }
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
+    supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => {
       setSession(s);
       setAuthLoading(false);
     }).catch(() => setAuthLoading(false));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: AuthChangeEvent, s: Session | null) => {
       setSession(s);
     });
     return () => subscription.unsubscribe();
@@ -89,9 +89,8 @@ const App = () => {
     );
   }
 
-  // ── Auth gate (skip in local dev when Supabase not configured) ──
   if (AUTH_ENABLED && !session) {
-    return <AuthPage onAuth={() => supabase.auth.getSession().then(({ data: { session: s } }) => setSession(s))} />;
+    return <AuthPage onAuth={() => supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))} />;
   }
 
   return (

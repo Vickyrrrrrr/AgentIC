@@ -23,7 +23,13 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
         if (err) throw err;
         onAuth();
       } else {
-        const { error: err } = await supabase.auth.signUp({ email, password });
+        const { error: err } = await supabase.auth.signUp({ 
+          email, 
+          password,
+          options: {
+            emailRedirectTo: window.location.origin
+          }
+        });
         if (err) throw err;
         setSuccessMsg('We sent you a confirmation link. Check your email to continue.');
       }
