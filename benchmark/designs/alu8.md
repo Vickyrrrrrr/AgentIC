@@ -1,1 +1,0 @@
-Design an 8-bit ALU supporting these operations selected by a 3-bit opcode: 000 ADD, 001 SUB, 010 AND, 011 OR, 100 XOR, 101 NOT (on operand A), 110 SHL (shift left by 1), 111 SHR (shift right by 1). Inputs: a (8-bit), b (8-bit), opcode (3-bit). Outputs: result (8-bit), zero (1-bit high when result is zero), carry (1-bit). Fully combinational, no clock needed. Module name is alu8.
