@@ -9,8 +9,12 @@ export const api = axios.create({
   headers: { 'ngrok-skip-browser-warning': 'true' },
 });
 
+const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
+
 // Attach Supabase JWT to every request
 api.interceptors.request.use(async (config) => {
+  if (!AUTH_ENABLED) return config;
+  
   try {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
