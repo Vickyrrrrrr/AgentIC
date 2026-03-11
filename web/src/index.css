@@ -3276,6 +3276,50 @@ body {
   transform: translateY(0);
 }
 
+/* OAuth Google Button */
+.auth-provider-divider {
+  display: flex;
+  align-items: center;
+  margin: 1.5rem 0;
+  gap: 0.75rem;
+}
+
+.auth-provider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.auth-provider-text {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+.auth-google-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.65rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.auth-google-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-mid);
+}
+
 .auth-submit:disabled {
   opacity: 0.45;
   cursor: not-allowed;
