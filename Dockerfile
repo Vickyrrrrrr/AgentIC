@@ -15,29 +15,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     verilator \
     iverilog \
     yosys \
+    fontconfig \
+    fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 
-# Install SymbiYosys (try pip first, fall back to source)
+# Install SymbiYosys
 RUN pip install --no-cache-dir symbiyosys 2>/dev/null || \
     (git clone --depth 1 https://github.com/YosysHQ/sby /tmp/sby \
      && cd /tmp/sby && make install && rm -rf /tmp/sby) || true
 
 WORKDIR /app
 
-# Ensure module resolution works from /app
 ENV PYTHONPATH=/app
 
-# Install Python dependencies first (layer cache)
+# Disable CrewAI telemetry — stops the 20s interactive prompt on every LLM call
+ENV CREWAI_TRACING_ENABLED=false
+ENV CREWAI_DISABLE_TELEMETRY=true
+ENV OTEL_SDK_DISABLED=true
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir uvicorn[standard] fastapi && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir apscheduler>=3.10.0 'litellm[proxy]'
 
 # Copy application code
 COPY . .
 
-# Create runtime directories that the build pipeline writes into
-# PDK_ROOT must exist so startup_self_check passes (actual PDK files not needed for cloud LLM builds)
+# Runtime directories
 RUN mkdir -p /app/designs /app/artifacts /app/pdk
 
 ENV PDK_ROOT=/app/pdk
