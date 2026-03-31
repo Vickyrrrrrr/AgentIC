@@ -10,6 +10,7 @@ import { Fabrication } from './pages/Fabrication';
 import { Documentation } from './pages/Documentation';
 import { api } from './api';
 import './index.css';
+import { Home, Zap, Users, BarChart2, BookOpen, Scaling, Factory } from 'lucide-react';
 
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
 
@@ -68,13 +69,13 @@ const App = () => {
 
   const navItems = useMemo(
     () => [
-      { name: 'Home', icon: '🏠' },
-      { name: 'Design Studio', icon: '⚡' },
-      { name: 'HITL Build', icon: '🧑‍💻' },
-      { name: 'Dashboard', icon: '📊' },
-      { name: 'Documentation', icon: '📚' },
-      { name: 'Benchmarking', icon: '📈' },
-      { name: 'Fabrication', icon: '🏗️' },
+      { name: 'Home', icon: Home },
+      { name: 'Design Studio', icon: Zap },
+      { name: 'HITL Build', icon: Users },
+      { name: 'Dashboard', icon: BarChart2 },
+      { name: 'Documentation', icon: BookOpen },
+      { name: 'Benchmarking', icon: Scaling },
+      { name: 'Fabrication', icon: Factory },
     ],
     []
   );
@@ -120,16 +121,19 @@ const App = () => {
         </div>
 
         <nav className="app-nav">
-          {navItems.map((item) => (
-            <button
-              key={item.name}
-              className={`app-nav-btn ${selectedPage === item.name ? 'active' : ''}`}
-              onClick={() => setSelectedPage(item.name)}
-            >
-              <span>{item.icon}</span>
-              <span>{item.name}</span>
-            </button>
-          ))}
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.name}
+                className={`app-nav-btn ${selectedPage === item.name ? 'active' : ''}`}
+                onClick={() => setSelectedPage(item.name)}
+              >
+                <Icon size={18} strokeWidth={2} className="nav-icon" />
+                <span>{item.name}</span>
+              </button>
+            );
+          })}
         </nav>
 
         <div className="app-sidebar-footer">
