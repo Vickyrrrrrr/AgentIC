@@ -21,6 +21,12 @@ CLOUD_CONFIG = {
     "api_key": os.environ.get("NVIDIA_API_KEY", ""),
 }
 
+GLM_CONFIG = {
+    "model": os.environ.get("GLM_MODEL", "glm-4-plus"),
+    "base_url": os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
+    "api_key": os.environ.get("GLM_API_KEY", ""),
+}
+
 LOCAL_CONFIG = {
     "model": os.environ.get(
         "LLM_MODEL",
@@ -43,6 +49,57 @@ NVIDIA_CONFIG = CLOUD_CONFIG
 LLM_MODEL = LOCAL_CONFIG["model"]
 LLM_BASE_URL = LOCAL_CONFIG["base_url"]
 LLM_API_KEY = LOCAL_CONFIG["api_key"]
+
+def get_role_llm_config(role: str) -> Dict[str, str]:
+    """
+    Resolve the LLM config for a specific multi-agent role.
+    Intelligently maps agent roles to preferred backend engines:
+    - Architect, Designer, Verifier -> NVIDIA (Heavy code generation & JSON formatting)
+    - Debugger, Manager -> GLM (Deep reasoning & log summarization)
+    - Fixer, Physical -> Groq (Blazing fast iterative speed)
+    """
+    role = role.lower()
+    
+    # 1. Select the preferred engine
+    preferred_engine = CLOUD_CONFIG
+    if role in ("architect", "debugger", "manager"):
+        preferred_engine = GLM_CONFIG
+    elif role in ("designer", "verifier"):
+        preferred_engine = CLOUD_CONFIG
+    elif role in ("fixer", "physical"):
+        preferred_engine = GROQ_CONFIG
+
+    # Helper to check if an engine has a valid API key
+    def is_valid(cfg):
+        k = cfg.get("api_key", "")
+        return bool(k and k not in ("mock-key", "NA", ""))
+
+    # 2. Fallback execution order (Preferred -> GLM -> NVIDIA -> Groq -> Local)
+    # If the user's setup lacks a key for the preferred engine, shift to the next best
+    engines = [preferred_engine, GLM_CONFIG, CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG]
+    
+    for cfg in engines:
+        # LOCAL_CONFIG is always considered a valid fallback if we reach the end
+        if cfg is LOCAL_CONFIG or is_valid(cfg):
+            model = cfg.get("model", "")
+            # Ensure proper prefixing: use 'openai/' for custom OpenAI-compatible endpoints like Zhipu
+            if cfg is GLM_CONFIG and not model.startswith("openai/"):
+                model = f"openai/{model}"
+            
+            # Auto-inject env dicts for LiteLLM 
+            if model.startswith("openai/"):
+                os.environ["OPENAI_API_KEY"] = cfg.get("api_key", "")
+            elif model.startswith("groq/"):
+                os.environ["GROQ_API_KEY"] = cfg.get("api_key", "")
+            
+            
+            return {
+                "model": model,
+                "api_key": cfg.get("api_key", ""),
+                "base_url": cfg.get("base_url", "")
+            }
+            
+    return LOCAL_CONFIG.copy()
 
 # Portable OSS-PDK profiles (adapter-style)
 PDK_PROFILES: Dict[str, Dict[str, Any]] = {

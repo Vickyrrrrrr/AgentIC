@@ -278,106 +278,108 @@ Key files:
 - [vlsi_tools.py](/home/vickynishad/AgentIC/src/agentic/tools/vlsi_tools.py)
 - [USER_GUIDE.md](/home/vickynishad/AgentIC/docs/USER_GUIDE.md)
 
-## Installation
+## Installation & Quickstart
 
-### Prerequisites
+AgentIC is distributed as a standalone, compiled executable. You do not need to install Python or set up virtual environments!
 
-Minimum verification flow:
+### 1. Prerequisites
+AgentIC orchestrates industry-standard open-source EDA tools. You must have these installed on your system:
 
-```text
-Python 3.10+
-Verilator 5.x
-Icarus Verilog
-Yosys / SymbiYosys via oss-cad-suite
-```
+- **oss-cad-suite** (Provides `yosys`, `verilator 5.x`, `iverilog`)
+- **Docker** (Required for OpenLane physical implementation)
 
-Optional physical flow:
+### 2. Setup AgentIC
 
-```text
-OpenLane
-Docker
-Installed PDK (for example sky130 or gf180)
-```
+1. Download the `agentic` executable provided with your purchase.
+2. Place it anywhere in your PATH (e.g., `sudo mv agentic /usr/local/bin/agentic`)
+3. Make it executable: `chmod +x agentic`
+4. Authenticate your machine using your license key:
+   ```bash
+   agentic login <your_license_key>
+   ```
 
-### Setup
+### 3. Bring Your Own Key (BYOK)
 
-```bash
-git clone https://github.com/Vickyrrrrrr/AgentIC.git
-cd AgentIC
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+AgentIC is a BYOK application. To generate chips, you need an API key from a supported cloud provider (NVIDIA, Groq, or OpenAI). 
 
-### Environment
-
-Typical `.env` values:
+Inside the folder where you plan to build your chip, create a file named `.env` and add your key:
 
 ```bash
-NVIDIA_API_KEY="your-key-here"
-LLM_BASE_URL="http://localhost:11434"
+# Example .env file
+NVIDIA_API_KEY="nvapi-your-key-here"
+GROQ_API_KEY="gsk_your-key-here"
+
+# Advanced (Optional)
 OPENLANE_ROOT="/path/to/OpenLane"
 PDK_ROOT="/path/to/pdk"
 ```
 
-See [USER_GUIDE.md](/home/vickynishad/AgentIC/docs/USER_GUIDE.md) for model backend selection details.
-
 ## CLI Usage
 
-All commands are invoked through `main.py`.
+Because AgentIC is now a standalone tool, you run all commands directly using `agentic`.
 
-### Build
+You can view all available commands and options at any time by running:
+```bash
+agentic --help
+agentic build --help
+```
 
-Fast RTL and verification flow:
+### Building a Chip
+
+To create a fast RTL and verification flow (Skipping physical GDSII layout):
 
 ```bash
-python3 main.py build \
-  --name my_design \
+agentic build \
+  --name apb_timer \
   --desc "32-bit APB timer with interrupt" \
   --skip-openlane
 ```
 
-Full flow with signoff-oriented stages:
+To run a full industry signoff flow (RTL all the way to GDSII layout via physical synthesis):
 
 ```bash
-python3 main.py build \
-  --name my_design \
-  --desc "32-bit APB timer with interrupt" \
+agentic build \
+  --name i2c_master \
+  --desc "I2C Master Controller with 8-byte FIFO" \
   --full-signoff \
   --pdk-profile sky130
 ```
 
-Skip coverage while still continuing from formal to regression:
+To skip coverage analysis but still continue from formal verification to regression:
 
 ```bash
-python3 main.py build \
-  --name my_design \
+agentic build \
+  --name uart_tx \
   --desc "UART transmitter with programmable baud divisor" \
   --skip-openlane \
   --skip-coverage
 ```
 
-Important build flags:
+### Advanced Build Flags
+
+AgentIC provides granular control over the autonomous hardware generation process:
 
 ```text
---skip-openlane
---skip-coverage
---full-signoff
---strict-gates / --no-strict-gates
---min-coverage
---max-retries
---max-pivots
---pdk-profile {sky130,gf180}
---hierarchical {auto,off,on}
---congestion-threshold
+--skip-openlane                     Stop after verification (No physical hardening)
+--skip-coverage                     Skip Verilator coverage gates
+--full-signoff                      Run rigorous DRC/LVS/STA verification
+--strict-gates / --no-strict-gates  Stop the build if any intermediate check fails
+--min-coverage FLOAT                Minimum line coverage required to advance
+--max-retries INT                   How many times the AI can attempt to fix bugs
+--max-pivots INT                    How many strategy pivots allowed on logic failures
+--pdk-profile {sky130,gf180}        Target physical layout technology
+--hierarchical {auto,off,on}        Multi-module extraction logic
+--congestion-threshold FLOAT        Physical routing congestion tolerance
 ```
 
-### Other Commands
+### Debugging & Verification
+
+If you want to manually run stages on a design that a previous build generated:
 
 ```bash
-python3 main.py simulate --name <design>
-python3 main.py harden --name <design>
-python3 main.py verify <design>
+agentic simulate --name <design>
+agentic harden --name <design>
+agentic verify <design>
 ```
 
 ## Generated Artifacts

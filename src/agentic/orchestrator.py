@@ -192,10 +192,14 @@ class BuildOrchestrator:
         coverage_profile: str = COVERAGE_PROFILE_DEFAULT,
         event_sink=None,  # Optional callable(dict) for live event streaming (web API)
         no_golden_templates: bool = False,  # Bypass golden template matching in RTL_GEN
+        role_llms: Optional[Dict[str, Any]] = None,  # role -> LLM mapping
+        human_in_loop: bool = False,       # For web API HITL
     ):
         self.name = name
         self.desc = desc
         self.llm = llm
+        self.role_llms = role_llms or {}
+        self.human_in_loop = human_in_loop
         self.event_sink = event_sink  # Web API hook: callable(event_dict) or None
         self.no_golden_templates = no_golden_templates
         self.max_retries = max_retries
@@ -260,6 +264,10 @@ class BuildOrchestrator:
         }
         self.history: List[Dict[str, Any]] = []    # Log of state transitions and errors
         self.errors: List[str] = []     # List of error messages
+
+    def get_llm_for_role(self, role: str) -> "LLM":
+        """Get the specific LLM override for a role, or fallback to the primary LLM."""
+        return self.role_llms.get(role, self.llm)
 
     def setup_logger(self):
         """Sets up a file logger for the build process."""
@@ -909,7 +917,7 @@ class BuildOrchestrator:
         # Produces a validated JSON contract (SID) that defines every port,
         # parameter, FSM state, and sub-module BEFORE any Verilog is written.
         try:
-            architect = ArchitectModule(llm=self.llm, verbose=self.verbose, max_retries=3)
+            architect = ArchitectModule(llm=self.get_llm_for_role("architect"), verbose=self.verbose, max_retries=3)
             sid = architect.decompose(
                 design_name=self.name,
                 spec_text=self.desc,
@@ -938,7 +946,7 @@ class BuildOrchestrator:
                 "Defines clean, complete, production-ready interfaces, FSMs, and datapaths. "
                 "Never uses placeholders or simplified approximations."
             ),
-            llm=self.llm,
+            llm=self.get_llm_for_role("designer"),
             verbose=self.verbose
         )
         
@@ -986,7 +994,7 @@ SPECIFICATION SECTIONS (Markdown):
         self.log("Running HardwareSpecGenerator (classify → complete → decompose → interface → contract → output)...", refined=True)
 
         try:
-            spec_gen = HardwareSpecGenerator(llm=self.llm, verbose=self.verbose)
+            spec_gen = HardwareSpecGenerator(llm=self.get_llm_for_role("architect"), verbose=self.verbose)
             hw_spec, issues = spec_gen.generate(
                 design_name=self.name,
                 description=self.desc,
@@ -1049,11 +1057,38 @@ SPECIFICATION SECTIONS (Markdown):
                     console.print(table)
                     console.print()
 
-                    # Prompt user to choose
-                    choice_str = typer.prompt(
-                        f"Choose an option (1-{len(parsed_options)}) or type a custom description",
-                        default="1"
-                    )
+                    # Prompt user to choose (only if in a real interactive terminal or HITL)
+                    import sys
+                    import time
+                    choice_str = None
+                    
+                    if sys.stdin.isatty():
+                        choice_str = typer.prompt(
+                            f"Choose an option (1-{len(parsed_options)}) or type a custom description",
+                            default="1"
+                        )
+                    elif self.human_in_loop:
+                        # Web API HITL Mode: Signal that we are waiting for a choice
+                        self.log("EVENT:SPEC_ELABORATION_WAIT | WAITING_FOR_USER_CHOICE", refined=True)
+                        self.artifacts['waiting_for_elaboration'] = True
+                        
+                        # Loop until the choice is injected via API (artifacts['spec_elaboration_choice'])
+                        # Or until timeout (e.g. 10 minutes)
+                        wait_start = time.time()
+                        while 'spec_elaboration_choice' not in self.artifacts:
+                            if time.time() - wait_start > 600: # 10 min timeout
+                                self.log("HITL Timeout: Auto-selecting Option 1.", refined=True)
+                                choice_str = "1"
+                                break
+                            time.sleep(2)
+                        
+                        if not choice_str:
+                            choice_str = self.artifacts.get('spec_elaboration_choice', "1")
+                            self.log(f"Received user choice: {choice_str}", refined=True)
+                    else:
+                        # Non-interactive (Background/CI) -> Auto-select first option
+                        self.log("Non-interactive mode: auto-selecting Option 1.", refined=True)
+                        choice_str = "1"
 
                     chosen_desc = None
                     if choice_str.strip().isdigit():
@@ -1170,7 +1205,7 @@ SPECIFICATION SECTIONS (Markdown):
                 return
 
         try:
-            expander = HierarchyExpander(llm=self.llm, verbose=self.verbose)
+            expander = HierarchyExpander(llm=self.get_llm_for_role("architect"), verbose=self.verbose)
             result = expander.expand(hw_spec_obj)
 
             self.artifacts['hierarchy_result'] = result.to_dict()
@@ -2439,7 +2474,7 @@ endclass
             strategy_prompt = self._get_strategy_prompt()
             
             rtl_agent = get_designer_agent(
-                self.llm, 
+                self.get_llm_for_role("designer"), 
                 goal=f"Create {self.strategy.name} RTL for {self.name}", 
                 verbose=self.verbose,
                 strategy=self.strategy.name
@@ -2457,7 +2492,7 @@ undriven outputs, and Verilator-incompatible constructs. You verify that:
 4. Module name matches the design name
 5. No placeholders or TODO comments remain
 You return the FINAL corrected code in ```verilog``` fences.""",
-                llm=self.llm,
+                llm=self.get_llm_for_role("designer"),
                 verbose=False,
                 tools=[syntax_check_tool, read_file_tool],
                 allow_delegation=False
@@ -2691,7 +2726,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         _react_fixed_code = None
         if os.path.exists(path) and errors_for_llm.strip():
             _react_agent = ReActAgent(
-                llm=self.llm,
+                llm=self.get_llm_for_role("fixer"),
                 role="RTL Syntax Fixer",
                 max_steps=6,
                 verbose=self.verbose,
@@ -2790,7 +2825,7 @@ Code:
 You analyze the ARCHITECTURE SPEC to understand design intent before fixing.
 You review PREVIOUS FIX ATTEMPTS to avoid repeating ineffective patches.
 You explain what you changed and why.""",
-                llm=self.llm,
+                llm=self.get_llm_for_role("fixer"),
                 verbose=self.verbose,
                 tools=[syntax_check_tool, read_file_tool]
             )
@@ -2925,7 +2960,7 @@ Original errors to fix:
                 self._clear_tb_fingerprints()  # New TB → fresh gate attempts
             else:
                 self.log("Generating Testbench...", refined=True)
-                tb_agent = get_testbench_agent(self.llm, f"Verify {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+                tb_agent = get_testbench_agent(self.get_llm_for_role("verifier"), f"Verify {self.name}", verbose=self.verbose, strategy=self.strategy.name)
                 
                 tb_strategy_prompt = self._get_tb_strategy_prompt()
                 
@@ -3248,7 +3283,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 )
 
             # --- LLM ERROR ANALYSIS + FIX: Collaborative 2-agent Crew ---
-            analyst = get_error_analyst_agent(self.llm, verbose=self.verbose)
+            analyst = get_error_analyst_agent(self.get_llm_for_role("debugger"), verbose=self.verbose)
             analysis_task = Task(
                 description=f'''Analyze this Verification Failure for "{self.name}".
 
@@ -3411,7 +3446,7 @@ Reply with JSON only, no prose, using this exact schema:
             
             if is_tb_issue:
                 self.log("Analyst identified Testbench Error. Fixing TB...", refined=True)
-                fixer = get_testbench_agent(self.llm, f"Fix TB for {self.name}", verbose=self.verbose)
+                fixer = get_testbench_agent(self.get_llm_for_role("fixer"), f"Fix TB for {self.name}", verbose=self.verbose)
                 port_info = self._extract_module_interface(self.artifacts['rtl_code'])
                 fix_prompt = f"""Fix the Testbench logic/syntax.
 
@@ -3455,7 +3490,7 @@ Never sample a DUT output in the same time step that stimulus is applied.
 """
             else:
                 self.log("Analyst identified RTL Logic Error. Fixing RTL...", refined=True)
-                fixer = get_designer_agent(self.llm, f"Fix RTL for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+                fixer = get_designer_agent(self.get_llm_for_role("fixer"), f"Fix RTL for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
                 error_lines = [line for line in output.split('\n') if "Error" in line or "fail" in line.lower()]
                 error_summary = "\n".join(error_lines)
                 
@@ -3640,7 +3675,7 @@ Return the complete module with ONLY the minimal fix applied.
                 rtl_for_sva = self.artifacts.get("rtl_code", "")
             signal_inventory = self._format_signal_inventory_for_prompt(rtl_for_sva)
             
-            verif_agent = get_verification_agent(self.llm, verbose=self.verbose)
+            verif_agent = get_verification_agent(self.get_llm_for_role("verifier"), verbose=self.verbose)
             sva_task = Task(
                 description=f"""Generate SystemVerilog Assertions (SVA) for module "{self.name}".
 
@@ -3843,7 +3878,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 from .config import SBY_BIN as _SBY_BIN, YOSYS_BIN as _YOSYS_BIN
                 if os.path.exists(_sby_cfg) and os.path.exists(_rtl_path_fv):
                     _debugger = DeepDebuggerModule(
-                        llm=self.llm,
+                        llm=self.get_llm_for_role("verifier"),
                         sby_bin=_SBY_BIN or "sby",
                         yosys_bin=_YOSYS_BIN or "yosys",
                         verbose=self.verbose,
@@ -4108,7 +4143,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        tb_agent = get_testbench_agent(self.llm, f"Improve coverage for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+        tb_agent = get_testbench_agent(self.get_llm_for_role("verifier"), f"Improve coverage for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
 
         branch_target = float(thresholds['branch'])
         improve_prompt = f"""The current testbench for "{self.name}" does not meet coverage thresholds.
@@ -4192,7 +4227,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         self.log("Starting Regression Testing...", refined=True)
         
         regression_agent = get_regression_agent(
-            self.llm, 
+            self.get_llm_for_role("fixer"), 
             f"Generate regression tests for {self.name}", 
             verbose=self.verbose
         )
@@ -4338,7 +4373,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         sdc_path = os.path.join(src_dir, f"{self.name}.sdc")
         
         self.log("Generating SDC Timing Constraints...", refined=True)
-        sdc_agent = get_sdc_agent(self.llm, "Generate Synthesis Design Constraints", self.verbose)
+        sdc_agent = get_sdc_agent(self.get_llm_for_role("physical"), "Generate Synthesis Design Constraints", self.verbose)
         
         arch_spec = self.artifacts.get('spec', 'No spec generated.')
         sdc_task = Task(
@@ -4396,7 +4431,7 @@ REQUIREMENTS:
                 role='Physical Design Estimator',
                 goal='Estimate die area, utilization, and clock period for floorplanning',
                 backstory='Senior PD engineer who estimates area from RTL complexity, gate count, and PDK constraints.',
-                llm=self.llm,
+                llm=self.get_llm_for_role("fixer"),
                 verbose=False,
                 allow_delegation=False,
             )
@@ -4589,7 +4624,7 @@ REASONING: <1-line explanation>""",
                 role='PPA Convergence Analyst',
                 goal='Decide whether to continue, pivot, or accept current PPA metrics',
                 backstory='Expert in timing closure, congestion mitigation, and PPA trade-offs for ASIC designs.',
-                llm=self.llm,
+                llm=self.get_llm_for_role("physical"),
                 verbose=False,
                 allow_delegation=False,
             )
@@ -4806,7 +4841,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.log(f"Hardening failed. Activating self-reflection retry...", refined=True)
             try:
                 reflect_pipeline = SelfReflectPipeline(
-                    llm=self.llm,
+                    llm=self.get_llm_for_role("manager"),
                     max_retries=3,
                     verbose=self.verbose,
                     on_reflection=lambda evt: self.log(
@@ -4950,7 +4985,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # 5. Documentation
         self.log("Generating Design Documentation (AI-Powered)...", refined=True)
         
-        doc_agent = get_doc_agent(self.llm, verbose=self.verbose)
+        doc_agent = get_doc_agent(self.get_llm_for_role("manager"), verbose=self.verbose)
         
         doc_task = Task(
             description=f"""Generate a comprehensive Datasheet (Markdown) for "{self.name}".
@@ -5058,7 +5093,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                         role='Signoff Failure Analyst',
                         goal='Identify root cause of signoff failure and recommend fix path',
                         backstory='Expert in DRC/LVS debugging, timing closure, IR-drop mitigation, and ECO strategies.',
-                        llm=self.llm,
+                        llm=self.get_llm_for_role("physical"),
                         verbose=False,
                         allow_delegation=False,
                     )

@@ -3,18 +3,6 @@ from crewai import Agent
 from langchain_openai import ChatOpenAI
 
 def get_architect_agent(llm, tools, verbose=False):
-    deepseek_llm = ChatOpenAI(
-        model="deepseek-ai/deepseek-v3.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=os.environ.get("NVIDIA_API_KEY", ""),
-        temperature=1.0,
-        model_kwargs={
-            "top_p": 0.95,
-            "extra_body": {"chat_template_kwargs": {"thinking": True}}
-        },
-        max_tokens=8192
-    )
-
     return Agent(
         role='Principal VLSI Architect',
         goal='Resolve complex, cross-file architectural and syntax failures that automated loops cannot fix.',
@@ -25,7 +13,7 @@ You actively use tools like `codebase_explorer` to see what files exist, `global
 You fix structural naming mismatches, missing include files, missing module definitions, and assure the entire codebase is structurally sound.
 You write fixes back using the write_verilog tools.""",
         tools=tools,
-        llm=deepseek_llm,
+        llm=llm,
         verbose=verbose,
         allow_delegation=False
     )

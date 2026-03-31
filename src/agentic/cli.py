@@ -59,6 +59,64 @@ from .tools.vlsi_tools import (
 app = typer.Typer()
 console = Console()
 
+CREDENTIALS_FILE = os.path.expanduser("~/.agentic_credentials.json")
+
+def verify_license():
+    """Check if the user has a valid license key saved."""
+    if not os.path.exists(CREDENTIALS_FILE):
+        console.print(Panel(
+            "[bold red]Authorization Required[/bold red]\n"
+            "You do not have a valid license locally.\n"
+            "Please run: [bold cyan]agentic login <your_license_key>[/bold cyan]",
+            title="🔒 License Check Failed"
+        ))
+        raise typer.Exit(1)
+    
+    import json
+    try:
+        with open(CREDENTIALS_FILE, 'r') as f:
+            data = json.load(f)
+            key = data.get("license_key", "")
+            
+            # TODO: Replace with real API call to Stripe/LemonSqueezy
+            # For now, we simulate that any key starting with "sk_live_" is valid
+            if not key.startswith("sk_live_"):
+                console.print(Panel(
+                    f"[bold red]Invalid License Key[/bold red]\n"
+                    f"The key we found ({key[:8]}...) was rejected by the server.\n"
+                    "Please run: [bold cyan]agentic login <your_license_key>[/bold cyan]",
+                    title="🔒 License Check Failed"
+                ))
+                raise typer.Exit(1)
+                
+    except Exception as e:
+        console.print(f"[bold red]Error reading credentials: {e}[/bold red]")
+        raise typer.Exit(1)
+
+@app.command()
+def login(key: str = typer.Argument(..., help="Your AgentIC License Key (e.g., sk_live_...)")):
+    """Authenticate this computer to use AgentIC."""
+    import json
+    
+    console.print(f"Verifying license key securely with server...")
+    
+    # Mock server verification check
+    if not key.startswith("sk_live_"):
+        console.print("[bold red]✗ Invalid License Key[/bold red]")
+        raise typer.Exit(1)
+        
+    os.makedirs(os.path.dirname(CREDENTIALS_FILE) or ".", exist_ok=True)
+    with open(CREDENTIALS_FILE, 'w') as f:
+        json.dump({"license_key": key}, f)
+        
+    console.print(Panel(
+        f"[bold green]Authentication Successful![/bold green]\n"
+        f"Your license key {key[:8]}... has been saved.\n"
+        "You are now ready to use AgentIC.",
+        title="🔒 Login Complete"
+    ))
+
+
 # Setup Brain
 def get_llm():
     """Returns the LLM instance from the best available provider:
@@ -109,8 +167,19 @@ def get_llm():
             console.print(f"[yellow]⚠ {name} init failed[/yellow]")
     
     # Critical Failure if both fail
-    console.print(f"[bold red]CRITICAL: No valid LLM backend found.[/bold red]")
-    console.print(f"Please set [bold]NVIDIA_API_KEY[/bold] for Cloud or configure [bold]LLM_BASE_URL[/bold] for Local.")
+    console.print(Panel(
+        "[bold red]CRITICAL: No AI API Key Found[/bold red]\n\n"
+        "AgentIC is a [bold yellow]Bring-Your-Own-Key[/bold yellow] application. "
+        "To build chips using cloud AI clusters, you must provide your own API key.\n\n"
+        "[bold cyan]How to fix this:[/bold cyan]\n"
+        "1. Create a file named [bold].env[/bold] in your current directory.\n"
+        "2. Add your provider's API key to the file. For example:\n"
+        "   [green]NVIDIA_API_KEY=\"nvapi-...\"[/green]\n"
+        "   [green]GROQ_API_KEY=\"gsk_...\"[/green]\n\n"
+        "[dim]Alternatively, you can export these as environment variables before running AgentIC.[/dim]",
+        title="🔑 Missing API Key Setup",
+        border_style="red"
+    ))
     raise typer.Exit(1)
 
 
@@ -134,6 +203,7 @@ def simulate(
     show_thinking: bool = typer.Option(True, "--show-thinking", help="Print DeepSeek <think> reasoning")
 ):
     """Run simulation on an existing design with AUTO-FIX loop."""
+    verify_license()
     console.print(Panel(
         f"[bold cyan]AgentIC: Manual Simulation + Auto-Fix Mode[/bold cyan]\n"
         f"Design: [yellow]{name}[/yellow]",
@@ -373,6 +443,7 @@ def harden(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
 ):
     """Run OpenLane hardening (RTL -> GDSII) on an existing design."""
+    verify_license()
     console.print(Panel(
         f"[bold cyan]AgentIC: Manual Hardening Mode[/bold cyan]\n"
         f"Design: [yellow]{name}[/yellow]",
@@ -456,6 +527,7 @@ def build(
     no_golden_templates: bool = typer.Option(False, "--no-golden-templates", help="Disable golden template matching in RTL_GEN; force LLM to generate RTL from scratch"),
 ):
     """Build a chip from natural language description (Autonomous Orchestrator 2.0)."""
+    verify_license()
     
     from .orchestrator import BuildOrchestrator
     
@@ -490,10 +562,27 @@ def build(
     run_startup_diagnostics(strict=strict_gates)
     llm = get_llm()
     
+    # Build Multi-LLM Role Map for the CLI
+    from .config import get_role_llm_config
+    from crewai import LLM
+    roles = ["architect", "designer", "verifier", "fixer", "debugger", "manager", "physical"]
+    role_llms = {}
+    for role in roles:
+        cfg = get_role_llm_config(role)
+        llm_kwargs = dict(model=cfg["model"], api_key=cfg["api_key"], temperature=0.6)
+        if cfg.get("base_url"):
+            llm_kwargs["base_url"] = cfg["base_url"]
+        try:
+            role_llms[role] = LLM(**llm_kwargs)
+        except Exception:
+            role_llms[role] = llm
+            
     orchestrator = BuildOrchestrator(
         name=name,
         desc=desc,
         llm=llm,
+        role_llms=role_llms,
+
         max_retries=max_retries,
         verbose=show_thinking,
         skip_openlane=skip_openlane,

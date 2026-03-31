@@ -330,6 +330,11 @@ STEP 5 — WARNINGS
 List every assumption that could affect correctness. If you have zero warnings,
 you are being overconfident — look again.
 
+CRITICAL JSON RULES: 
+- NEVER use unescaped double-quotes inside string values (escape them like \\\"). 
+- DO NOT leave trailing commas at the end of objects or arrays.
+- Double check that every brace and bracket has a matching closing pair.
+
 Return ONLY this JSON (no markdown fences, no commentary):
 {{
   "design_category": "{category}",

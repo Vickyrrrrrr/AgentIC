@@ -151,7 +151,8 @@ MANDATORY RULES:
 5. Use "parameters" for configurable widths/depths — NEVER hardcode magic numbers.
 6. "functional_logic" must be a COMPLETE natural-language specification of the behavior,
    not a placeholder like "implements counter logic".
-7. Return ONLY the JSON object — no markdown fences, no commentary.
+7. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces.
+8. Return ONLY the JSON object — no markdown fences, no commentary.
 """
 
 DECOMPOSE_USER_PROMPT = """\

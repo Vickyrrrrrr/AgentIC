@@ -71,6 +71,9 @@ app.add_middleware(
 # Structure: { job_id: { status, design_name, events: [], result: {}, cancelled: bool } }
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
 
+# Registry for active orchestrator instances to support HITL interaction
+RUNNING_ORCHESTRATORS: Dict[str, Any] = {}
+
 # Training data output path
 TRAINING_JSONL = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "training", "agentic_sft_data.jsonl"))
 
@@ -114,7 +117,7 @@ def _get_llm(byok_api_key: str = None):
 
     If byok_api_key is provided (BYOK plan), it overrides the cloud config key.
     """
-    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG
+    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG, GLM_CONFIG
 
     try:
         from crewai import LLM
@@ -122,9 +125,10 @@ def _get_llm(byok_api_key: str = None):
         raise RuntimeError(f"Cannot import crewai.LLM: {imp_err}")
 
     configs = [
-        ("Cloud Compute Engine", CLOUD_CONFIG),
-        ("Groq Compute Engine",  GROQ_CONFIG),
-        ("Local Compute Engine", LOCAL_CONFIG),
+        ("ZhipuAI Compute Engine", GLM_CONFIG),
+        ("NVIDIA Compute Engine",  CLOUD_CONFIG),
+        ("Groq Compute Engine",    GROQ_CONFIG),
+        ("Local Compute Engine",   LOCAL_CONFIG),
     ]
 
     backend_errors: list = []
@@ -170,6 +174,31 @@ def _get_llm(byok_api_key: str = None):
         "No valid LLM backend found. "
         + " | ".join(backend_errors)
     )
+
+
+def _get_role_llm_map(byok_key: str = None) -> Dict[str, Any]:
+    """Build a dictionary of crewai.LLM instances for each agent role."""
+    from agentic.config import get_role_llm_config
+    from crewai import LLM
+    
+    roles = ["architect", "designer", "verifier", "fixer", "debugger", "manager", "physical"]
+    role_map = {}
+    
+    for role in roles:
+        cfg = get_role_llm_config(role)
+        key = byok_key if byok_key else cfg.get("api_key", "")
+        # fallback if byok not suitable for the override
+        if not key or key in ("mock-key", "NA"):
+            key = cfg.get("api_key", "")
+            
+        model = cfg["model"]
+        llm_kwargs = dict(model=model, api_key=key, temperature=0.6)
+        if cfg.get("base_url"):
+            llm_kwargs["base_url"] = cfg["base_url"]
+            
+        role_map[role] = LLM(**llm_kwargs)
+        
+    return role_map
 
 
 def _emit_event(job_id: str, event_type: str, state: str, message: str, step: int = 0, extra: dict = None):
@@ -286,6 +315,11 @@ class RejectRequest(BaseModel):
     feedback: Optional[str] = None
 
 
+class BuildElaborateRequest(BaseModel):
+    job_id: str
+    choice: str  # "1", "2", "3" or custom text
+
+
 def _repo_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -367,6 +401,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         # Use smart LLM selection: Cloud first (NVIDIA → Groq) → Local fallback
         byok_key = JOB_STORE[job_id].get("byok_key")
         llm, llm_name = _get_llm(byok_api_key=byok_key)
+        role_llms = _get_role_llm_map(byok_key=byok_key)
         _emit_event(job_id, "checkpoint", "INIT", f"🤖 Compute engine ready", step=1)
 
         orchestrator = BuildOrchestrator(
@@ -391,7 +426,11 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             coverage_fallback_policy=req.coverage_fallback_policy,
             coverage_profile=req.coverage_profile,
             event_sink=event_sink,
+            role_llms=role_llms,
+            human_in_loop=req.human_in_loop,
         )
+
+        RUNNING_ORCHESTRATORS[job_id] = orchestrator
 
         if req.human_in_loop:
             # Run with human-in-the-loop approval gates
@@ -404,9 +443,14 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         if JOB_STORE.get(job_id, {}).get("cancelled"):
             JOB_STORE[job_id]["status"] = "cancelled"
             _emit_event(job_id, "error", "FAIL", "🛑 Build cancelled by user.", step=0)
+            if job_id in RUNNING_ORCHESTRATORS:
+                del RUNNING_ORCHESTRATORS[job_id]
             return
 
         # Gather result
+        if job_id in RUNNING_ORCHESTRATORS:
+            del RUNNING_ORCHESTRATORS[job_id]
+            
         success = orchestrator.state.name == "SUCCESS"
         result = _build_result_summary(orchestrator, req.design_name, success)
         
@@ -1086,13 +1130,26 @@ async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_u
     return {"job_id": job_id, "design_name": design_name, "status": "queued"}
 
 
+@app.post("/api/build/elaborate")
+async def elaborate_build(req: BuildElaborateRequest, user: dict = Depends(get_current_user)):
+    """Inject a user choice into a waiting orchestrator (HITL Elaboration)."""
+    job_id = req.job_id
+    if job_id not in RUNNING_ORCHESTRATORS:
+        raise HTTPException(status_code=404, detail="Active build not found or not in elaboration state")
+    
+    orch = RUNNING_ORCHESTRATORS[job_id]
+    orch.artifacts['spec_elaboration_choice'] = req.choice
+    
+    return {"status": "success", "message": f"Choice '{req.choice}' injected"}
+
+
 @app.get("/build/status/{job_id}")
 def get_build_status(job_id: str):
     """Poll current build status and all events so far."""
     if job_id not in JOB_STORE:
         raise HTTPException(status_code=404, detail="Job not found")
     job = JOB_STORE[job_id]
-    return {
+    resp = {
         "job_id": job_id,
         "status": job["status"],
         "design_name": job["design_name"],
@@ -1100,6 +1157,15 @@ def get_build_status(job_id: str):
         "events": job["events"],
         "event_count": len(job["events"]),
     }
+    
+    # If the build is actively waiting for an elaboration choice, attach the options
+    if job_id in RUNNING_ORCHESTRATORS:
+        orch = RUNNING_ORCHESTRATORS[job_id]
+        if orch.artifacts.get('waiting_for_elaboration') and 'spec_elaboration_options' in orch.artifacts:
+            resp["waiting_for_elaboration"] = True
+            resp["elaboration_options"] = orch.artifacts['spec_elaboration_options']
+            
+    return resp
 
 
 @app.get("/build/stream/{job_id}")
@@ -1128,6 +1194,17 @@ async def stream_build_events(job_id: str):
                 sent_index += 1
                 last_event_sent_at = time.time()
                 stall_warned = False  # new event arrived — reset warning
+
+            # If the orchestrator is waiting for elaboration, emit a special status event periodically
+            if job_id in RUNNING_ORCHESTRATORS:
+                orch = RUNNING_ORCHESTRATORS[job_id]
+                if orch.artifacts.get('waiting_for_elaboration') and 'spec_elaboration_options' in orch.artifacts:
+                    waiting_event = {
+                        "type": "elaboration_waiting",
+                        "options": orch.artifacts['spec_elaboration_options'],
+                        "message": "Waiting for architectural choice..."
+                    }
+                    yield f"data: {json.dumps(waiting_event)}\n\n"
 
             # Stop streaming when done, failed, or cancelled
             if job["status"] in ("done", "failed", "cancelled") and sent_index >= len(events):
