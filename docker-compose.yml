@@ -106,7 +106,10 @@ services:
       - minio
     entrypoint: >
       /bin/sh -c "
-      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      until /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin > /dev/null 2>&1; do
+        echo 'waiting for minio...';
+        sleep 2;
+      done;
       /usr/bin/mc mb myminio/agentic-artifacts --ignore-existing;
       /usr/bin/mc anonymous set public myminio/agentic-artifacts;
       exit 0;
