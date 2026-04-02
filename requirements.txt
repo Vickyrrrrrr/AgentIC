@@ -10,8 +10,16 @@ typer
 rich
 python-dotenv
 
-# ── Server runtime ────────────────────────────────────────────────────
+# ── Server runtime & Cloud ────────────────────────────────────────────
 httpx
+fastapi
+uvicorn
+celery
+redis
+sqlalchemy
+psycopg2-binary
+boto3
+
 # ── Reports ──────────────────────────────────────────────────────────
 PyMuPDF
 python-docx

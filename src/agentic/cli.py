@@ -57,17 +57,33 @@ from .tools.vlsi_tools import (
 
 # --- INITIALIZE ---
 app = typer.Typer()
-console = Console()
+from rich.theme import Theme
+claude_theme = Theme({
+    "info": "dim white",
+    "accent": "#d97757",
+    "success": "#32997b",
+    "warning": "#e0b04a",
+    "error": "#d45851",
+    "heading": "bold #e5e1d8",
+    "border": "#8f8a80",
+    "spinner": "#d97757"
+})
+console = Console(theme=claude_theme)
+
 
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic_credentials.json")
 
 def verify_license():
-    """Check if the user has a valid license key saved."""
+    """Verify license key before running any CLI commands (Mock Lemon Squeezy integration)"""
+    # Skip license checking when running locally (not packaged by PyInstaller)
+    if not getattr(sys, "frozen", False):
+        return
+
     if not os.path.exists(CREDENTIALS_FILE):
         console.print(Panel(
-            "[bold red]Authorization Required[/bold red]\n"
+            "[error]Authorization Required[/error]\n"
             "You do not have a valid license locally.\n"
-            "Please run: [bold cyan]agentic login <your_license_key>[/bold cyan]",
+            "Please run: [accent]agentic login <your_license_key>[/accent]",
             title="🔒 License Check Failed"
         ))
         raise typer.Exit(1)
@@ -82,39 +98,84 @@ def verify_license():
             # For now, we simulate that any key starting with "sk_live_" is valid
             if not key.startswith("sk_live_"):
                 console.print(Panel(
-                    f"[bold red]Invalid License Key[/bold red]\n"
+                    f"[error]Invalid License Key[/error]\n"
                     f"The key we found ({key[:8]}...) was rejected by the server.\n"
-                    "Please run: [bold cyan]agentic login <your_license_key>[/bold cyan]",
+                    "Please run: [accent]agentic login <your_license_key>[/accent]",
                     title="🔒 License Check Failed"
                 ))
                 raise typer.Exit(1)
+
+            # --- Inject user-provided API keys into runtime configs ---
+            from . import config
+            if data.get("nvidia_api_key"): 
+                config.CLOUD_CONFIG["api_key"] = data["nvidia_api_key"]
+                os.environ["NVIDIA_API_KEY"] = data["nvidia_api_key"]
+            if data.get("groq_api_key"): 
+                config.GROQ_CONFIG["api_key"] = data["groq_api_key"]
+                os.environ["GROQ_API_KEY"] = data["groq_api_key"]
+            if data.get("glm_api_key"): 
+                config.GLM_CONFIG["api_key"] = data["glm_api_key"]
+                os.environ["GLM_API_KEY"] = data["glm_api_key"]
                 
     except Exception as e:
-        console.print(f"[bold red]Error reading credentials: {e}[/bold red]")
+        console.print(f"[error]Error reading credentials: {e}[/error]")
         raise typer.Exit(1)
 
 @app.command()
-def login(key: str = typer.Argument(..., help="Your AgentIC License Key (e.g., sk_live_...)")):
-    """Authenticate this computer to use AgentIC."""
+def login(key: str = typer.Argument(..., help="Your AgentIC (Squeeaze Lemon) License Key (e.g., sk_live_...)")):
+    """Authenticate this computer and setup LLM API keys for multi-agent capabilities."""
     import json
     
     console.print(f"Verifying license key securely with server...")
     
-    # Mock server verification check
+    # Mock server verification for Squeeaze Lemon / Lemon Squeezy
     if not key.startswith("sk_live_"):
-        console.print("[bold red]✗ Invalid License Key[/bold red]")
+        console.print("[error]✗ Invalid License Key. Must start with sk_live_[/error]")
         raise typer.Exit(1)
+    
+    console.print(Panel(
+        f"[success]Authentication Successful![/success]\n"
+        f"License verified. Now, let's configure your AI engines.\n"
+        f"AgentIC relies on 3 specific models for optimal speed & logic.",
+        title="🔒 Login Complete"
+    ))
+    
+    nvidia_key = typer.prompt("🔑 Enter your NVIDIA API Key (for Heavy Reasoning)", hide_input=True)
+    groq_key = typer.prompt("⚡ Enter your GROQ API Key (for Fast Iterations)", hide_input=True)
+    glm_key = typer.prompt("🧠 Enter your ZhipuAI/GLM API Key (Optional, press Enter to skip)", default="", hide_input=True)
         
     os.makedirs(os.path.dirname(CREDENTIALS_FILE) or ".", exist_ok=True)
     with open(CREDENTIALS_FILE, 'w') as f:
-        json.dump({"license_key": key}, f)
+        json.dump({
+            "license_key": key,
+            "nvidia_api_key": nvidia_key,
+            "groq_api_key": groq_key,
+            "glm_api_key": glm_key
+        }, f, indent=4)
         
-    console.print(Panel(
-        f"[bold green]Authentication Successful![/bold green]\n"
-        f"Your license key {key[:8]}... has been saved.\n"
-        "You are now ready to use AgentIC.",
-        title="🔒 Login Complete"
-    ))
+    # Inject them immediately for this session
+    from . import config
+    config.CLOUD_CONFIG["api_key"] = nvidia_key
+    config.GROQ_CONFIG["api_key"] = groq_key
+    config.GLM_CONFIG["api_key"] = glm_key
+
+    console.print(f"\n[success]✅ API Keys securely saved in {CREDENTIALS_FILE}[/success]")
+    
+    # Now trigger diagnostics to ensure they have the compilers installed
+    console.print("\n[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
+    from .tools.vlsi_tools import startup_self_check
+    status = startup_self_check()
+    if not status["ok"]:
+        console.print("[warning]Some system compiler dependencies are missing.[/warning]")
+        if typer.confirm("Would you like AgentIC to attempt an automatic environment installation now?"):
+            console.print("[dim]Running installation script (this may take a few minutes)...[/dim]")
+            import subprocess
+            os.system("bash scripts/setup_env.sh || bash scripts/setup_desktop.sh")
+            console.print("[success]Dependencies setup attempted! Re-run 'agentic login' or 'source scripts/env.sh' to apply changes.[/success]")
+    else:
+        console.print("[success]Compiler environment looks pristine! 🚀[/success]")
+        
+    console.print("\n[success]You are completely set up! Try running: agentic build --name my_design --desc '...'[/success]")
 
 
 # Setup Brain
@@ -162,21 +223,21 @@ def get_llm():
             )
             # Make a lightweight API call to validate the endpoint
             llm.call([{"role": "user", "content": "Hi"}])
-            console.print(f"[green]✓ AgentIC is working on your chip using {name}[/green]")
+            console.print(f"[success]✓ AgentIC is working on your chip using {name}[/success]")
             return llm
         except Exception as e:
-            console.print(f"[yellow]⚠ {name} init failed[/yellow]")
+            console.print(f"[warning]⚠ {name} init failed[/warning]")
     
     # Critical Failure if both fail
     console.print(Panel(
-        "[bold red]CRITICAL: No AI API Key Found[/bold red]\n\n"
-        "AgentIC is a [bold yellow]Bring-Your-Own-Key[/bold yellow] application. "
+        "[error]CRITICAL: No AI API Key Found[/error]\n\n"
+        "AgentIC is a [warning]Bring-Your-Own-Key[/warning] application. "
         "To build chips using cloud AI clusters, you must provide your own API key.\n\n"
-        "[bold cyan]How to fix this:[/bold cyan]\n"
+        "[accent]How to fix this:[/accent]\n"
         "1. Create a file named [bold].env[/bold] in your current directory.\n"
         "2. Add your provider's API key to the file. For example:\n"
-        "   [green]NVIDIA_API_KEY=\"nvapi-...\"[/green]\n"
-        "   [green]GROQ_API_KEY=\"gsk_...\"[/green]\n\n"
+        "   [success]NVIDIA_API_KEY=\"nvapi-...\"[/success]\n"
+        "   [success]GROQ_API_KEY=\"gsk_...\"[/success]\n\n"
         "[dim]Alternatively, you can export these as environment variables before running AgentIC.[/dim]",
         title="🔑 Missing API Key Setup",
         border_style="red"
@@ -187,12 +248,12 @@ def get_llm():
 def run_startup_diagnostics(strict: bool = True):
     diag = startup_self_check()
     ok = bool(diag.get("ok", False))
-    status = "[green]PASS[/green]" if ok else "[red]FAIL[/red]"
+    status = "[success]PASS[/success]" if ok else "[error]FAIL[/error]"
     console.print(Panel(f"Startup Toolchain Check: {status}", title="🔧 Environment"))
     if not ok:
         for check in diag.get("checks", []):
             if not check.get("ok"):
-                console.print(f"  [red]✗ {check.get('tool')}[/red] -> {check.get('resolved')}")
+                console.print(f"  [error]✗ {check.get('tool')}[/error] -> {check.get('resolved')}")
         if strict:
             raise typer.Exit(1)
 
@@ -206,8 +267,8 @@ def simulate(
     """Run simulation on an existing design with AUTO-FIX loop."""
     verify_license()
     console.print(Panel(
-        f"[bold cyan]AgentIC: Manual Simulation + Auto-Fix Mode[/bold cyan]\n"
-        f"Design: [yellow]{name}[/yellow]",
+        f"[accent]AgentIC: Manual Simulation + Auto-Fix Mode[/accent]\n"
+        f"Design: [warning]{name}[/warning]",
         title="🚀 Starting Simulation"
     ))
 
@@ -238,7 +299,7 @@ def simulate(
             expected_output='Corrected SystemVerilog code in a ```verilog fence',
             agent=fix_agent
         )
-        with console.status(f"[cyan]AI is fixing ({agent_role})...[/cyan]"):
+        with console.status(f"[accent]AI is fixing ({agent_role})...[/accent]"):
             result = str(Crew(agents=[fix_agent], tasks=[fix_task]).kickoff())
             return result
     
@@ -247,7 +308,7 @@ def simulate(
     
     while not sim_success and sim_tries < max_retries:
         sim_tries += 1
-        console.print(f"[bold red]✗ SIMULATION FAILED (attempt {sim_tries}/{max_retries})[/bold red]")
+        console.print(f"[error]✗ SIMULATION FAILED (attempt {sim_tries}/{max_retries})[/error]")
         sim_output_text = sim_output or ""
 
         # 1) If compilation failed, fix TB first.
@@ -305,7 +366,7 @@ Reply with ONLY "A" or "B".''',
             is_tb_issue = "A" in analysis
 
             if is_tb_issue:
-                 console.print("[yellow]  -> [Analyst] Root Cause: Testbench Error. Fixing TB...[/yellow]")
+                 console.print("[warning]  -> [Analyst] Root Cause: Testbench Error. Fixing TB...[/warning]")
                  fix_tb_logic_prompt = f'''Fix the Testbench logic/syntax. The simulation failed or generated runtime errors.
                  
 CRITICAL FIXING RULES:
@@ -341,7 +402,7 @@ Current Testbench (To Fix - increase wait cycles):
                  continue
 
             else:
-                console.print("[yellow]  -> Detecting Design Logic mismatch. Fixing RTL...[/yellow]")
+                console.print("[warning]  -> Detecting Design Logic mismatch. Fixing RTL...[/warning]")
                 fix_rtl_prompt = f'''The simulation did not pass. Fix the RTL (module "{name}") so that the testbench passes.
 
 CRITICAL REQUIREMENTS:
@@ -381,13 +442,13 @@ Current RTL:
                 continue
     
     if not sim_success:
-        console.print(f"[bold red]✗ SIMULATION FAILED:[/bold red]\n{sim_output}")
+        console.print(f"[error]✗ SIMULATION FAILED:[/error]\n{sim_output}")
         raise typer.Exit(1)
 
     sim_lines = sim_output.strip().split('\n')
     for line in sim_lines[-20:]:  # Print last 20 lines of log
         console.print(f"  [dim]{line}[/dim]")
-    console.print("  ✓ Simulation [green]passed[/green]")
+    console.print("  ✓ Simulation [success]passed[/success]")
 
 
 def _generate_config_tcl(design_name: str, rtl_file: str) -> str:
@@ -446,8 +507,8 @@ def harden(
     """Run OpenLane hardening (RTL -> GDSII) on an existing design."""
     verify_license()
     console.print(Panel(
-        f"[bold cyan]AgentIC: Manual Hardening Mode[/bold cyan]\n"
-        f"Design: [yellow]{name}[/yellow]",
+        f"[accent]AgentIC: Manual Hardening Mode[/accent]\n"
+        f"Design: [warning]{name}[/warning]",
         title="🚀 Starting OpenLane"
     ))
     
@@ -456,7 +517,7 @@ def harden(
 
     if not os.path.exists(new_config):
         if not os.path.exists(rtl_file):
-            console.print(f"[bold red]✗ RTL file not found: {rtl_file}[/bold red]")
+            console.print(f"[error]✗ RTL file not found: {rtl_file}[/error]")
             raise typer.Exit(1)
         
         # Auto-generate config.tcl based on design size
@@ -464,7 +525,7 @@ def harden(
         os.makedirs(os.path.dirname(new_config), exist_ok=True)
         with open(new_config, 'w') as f:
             f.write(config_content)
-        console.print(f"  ✓ Config auto-generated: [green]{new_config}[/green]")
+        console.print(f"  ✓ Config auto-generated: [success]{new_config}[/success]")
     
     # Ask for background execution
     run_bg = typer.confirm("OpenLane hardening can take 10-30+ minutes. Run in background?", default=True)
@@ -478,28 +539,28 @@ def harden(
     
     if ol_success:
         if run_bg:
-             console.print(f"  ✓ [green]{ol_result}[/green]")
+             console.print(f"  ✓ [success]{ol_result}[/success]")
              console.print(f"  [dim]Monitor logs: tail -f {OPENLANE_ROOT}/designs/{name}/harden.log[/dim]")
-             console.print("  [yellow]Note: Run manual signoff check after background job completes.[/yellow]")
+             console.print("  [warning]Note: Run manual signoff check after background job completes.[/warning]")
              return
-        console.print(f"  ✓ GDSII generated: [green]{ol_result}[/green]")
+        console.print(f"  ✓ GDSII generated: [success]{ol_result}[/success]")
         
         # --- Strict Signoff Check ---
         console.print(Panel(
-            f"[bold cyan]Running Signoff Checks (STA/Power)...[/bold cyan]",
+            f"[accent]Running Signoff Checks (STA/Power)...[/accent]",
             title="🔍 Fabrication Readiness"
         ))
         success, report = signoff_check_tool(name)
         if success:
-            console.print(f"[bold green]✅ SIGNOFF PASSED[/bold green]")
+            console.print(f"[success]✅ SIGNOFF PASSED[/success]")
             console.print(report)
         else:
-            console.print(f"[bold red]❌ SIGNOFF FAILED[/bold red]")
+            console.print(f"[error]❌ SIGNOFF FAILED[/error]")
             console.print(report)
             raise typer.Exit(1)
 
     else:
-        console.print(f"[bold red]✗ OpenLane failed[/bold red]")
+        console.print(f"[error]✗ OpenLane failed[/error]")
         console.print(f"  Error: {ol_result[:500]}...")
         raise typer.Exit(1)
 
@@ -533,10 +594,10 @@ def build(
     from .orchestrator import BuildOrchestrator
     
     console.print(Panel(
-        f"[bold cyan]AgentIC: Natural Language → GDSII[/bold cyan]\n"
-        f"Design: [yellow]{name}[/yellow]\n"
+        f"[accent]AgentIC: Natural Language → GDSII[/accent]\n"
+        f"Design: [warning]{name}[/warning]\n"
         f"Description: {desc}\n"
-        f"{'[bold green]Full Industry Signoff Enabled[/bold green]' if full_signoff else ''}",
+        f"{'[success]Full Industry Signoff Enabled[/success]' if full_signoff else ''}",
         title="🚀 Starting Autonomous Orchestrator"
     ))
 
@@ -609,7 +670,7 @@ def build(
 @app.command()
 def verify(name: str = typer.Argument(..., help="Design name to verify")):
     """Run verification on an existing design."""
-    console.print(f"[yellow]Running verification for {name}...[/yellow]")
+    console.print(f"[warning]Running verification for {name}...[/warning]")
     output = run_verification(name)
     console.print(output)
 

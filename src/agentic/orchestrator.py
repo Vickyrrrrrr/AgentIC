@@ -82,7 +82,19 @@ from .tools.vlsi_tools import (
     get_coverage_thresholds,
 )
 
-console = Console()
+from rich.theme import Theme
+claude_theme = Theme({
+    "info": "dim white",
+    "accent": "#d97757",
+    "success": "#32997b",
+    "warning": "#e0b04a",
+    "error": "#d45851",
+    "heading": "bold #e5e1d8",
+    "border": "#8f8a80",
+    "spinner": "#d97757"
+})
+console = Console(theme=claude_theme)
+
 
 
 # ---------------------------------------------------------------------------
@@ -875,17 +887,17 @@ class BuildOrchestrator:
             summary = {k: v for k, v in self.artifacts.items() if 'code' not in k and 'spec' not in k}
             
             console.print(Panel(
-                f"[bold green]BUILD SUCCESSFUL[/]\n\n" + 
+                f"[success]BUILD SUCCESSFUL[/]\n\n" + 
                 "\n".join([f"[bold]{k.upper()}:[/] {v}" for k, v in summary.items()]),
                 title="Done"
             ))
         else:
-            console.print(Panel(f"[bold red]BUILD FAILED[/]", title="Failed"))
+            console.print(Panel(f"[error]BUILD FAILED[/]", title="Failed"))
 
     # --- ACTION HANDLERS ---
 
     def do_init(self):
-        with console.status("[bold green]Initializing Workspace...[/bold green]"):
+        with console.status("[success]Initializing Workspace...[/success]", spinner="dots12", spinner_style="spinner"):
             # Setup directories, check tools
             self.artifacts['root'] = f"{OPENLANE_ROOT}/designs/{self.name}"
             self.setup_logger() # Setup logging to file
@@ -980,7 +992,7 @@ SPECIFICATION SECTIONS (Markdown):
             agent=arch_agent
         )
 
-        with console.status("[bold cyan]Architecting Chip Specification...[/bold cyan]"):
+        with console.status("[accent]Architecting Chip Specification...[/accent]", spinner="dots12", spinner_style="spinner"):
             result = Crew(agents=[arch_agent], tasks=[spec_task]).kickoff()
 
         self.artifacts['spec'] = str(result)
@@ -2380,9 +2392,9 @@ endclass
         return snapshot
 
     def _save_industry_benchmark_metrics(self):
-        """Write benchmark metrics after successful chip creation to metircs/."""
+        """Write benchmark metrics after successful chip creation to metrics/."""
         snapshot = self._build_industry_benchmark_snapshot()
-        metrics_root = os.path.join(WORKSPACE_ROOT, "metircs")
+        metrics_root = os.path.join(WORKSPACE_ROOT, "metrics")
         design_dir = os.path.join(metrics_root, self.name)
         os.makedirs(design_dir, exist_ok=True)
 
@@ -2541,7 +2553,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 agent=reviewer
             )
             
-            with console.status(f"[bold yellow]Generating RTL ({self.strategy.name})...[/bold yellow]"):
+            with console.status(f"[warning]Generating RTL ({self.strategy.name})...[/warning]"):
                 try:
                     result = Crew(
                         agents=[rtl_agent, reviewer],
@@ -2597,7 +2609,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             self.log("Syntax Check Passed (Verilator)", refined=True)
             
             # --- START VERILATOR LINT CHECK ---
-            with console.status("[bold yellow]Running Verilator Lint...[/bold yellow]"):
+            with console.status("[warning]Running Verilator Lint...[/warning]", spinner="dots12", spinner_style="spinner"):
                  lint_success, lint_report = run_lint_check(path)
             
             self.logger.info(f"LINT REPORT:\n{lint_report}")
@@ -2836,7 +2848,7 @@ You explain what you changed and why.""",
                  agent=fixer
             )
 
-            with console.status("[bold red]AI fixing Syntax/Lint Errors...[/bold red]"):
+            with console.status("[error]AI fixing Syntax/Lint Errors...[/error]", spinner="dots12", spinner_style="spinner"):
                 try:
                     result = Crew(agents=[fixer], tasks=[task]).kickoff()
                     new_code = str(result)
@@ -2919,7 +2931,7 @@ Original errors to fix:
                 expected_output="Complete fixed Verilog code inside ```verilog``` fences",
                 agent=fixer
             )
-            with console.status("[bold yellow]Re-prompting LLM for valid Verilog output...[/bold yellow]"):
+            with console.status("[warning]Re-prompting LLM for valid Verilog output...[/warning]", spinner="dots12", spinner_style="spinner"):
                 reformat_result = Crew(agents=[fixer], tasks=[reformat_task]).kickoff()
             _inner_code = str(reformat_result)
             self.logger.info(f"REFORMATTED RTL (parse retry {_parse_retry + 1}):\n{_inner_code}")
@@ -3029,7 +3041,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                     agent=tb_agent
                 )
                 
-                with console.status("[bold magenta]Generating Testbench...[/bold magenta]"):
+                with console.status("[accent]Generating Testbench...[/accent]", spinner="dots12", spinner_style="spinner"):
                     try:
                         tb_code = self._kickoff_with_timeout(
                             agents=[tb_agent],
@@ -3183,7 +3195,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
         self._record_tb_gate_history("compile", True, "gate_pass", compile_report)
         
         # Run Sim
-        with console.status("[bold magenta]Running Simulation...[/bold magenta]"):
+        with console.status("[accent]Running Simulation...[/accent]", spinner="dots12", spinner_style="spinner"):
             success, output = run_simulation(self.name)
         
         self.logger.info(f"SIMULATION OUTPUT:\n{output}")
@@ -3319,7 +3331,7 @@ Reply with JSON only, no prose, using this exact schema:
                 agent=analyst
             )
             
-            with console.status("[bold red]Analyzing Failure (Multi-Class)...[/bold red]"):
+            with console.status("[error]Analyzing Failure (Multi-Class)...[/error]"):
                 analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
             
             self.logger.info(f"FAILURE ANALYSIS:\n{analysis}")
@@ -3342,7 +3354,7 @@ Reply with JSON only, no prose, using this exact schema:
                     analysis,
                     analyst_result.diagnostics,
                 )
-                with console.status("[bold red]Retrying Failure Analysis (JSON)...[/bold red]"):
+                with console.status("[error]Retrying Failure Analysis (JSON)...[/error]"):
                     analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
                 self.logger.info(f"FAILURE ANALYSIS RETRY:\n{analysis}")
                 analyst_result = self._parse_structured_agent_json(
@@ -3538,7 +3550,7 @@ CRITICAL RULES:
                 agent=fixer
             )
             
-            with console.status("[bold yellow]AI Implementing Fix...[/bold yellow]"):
+            with console.status("[warning]AI Implementing Fix...[/warning]", spinner="dots12", spinner_style="spinner"):
                  result = Crew(
                      agents=[fixer],
                      tasks=[fix_task],
@@ -3595,7 +3607,7 @@ Return the complete module with ONLY the minimal fix applied.
                             expected_output="Fixed Verilog Code in ```verilog fences",
                             agent=fixer
                         )
-                        with console.status("[bold yellow]AI Implementing Surgical Fix (retry)...[/bold yellow]"):
+                        with console.status("[warning]AI Implementing Surgical Fix (retry)...[/warning]"):
                             result2 = Crew(agents=[fixer], tasks=[retry_task], verbose=self.verbose).kickoff()
                         fixed_code = str(result2)
                         # --- Universal code output validation (surgical RTL retry) ---
@@ -3715,7 +3727,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 agent=verif_agent
             )
             
-            with console.status("[bold cyan]AI Generating SVA Assertions...[/bold cyan]"):
+            with console.status("[accent]AI Generating SVA Assertions...[/accent]", spinner="dots12", spinner_style="spinner"):
                 sva_result = str(Crew(agents=[verif_agent], tasks=[sva_task]).kickoff())
             
             # --- Universal code output validation (SVA) ---
@@ -3853,7 +3865,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             # 4. Write SBY config and run
             write_sby_config(self.name, use_sby_check=True)
             
-            with console.status("[bold cyan]Running Formal Verification (SymbiYosys)...[/bold cyan]"):
+            with console.status("[accent]Running Formal Verification (SymbiYosys)...[/accent]"):
                 success, result = run_formal_verification(self.name)
             
             self.logger.info(f"FORMAL RESULT:\n{result}")
@@ -3938,7 +3950,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 return
         
         # 4. Run CDC check
-        with console.status("[bold cyan]Running CDC Analysis...[/bold cyan]"):
+        with console.status("[accent]Running CDC Analysis...[/accent]", spinner="dots12", spinner_style="spinner"):
             cdc_clean, cdc_report = run_cdc_check(rtl_path)
         
         self.logger.info(f"CDC REPORT:\n{cdc_report}")
@@ -3973,7 +3985,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        with console.status("[bold magenta]Running Coverage-Instrumented Simulation...[/bold magenta]"):
+        with console.status("[accent]Running Coverage-Instrumented Simulation...[/accent]", spinner="dots12", spinner_style="spinner"):
             sim_passed, sim_output, coverage_data = run_simulation_with_coverage(
                 self.name,
                 backend=self.coverage_backend,
@@ -4187,7 +4199,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             agent=tb_agent
         )
 
-        with console.status("[bold yellow]AI Improving Test Coverage...[/bold yellow]"):
+        with console.status("[warning]AI Improving Test Coverage...[/warning]", spinner="dots12", spinner_style="spinner"):
             result = Crew(agents=[tb_agent], tasks=[improve_task]).kickoff()
 
         improved_tb = str(result)
@@ -4258,7 +4270,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             agent=regression_agent
         )
         
-        with console.status("[bold magenta]AI Generating Regression Tests...[/bold magenta]"):
+        with console.status("[accent]AI Generating Regression Tests...[/accent]", spinner="dots12", spinner_style="spinner"):
             result = str(Crew(agents=[regression_agent], tasks=[regression_task]).kickoff())
         
         self.logger.info(f"REGRESSION TESTS:\n{result}")
@@ -4391,7 +4403,7 @@ REQUIREMENTS:
             agent=sdc_agent
         )
         
-        with console.status("[bold cyan]Generating Timing Constraints (SDC)...[/bold cyan]"):
+        with console.status("[accent]Generating Timing Constraints (SDC)...[/accent]"):
             sdc_content = str(Crew(agents=[sdc_agent], tasks=[sdc_task]).kickoff()).strip()
             
             # Clean up potential markdown wrappers created by LLM anyway
@@ -4453,7 +4465,7 @@ REASONING: <1-line explanation>""",
                 agent=estimator,
             )
 
-            with console.status("[bold cyan]LLM Estimating Floorplan...[/bold cyan]"):
+            with console.status("[accent]LLM Estimating Floorplan...[/accent]", spinner="dots12", spinner_style="spinner"):
                 est_result = str(Crew(agents=[estimator], tasks=[estimate_task]).kickoff()).strip()
             self.logger.info(f"FLOORPLAN LLM ESTIMATE:\n{est_result}")
 
@@ -4656,7 +4668,7 @@ REASONING: <1-line explanation>""",
                 agent=conv_analyst,
             )
 
-            with console.status("[bold cyan]LLM Analyzing Convergence...[/bold cyan]"):
+            with console.status("[accent]LLM Analyzing Convergence...[/accent]", spinner="dots12", spinner_style="spinner"):
                 conv_result = str(Crew(agents=[conv_analyst], tasks=[convergence_task]).kickoff()).strip()
             self.logger.info(f"CONVERGENCE LLM ANALYSIS:\n{conv_result}")
 
@@ -4822,7 +4834,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # 2. Run OpenLane
         run_tag = f"agentrun_{self.global_step_count}"
         floorplan_tcl = self.artifacts.get("floorplan_tcl", "")
-        with console.status("[bold blue]Hardening Layout (OpenLane)...[/bold blue]"):
+        with console.status("[info]Hardening Layout (OpenLane)...[/info]"):
             success, result = run_openlane(
                 self.name,
                 background=False,
@@ -4917,7 +4929,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.log("LEC: skipped (missing RTL or gate netlist)", refined=True)
         
         # ── 1. DRC / LVS ──
-        with console.status("[bold blue]Checking DRC/LVS Reports...[/bold blue]"):
+        with console.status("[info]Checking DRC/LVS Reports...[/info]", spinner="dots12", spinner_style="spinner"):
             signoff_pass, signoff_details = parse_drc_lvs_reports(self.name)
         
         self.logger.info(f"SIGNOFF DETAILS:\n{signoff_details}")
@@ -4934,7 +4946,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         
         # ── 2. TIMING CLOSURE (multi-corner STA) ──
         self.log("Checking Timing Closure (all corners)...", refined=True)
-        with console.status("[bold blue]Parsing STA Reports...[/bold blue]"):
+        with console.status("[info]Parsing STA Reports...[/info]", spinner="dots12", spinner_style="spinner"):
             sta = parse_sta_signoff(self.name)
         
         self.logger.info(f"STA RESULTS: {sta}")
@@ -4956,7 +4968,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         
         # ── 3. POWER & IR-DROP ──
         self.log("Analyzing Power & IR-Drop...", refined=True)
-        with console.status("[bold blue]Parsing Power Reports...[/bold blue]"):
+        with console.status("[info]Parsing Power Reports...[/info]", spinner="dots12", spinner_style="spinner"):
             power = parse_power_signoff(self.name)
         
         self.logger.info(f"POWER RESULTS: {power}")
@@ -4976,7 +4988,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                     self.log("IR-Drop: Within limits ✓", refined=True)
         
         # 4. Physical Metrics
-        with console.status("[bold blue]Analyzing Physical Metrics...[/bold blue]"):
+        with console.status("[info]Analyzing Physical Metrics...[/info]", spinner="dots12", spinner_style="spinner"):
             metrics, metrics_status = check_physical_metrics(self.name)
         
         if metrics:
@@ -5018,7 +5030,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             agent=doc_agent
         )
         
-        with console.status("[bold cyan]AI Writing Datasheet...[/bold cyan]"):
+        with console.status("[accent]AI Writing Datasheet...[/accent]", spinner="dots12", spinner_style="spinner"):
             doc_content = str(Crew(agents=[doc_agent], tasks=[doc_task]).kickoff())
         
         # Save to file
@@ -5064,7 +5076,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         
         console.print()
         console.print(Panel(
-            f"[bold cyan]Fabrication Readiness Report[/bold cyan]\n\n"
+            f"[accent]Fabrication Readiness Report[/accent]\n\n"
             f"DRC:        {drc_v} violations\n"
             f"LVS:        {lvs_e} errors\n"
             f"Timing:     {timing_status} (WNS={sta.get('worst_setup', 0):.2f}ns)\n"
@@ -5078,7 +5090,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             f"func={self.artifacts.get('coverage', {}).get('functional_pct', 'N/A')}% "
             f"[{self.artifacts.get('coverage', {}).get('backend', 'N/A')}/{self.artifacts.get('coverage', {}).get('coverage_mode', 'N/A')}]\n"
             f"Formal:     {self.artifacts.get('formal_result', 'SKIPPED')}\n\n"
-            f"{'[bold green]FABRICATION READY ✓[/]' if fab_ready else '[bold red]NOT FABRICATION READY ✗[/]'}",
+            f"{'[success]FABRICATION READY ✓[/]' if fab_ready else '[error]NOT FABRICATION READY ✗[/]'}",
             title="📋 Signoff Report"
         ))
 
@@ -5117,7 +5129,7 @@ FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
                         agent=signoff_analyst,
                     )
 
-                    with console.status("[bold red]LLM Analyzing Signoff Failure...[/bold red]"):
+                    with console.status("[error]LLM Analyzing Signoff Failure...[/error]", spinner="dots12", spinner_style="spinner"):
                         signoff_analysis = str(Crew(agents=[signoff_analyst], tasks=[signoff_analysis_task]).kickoff()).strip()
                     self.logger.info(f"SIGNOFF FAILURE ANALYSIS:\n{signoff_analysis}")
 

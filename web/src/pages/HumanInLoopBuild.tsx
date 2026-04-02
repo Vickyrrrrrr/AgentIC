@@ -3,6 +3,7 @@ import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { StageProgressBar } from '../components/StageProgressBar';
 import { ApprovalCard } from '../components/ApprovalCard';
+import ElaborationCard from '../components/ElaborationCard';
 import { api, API_BASE } from '../api';
 import '../hitl.css';
 
@@ -74,6 +75,7 @@ interface BuildEvent {
     total_steps: number;
     timestamp: number | string;
     status?: string;
+    is_live_waiting?: boolean;
     // agent_thought fields
     agent_name?: string;
     thought_type?: string;
@@ -86,6 +88,8 @@ interface BuildEvent {
     warnings?: string[];
     next_stage_name?: string;
     next_stage_preview?: string;
+    // elaboration fields
+    options?: Array<Record<string, string>>;
 }
 
 interface StageCompleteData {
@@ -96,6 +100,11 @@ interface StageCompleteData {
     warnings: string[];
     next_stage_name: string;
     next_stage_preview: string;
+}
+
+interface ElaborationData {
+    options: Array<Record<string, string>>;
+    message: string;
 }
 
 function slugify(text: string): string {
@@ -144,6 +153,7 @@ export const HumanInLoopBuild = () => {
     const [failedStage, setFailedStage] = useState<string | undefined>();
     const [waitingForApproval, setWaitingForApproval] = useState(false);
     const [approvalData, setApprovalData] = useState<StageCompleteData | null>(null);
+    const [elaborationData, setElaborationData] = useState<ElaborationData | null>(null);
 
     // Fetch partial artifacts on build failure
     const [partialArtifacts, setPartialArtifacts] = useState<Array<{name: string; path: string; size: number; type: string}>>([]);
@@ -245,19 +255,33 @@ export const HumanInLoopBuild = () => {
                         setThinkingData(null);
                     }
 
-                    // Handle stage_complete: show approval card
+                    // Handle stage_complete: show approval card only if backend is currently blocked!
                     if (data.type === 'stage_complete') {
-                        setApprovalData({
-                            stage_name: data.stage_name || data.state || '',
-                            summary: data.summary || '',
-                            artifacts: data.artifacts || [],
-                            decisions: data.decisions || [],
-                            warnings: data.warnings || [],
-                            next_stage_name: data.next_stage_name || '',
-                            next_stage_preview: data.next_stage_preview || '',
+                        if (data.is_live_waiting) {
+                            setApprovalData({
+                                stage_name: data.stage_name || data.state || '',
+                                summary: data.summary || '',
+                                artifacts: data.artifacts || [],
+                                decisions: data.decisions || [],
+                                warnings: data.warnings || [],
+                                next_stage_name: data.next_stage_name || '',
+                                next_stage_preview: data.next_stage_preview || '',
+                            });
+                            setWaitingForApproval(true);
+                        } else {
+                            // If it's a historical replay of an ALREADY approved stage, auto-mark it as complete!
+                            setCompletedStages(prev => new Set(prev).add(data.stage_name || data.state || ''));
+                        }
+                        setCurrentStage(data.stage_name || data.state || '');
+                    }
+
+                    // Handle elaboration options
+                    if (data.type === 'elaboration_waiting') {
+                        setElaborationData({
+                            options: data.options || [],
+                            message: data.message || 'Waiting for architectural elaboration...',
                         });
                         setWaitingForApproval(true);
-                        setCurrentStage(data.stage_name || data.state || '');
                     }
 
                     // Track stage progression
@@ -282,10 +306,11 @@ export const HumanInLoopBuild = () => {
 
                     // Add event to feed
                     setEvents(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.message === data.message && last.type === data.type) {
-                            return prev;
-                        }
+                        // Deduplicate: avoid replay loops when reconnecting. 
+                        // The backend replays all events from index 0 on reconnect.
+                        const isDuplicate = prev.some(e => e.timestamp === data.timestamp && e.type === data.type && e.message === data.message);
+                        if (isDuplicate) return prev;
+                        
                         return [...prev, data];
                     });
 
@@ -394,6 +419,34 @@ export const HumanInLoopBuild = () => {
             setWaitingForApproval(false);
         } catch (e: any) {
             setError(e?.response?.data?.detail || 'Failed to reject');
+        }
+        setIsSubmitting(false);
+    };
+
+    const handleElaborate = async (choice: string) => {
+        if (!elaborationData || isSubmitting) return;
+        setIsSubmitting(true);
+        try {
+            await api.post(`/build/elaborate`, {
+                job_id: jobId,
+                choice: choice,
+            });
+            const displayChoice = choice.length > 25 ? choice.substring(0, 22) + '...' : choice;
+            setEvents(prev => [...prev, {
+                type: 'user_action',
+                state: 'SPEC_VALIDATE',
+                message: `👤 Selected architectural preference: ${displayChoice}`,
+                step: 0,
+                total_steps: 1,
+                timestamp: new Date().toISOString(),
+                agent_name: 'User',
+                thought_type: 'user_action',
+                content: `Elaboration choice: ${choice}`,
+            }]);
+            setElaborationData(null);
+            setWaitingForApproval(false);
+        } catch (e: any) {
+            setError(e?.response?.data?.detail || 'Failed to submit elaboration choice');
         }
         setIsSubmitting(false);
     };
@@ -670,6 +723,14 @@ export const HumanInLoopBuild = () => {
                                     jobId={jobId}
                                     onApprove={handleApprove}
                                     onReject={handleReject}
+                                    isSubmitting={isSubmitting}
+                                />
+                            )}
+                            {elaborationData && (
+                                <ElaborationCard
+                                    options={elaborationData.options}
+                                    message={elaborationData.message}
+                                    onSelect={handleElaborate}
                                     isSubmitting={isSubmitting}
                                 />
                             )}

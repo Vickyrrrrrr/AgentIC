@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { API_BASE } from '../api';
+import { api, API_BASE } from '../api';
 
 interface Props {
     designName: string;
@@ -38,6 +38,18 @@ function CheckRow({ label, passed, detail }: { label: string; passed: boolean | 
 }
 
 export const ChipSummary: React.FC<Props> = ({ designName, result, jobStatus, events, jobId, onReset }) => {
+    const [artifacts, setArtifacts] = useState<Array<{name: string; path: string; size: number; type: string}>>([]);
+
+    useEffect(() => {
+        if (designName) {
+            api.get('/build/artifacts/' + designName)
+                .then(res => {
+                    setArtifacts(res.data?.artifacts || []);
+                })
+                .catch(() => {});
+        }
+    }, [designName]);
+
     const success = jobStatus === 'done';
     const metrics = result?.metrics || {};
     const convergence = result?.convergence_history || [];
@@ -157,6 +169,44 @@ export const ChipSummary: React.FC<Props> = ({ designName, result, jobStatus, ev
                     />
                 </div>
             </div>
+
+            {/* ── Generated Artifacts ─────────────────── */}
+            {artifacts.length > 0 && (() => {
+                const groups: Record<string, typeof artifacts> = {};
+                artifacts.forEach(a => {
+                    const key = a.type || 'other';
+                    (groups[key] = groups[key] || []).push(a);
+                });
+                return (
+                    <div className="cs-section">
+                        <h2 className="cs-section-title">
+                            Build Artifacts & Reports ({artifacts.length} files generated)
+                        </h2>
+                        <div className="hitl-fail-artifacts-grouped" style={{ marginTop: '0.75rem' }}>
+                            {Object.entries(groups).map(([type, files]) => (
+                                <div key={type} className="hitl-fail-artifact-group">
+                                    <span className="hitl-fail-artifact-group-label">{type}</span>
+                                    {files.map((a, i) => (
+                                        <div key={i} className="hitl-fail-artifact-row">
+                                            <span className="hitl-fail-artifact-name">{a.name}</span>
+                                            <span className="hitl-fail-artifact-size">
+                                                {a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`}
+                                            </span>
+                                            <a
+                                                href={`${API_BASE}/build/artifacts/${designName}/${encodeURIComponent(a.name)}`}
+                                                className="hitl-fail-artifact-dl"
+                                                download
+                                            >
+                                                ↓ dl
+                                            </a>
+                                        </div>
+                                    ))}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* ── Self-Healing ────────────────────────── */}
             {totalHealActions > 0 && (

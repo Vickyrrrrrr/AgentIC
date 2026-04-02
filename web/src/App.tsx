@@ -9,9 +9,10 @@ import { HumanInLoopBuild } from './pages/HumanInLoopBuild';
 import { Benchmarking } from './pages/Benchmarking';
 import { Fabrication } from './pages/Fabrication';
 import { Documentation } from './pages/Documentation';
+import { EDALab } from './pages/EDALab';
 import { api } from './api';
 import './index.css';
-import { Home, Zap, Users, BarChart2, BookOpen, Scaling, Factory } from 'lucide-react';
+import { Home, Zap, Users, BarChart2, BookOpen, Scaling, Factory, TerminalSquare } from 'lucide-react';
 
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
 
@@ -75,6 +76,7 @@ const App = () => {
       { name: 'HITL Build', icon: Users },
       { name: 'Dashboard', icon: BarChart2 },
       { name: 'Documentation', icon: BookOpen },
+      { name: 'Manual EDA Lab', icon: TerminalSquare },
       { name: 'Benchmarking', icon: Scaling },
       { name: 'Fabrication', icon: Factory },
     ],
@@ -174,6 +176,7 @@ const App = () => {
           {selectedPage === 'Home' && <HomeComponent designsLength={designs.length} setSelectedPage={setSelectedPage} />}
           {selectedPage === 'Dashboard' && <Dashboard selectedDesign={selectedDesign} />}
           {selectedPage === 'Design Studio' && <DesignStudio />}
+          {selectedPage === 'Manual EDA Lab' && <EDALab />}
           {selectedPage === 'HITL Build' && <HumanInLoopBuild />}
           {selectedPage === 'Documentation' && <Documentation />}
           {selectedPage === 'Benchmarking' && <Benchmarking selectedDesign={selectedDesign} />}

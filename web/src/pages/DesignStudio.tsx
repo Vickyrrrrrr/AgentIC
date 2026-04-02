@@ -158,11 +158,11 @@ export const DesignStudio = () => {
                         return;
                     }
                     setEvents(prev => {
-                        // Deduplicate: skip if last event has same message + type
-                        const last = prev[prev.length - 1];
-                        if (last && last.message === data.message && last.type === data.type) {
-                            return prev;
-                        }
+                        // Deduplicate: avoid replay loops when reconnecting. 
+                        // The backend replays all events from index 0 on reconnect.
+                        const isDuplicate = prev.some(e => e.timestamp === data.timestamp && e.type === data.type && e.message === data.message);
+                        if (isDuplicate) return prev;
+                        
                         return [...prev, data];
                     });
                     setJobStatus(data.type === 'error' ? 'failed' : 'running');

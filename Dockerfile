@@ -1,3 +1,12 @@
+# Build frontend web UI
+FROM node:20 as frontend-builder
+WORKDIR /app/web
+COPY web/package*.json ./
+RUN npm install
+COPY web/ ./
+RUN npm run build
+
+# Base Python runtime
 FROM python:3.11-slim
 
 # Install system dependencies and EDA tools
@@ -29,7 +38,7 @@ WORKDIR /app
 
 ENV PYTHONPATH=/app
 
-# Disable CrewAI telemetry — stops the 20s interactive prompt on every LLM call
+# Disable CrewAI telemetry
 ENV CREWAI_TRACING_ENABLED=false
 ENV CREWAI_DISABLE_TELEMETRY=true
 ENV OTEL_SDK_DISABLED=true
@@ -43,6 +52,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy application code
 COPY . .
+
+# Copy built artifacts from frontend-builder
+COPY --from=frontend-builder /app/web/dist /app/web/dist
 
 # Runtime directories
 RUN mkdir -p /app/designs /app/artifacts /app/pdk

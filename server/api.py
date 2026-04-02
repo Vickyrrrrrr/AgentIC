@@ -7,6 +7,10 @@ import json
 import os
 import re
 import sys
+import os
+
+# Add src to Python path so 'agentic' module can be found when run locally or via docker
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 import time
 import uuid
 import glob
@@ -31,6 +35,7 @@ from server.auth import (
     record_build_success,
 )
 from server.billing import router as billing_router
+from server.lab import router as lab_router
 from server.report_gen import (
     generate_stage_report_pdf,
     generate_stage_report_docx,
@@ -54,6 +59,7 @@ if src_path not in sys.path:
 # ─── App ─────────────────────────────────────────────────────────────
 app = FastAPI(title="AgentIC Backend API", version="3.0.0")
 app.include_router(billing_router)
+app.include_router(lab_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,6 +76,69 @@ app.add_middleware(
 # ─── Job Store ───────────────────────────────────────────────────────
 # Structure: { job_id: { status, design_name, events: [], result: {}, cancelled: bool } }
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
+
+try:
+    from .db import SessionLocal, Job as DBJob
+except ImportError:
+    SessionLocal = None
+    pass
+
+def _sync_job_to_db(job_id: str):
+    """Safely mirrors JOB_STORE dictionary changes into the persistent Database."""
+    if not SessionLocal:
+        return
+    try:
+        job_data = JOB_STORE.get(job_id)
+        if not job_data:
+            return
+            
+        with SessionLocal() as db:
+            db_job = db.query(DBJob).filter(DBJob.id == job_id).first()
+            if not db_job:
+                db_job = DBJob(id=job_id)
+                db.add(db_job)
+            
+            db_job.design_name = job_data.get("design_name", "")
+            db_job.status = job_data.get("status", "pending")
+            db_job.build_status = job_data.get("build_status", "pending")
+            db_job.human_in_loop = job_data.get("human_in_loop", False)
+            db_job.waiting_approval = job_data.get("waiting_approval", False)
+            db_job.waiting_stage = job_data.get("waiting_stage", "")
+            
+            # Using copy for JSON safely
+            db_job.events = job_data.get("events", [])
+            db_job.stages = job_data.get("stages", {})
+            db_job.request_data = job_data.get("request_data", {})
+            db_job.result = job_data.get("result", None)
+            
+            db.commit()
+    except Exception as e:
+        logger.error(f"Failed to sync {job_id} to DB: {e}")
+
+def _pull_job_from_db(job_id: str):
+    """Safely reads the background Worker's Database changes back into the API memory."""
+    if not SessionLocal:
+        return
+    try:
+        with SessionLocal() as db:
+            db_job = db.query(DBJob).filter(DBJob.id == job_id).first()
+            if db_job:
+                if job_id not in JOB_STORE:
+                    JOB_STORE[job_id] = {}
+                JOB_STORE[job_id].update({
+                    "design_name": db_job.design_name or JOB_STORE[job_id].get("design_name", ""),
+                    "status": db_job.status or "pending",
+                    "build_status": db_job.build_status or "pending",
+                    "human_in_loop": db_job.human_in_loop,
+                    "waiting_approval": db_job.waiting_approval,
+                    "waiting_stage": db_job.waiting_stage,
+                    "events": db_job.events or [],
+                    "stages": db_job.stages or {},
+                    "result": db_job.result or {},
+                    "current_state": db_job.events[-1].get("state", "UNKNOWN") if db_job.events else "INIT",
+                })
+    except Exception as e:
+        logger.error(f"Failed to pull {job_id} from DB: {e}")
 
 # Registry for active orchestrator instances to support HITL interaction
 RUNNING_ORCHESTRATORS: Dict[str, Any] = {}
@@ -218,6 +287,7 @@ def _emit_event(job_id: str, event_type: str, state: str, message: str, step: in
         **(extra or {}),
     }
     JOB_STORE[job_id]["events"].append(event)
+    _sync_job_to_db(job_id)
     # Also update current state
     JOB_STORE[job_id]["current_state"] = state
 
@@ -238,6 +308,7 @@ def _emit_agent_thought(job_id: str, agent_name: str, thought_type: str, content
         "message": f"[{agent_name}] {content[:200]}",
     }
     JOB_STORE[job_id]["events"].append(event)
+    _sync_job_to_db(job_id)
 
 
 def _emit_agent_thinking(job_id: str, agent_name: str, message: str, state: str = ""):
@@ -259,6 +330,7 @@ def _emit_agent_thinking(job_id: str, agent_name: str, message: str, state: str 
         "total_steps": TOTAL_STEPS,
     }
     JOB_STORE[job_id]["events"].append(event)
+    _sync_job_to_db(job_id)
 
 
 def _emit_stage_complete(job_id: str, payload: dict):
@@ -274,6 +346,7 @@ def _emit_stage_complete(job_id: str, payload: dict):
         "message": f"✋ Stage {payload.get('stage_name', '')} complete — awaiting approval",
     }
     JOB_STORE[job_id]["events"].append(event)
+    _sync_job_to_db(job_id)
     JOB_STORE[job_id]["current_state"] = payload.get("stage_name", "UNKNOWN")
     JOB_STORE[job_id]["waiting_approval"] = True
     JOB_STORE[job_id]["waiting_stage"] = payload.get("stage_name", "")
@@ -364,6 +437,36 @@ def _docs_index() -> Dict[str, Dict[str, str]]:
             "summary": "Deploy AgentIC on HuggingFace Spaces or any cloud.",
         },
     }
+
+def _generate_and_save_build_reports(job_id: str, design_name: str):
+    """Automatically generate PDF and DOCX reports summarizing the build at the end of the pipeline,
+    and save them into the design's workspace directory as artifacts.
+    """
+    job = JOB_STORE.get(job_id)
+    if not job: return
+    
+    stages = job.get("stages", {})
+    events = job.get("events", [])
+    build_status = job.get("build_status", "unknown")
+    
+    workspace_dir = os.path.join(_repo_root(), "designs", design_name)
+    os.makedirs(workspace_dir, exist_ok=True)
+    
+    try:
+        pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events)
+        pdf_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+    except Exception as e:
+        print(f"Failed to generate auto PDF report: {e}")
+        
+    try:
+        docx_bytes = generate_full_report_docx(stages, design_name, build_status, events)
+        docx_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.docx")
+        with open(docx_path, "wb") as f:
+            f.write(docx_bytes)
+    except Exception as e:
+        print(f"Failed to generate auto DOCX report: {e}")
 
 
 # ─── Build Runner ────────────────────────────────────────────────────
@@ -511,6 +614,9 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         design_name = JOB_STORE.get(job_id, {}).get("design_name", "")
         if design_name:
             approval_manager.cleanup(design_name)
+        
+        # ── Auto-generate final build reports as artifacts ──
+        _generate_and_save_build_reports(job_id, req.design_name)
 
 
 def _infer_agent_name(state: str, message: str) -> str:
@@ -1126,12 +1232,23 @@ async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_u
     # Record build start in Supabase
     record_build_start(profile, job_id, design_name)
 
-    thread = threading.Thread(
-        target=_run_agentic_build,
-        args=(job_id, req),
-        daemon=True,
-    )
-    thread.start()
+    use_celery = os.getenv("RUN_CELERY", "false").lower() == "true"
+    if use_celery:
+        try:
+            from .tasks import run_agentic_build_task
+            logger.info(f"Sending job {job_id} to distributed Celery worker queue.")
+            # We dump the pydantic model to a dict so Celery/Redis can serialize it
+            run_agentic_build_task.apply_async(args=[job_id, req.dict()])
+        except ImportError:
+            use_celery = False
+            
+    if not use_celery:
+        thread = threading.Thread(
+            target=_run_agentic_build,
+            args=(job_id, req),
+            daemon=True,
+        )
+        thread.start()
 
     return {"job_id": job_id, "design_name": design_name, "status": "queued"}
 
@@ -1152,6 +1269,7 @@ async def elaborate_build(req: BuildElaborateRequest, user: dict = Depends(get_c
 @app.get("/build/status/{job_id}")
 def get_build_status(job_id: str):
     """Poll current build status and all events so far."""
+    _pull_job_from_db(job_id) # Ensure API stays synced with Worker
     if job_id not in JOB_STORE:
         raise HTTPException(status_code=404, detail="Job not found")
     job = JOB_STORE[job_id]
@@ -1177,6 +1295,7 @@ def get_build_status(job_id: str):
 @app.get("/build/stream/{job_id}")
 async def stream_build_events(job_id: str):
     """SSE endpoint — streams live build events as they are emitted."""
+    _pull_job_from_db(job_id) # Prime memory
     if job_id not in JOB_STORE:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1184,38 +1303,56 @@ async def stream_build_events(job_id: str):
         sent_index = 0
         last_event_sent_at = time.time()
         stall_warned = False
+        elaboration_sent = False
         STALL_TIMEOUT = 300  # 5 minutes of silence → stall warning
         # Send a ping immediately so the browser knows the connection is alive
         yield "data: {\"type\": \"ping\", \"message\": \"connected\"}\n\n"
 
         while True:
+            _pull_job_from_db(job_id)
             job = JOB_STORE.get(job_id)
             if job is None:
                 break
 
             events = job["events"]
+            waiting_stages = approval_manager.get_waiting_stages()
             while sent_index < len(events):
                 event = events[sent_index]
-                yield f"data: {json.dumps(event)}\n\n"
+                event_copy = dict(event)
+                
+                # If this stage_complete event happens to be the one we are CURRENTLY waiting on, 
+                # flag it so the frontend doesn't pop up ghost approvals for past stages.
+                if event_copy.get("type") == "stage_complete":
+                    is_live_waiting = any(
+                        w["design_name"] == job["design_name"] and w["stage"] == event_copy.get("state") 
+                        for w in waiting_stages
+                    )
+                    event_copy["is_live_waiting"] = is_live_waiting
+
+                yield f"data: {json.dumps(event_copy)}\n\n"
                 sent_index += 1
                 last_event_sent_at = time.time()
                 stall_warned = False  # new event arrived — reset warning
-
-            # If the orchestrator is waiting for elaboration, emit a special status event periodically
-            if job_id in RUNNING_ORCHESTRATORS:
-                orch = RUNNING_ORCHESTRATORS[job_id]
-                if orch.artifacts.get('waiting_for_elaboration') and 'spec_elaboration_options' in orch.artifacts:
-                    waiting_event = {
-                        "type": "elaboration_waiting",
-                        "options": orch.artifacts['spec_elaboration_options'],
-                        "message": "Waiting for architectural choice..."
-                    }
-                    yield f"data: {json.dumps(waiting_event)}\n\n"
 
             # Stop streaming when done, failed, or cancelled
             if job["status"] in ("done", "failed", "cancelled") and sent_index >= len(events):
                 yield f"data: {json.dumps({'type': 'stream_end', 'status': job['status']})}\n\n"
                 break
+
+            # If the orchestrator is waiting for elaboration, emit a special status event periodically
+            # We track this locally so we don't spam the stream every 0.4s
+            if job_id in RUNNING_ORCHESTRATORS:
+                orch = RUNNING_ORCHESTRATORS[job_id]
+                if orch.artifacts.get('waiting_for_elaboration') and 'spec_elaboration_options' in orch.artifacts:
+                    if not elaboration_sent:
+                        waiting_event = {
+                            "type": "elaboration_waiting",
+                            "options": orch.artifacts['spec_elaboration_options'],
+                            "message": "Waiting for architectural choice...",
+                            "timestamp": int(time.time()),
+                        }
+                        yield f"data: {json.dumps(waiting_event)}\n\n"
+                        elaboration_sent = True
 
             # Emit a stall warning if no events have arrived for STALL_TIMEOUT seconds
             if (
@@ -1466,6 +1603,8 @@ def _classify_artifact(filename: str) -> str:
         '.sby': 'formal',
         '.log': 'log',
         '.csv': 'report',
+        '.pdf': 'report',
+        '.docx': 'report',
     }
     return classifications.get(ext, 'other')
 
@@ -1594,3 +1733,19 @@ def download_stage_report_docx(job_id: str, stage_name: str):
                  f'attachment; filename="{safe_name}_{stage_name}_report.docx"'},
     )
 
+
+import os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+# Mount the static Vite React app (for HuggingFace Spaces/Docker)
+frontend_dist = os.path.join(os.path.dirname(__file__), "..", "web", "dist")
+if os.path.exists(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+    app.mount("/vcdrom", StaticFiles(directory=os.path.join(frontend_dist, "vcdrom")), name="vcdrom")
+    app.get("/{catchall:path}")
+    def serve_frontend_app(catchall: str):
+        full_path = os.path.join(frontend_dist, catchall)
+        if os.path.isfile(full_path):
+            return FileResponse(full_path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
