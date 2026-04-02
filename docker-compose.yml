@@ -13,6 +13,8 @@ services:
       - ./artifacts:/app/artifacts
       - ./training:/app/training
       - ./designs:/app/designs
+      - /var/run/docker.sock:/var/run/docker.sock  # Allows AgentIC to trigger OpenLane's Docker container
+      - ~/volare:/root/.volare  # Mount PDK path so Sky130 is cached
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:7860/health"]

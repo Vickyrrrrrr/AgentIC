@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     verilator \
     iverilog \
+    gtkwave \
     yosys \
     fontconfig \
     fonts-dejavu \

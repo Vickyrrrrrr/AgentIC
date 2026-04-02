@@ -135,10 +135,10 @@ def _get_llm(byok_api_key: str = None):
     for name, cfg in configs:
         is_local = "Local" in name
         key = byok_api_key if (byok_api_key and not is_local) else cfg.get("api_key", "")
-        # Skip hosted configs that have no valid API key configured
-        if not is_local and (not key or key.strip() in ("", "mock-key", "NA")):
-            backend_errors.append(f"{name}: skipped – no API key")
-            continue
+        if not is_local and (not cfg.get("api_key", "") or cfg.get("api_key", "").strip() in ("", "mock-key", "NA")):
+            if not (byok_api_key and ((byok_api_key.startswith("gsk_") and "Groq" in name) or (byok_api_key.startswith("nvapi-") and "NVIDIA" in name) or ("ZhipuAI" in name and not byok_api_key.startswith("gsk_") and not byok_api_key.startswith("nvapi-")))):
+                backend_errors.append(f"{name}: skipped – no API key")
+                continue
         try:
             model = cfg["model"]
 
@@ -150,11 +150,14 @@ def _get_llm(byok_api_key: str = None):
             if cfg.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
                 model = f"openai/{model}"
 
-            # ── Inject provider env-vars that litellm resolves internally ──
-            if model.startswith("groq/"):
-                os.environ["GROQ_API_KEY"] = key
-            if model.startswith("openai/") and cfg.get("base_url"):
-                os.environ["OPENAI_API_KEY"] = key
+            # Only use BYOK key if it matches the current backend provider
+            if byok_api_key and not is_local:
+                if byok_api_key.startswith("gsk_") and "Groq" not in name:
+                    pass
+                elif byok_api_key.startswith("nvapi-") and "NVIDIA" not in name:
+                    pass
+                else:
+                    key = byok_api_key
 
             llm_kwargs: dict = dict(
                 model=model,
@@ -404,13 +407,16 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         role_llms = _get_role_llm_map(byok_key=byok_key)
         _emit_event(job_id, "checkpoint", "INIT", f"🤖 Compute engine ready", step=1)
 
+        IS_HUGGINGFACE = os.environ.get("SPACE_ID") is not None
+        forced_skip_openlane = True if IS_HUGGINGFACE else req.skip_openlane
+
         orchestrator = BuildOrchestrator(
             name=req.design_name,
             desc=req.description,
             llm=llm,
             max_retries=req.max_retries,
             verbose=req.show_thinking,
-            skip_openlane=req.skip_openlane,
+            skip_openlane=forced_skip_openlane, # TEMPORARY HF MAINTENANCE OVERRIDE
             skip_coverage=req.skip_coverage,
             full_signoff=req.full_signoff,
             min_coverage=req.min_coverage,
@@ -1404,8 +1410,8 @@ def get_partial_artifacts(design_name: str):
                 })
     
     # Check OpenLane designs directory
-    openlane_root = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
-    ol_design_dir = os.path.join(openlane_root, "designs", design_name)
+    from agentic.config import OPENLANE_ROOT
+    ol_design_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
     if os.path.isdir(ol_design_dir):
         for root_dir, _dirs, files in os.walk(ol_design_dir):
             for f in files:
@@ -1432,9 +1438,9 @@ def download_artifact(design_name: str, filename: str):
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     # Search workspace designs/ first, then OpenLane designs/
+    from agentic.config import OPENLANE_ROOT
     search_dirs = [os.path.join(_repo_root(), "designs", design_name)]
-    openlane_root = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
-    search_dirs.append(os.path.join(openlane_root, "designs", design_name))
+    search_dirs.append(os.path.join(OPENLANE_ROOT, "designs", design_name))
 
     for base_dir in search_dirs:
         if not os.path.isdir(base_dir):

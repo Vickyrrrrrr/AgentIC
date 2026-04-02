@@ -43,31 +43,29 @@ export const DesignStudio = () => {
     const [events, setEvents] = useState<BuildEvent[]>([]);
     const [jobStatus, setJobStatus] = useState<'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'cancelling'>('queued');
     const [result, setResult] = useState<any>(null);
-    const [error, setError] = useState('');
+    const [ // @ts-ignore
+    error, setError] = useState('');
 
     // Billing / Profile State
     const [profile, setProfile] = useState<{ auth_enabled: boolean, plan: string, successful_builds: number, has_byok_key: boolean } | null>(null);
     const [showBillingModal, setShowBillingModal] = useState(false);
 
     // Build Options
-    const [skipOpenlane, setSkipOpenlane] = useState(false);
-    const [skipCoverage, setSkipCoverage] = useState(false);
-    const [showAdvanced, setShowAdvanced] = useState(false);
-    const [fullSignoff, setFullSignoff] = useState(false);
-    const [maxRetries, setMaxRetries] = useState(5);
-    const [showThinking, setShowThinking] = useState(false);
-    const [minCoverage, setMinCoverage] = useState(80.0);
-    const [strictGates, setStrictGates] = useState(false);
-    const [pdkProfile, setPdkProfile] = useState("sky130");
-    const [maxPivots, setMaxPivots] = useState(2);
-    const [congestionThreshold, setCongestionThreshold] = useState(10.0);
-    const [hierarchical, setHierarchical] = useState("auto");
-    const [tbGateMode, setTbGateMode] = useState("strict");
-    const [tbMaxRetries, setTbMaxRetries] = useState(3);
-    const [tbFallbackTemplate, setTbFallbackTemplate] = useState("uvm_lite");
-    const [coverageBackend, setCoverageBackend] = useState("auto");
-    const [coverageFallbackPolicy, setCoverageFallbackPolicy] = useState("fail_closed");
-    const [coverageProfile, setCoverageProfile] = useState("balanced");
+    const isHuggingFace = window.location.hostname.includes("hf.space") || window.location.hostname.includes("huggingface.co");
+    const [skipOpenlane, setSkipOpenlane] = useState(isHuggingFace);
+    const [maxRetries, _setMaxRetries] = useState(5);
+    const [minCoverage, _setMinCoverage] = useState(80.0);
+    const [aiModel, setAiModel] = useState<'AgentIC' | 'BYOK'>('AgentIC');
+    const [pdkProfile, _setPdkProfile] = useState("sky130");
+    const [maxPivots, _setMaxPivots] = useState(2);
+    const [congestionThreshold, _setCongestionThreshold] = useState(10.0);
+    const [hierarchical, _setHierarchical] = useState("auto");
+    const [tbGateMode, _setTbGateMode] = useState("strict");
+    const [tbMaxRetries, _setTbMaxRetries] = useState(3);
+    const [tbFallbackTemplate, _setTbFallbackTemplate] = useState("uvm_lite");
+    const [coverageBackend, _setCoverageBackend] = useState("auto");
+    const [coverageFallbackPolicy, _setCoverageFallbackPolicy] = useState("fail_closed");
+    const [coverageProfile, _setCoverageProfile] = useState("balanced");
     const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
 
     const abortCtrlRef = useRef<AbortController | null>(null);
@@ -104,12 +102,12 @@ export const DesignStudio = () => {
                 design_name: designName || slugify(prompt),
                 description: prompt,
                 skip_openlane: skipOpenlane,
-                skip_coverage: skipCoverage,
-                full_signoff: fullSignoff,
+                skip_coverage: false,
+                full_signoff: false,
                 max_retries: maxRetries,
-                show_thinking: showThinking,
+                show_thinking: false,
                 min_coverage: minCoverage,
-                strict_gates: strictGates,
+                strict_gates: false,
                 pdk_profile: pdkProfile,
                 max_pivots: maxPivots,
                 congestion_threshold: congestionThreshold,
@@ -224,198 +222,96 @@ export const DesignStudio = () => {
                 {phase === 'prompt' && (
                     <motion.div
                         key="prompt"
-                        className="prompt-screen"
+                        className="prompt-screen-modern"
                         initial={{ opacity: 0, y: 40 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -40 }}
                         transition={{ duration: 0.5 }}
                     >
-                        <div className="prompt-hero">
-                            <div className="chip-icon-glow">⚙️</div>
-                            <h1 className="prompt-title">Design Your Chip</h1>
-                            <p className="prompt-sub">
-                                Describe any digital chip in plain English.<br />
-                                AgentIC will autonomously write RTL, verify, and harden it to silicon.
-                            </p>
-                        </div>
-
-                        <div className="prompt-card">
-                            <div className="prompt-examples">
-                                {['8-bit RISC CPU with Harvard architecture', 'AXI4 DMA engine with 4 channels', 'UART controller at 115200 baud'].map(ex => (
-                                    <button key={ex} className="example-chip" onClick={() => setPrompt(ex)}>
-                                        {ex}
+                        <div className="prompt-modern-container">
+                            <h1 className="prompt-title-modern">AgentIC Studio</h1>
+                            
+                            <div className="prompt-input-wrapper">
+                                <div className="prompt-input-inner">
+                                    <span className="prompt-input-icon">➕</span>
+                                    <textarea
+                                        className="prompt-textarea-modern"
+                                        placeholder="Describe the chip you want to build..."
+                                        value={prompt}
+                                        onChange={e => setPrompt(e.target.value)}
+                                        rows={1}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && !e.shiftKey) {
+                                                e.preventDefault();
+                                                if (prompt.trim()) handleLaunch();
+                                            }
+                                            e.currentTarget.style.height = 'auto';
+                                            e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';
+                                        }}
+                                        autoFocus
+                                    />
+                                    <button 
+                                        className="prompt-submit-btn" 
+                                        onClick={handleLaunch} 
+                                        disabled={!prompt.trim()}
+                                    >
+                                        <div className="submit-arrow">↑</div>
                                     </button>
-                                ))}
-                            </div>
-
-                            <textarea
-                                className="prompt-textarea"
-                                placeholder="Describe the chip you want to build in plain English... (e.g. 'A 4-bit counter with synchronous reset and clock enable')"
-                                value={prompt}
-                                onChange={e => setPrompt(e.target.value)}
-                                rows={5}
-                                autoFocus
-                            />
-
-                            {designName && (
-                                <div className="design-name-preview">
-                                    <span className="design-name-label">Design ID:</span>
-                                    <input
-                                        className="design-name-input"
-                                        value={designName}
-                                        onChange={e => setDesignName(e.target.value.replace(/[^a-z0-9_]/g, ''))}
-                                    />
                                 </div>
-                            )}
-
-                            <div className="prompt-options">
-                                <label className="toggle-label" style={{ marginBottom: '1rem', display: 'flex' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={skipOpenlane}
-                                        onChange={e => setSkipOpenlane(e.target.checked)}
-                                    />
-                                    <span>Skip OpenLane (RTL + Verify only, faster)</span>
-                                </label>
-
-                                <button
-                                    className="advanced-toggle-btn"
-                                    onClick={() => setShowAdvanced(!showAdvanced)}
-                                    style={{ background: 'transparent', border: '1px solid var(--border-mid)', color: 'var(--text-mid)', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.9rem', width: '100%', textAlign: 'left', marginBottom: '1rem', transition: 'all var(--fast)', fontWeight: 500 }}
-                                    onMouseOver={e => { e.currentTarget.style.borderColor = 'var(--text-dim)'; e.currentTarget.style.color = 'var(--text)'; }}
-                                    onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border-mid)'; e.currentTarget.style.color = 'var(--text-mid)'; }}
-                                >
-                                    {showAdvanced ? '▼ Hide Advanced Options' : '▶ Show Advanced Options'}
-                                </button>
-
-                                {showAdvanced && (
-                                    <div className="advanced-options-panel" style={{ background: 'var(--bg-card)', padding: '1.25rem', borderRadius: 'var(--radius-md)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem', border: '1px solid var(--border)', boxShadow: 'var(--shadow-xs)' }}>
-
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Max Retries</span>
-                                                <input type="number" value={maxRetries} onChange={e => setMaxRetries(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
-                                            </label>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Min Coverage (%)</span>
-                                                <input type="number" step="0.1" value={minCoverage} onChange={e => setMinCoverage(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
-                                            </label>
-                                        </div>
-
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>PDK Profile</span>
-                                                <select value={pdkProfile} onChange={e => setPdkProfile(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
-                                                    <option value="sky130">sky130</option>
-                                                    <option value="gf180">gf180</option>
-                                                </select>
-                                            </label>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Coverage Profile</span>
-                                                <select value={coverageProfile} onChange={e => setCoverageProfile(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
-                                                    <option value="balanced">Balanced</option>
-                                                    <option value="aggressive">Aggressive</option>
-                                                    <option value="relaxed">Relaxed</option>
-                                                </select>
-                                            </label>
-                                        </div>
-
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>TB Gate Mode</span>
-                                                <select value={tbGateMode} onChange={e => setTbGateMode(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
-                                                    <option value="strict">Strict</option>
-                                                    <option value="relaxed">Relaxed</option>
-                                                </select>
-                                            </label>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>TB Fallback Template</span>
-                                                <select value={tbFallbackTemplate} onChange={e => setTbFallbackTemplate(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
-                                                    <option value="uvm_lite">UVM Lite</option>
-                                                    <option value="classic">Classic</option>
-                                                </select>
-                                            </label>
-                                        </div>
-
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Coverage Backend</span>
-                                                <select value={coverageBackend} onChange={e => setCoverageBackend(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
-                                                    <option value="auto">Auto</option>
-                                                    <option value="verilator">Verilator</option>
-                                                    <option value="iverilog">Icarus Verilog</option>
-                                                </select>
-                                            </label>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Fallback Policy</span>
-                                                <select value={coverageFallbackPolicy} onChange={e => setCoverageFallbackPolicy(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
-                                                    <option value="fail_closed">Fail Closed</option>
-                                                    <option value="fallback_oss">Fallback OSS</option>
-                                                    <option value="skip">Skip</option>
-                                                </select>
-                                            </label>
-                                        </div>
-
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Hierarchical</span>
-                                                <select value={hierarchical} onChange={e => setHierarchical(e.target.value)} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none' }}>
-                                                    <option value="auto">Auto</option>
-                                                    <option value="on">On</option>
-                                                    <option value="off">Off</option>
-                                                </select>
-                                            </label>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Congestion Threshold (%)</span>
-                                                <input type="number" step="0.1" value={congestionThreshold} onChange={e => setCongestionThreshold(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
-                                            </label>
-                                        </div>
-
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>Max Pivots</span>
-                                                <input type="number" value={maxPivots} onChange={e => setMaxPivots(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
-                                            </label>
-                                            <label style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ color: 'var(--text-mid)', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.8rem' }}>TB Max Retries</span>
-                                                <input type="number" value={tbMaxRetries} onChange={e => setTbMaxRetries(Number(e.target.value))} style={{ padding: '0.5rem 0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--radius-xs)', fontSize: '0.9rem', outline: 'none', transition: 'border-color var(--fast)' }} />
-                                            </label>
-                                        </div>
-
-                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', marginTop: '0.5rem', background: 'var(--bg)', padding: '1rem', borderRadius: 'var(--radius)', border: '1px solid var(--border-mid)' }}>
-                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
-                                                <input type="checkbox" checked={skipCoverage} onChange={e => setSkipCoverage(e.target.checked)} />
-                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Skip Coverage</span>
-                                            </label>
-                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
-                                                <input type="checkbox" checked={fullSignoff} onChange={e => setFullSignoff(e.target.checked)} />
-                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Full Signoff</span>
-                                            </label>
-                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
-                                                <input type="checkbox" checked={strictGates} onChange={e => setStrictGates(e.target.checked)} />
-                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Strict Gates</span>
-                                            </label>
-                                            <label className="toggle-label" style={{ display: 'flex', alignItems: 'center' }}>
-                                                <input type="checkbox" checked={showThinking} onChange={e => setShowThinking(e.target.checked)} />
-                                                <span style={{ marginLeft: '0.5rem', color: 'var(--text)', fontWeight: 500 }}>Show Thinking</span>
-                                            </label>
-                                        </div>
+                                <div className="prompt-input-footer">
+                                    <div className="model-selector">
+                                        <button 
+                                            className={`footer-btn ${aiModel === 'AgentIC' ? 'active' : ''}`}
+                                            onClick={() => setAiModel('AgentIC')}
+                                        >
+                                            🚀 AgentIC Neural
+                                        </button>
+                                        <button 
+                                            className={`footer-btn ${aiModel === 'BYOK' ? 'active' : ''}`}
+                                            onClick={() => setAiModel('BYOK')}
+                                        >
+                                            🔑 BYOK Model
+                                        </button>
                                     </div>
-                                )}
+                                    
+                                    <div className="stage-selector">
+                                        <button 
+                                            className={`footer-btn ${skipOpenlane ? 'active' : ''}`}
+                                            onClick={() => setSkipOpenlane(true)}
+                                            title="Stop after verification"
+                                        >
+                                            💻 RTL Generation & Verification
+                                        </button>
+                                        <button 
+                                            className={`footer-btn ${!skipOpenlane ? 'active' : ''}`}
+                                            onClick={() => {
+                                                if (isHuggingFace) {
+                                                    alert("GDS Layout is temporarily under maintenance on the cloud platform. It will be available back in a few days. Using RTL & Verification mode for now.");
+                                                } else {
+                                                    setSkipOpenlane(false);
+                                                }
+                                            }}
+                                            title={isHuggingFace ? "Full silicon flow to GDS (Under Cloud Maintenance)" : "Full silicon flow to GDS"}
+                                        >
+                                            {isHuggingFace ? "🏗️ Full GDS Signoff (Cloud Disabled)" : "🏗️ Full GDS Signoff"}
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
 
-                            {error && <div className="error-banner">⚠️ {error}</div>}
-
-                            <motion.button
-                                className="launch-btn"
-                                onClick={handleLaunch}
-                                disabled={!prompt.trim()}
-                                whileHover={{ scale: 1.03 }}
-                                whileTap={{ scale: 0.97 }}
-                            >
-                                <span style={{ fontSize: '1.4rem' }}>🚀</span>
-                                Launch Autonomous Build
-                            </motion.button>
+                            <div className="prompt-quick-links">
+                                <div className="quick-links-header">
+                                    <span className="icon">⏱️</span> Quick Starts
+                                </div>
+                                <div className="quick-links-grid">
+                                    {['8-bit RISC CPU with Harvard architecture', 'AXI4 DMA engine with 4 channels', 'UART controller at 115200 baud'].map(ex => (
+                                        <button key={ex} className="quick-link-card" onClick={() => setPrompt(ex)}>
+                                            <span className="card-icon">⚡</span>
+                                            <span className="card-text">{ex}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                         </div>
                     </motion.div>
                 )}

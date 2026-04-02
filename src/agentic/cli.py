@@ -155,12 +155,13 @@ def get_llm():
                 api_key=key if key and key != "NA" else "mock-key", # Local LLMs might use mock-key
                 temperature=0.2, # Standardized for RTL generation stability
                 top_p=0.7,   # Optimized for code output
-                max_completion_tokens=8192,
                 max_tokens=8192,
                 timeout=300,
                 extra_body=extra_t,
                 model_kwargs={"presence_penalty": 0, "repetition_penalty": 1}
             )
+            # Make a lightweight API call to validate the endpoint
+            llm.call([{"role": "user", "content": "Hi"}])
             console.print(f"[green]✓ AgentIC is working on your chip using {name}[/green]")
             return llm
         except Exception as e:

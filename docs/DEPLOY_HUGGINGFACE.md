@@ -263,3 +263,19 @@ git ls-files .env     # must print nothing
 | HITL approval never triggers | `skip_openlane: true` in request | Physical stages are skipped — HITL only fires before FLOORPLAN |
 | Build artifacts gone after restart | Container filesystem is ephemeral | Expected on free HF tier — use HF Datasets volume for persistence |
 | `port 7860 refused` locally | Container not started | Run `docker compose up` first |
+
+## Important Note on OpenLane (Physical Design) in Hugging Face
+Hugging Face Spaces strictly **prohibits Docker-in-Docker** (spawning new containers inside a container) for security reasons. Because the standard AgentIC flow runs OpenLane by spinning up the an `efabless/openlane` Docker container on the fly, **the final Physical Design/Layout (GDS) stage will fail on standard Hugging Face Spaces.**
+
+### What WORKS on Hugging Face Backend:
+- Spec Generation & Hierarchy Planning
+- AI RTL Generation & Syntax Fixing
+- UVM/Testbench Verification & Iterative Bug Fixing
+- Verilator & Icarus Verilog Simulation
+- Waveform Generation (`.vcd` & GTKWave integration)
+- Yosys Logic Synthesis & Equivalency Checks
+
+### What DOES NOT WORK on Hugging Face Backend:
+- OpenLane Hardening (Floorplanning, Placement, Routing, GDS generation).
+
+*If you specifically require OpenLane routing on Hugging Face, you must build a custom monolithic image using `FROM efabless/openlane:current` and install Python natively, effectively bypassing the Docker-in-Docker requirement.*

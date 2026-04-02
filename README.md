@@ -8,6 +8,9 @@ pinned: false
 app_port: 7860
 ---
 
+> 
+> > **🚧 TEMPORARY MAINTENANCE NOTICE (April 2026):** Hugging Face Spaces strictly restrict Docker-in-Docker functionality which causes physical placement/routing stages (OpenLane) to fail. The *Full GDS Signoff* feature is currently disabled out of the box until redeployment to a custom Oracle Cloud / AWS infrastructure is finished. It currently supports up through RTL Generation, UVM Verification, Simulation, and Testbench coverage.
+> 
 # AgentIC
 
 AgentIC is an autonomous RTL-to-GDSII pipeline. Give it a natural-language chip specification — it generates RTL, writes testbenches, runs simulation, formal verification, coverage, and regression, and optionally drives physical implementation through GDSII hardening. Every stage is AI-assisted, EDA-tool-verified, and gated behind a Human-in-the-Loop approval checkpoint.

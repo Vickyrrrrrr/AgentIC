@@ -4861,6 +4861,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                     if ok:
                         self.artifacts['gds'] = res
                         self.artifacts['run_tag'] = new_tag
+                            
                     return ok, res if not ok else "", {}
 
                 def _hardening_fix(action):

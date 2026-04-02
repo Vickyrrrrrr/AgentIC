@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
+import { HomeComponent } from './components/HomeComponent';
 import { AuthPage } from './components/AuthPage';
 import { Dashboard } from './pages/Dashboard';
 import { DesignStudio } from './pages/DesignStudio';
@@ -170,113 +171,7 @@ const App = () => {
         </header>
 
         <section className="app-content">
-          {selectedPage === 'Home' && (
-            <div className="home-overview">
-              <div className="home-hero">
-                <div className="home-hero-badge">Text → Silicon</div>
-                <h2 className="home-hero-title">Autonomous Chip Design Studio</h2>
-                <p className="home-hero-desc">
-                  From natural language to fabrication-ready GDSII — powered by multi-agent
-                  collaboration, intelligent specification analysis, self-healing loops, and
-                  a fully autonomous pipeline.
-                </p>
-              </div>
-
-              <div className="home-card-grid">
-                <div className="home-kpi">{designs.length}<span>Designs</span></div>
-                <div className="home-kpi">14<span>Pipeline Stages</span></div>
-                <div className="home-kpi">5<span>Core Modules</span></div>
-                <div className="home-kpi">AI<span>Agents</span></div>
-              </div>
-
-              <div className="home-section">
-                <h3 className="home-section-title">Multi-Agent Architecture</h3>
-                <div className="home-agent-grid">
-                  <div className="agent-card">
-                    <div className="agent-icon">🏗️</div>
-                    <div className="agent-name">Architect</div>
-                    <div className="agent-desc">Specification analysis and structured design decomposition</div>
-                  </div>
-                  <div className="agent-card">
-                    <div className="agent-icon">💻</div>
-                    <div className="agent-name">RTL Designer + Reviewer</div>
-                    <div className="agent-desc">Multi-agent collaborative generation</div>
-                  </div>
-                  <div className="agent-card">
-                    <div className="agent-icon">🧪</div>
-                    <div className="agent-name">TB Designer</div>
-                    <div className="agent-desc">Automated testbench generation and validation</div>
-                  </div>
-                  <div className="agent-card">
-                    <div className="agent-icon">🔍</div>
-                    <div className="agent-name">Error Analyst</div>
-                    <div className="agent-desc">Intelligent failure classification</div>
-                  </div>
-                  <div className="agent-card">
-                    <div className="agent-icon">🔄</div>
-                    <div className="agent-name">Self-Healing Engine</div>
-                    <div className="agent-desc">Convergence-aware optimization and recovery</div>
-                  </div>
-                  <div className="agent-card">
-                    <div className="agent-icon">🧠</div>
-                    <div className="agent-name">Deep Debugger</div>
-                    <div className="agent-desc">Causal failure analysis</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="home-section">
-                <h3 className="home-section-title">Pipeline Flow</h3>
-                <div className="pipeline-flow">
-                  {[
-                    { icon: '📐', label: 'SPEC', sub: 'Specification' },
-                    { icon: '🔍', label: 'VALIDATE', sub: 'Spec Validation' },
-                    { icon: '🌲', label: 'EXPAND', sub: 'Hierarchy' },
-                    { icon: '⚖️', label: 'FEASIBLE', sub: 'Feasibility' },
-                    { icon: '🔀', label: 'CDC', sub: 'Clock Domains' },
-                    { icon: '📋', label: 'V-PLAN', sub: 'Verify Plan' },
-                    { icon: '💻', label: 'RTL', sub: 'Generation' },
-                    { icon: '🔨', label: 'FIX', sub: 'Code Quality' },
-                    { icon: '🧪', label: 'VERIFY', sub: 'Simulation' },
-                    { icon: '📊', label: 'FORMAL', sub: 'Formal' },
-                    { icon: '📈', label: 'COV', sub: 'Coverage' },
-                    { icon: '🗺️', label: 'FLOOR', sub: 'Floorplan' },
-                    { icon: '🏗️', label: 'HARDEN', sub: 'Place+Route' },
-                    { icon: '✅', label: 'SIGNOFF', sub: 'Tape-out' },
-                  ].map((s, i) => (
-                    <div className="pipeline-stage" key={s.label}>
-                      <div className="pipeline-stage-icon">{s.icon}</div>
-                      <div className="pipeline-stage-label">{s.label}</div>
-                      <div className="pipeline-stage-sub">{s.sub}</div>
-                      {i < 13 && <div className="pipeline-arrow">→</div>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="home-section">
-                <h3 className="home-section-title">Quick Start</h3>
-                <div className="home-quickstart">
-                  <div className="quickstart-step">
-                    <div className="quickstart-num">1</div>
-                    <div>Go to <strong>Design Studio</strong> and describe any chip</div>
-                  </div>
-                  <div className="quickstart-step">
-                    <div className="quickstart-num">2</div>
-                    <div>Watch AI agents autonomously build and verify your chip</div>
-                  </div>
-                  <div className="quickstart-step">
-                    <div className="quickstart-num">3</div>
-                    <div>Check <strong>Dashboard</strong> for silicon metrics and signoff</div>
-                  </div>
-                </div>
-                <button className="btn-primary home-cta" onClick={() => setSelectedPage('Design Studio')}>
-                  Start New Build →
-                </button>
-              </div>
-            </div>
-          )}
-
+          {selectedPage === 'Home' && <HomeComponent designsLength={designs.length} setSelectedPage={setSelectedPage} />}
           {selectedPage === 'Dashboard' && <Dashboard selectedDesign={selectedDesign} />}
           {selectedPage === 'Design Studio' && <DesignStudio />}
           {selectedPage === 'HITL Build' && <HumanInLoopBuild />}

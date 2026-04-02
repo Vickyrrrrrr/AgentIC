@@ -323,36 +323,29 @@ class ReActAgent:
         return trace
 
     def _call_llm(self) -> str:
-        """Call the LLM with the current conversation."""
-        from crewai import Agent, Task, Crew
-
-        # Build a single prompt from conversation history
-        prompt_parts = []
+        """Call the LLM with the current conversation using an array of message objects."""
+        # Keep system prompt intact, truncate older conversation turns if history is too long
+        system_msg = None
+        history_msgs = []
+        
         for msg in self._conversation:
             if msg["role"] == "system":
-                prompt_parts.append(msg["content"])
-            elif msg["role"] == "user":
-                prompt_parts.append(f"\n{msg['content']}")
-            elif msg["role"] == "assistant":
-                prompt_parts.append(f"\nAssistant: {msg['content']}")
-
-        full_prompt = "\n".join(prompt_parts)
-
-        agent = Agent(
-            role=self.role,
-            goal="Follow the ReAct framework to complete the task",
-            backstory=f"Expert {self.role} using structured ReAct reasoning.",
-            llm=self.llm,
-            verbose=False,  # We handle our own logging
-        )
-
-        task = Task(
-            description=full_prompt[-12000:],  # Truncate to fit context
-            expected_output="A Thought, Action, or Final Answer following ReAct format",
-            agent=agent,
-        )
-
-        result = str(Crew(agents=[agent], tasks=[task]).kickoff())
+                system_msg = msg
+            else:
+                history_msgs.append(msg)
+                
+        # Simple message-level truncation: keep the last 10 messages (5 turns)
+        if len(history_msgs) > 10:
+            history_msgs = history_msgs[-10:]
+            
+        messages = []
+        if system_msg:
+            messages.append(system_msg)
+        messages.extend(history_msgs)
+        
+        # Use LLM.call directly which accepts array of message objects
+        # natively (supported by LiteLLM under the hood)
+        result = str(self.llm.call(messages))
         return result
 
     def _parse_response(self, response: str) -> Tuple[str, str, str, str]:

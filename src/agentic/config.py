@@ -11,7 +11,7 @@ _dotenv_path = os.path.join(WORKSPACE_ROOT, ".env")
 if os.path.isfile(_dotenv_path):
     load_dotenv(_dotenv_path, override=False)
 
-OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
+OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/MVP/OpenLane"))
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 
@@ -85,13 +85,6 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
             # Ensure proper prefixing: use 'openai/' for custom OpenAI-compatible endpoints like Zhipu
             if cfg is GLM_CONFIG and not model.startswith("openai/"):
                 model = f"openai/{model}"
-            
-            # Auto-inject env dicts for LiteLLM 
-            if model.startswith("openai/"):
-                os.environ["OPENAI_API_KEY"] = cfg.get("api_key", "")
-            elif model.startswith("groq/"):
-                os.environ["GROQ_API_KEY"] = cfg.get("api_key", "")
-            
             
             return {
                 "model": model,

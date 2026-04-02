@@ -23,6 +23,7 @@ from ..config import (
     SIM_BACKEND_DEFAULT,
     COVERAGE_FALLBACK_POLICY_DEFAULT,
     COVERAGE_PROFILE_DEFAULT,
+    WORKSPACE_ROOT,
     get_pdk_profile,
 )
 
@@ -190,14 +191,14 @@ def _rewrite_result_paths(result_dict: Dict[str, Any], staged_map: Dict[str, str
 
 def _promote_vcd_artifacts(tmpdir: str, src_dir: str):
     for entry in os.listdir(tmpdir):
-        if not entry.endswith(".vcd"):
+        if not entry.endswith((".vcd", ".log", ".txt", ".out")):
             continue
         src = os.path.join(tmpdir, entry)
         dst = os.path.join(src_dir, entry)
         try:
             shutil.copy2(src, dst)
         except OSError:
-            continue
+            pass
 
 
 def _collect_diag_lines(raw: str, limit: int = 12) -> List[str]:
@@ -2599,7 +2600,10 @@ def run_openlane(
 ):
     """Triggers the OpenLane flow via Docker."""
     
-    # --- Autonomous Environment Fix ---
+    # --- TEMPORARY HF MAINTENANCE OVERRIDE ---
+    if os.environ.get("SPACE_ID"):
+        return False, "OpenLane GDS Layout features are temporarily disabled on the Hugging Face backend due to Docker-in-Docker isolation policies. Please rely on the 'rtl_and_verification_mode'."
+    
     # If PDK_ROOT is not set, try to find it in common locations
     effective_pdk_root = PDK_ROOT
     selected_pdk = pdk_name or PDK

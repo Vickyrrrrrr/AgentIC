@@ -60,7 +60,7 @@ def _draw_pdf_header(page, title: str, subtitle: str, design_name: str,
 
     # Title block
     y = 90
-    page.insert_text((36, y), title, fontsize=16, fontname="helv-b",
+    page.insert_text((36, y), title, fontsize=16, fontname="hebo",
                      color=BRAND_DARK)
     y += 22
     page.insert_text((36, y), subtitle, fontsize=10, fontname="helv",
@@ -77,7 +77,7 @@ def _pdf_section(page, y: float, heading: str) -> float:
     if y > PAGE_H - 80:  # near bottom — caller handles new page
         return y
     y += 8
-    page.insert_text((36, y), heading, fontsize=11, fontname="helv-b",
+    page.insert_text((36, y), heading, fontsize=11, fontname="hebo",
                      color=BRAND_ORANGE)
     y += 14
     page.draw_line(fitz.Point(36, y), fitz.Point(PAGE_W - 36, y),
@@ -153,7 +153,7 @@ def generate_stage_report_pdf(payload: dict, design_name: str) -> bytes:
         for a in artifacts:
             y = _pdf_body(page, y,
                           f"• {a['name']}: {a['description']}",
-                          font="helv-b", size=9)
+                          font="hebo", size=9)
             path = a.get("path", "")
             if path and not path.startswith("{"):
                 y = _pdf_body(page, y, f"  Path: {path[:120]}",
@@ -239,7 +239,7 @@ def generate_full_report_pdf(stages: Dict[str, dict], design_name: str,
 
         artifacts = payload.get("artifacts", [])
         if artifacts:
-            y = _pdf_body(page, y, "Artifacts:", font="helv-b", size=9)
+            y = _pdf_body(page, y, "Artifacts:", font="hebo", size=9)
             for a in artifacts:
                 _ensure_space(30)
                 y = _pdf_body(page, y, f"  • {a['name']}: {a['description']}",
@@ -247,7 +247,7 @@ def generate_full_report_pdf(stages: Dict[str, dict], design_name: str,
 
         decisions = payload.get("decisions", [])
         if decisions:
-            y = _pdf_body(page, y, "Decisions:", font="helv-b", size=9)
+            y = _pdf_body(page, y, "Decisions:", font="hebo", size=9)
             for d in decisions:
                 _ensure_space(20)
                 y = _pdf_body(page, y, f"  • {d}", size=8.5)
