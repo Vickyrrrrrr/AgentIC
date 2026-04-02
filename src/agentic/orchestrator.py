@@ -929,7 +929,7 @@ class BuildOrchestrator:
         # Produces a validated JSON contract (SID) that defines every port,
         # parameter, FSM state, and sub-module BEFORE any Verilog is written.
         try:
-            architect = ArchitectModule(llm=self.get_llm_for_role("architect"), verbose=self.verbose, max_retries=3)
+            architect = ArchitectModule(llm=self.get_llm_for_role("architect"), max_retries=3)
             sid = architect.decompose(
                 design_name=self.name,
                 spec_text=self.desc,
@@ -993,7 +993,7 @@ SPECIFICATION SECTIONS (Markdown):
         )
 
         with console.status("[accent]Architecting Chip Specification...[/accent]", spinner="dots12", spinner_style="spinner"):
-            result = Crew(agents=[arch_agent], tasks=[spec_task]).kickoff()
+            result = Crew(verbose=False, agents=[arch_agent], tasks=[spec_task]).kickoff()
 
         self.artifacts['spec'] = str(result)
         self.log("Architecture Plan Generated (fallback)", refined=True)
@@ -1006,7 +1006,7 @@ SPECIFICATION SECTIONS (Markdown):
         self.log("Running HardwareSpecGenerator (classify → complete → decompose → interface → contract → output)...", refined=True)
 
         try:
-            spec_gen = HardwareSpecGenerator(llm=self.get_llm_for_role("architect"), verbose=self.verbose)
+            spec_gen = HardwareSpecGenerator(llm=self.get_llm_for_role("architect"))
             hw_spec, issues = spec_gen.generate(
                 design_name=self.name,
                 description=self.desc,
@@ -1217,7 +1217,7 @@ SPECIFICATION SECTIONS (Markdown):
                 return
 
         try:
-            expander = HierarchyExpander(llm=self.get_llm_for_role("architect"), verbose=self.verbose)
+            expander = HierarchyExpander(llm=self.get_llm_for_role("architect"))
             result = expander.expand(hw_spec_obj)
 
             self.artifacts['hierarchy_result'] = result.to_dict()
@@ -2129,7 +2129,7 @@ endclass
 
         def _run():
             try:
-                result_box.append(str(Crew(agents=agents, tasks=tasks).kickoff()))
+                result_box.append(str(Crew(verbose=False, agents=agents, tasks=tasks).kickoff()))
             except Exception as exc:
                 error_box.append(exc)
 
@@ -2555,20 +2555,16 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             
             with console.status(f"[warning]Generating RTL ({self.strategy.name})...[/warning]"):
                 try:
-                    result = Crew(
-                        agents=[rtl_agent, reviewer],
+                    result = Crew(verbose=False, agents=[rtl_agent, reviewer],
                         tasks=[rtl_task, review_task],
-                        verbose=self.verbose
                     ).kickoff()
                     rtl_code = str(result)
                     # --- Universal code output validation (RTL gen) ---
                     if not validate_llm_code_output(rtl_code):
                         self.log("RTL generation returned prose instead of code. Retrying once.", refined=True)
                         self.logger.warning(f"RTL VALIDATION FAIL (prose detected):\n{rtl_code[:500]}")
-                        rtl_code = str(Crew(
-                            agents=[rtl_agent, reviewer],
+                        rtl_code = str(Crew(verbose=False, agents=[rtl_agent, reviewer],
                             tasks=[rtl_task, review_task],
-                            verbose=self.verbose
                         ).kickoff())
                 except Exception as crew_exc:
                     self.log(f"CrewAI RTL generation error: {crew_exc}", refined=True)
@@ -2850,7 +2846,7 @@ You explain what you changed and why.""",
 
             with console.status("[error]AI fixing Syntax/Lint Errors...[/error]", spinner="dots12", spinner_style="spinner"):
                 try:
-                    result = Crew(agents=[fixer], tasks=[task]).kickoff()
+                    result = Crew(verbose=False, agents=[fixer], tasks=[task]).kickoff()
                     new_code = str(result)
                     # --- Universal code output validation (RTL fix) ---
                     if not validate_llm_code_output(new_code):
@@ -2861,7 +2857,7 @@ You explain what you changed and why.""",
                         )
                         self.log("RTL fix returned prose instead of code. Retrying once.", refined=True)
                         self.logger.warning(f"RTL FIX VALIDATION FAIL (prose detected):\n{new_code[:500]}")
-                        new_code = str(Crew(agents=[fixer], tasks=[task]).kickoff())
+                        new_code = str(Crew(verbose=False, agents=[fixer], tasks=[task]).kickoff())
                 except Exception as crew_exc:
                     self.log(f"CrewAI fix error: {crew_exc}", refined=True)
                     self.logger.warning(f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}")
@@ -2932,7 +2928,7 @@ Original errors to fix:
                 agent=fixer
             )
             with console.status("[warning]Re-prompting LLM for valid Verilog output...[/warning]", spinner="dots12", spinner_style="spinner"):
-                reformat_result = Crew(agents=[fixer], tasks=[reformat_task]).kickoff()
+                reformat_result = Crew(verbose=False, agents=[fixer], tasks=[reformat_task]).kickoff()
             _inner_code = str(reformat_result)
             self.logger.info(f"REFORMATTED RTL (parse retry {_parse_retry + 1}):\n{_inner_code}")
 
@@ -2972,7 +2968,7 @@ Original errors to fix:
                 self._clear_tb_fingerprints()  # New TB → fresh gate attempts
             else:
                 self.log("Generating Testbench...", refined=True)
-                tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Verify {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+                tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Verify {self.name}", strategy=self.strategy.name)
                 
                 tb_strategy_prompt = self._get_tb_strategy_prompt()
                 
@@ -3295,7 +3291,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 )
 
             # --- LLM ERROR ANALYSIS + FIX: Collaborative 2-agent Crew ---
-            analyst = get_error_analyst_agent(self.get_llm_for_role("fixer"), verbose=self.verbose)
+            analyst = get_error_analyst_agent(self.get_llm_for_role("fixer"))
             analysis_task = Task(
                 description=f'''Analyze this Verification Failure for "{self.name}".
 
@@ -3332,7 +3328,7 @@ Reply with JSON only, no prose, using this exact schema:
             )
             
             with console.status("[error]Analyzing Failure (Multi-Class)...[/error]"):
-                analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
+                analysis = str(Crew(verbose=False, agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
             
             self.logger.info(f"FAILURE ANALYSIS:\n{analysis}")
             analyst_result = self._parse_structured_agent_json(
@@ -3355,7 +3351,7 @@ Reply with JSON only, no prose, using this exact schema:
                     analyst_result.diagnostics,
                 )
                 with console.status("[error]Retrying Failure Analysis (JSON)...[/error]"):
-                    analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
+                    analysis = str(Crew(verbose=False, agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
                 self.logger.info(f"FAILURE ANALYSIS RETRY:\n{analysis}")
                 analyst_result = self._parse_structured_agent_json(
                     agent_name="VerificationAnalyst",
@@ -3458,7 +3454,7 @@ Reply with JSON only, no prose, using this exact schema:
             
             if is_tb_issue:
                 self.log("Analyst identified Testbench Error. Fixing TB...", refined=True)
-                fixer = get_testbench_agent(self.get_llm_for_role("fixer"), f"Fix TB for {self.name}", verbose=self.verbose)
+                fixer = get_testbench_agent(self.get_llm_for_role("fixer"), f"Fix TB for {self.name}")
                 port_info = self._extract_module_interface(self.artifacts['rtl_code'])
                 fix_prompt = f"""Fix the Testbench logic/syntax.
 
@@ -3502,7 +3498,7 @@ Never sample a DUT output in the same time step that stimulus is applied.
 """
             else:
                 self.log("Analyst identified RTL Logic Error. Fixing RTL...", refined=True)
-                fixer = get_designer_agent(self.get_llm_for_role("fixer"), f"Fix RTL for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+                fixer = get_designer_agent(self.get_llm_for_role("fixer"), f"Fix RTL for {self.name}", strategy=self.strategy.name)
                 error_lines = [line for line in output.split('\n') if "Error" in line or "fail" in line.lower()]
                 error_summary = "\n".join(error_lines)
                 
@@ -3551,20 +3547,16 @@ CRITICAL RULES:
             )
             
             with console.status("[warning]AI Implementing Fix...[/warning]", spinner="dots12", spinner_style="spinner"):
-                 result = Crew(
-                     agents=[fixer],
+                 result = Crew(verbose=False, agents=[fixer],
                      tasks=[fix_task],
-                     verbose=self.verbose
                  ).kickoff()
             fixed_code = str(result)
             # --- Universal code output validation (verification fix) ---
             if not validate_llm_code_output(fixed_code):
                 self.log("Fix generation returned prose instead of code. Retrying once.", refined=True)
                 self.logger.warning(f"FIX VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
-                fixed_code = str(Crew(
-                    agents=[fixer],
+                fixed_code = str(Crew(verbose=False, agents=[fixer],
                     tasks=[fix_task],
-                    verbose=self.verbose
                 ).kickoff())
             self.logger.info(f"FIXED CODE:\n{fixed_code}")
             
@@ -3608,13 +3600,13 @@ Return the complete module with ONLY the minimal fix applied.
                             agent=fixer
                         )
                         with console.status("[warning]AI Implementing Surgical Fix (retry)...[/warning]"):
-                            result2 = Crew(agents=[fixer], tasks=[retry_task], verbose=self.verbose).kickoff()
+                            result2 = Crew(verbose=False, agents=[fixer], tasks=[retry_task]).kickoff()
                         fixed_code = str(result2)
                         # --- Universal code output validation (surgical RTL retry) ---
                         if not validate_llm_code_output(fixed_code):
                             self.log("Surgical RTL retry returned prose instead of code. Retrying once.", refined=True)
                             self.logger.warning(f"SURGICAL RETRY VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
-                            fixed_code = str(Crew(agents=[fixer], tasks=[retry_task], verbose=self.verbose).kickoff())
+                            fixed_code = str(Crew(verbose=False, agents=[fixer], tasks=[retry_task]).kickoff())
                         self.logger.info(f"SURGICAL RETRY CODE:\n{fixed_code}")
 
                 # Write cleaned code and read it back
@@ -3687,7 +3679,7 @@ Return the complete module with ONLY the minimal fix applied.
                 rtl_for_sva = self.artifacts.get("rtl_code", "")
             signal_inventory = self._format_signal_inventory_for_prompt(rtl_for_sva)
             
-            verif_agent = get_verification_agent(self.get_llm_for_role("verifier"), verbose=self.verbose)
+            verif_agent = get_verification_agent(self.get_llm_for_role("verifier"))
             sva_task = Task(
                 description=f"""Generate SystemVerilog Assertions (SVA) for module "{self.name}".
 
@@ -3728,7 +3720,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             )
             
             with console.status("[accent]AI Generating SVA Assertions...[/accent]", spinner="dots12", spinner_style="spinner"):
-                sva_result = str(Crew(agents=[verif_agent], tasks=[sva_task]).kickoff())
+                sva_result = str(Crew(verbose=False, agents=[verif_agent], tasks=[sva_task]).kickoff())
             
             # --- Universal code output validation (SVA) ---
             if not validate_llm_code_output(sva_result):
@@ -3739,7 +3731,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 )
                 self.log("SVA generation returned prose instead of code. Retrying once.", refined=True)
                 self.logger.warning(f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}")
-                sva_result = str(Crew(agents=[verif_agent], tasks=[sva_task]).kickoff())
+                sva_result = str(Crew(verbose=False, agents=[verif_agent], tasks=[sva_task]).kickoff())
                 if not validate_llm_code_output(sva_result):
                     self.log("SVA retry also returned invalid output. Skipping formal.", refined=True)
                     self.transition(BuildState.COVERAGE_CHECK)
@@ -4155,7 +4147,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Improve coverage for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+        tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Improve coverage for {self.name}", strategy=self.strategy.name)
 
         branch_target = float(thresholds['branch'])
         improve_prompt = f"""The current testbench for "{self.name}" does not meet coverage thresholds.
@@ -4200,7 +4192,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         )
 
         with console.status("[warning]AI Improving Test Coverage...[/warning]", spinner="dots12", spinner_style="spinner"):
-            result = Crew(agents=[tb_agent], tasks=[improve_task]).kickoff()
+            result = Crew(verbose=False, agents=[tb_agent], tasks=[improve_task]).kickoff()
 
         improved_tb = str(result)
         # --- Universal code output validation (coverage TB improvement) ---
@@ -4212,7 +4204,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             )
             self.log("Coverage TB improvement returned prose instead of code. Retrying once.", refined=True)
             self.logger.warning(f"COVERAGE TB VALIDATION FAIL (prose detected):\n{improved_tb[:500]}")
-            improved_tb = str(Crew(agents=[tb_agent], tasks=[improve_task]).kickoff())
+            improved_tb = str(Crew(verbose=False, agents=[tb_agent], tasks=[improve_task]).kickoff())
         tb_validation_issues = self._validate_tb_candidate(improved_tb)
         if tb_validation_issues:
             self._record_stage_contract(
@@ -4271,7 +4263,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         )
         
         with console.status("[accent]AI Generating Regression Tests...[/accent]", spinner="dots12", spinner_style="spinner"):
-            result = str(Crew(agents=[regression_agent], tasks=[regression_task]).kickoff())
+            result = str(Crew(verbose=False, agents=[regression_agent], tasks=[regression_task]).kickoff())
         
         self.logger.info(f"REGRESSION TESTS:\n{result}")
         
@@ -4404,7 +4396,7 @@ REQUIREMENTS:
         )
         
         with console.status("[accent]Generating Timing Constraints (SDC)...[/accent]"):
-            sdc_content = str(Crew(agents=[sdc_agent], tasks=[sdc_task]).kickoff()).strip()
+            sdc_content = str(Crew(verbose=False, agents=[sdc_agent], tasks=[sdc_task]).kickoff()).strip()
             
             # Clean up potential markdown wrappers created by LLM anyway
             if sdc_content.startswith("```"):
@@ -4466,7 +4458,7 @@ REASONING: <1-line explanation>""",
             )
 
             with console.status("[accent]LLM Estimating Floorplan...[/accent]", spinner="dots12", spinner_style="spinner"):
-                est_result = str(Crew(agents=[estimator], tasks=[estimate_task]).kickoff()).strip()
+                est_result = str(Crew(verbose=False, agents=[estimator], tasks=[estimate_task]).kickoff()).strip()
             self.logger.info(f"FLOORPLAN LLM ESTIMATE:\n{est_result}")
 
             # Parse structured response
@@ -4669,7 +4661,7 @@ REASONING: <1-line explanation>""",
             )
 
             with console.status("[accent]LLM Analyzing Convergence...[/accent]", spinner="dots12", spinner_style="spinner"):
-                conv_result = str(Crew(agents=[conv_analyst], tasks=[convergence_task]).kickoff()).strip()
+                conv_result = str(Crew(verbose=False, agents=[conv_analyst], tasks=[convergence_task]).kickoff()).strip()
             self.logger.info(f"CONVERGENCE LLM ANALYSIS:\n{conv_result}")
 
             # Parse decision
@@ -4998,7 +4990,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # 5. Documentation
         self.log("Generating Design Documentation (AI-Powered)...", refined=True)
         
-        doc_agent = get_doc_agent(self.get_llm_for_role("manager"), verbose=self.verbose)
+        doc_agent = get_doc_agent(self.get_llm_for_role("manager"))
         
         doc_task = Task(
             description=f"""Generate a comprehensive Datasheet (Markdown) for "{self.name}".
@@ -5031,7 +5023,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         )
         
         with console.status("[accent]AI Writing Datasheet...[/accent]", spinner="dots12", spinner_style="spinner"):
-            doc_content = str(Crew(agents=[doc_agent], tasks=[doc_task]).kickoff())
+            doc_content = str(Crew(verbose=False, agents=[doc_agent], tasks=[doc_task]).kickoff())
         
         # Save to file
         doc_path = f"{OPENLANE_ROOT}/designs/{self.name}/{self.name}_datasheet.md"
@@ -5130,7 +5122,7 @@ FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
                     )
 
                     with console.status("[error]LLM Analyzing Signoff Failure...[/error]", spinner="dots12", spinner_style="spinner"):
-                        signoff_analysis = str(Crew(agents=[signoff_analyst], tasks=[signoff_analysis_task]).kickoff()).strip()
+                        signoff_analysis = str(Crew(verbose=False, agents=[signoff_analyst], tasks=[signoff_analysis_task]).kickoff()).strip()
                     self.logger.info(f"SIGNOFF FAILURE ANALYSIS:\n{signoff_analysis}")
 
                     # Parse and log

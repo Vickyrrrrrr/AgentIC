@@ -300,7 +300,7 @@ def simulate(
             agent=fix_agent
         )
         with console.status(f"[accent]AI is fixing ({agent_role})...[/accent]"):
-            result = str(Crew(agents=[fix_agent], tasks=[fix_task]).kickoff())
+            result = str(Crew(verbose=False, agents=[fix_agent], tasks=[fix_task]).kickoff())
             return result
     
     sim_success, sim_output = run_simulation(name)
@@ -361,7 +361,7 @@ Reply with ONLY "A" or "B".''',
                 expected_output='Single letter A or B',
                 agent=analyst
             )
-            analysis = str(Crew(agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
+            analysis = str(Crew(verbose=False, agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
             
             is_tb_issue = "A" in analysis
 
