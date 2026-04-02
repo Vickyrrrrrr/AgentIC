@@ -125,30 +125,54 @@ endmodule
 
     const askAIAssist = async () => {
         setLoading('ai');
-        setOutput(prev => prev + '\n\nQuerying AgentIC AI array for code fixes...\n');
+        setOutput(prev => prev + '\n\n🔍 Running syntax check before AI analysis...\n');
         try {
             const res = await api.post('/lab/ai-assist', { 
-                query: "Analyze this Verilog code for bugs. Format your response strictly by placing the fully corrected Verilog code inside exactly one ```verilog codeblock, followed by a concise markdown explanation of what you changed.",
+                query: "Analyze this Verilog code for ALL issues: syntax errors, logical bugs, and synthesizability problems. Fix everything and produce fully synthesizable, error-free Verilog.",
                 code 
             });
             
-            const responseText = res.data.response;
-            // Extract the Verilog code block from the LLM output
-            const codeMatch = responseText.match(/```verilog\n([\s\S]*?)```/);
+            const { fixed_code, line_changes, explanation, response: responseText } = res.data;
             
-            if (codeMatch && codeMatch[1]) {
-                const fixedCode = codeMatch[1].trim();
-                setCode(fixedCode); // Update the code editor with the fixed code
+            if (fixed_code) {
+                setCode(fixed_code);
                 
-                // Show the explanation in the console (strip out the huge code block)
-                const explanation = responseText.replace(/```verilog\n[\s\S]*?```/, '').trim();
-                setOutput(prev => prev + '\n🤖 [AI Code Fixer]: I have updated the editor with the fixed code!\n\n📋 Changes Made:\n' + explanation);
+                // Build a clear diff display for the console
+                let diffOutput = '\n🤖 [AI Code Fixer]: Code fixed and updated in editor!\n\n';
+                
+                if (line_changes && line_changes.length > 0) {
+                    diffOutput += '━━━ Changes Made ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                    for (const change of line_changes) {
+                        if (change.type === 'modified') {
+                            diffOutput += `\n📝 Line ${change.line}: Modified\n`;
+                            diffOutput += `  ❌ ${change.old}\n`;
+                            diffOutput += `  ✅ ${change.new}\n`;
+                        } else if (change.type === 'removed') {
+                            diffOutput += `\n🗑️  Line ${change.line}: Removed\n`;
+                            diffOutput += `  ❌ ${change.old}\n`;
+                        } else if (change.type === 'added') {
+                            diffOutput += `\n➕ Line ${change.line}: Added\n`;
+                            diffOutput += `  ✅ ${change.new}\n`;
+                        }
+                    }
+                    diffOutput += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                    diffOutput += `\n📊 Summary: ${line_changes.filter((c: any) => c.type === 'modified').length} modified, `;
+                    diffOutput += `${line_changes.filter((c: any) => c.type === 'added').length} added, `;
+                    diffOutput += `${line_changes.filter((c: any) => c.type === 'removed').length} removed\n`;
+                } else {
+                    diffOutput += '✨ No line-level changes detected (code may have been restructured).\n';
+                }
+                
+                if (explanation) {
+                    diffOutput += '\n📋 AI Explanation:\n' + explanation;
+                }
+                
+                setOutput(prev => prev + diffOutput);
             } else {
-                // Fallback if the LLM didn't format correctly
-                setOutput(prev => prev + '\n🤖 [AI Code Fixer]:\n' + responseText);
+                // Fallback: LLM didn't return structured code
+                setOutput(prev => prev + '\n🤖 [AI Code Fixer]:\n' + (responseText || 'No response received.'));
             }
         } catch (e: any) {
-            // Re-throw or ignore
             setOutput(prev => prev + '\n❌ Error calling AI: ' + (e.response?.data?.detail || e.message));
         }
         setLoading(null);
@@ -206,103 +230,127 @@ endmodule
     }, [viewerOpen, vcdData]);
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '1rem', padding: '1.5rem', boxSizing: 'border-box' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                    <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0, fontSize: '1.4rem', color: 'var(--text)' }}>
-                        <Cpu size={24}/> Manual EDA Testing Lab
+        <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px)', gap: '0', boxSizing: 'border-box' }}>
+            {/* ── Toolbar ── */}
+            <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '0.75rem 1.25rem',
+                borderBottom: '1px solid var(--border)',
+                background: 'color-mix(in srgb, var(--bg-card) 90%, transparent)',
+                backdropFilter: 'blur(8px)',
+                flexShrink: 0,
+                animation: 'reveal-up 0.3s var(--ease) both',
+            }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                    <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0, fontSize: '1.1rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
+                        <Cpu size={20} style={{ color: 'var(--accent)' }} />
+                        <span>EDA <span className="gradient-text">Lab</span></span>
                     </h2>
-                    <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Write Verilog, compile instantly natively, and chat directly with AI hardware engineers.</span>
                 </div>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button 
-                        onClick={runSyntaxCheck} 
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                    <button
+                        onClick={runSyntaxCheck}
                         disabled={!!loading}
-                        className="btn-primary"
-                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'var(--accent)', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading && loading !== 'syntax' ? 0.6 : 1 }}>
-                        {loading === 'syntax' ? <span className="spinner"/> : <CheckCircle size={16} />}
-                        Syntax Check
+                        className="shimmer-btn"
+                        style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: 'var(--accent)', opacity: loading && loading !== 'syntax' ? 0.5 : 1 }}>
+                        <span className="shimmer-btn-content">
+                            {loading === 'syntax' ? <span className="spinner"/> : <CheckCircle size={14} />}
+                            Syntax
+                        </span>
                     </button>
-                    <button 
-                        onClick={runSynthesis} 
+                    <button
+                        onClick={runSynthesis}
                         disabled={!!loading}
-                        className="btn-primary"
-                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#eab308', color: 'black', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading && loading !== 'synthesize' ? 0.6 : 1 }}>
-                        {loading === 'synthesize' ? <span className="spinner"/> : <Layers size={16} />}
-                        Synthesize (Yosys)
+                        className="shimmer-btn"
+                        style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: 'linear-gradient(135deg, #d97706, #eab308)', opacity: loading && loading !== 'synthesize' ? 0.5 : 1 }}>
+                        <span className="shimmer-btn-content">
+                            {loading === 'synthesize' ? <span className="spinner"/> : <Layers size={14} />}
+                            Synthesize
+                        </span>
                     </button>
-                    <button 
-                        onClick={runSimulate} 
+                    <button
+                        onClick={runSimulate}
                         disabled={!!loading}
-                        className="btn-primary"
-                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#10b981', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading && loading !== 'simulate' ? 0.6 : 1 }}>
-                        {loading === 'simulate' ? <span className="spinner"/> : <Play size={16} />}
-                        Simulate
+                        className="shimmer-btn"
+                        style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: 'linear-gradient(135deg, #059669, #10b981)', opacity: loading && loading !== 'simulate' ? 0.5 : 1 }}>
+                        <span className="shimmer-btn-content">
+                            {loading === 'simulate' ? <span className="spinner"/> : <Play size={14} />}
+                            Simulate
+                        </span>
                     </button>
                     {vcdData && (
-                        <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '0.5rem', paddingLeft: '0.5rem', borderLeft: '1px solid var(--border)' }}>
-                            <button 
+                        <>
+                            <div style={{ width: 1, height: 24, background: 'var(--border)', margin: '0 0.25rem' }} />
+                            <button
                                 onClick={openCloudViewer}
-                                className="btn-primary"
-                                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#0284c7', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: 'pointer' }}>
-                                <ExternalLink size={16} />
-                                In-Browser Viewer
+                                className="shimmer-btn"
+                                style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: 'linear-gradient(135deg, #0369a1, #0284c7)' }}>
+                                <span className="shimmer-btn-content"><ExternalLink size={14} /> Viewer</span>
                             </button>
                             {!IS_CLOUD_DEPLOY && (
-                                <button 
+                                <button
                                     onClick={openGTKWave}
-                                    className="btn-primary"
-                                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#3b82f6', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: 'pointer' }}>
-                                    <Eye size={16} />
-                                    Desktop GTKWave
+                                    className="shimmer-btn"
+                                    style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: 'linear-gradient(135deg, #2563eb, #3b82f6)' }}>
+                                    <span className="shimmer-btn-content"><Eye size={14} /> GTKWave</span>
                                 </button>
                             )}
-                            <button 
+                            <button
                                 onClick={downloadVCD}
-                                className="btn-primary"
-                                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#8b5cf6', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: 'pointer' }}>
-                                <FileDown size={16} />
-                                (.VCD)
+                                className="shimmer-btn"
+                                style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: 'linear-gradient(135deg, #7c3aed, #8b5cf6)' }}>
+                                <span className="shimmer-btn-content"><FileDown size={14} /> .VCD</span>
                             </button>
-                        </div>
+                        </>
                     )}
-                    <div style={{ flex: 1 }} />
-                    <button 
-                        onClick={askAIAssist}  
+                    <div style={{ flex: 1, minWidth: '0.5rem' }} />
+                    <button
+                        onClick={askAIAssist}
                         disabled={!!loading}
-                        className="btn-primary"
-                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#3b82f6', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading && loading !== 'ai' ? 0.6 : 1 }}>
-                        {loading === 'ai' ? <span className="spinner"/> : <Wand2 size={16} />}
-                        AI Code Fixer
+                        className="shimmer-btn"
+                        style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: 'linear-gradient(135deg, #2563eb, #7c3aed)', opacity: loading && loading !== 'ai' ? 0.5 : 1 }}>
+                        <span className="shimmer-btn-content">
+                            {loading === 'ai' ? <span className="spinner"/> : <Wand2 size={14} />}
+                            AI Fixer
+                        </span>
                     </button>
                 </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '1rem', flex: 1, minHeight: 0 }}>
+            {/* ── Editor + Console ── */}
+            <div style={{ display: 'flex', gap: 0, flex: 1, minHeight: 0 }}>
                 {viewerOpen ? (
-                    <div style={{ flex: '1', display: 'flex', flexDirection: 'column', border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: '#0f172a' }}>
-                        <div style={{ padding: '0.5rem 1rem', background: '#1e293b', borderBottom: '1px solid #334155', fontWeight: 600, fontSize: '0.85rem', color: '#94a3b8', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#0f172a', borderRight: '1px solid var(--border)' }}>
+                        <div style={{ padding: '0.45rem 1rem', background: '#1e293b', borderBottom: '1px solid #334155', fontWeight: 600, fontSize: '0.82rem', color: '#94a3b8', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                <ExternalLink size={16}/> Cloud VCD Viewer (VCDrom)
+                                <ExternalLink size={14}/> VCDrom Viewer
                             </div>
-                            <button 
+                            <button
                                 onClick={() => setViewerOpen(false)}
-                                style={{ background: '#334155', border: 'none', borderRadius: '4px', color: '#e2e8f0', padding: '0.2rem 0.5rem', cursor: 'pointer', fontSize: '0.75rem' }}>
-                                Close Viewer
+                                style={{ background: '#334155', border: 'none', borderRadius: '4px', color: '#e2e8f0', padding: '0.15rem 0.5rem', cursor: 'pointer', fontSize: '0.72rem' }}>
+                                Close
                             </button>
                         </div>
-                        <iframe 
+                        <iframe
                             id="vcdIframe"
-                            src="/vcdrom/index.html" 
+                            src="/vcdrom/index.html"
                             style={{ flex: 1, border: 'none', background: 'white' }}
                             title="VCD Viewer"
                         />
                     </div>
                 ) : (
-                    <div style={{ flex: '1.2', display: 'flex', flexDirection: 'column', border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' }}>
-                        <div style={{ padding: '0.5rem 1rem', background: 'var(--bg-surface)', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span>testbench.sv</span>
-                            <span style={{ fontSize: '0.75rem', fontWeight: 'normal' }}>Monaco Editor</span>
+                    <div style={{ flex: 1.2, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: '1px solid var(--border)' }}>
+                        <div style={{
+                            padding: '0.4rem 1rem', borderBottom: '1px solid var(--border)',
+                            fontWeight: 600, fontSize: '0.82rem', color: 'var(--text-dim)',
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            background: 'color-mix(in srgb, var(--bg-card) 90%, transparent)',
+                        }}>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', display: 'inline-block' }} />
+                                testbench.sv
+                            </span>
+                            <span style={{ fontSize: '0.72rem', fontWeight: 'normal', color: 'var(--text-dim)' }}>Monaco Editor</span>
                         </div>
                         <Editor
                             height="100%"
@@ -310,31 +358,44 @@ endmodule
                             theme={theme}
                             value={code}
                             onChange={(val) => setCode(val || '')}
-                            options={{ 
-                                minimap: { enabled: false }, 
-                                fontSize: 14, 
-                                fontFamily: 'monospace',
+                            options={{
+                                minimap: { enabled: false },
+                                fontSize: 14,
+                                fontFamily: "'Fira Code', monospace",
                                 scrollBeyondLastLine: false,
-                                smoothScrolling: true
+                                smoothScrolling: true,
+                                padding: { top: 12 },
+                                renderLineHighlight: 'gutter',
+                                cursorBlinking: 'smooth',
+                                cursorSmoothCaretAnimation: 'on',
                             }}
                         />
                     </div>
                 )}
 
-                <div style={{ flex: '0.8', display: 'flex', flexDirection: 'column', border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: '#0f172a' }}>
-                    <div style={{ padding: '0.5rem 1rem', background: '#1e293b', borderBottom: '1px solid #334155', fontWeight: 600, fontSize: '0.85rem', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'space-between' }}>
+                {/* Console */}
+                <div style={{ flex: 0.8, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#0f172a' }}>
+                    <div style={{
+                        padding: '0.4rem 1rem', background: '#1e293b', borderBottom: '1px solid #334155',
+                        fontWeight: 600, fontSize: '0.82rem', color: '#94a3b8',
+                        display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'space-between'
+                    }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <TerminalSquare size={16}/> Console Output
+                            <TerminalSquare size={14}/> Console
                         </div>
-                        <button 
+                        <button
                             onClick={() => setOutput('')}
                             style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '0' }}
                             title="Clear Console">
-                            <XCircle size={16} />
+                            <XCircle size={14} />
                         </button>
                     </div>
-                    <div style={{ flex: 1, padding: '1rem', overflowY: 'auto', color: '#e2e8f0', fontFamily: 'monospace', fontSize: '0.85rem', whiteSpace: 'pre-wrap', lineHeight: '1.5' }}>
-                        {output || 'System ready.\nWrite Verilog hardware code and hit Simulation to test execution locally on your laptop or server environment...'}
+                    <div style={{
+                        flex: 1, padding: '0.75rem 1rem', overflowY: 'auto',
+                        color: '#e2e8f0', fontFamily: "'Fira Code', monospace", fontSize: '0.82rem',
+                        whiteSpace: 'pre-wrap', lineHeight: '1.6',
+                    }}>
+                        {output || '$ System ready.\n  Write Verilog → click Syntax / Synthesize / Simulate\n  AI Fixer auto-diagnoses & repairs your code'}
                     </div>
                 </div>
             </div>

@@ -1,17 +1,70 @@
 import React from 'react';
+import { useRevealOnScroll } from '../utils/useAnimations';
 
 interface BenchmarkingProps {
     selectedDesign: string;
 }
 
-export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) => {
+const ComparisonRow = ({ metric, agenticVal, tradVal, delay }: { metric: string; agenticVal: string; tradVal: string; delay: number }) => {
     return (
-        <div className="page-container">
-            <h2 className="app-title">📊 Market Benchmarking: {selectedDesign || 'No Design'}</h2>
-            <p className="app-subtitle">Compare AgentIC-generated flows against conventional enterprise chip flows.</p>
+        <tr style={{ animation: `reveal-up 0.4s var(--ease) ${delay}ms both` }}>
+            <td style={{ fontWeight: 600 }}>{metric}</td>
+            <td>
+                <span style={{ 
+                    color: 'var(--success)', fontWeight: 600,
+                    display: 'inline-flex', alignItems: 'center', gap: '0.4rem'
+                }}>
+                    <span style={{
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: 'var(--success)',
+                        boxShadow: '0 0 6px var(--success)',
+                        display: 'inline-block'
+                    }} />
+                    {agenticVal}
+                </span>
+            </td>
+            <td style={{ color: 'var(--text-dim)' }}>{tradVal}</td>
+        </tr>
+    );
+};
 
-            <div className="sci-fi-card" style={{ marginBottom: '1.5rem' }}>
-                <h3>Cost & Efficiency Analysis</h3>
+export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) => {
+    const header = useRevealOnScroll(0.1);
+    const section1 = useRevealOnScroll(0.1);
+    const section2 = useRevealOnScroll(0.1);
+
+    const comparisons = [
+        { metric: 'RTL to GDSII Time', agenticVal: '~15 Minutes', tradVal: 'Days/Weeks' },
+        { metric: 'Spec Decomposition', agenticVal: 'Automated specification analysis', tradVal: 'Manual architecture review (weeks)' },
+        { metric: 'Verification Methodology', agenticVal: 'Intelligent multi-class diagnosis', tradVal: 'Manual waveform debugging' },
+        { metric: 'Agent Collaboration', agenticVal: 'Multi-agent collaborative pipeline', tradVal: 'Siloed engineer teams' },
+        { metric: 'Self-Healing', agenticVal: 'Convergence-aware automated recovery', tradVal: 'Manual iteration' },
+        { metric: 'Log Triage', agenticVal: 'Automated LLM Parsing', tradVal: 'Manual Grepping' },
+        { metric: 'Licensing Cost', agenticVal: 'Open Source + API', tradVal: '$1M+ / seat' },
+        { metric: 'DRC / LVS Violations', agenticVal: 'Auto-heal assisted', tradVal: 'Manual closure process' },
+    ];
+
+    const modules = [
+        { name: 'Architect', cap: 'Natural language specification decomposition and structured contract generation' },
+        { name: 'Reasoning Agent', cap: 'Iterative reasoning with observation-driven action planning' },
+        { name: 'Self-Healing Pipeline', cap: 'Convergence-aware retry with metric-driven optimization' },
+        { name: 'Deep Debugger', cap: 'Causal failure analysis with multi-perspective reasoning' },
+        { name: 'Waveform Analyst', cap: 'Signal-level diagnostic analysis and root cause identification' },
+    ];
+
+    return (
+        <div className="page-container" style={{ padding: '1.5rem', maxWidth: '1100px' }}>
+            <div ref={header.ref} className={`reveal ${header.isVisible ? 'visible' : ''}`}>
+                <h2 className="app-title" style={{ fontSize: '1.4rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
+                    📊 Market Benchmarking: <span className="gradient-text">{selectedDesign || 'No Design'}</span>
+                </h2>
+                <p className="app-subtitle" style={{ color: 'var(--text-mid)', fontSize: '0.88rem', marginBottom: '1.5rem' }}>
+                    Compare AgentIC-generated flows against conventional enterprise chip flows.
+                </p>
+            </div>
+
+            <div ref={section1.ref} className={`sci-fi-card reveal ${section1.isVisible ? 'visible' : ''}`} style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
+                <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Cost & Efficiency Analysis</h3>
                 <table className="enterprise-table" style={{ marginTop: '10px' }}>
                     <thead>
                         <tr>
@@ -21,52 +74,15 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
                         </tr>
                     </thead>
                     <tbody>
-                        <tr>
-                            <td>RTL to GDSII Time</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>~15 Minutes</td>
-                            <td>Days/Weeks</td>
-                        </tr>
-                        <tr>
-                            <td>Spec Decomposition</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Automated specification analysis</td>
-                            <td>Manual architecture review (weeks)</td>
-                        </tr>
-                        <tr>
-                            <td>Verification Methodology</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Intelligent multi-class diagnosis</td>
-                            <td>Manual waveform debugging</td>
-                        </tr>
-                        <tr>
-                            <td>Agent Collaboration</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Multi-agent collaborative pipeline</td>
-                            <td>Siloed engineer teams</td>
-                        </tr>
-                        <tr>
-                            <td>Self-Healing</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Convergence-aware automated recovery</td>
-                            <td>Manual iteration</td>
-                        </tr>
-                        <tr>
-                            <td>Log Triage</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Automated LLM Parsing</td>
-                            <td>Manual Grepping</td>
-                        </tr>
-                        <tr>
-                            <td>Licensing Cost</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Open Source + API</td>
-                            <td>$1M+ / seat</td>
-                        </tr>
-                        <tr>
-                            <td>DRC / LVS Violations</td>
-                            <td style={{ color: 'var(--success)', fontWeight: 600 }}>Auto-heal assisted</td>
-                            <td>Manual closure process</td>
-                        </tr>
+                        {comparisons.map((c, i) => (
+                            <ComparisonRow key={c.metric} {...c} delay={i * 60} />
+                        ))}
                     </tbody>
                 </table>
             </div>
 
-            <div className="sci-fi-card">
-                <h3>Core Module Architecture</h3>
+            <div ref={section2.ref} className={`sci-fi-card reveal ${section2.isVisible ? 'visible' : ''}`} style={{ padding: '1.25rem' }}>
+                <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Core Module Architecture</h3>
                 <table className="enterprise-table" style={{ marginTop: '10px' }}>
                     <thead>
                         <tr>
@@ -75,26 +91,12 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
                         </tr>
                     </thead>
                     <tbody>
-                        <tr>
-                            <td style={{ fontWeight: 600 }}>Architect</td>
-                            <td>Natural language specification decomposition and structured contract generation</td>
-                        </tr>
-                        <tr>
-                            <td style={{ fontWeight: 600 }}>Reasoning Agent</td>
-                            <td>Iterative reasoning with observation-driven action planning</td>
-                        </tr>
-                        <tr>
-                            <td style={{ fontWeight: 600 }}>Self-Healing Pipeline</td>
-                            <td>Convergence-aware retry with metric-driven optimization</td>
-                        </tr>
-                        <tr>
-                            <td style={{ fontWeight: 600 }}>Deep Debugger</td>
-                            <td>Causal failure analysis with multi-perspective reasoning</td>
-                        </tr>
-                        <tr>
-                            <td style={{ fontWeight: 600 }}>Waveform Analyst</td>
-                            <td>Signal-level diagnostic analysis and root cause identification</td>
-                        </tr>
+                        {modules.map((m, i) => (
+                            <tr key={m.name} style={{ animation: `reveal-up 0.4s var(--ease) ${i * 80}ms both` }}>
+                                <td style={{ fontWeight: 600 }}>{m.name}</td>
+                                <td>{m.cap}</td>
+                            </tr>
+                        ))}
                     </tbody>
                 </table>
             </div>

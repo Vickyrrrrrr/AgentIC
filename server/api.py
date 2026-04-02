@@ -1743,7 +1743,7 @@ frontend_dist = os.path.join(os.path.dirname(__file__), "..", "web", "dist")
 if os.path.exists(frontend_dist):
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
     app.mount("/vcdrom", StaticFiles(directory=os.path.join(frontend_dist, "vcdrom")), name="vcdrom")
-    app.get("/{catchall:path}")
+    @app.get("/{catchall:path}")
     def serve_frontend_app(catchall: str):
         full_path = os.path.join(frontend_dist, catchall)
         if os.path.isfile(full_path):

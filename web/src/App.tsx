@@ -10,7 +10,9 @@ import { Benchmarking } from './pages/Benchmarking';
 import { Fabrication } from './pages/Fabrication';
 import { Documentation } from './pages/Documentation';
 import { EDALab } from './pages/EDALab';
+import { DockItem, PulseDot } from './components/MagicUI';
 import { api } from './api';
+import { useCursorGlow } from './utils/useAnimations';
 import './index.css';
 import { Home, Zap, Users, BarChart2, BookOpen, Scaling, Factory, TerminalSquare } from 'lucide-react';
 
@@ -19,13 +21,16 @@ const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
 const App = () => {
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [selectedPage, setSelectedPage] = useState('Design Studio');
+  const [selectedPage, setSelectedPage] = useState('Home');
   const [designs, setDesigns] = useState<{ name: string, has_gds: boolean }[]>([]);
   const [selectedDesign, setSelectedDesign] = useState<string>('');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('agentic-theme');
     return saved === 'dark' ? 'dark' : 'light';
   });
+
+  // Cursor glow effect
+  useCursorGlow();
 
   // ── Auth state (skip when Supabase not configured) ──
   useEffect(() => {
@@ -48,7 +53,7 @@ const App = () => {
     localStorage.setItem('agentic-theme', theme);
   }, [theme]);
 
-  // Fetch designs when authenticated (or always in local dev without auth)
+  // Fetch designs
   useEffect(() => {
     if (AUTH_ENABLED && !session) return;
     api.get('/designs')
@@ -66,7 +71,7 @@ const App = () => {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setSession(null);
-    setSelectedPage('Design Studio');
+    setSelectedPage('Home');
   };
 
   const navItems = useMemo(
@@ -75,20 +80,28 @@ const App = () => {
       { name: 'Design Studio', icon: Zap },
       { name: 'HITL Build', icon: Users },
       { name: 'Dashboard', icon: BarChart2 },
-      { name: 'Documentation', icon: BookOpen },
       { name: 'Manual EDA Lab', icon: TerminalSquare },
+      { name: 'Documentation', icon: BookOpen },
       { name: 'Benchmarking', icon: Scaling },
       { name: 'Fabrication', icon: Factory },
     ],
     []
   );
 
-  // ── Auth loading spinner ──
+  // ── Premium loading spinner ──
   if (authLoading) {
     return (
-      <div className="auth-loading">
-        <div className="auth-loading-spinner" />
-        <span>Loading AgentIC…</span>
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        height: '100vh', gap: '1rem', background: 'var(--bg)'
+      }}>
+        <div style={{
+          width: 48, height: 48, borderRadius: '50%',
+          border: '3px solid var(--border)',
+          borderTopColor: 'var(--accent)',
+          animation: 'spin-slow 0.8s linear infinite'
+        }} />
+        <span style={{ color: 'var(--text-mid)', fontSize: '0.9rem', fontWeight: 500 }}>Loading AgentIC…</span>
       </div>
     );
   }
@@ -97,92 +110,103 @@ const App = () => {
     return <AuthPage onAuth={() => supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))} />;
   }
 
+  const renderPage = () => {
+    switch (selectedPage) {
+      case 'Home':
+        return <HomeComponent designsLength={designs.length} setSelectedPage={setSelectedPage} />;
+      case 'Dashboard':
+        return <Dashboard selectedDesign={selectedDesign} />;
+      case 'Design Studio':
+        return <DesignStudio />;
+      case 'Manual EDA Lab':
+        return <EDALab />;
+      case 'HITL Build':
+        return <HumanInLoopBuild />;
+      case 'Documentation':
+        return <Documentation />;
+      case 'Benchmarking':
+        return <Benchmarking selectedDesign={selectedDesign} />;
+      case 'Fabrication':
+        return <Fabrication selectedDesign={selectedDesign} hasGds={designs.find((d) => d.name === selectedDesign)?.has_gds} />;
+      default:
+        return <HomeComponent designsLength={designs.length} setSelectedPage={setSelectedPage} />;
+    }
+  };
+
   return (
     <div className="app-shell">
-      <aside className="app-sidebar">
-        <div className="app-brand">
-          <div className="app-brand-logo">A</div>
-          <div>
-            <div className="app-brand-title">AgentIC</div>
-            <div className="app-brand-sub">Autonomous Silicon Studio</div>
+      {/* ── Top Navigation Bar ── */}
+      <nav className="top-nav">
+        {/* Brand */}
+        <div className="top-nav-brand">
+          <div className="top-nav-brand-logo">A</div>
+          <div className="top-nav-brand-text">
+            <span className="top-nav-brand-title">AgentIC</span>
+            <span className="top-nav-brand-sub">Autonomous Silicon Studio</span>
           </div>
         </div>
 
-        <div className="app-sidebar-group">
-          <div className="app-sidebar-label">Active Design</div>
-          <select
-            className="app-design-select"
-            value={selectedDesign}
-            onChange={(e) => setSelectedDesign(e.target.value)}
-          >
-            {designs.map((d) => (
-              <option key={d.name} value={d.name}>
-                {d.name} {d.has_gds ? '• GDS' : ''}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <nav className="app-nav">
+        {/* Dock Navigation */}
+        <div className="dock-nav">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button
+              <DockItem
                 key={item.name}
-                className={`app-nav-btn ${selectedPage === item.name ? 'active' : ''}`}
+                icon={<Icon size={16} strokeWidth={2} />}
+                label={item.name}
+                active={selectedPage === item.name}
                 onClick={() => setSelectedPage(item.name)}
-              >
-                <Icon size={18} strokeWidth={2} className="nav-icon" />
-                <span>{item.name}</span>
-              </button>
+              />
             );
           })}
-        </nav>
+        </div>
 
-        <div className="app-sidebar-footer">
-          {/* User info — only show when authenticated */}
+        {/* Right Actions */}
+        <div className="top-nav-actions">
+          {designs.length > 0 && (
+            <select
+              className="top-nav-select"
+              value={selectedDesign}
+              onChange={(e) => setSelectedDesign(e.target.value)}
+            >
+              {designs.map((d) => (
+                <option key={d.name} value={d.name}>
+                  {d.name} {d.has_gds ? '• GDS' : ''}
+                </option>
+              ))}
+            </select>
+          )}
+
+          <button
+            className="top-nav-btn"
+            onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+            title={theme === 'light' ? 'Dark mode' : 'Light mode'}
+          >
+            {theme === 'light' ? '🌙' : '☀️'}
+          </button>
+
           {session && (
-            <div className="app-user-info">
-              <div className="app-user-avatar">
+            <>
+              <div className="top-nav-avatar" title={session.user.email || ''}>
                 {session.user.email?.[0]?.toUpperCase() || '?'}
               </div>
-              <div className="app-user-details">
-                <div className="app-user-email">{session.user.email}</div>
-              </div>
-            </div>
+              <button className="top-nav-btn" onClick={handleLogout} title="Sign Out">
+                ↩
+              </button>
+            </>
           )}
-          <button
-            className="theme-toggle"
-            onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
-          >
-            {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
-          </button>
-          {session && (
-            <button className="logout-btn" onClick={handleLogout}>
-              ↩ Sign Out
-            </button>
-          )}
-          <div className="app-version">AgentIC · 2026</div>
+
+          <PulseDot color="var(--success)" />
         </div>
-      </aside>
+      </nav>
 
+      {/* ── Main Content ── */}
       <main className="app-main">
-        <header className="app-topbar">
-          <h1>{selectedPage}</h1>
-          <div className="app-topbar-meta">Multi-Agent Autonomous Silicon</div>
-        </header>
-
         <section className="app-content">
-          {selectedPage === 'Home' && <HomeComponent designsLength={designs.length} setSelectedPage={setSelectedPage} />}
-          {selectedPage === 'Dashboard' && <Dashboard selectedDesign={selectedDesign} />}
-          {selectedPage === 'Design Studio' && <DesignStudio />}
-          {selectedPage === 'Manual EDA Lab' && <EDALab />}
-          {selectedPage === 'HITL Build' && <HumanInLoopBuild />}
-          {selectedPage === 'Documentation' && <Documentation />}
-          {selectedPage === 'Benchmarking' && <Benchmarking selectedDesign={selectedDesign} />}
-          {selectedPage === 'Fabrication' && (
-            <Fabrication selectedDesign={selectedDesign} hasGds={designs.find((d) => d.name === selectedDesign)?.has_gds} />
-          )}
+          <div key={selectedPage} className="page-transition">
+            {renderPage()}
+          </div>
         </section>
       </main>
     </div>
