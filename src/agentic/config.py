@@ -64,7 +64,7 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     preferred_engine = CLOUD_CONFIG
     if role in ("architect", "debugger", "manager"):
         preferred_engine = GLM_CONFIG
-    elif role in ("designer", "verifier"):
+    elif role in ("designer", "testbench_designer", "verifier"):
         preferred_engine = CLOUD_CONFIG
     elif role in ("fixer", "physical"):
         preferred_engine = GROQ_CONFIG

@@ -565,7 +565,7 @@ def build(
     # Build Multi-LLM Role Map for the CLI
     from .config import get_role_llm_config
     from crewai import LLM
-    roles = ["architect", "designer", "verifier", "fixer", "debugger", "manager", "physical"]
+    roles = ["architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager", "physical"]
     role_llms = {}
     for role in roles:
         cfg = get_role_llm_config(role)

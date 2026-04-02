@@ -2960,7 +2960,7 @@ Original errors to fix:
                 self._clear_tb_fingerprints()  # New TB → fresh gate attempts
             else:
                 self.log("Generating Testbench...", refined=True)
-                tb_agent = get_testbench_agent(self.get_llm_for_role("verifier"), f"Verify {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+                tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Verify {self.name}", verbose=self.verbose, strategy=self.strategy.name)
                 
                 tb_strategy_prompt = self._get_tb_strategy_prompt()
                 
@@ -3283,7 +3283,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 )
 
             # --- LLM ERROR ANALYSIS + FIX: Collaborative 2-agent Crew ---
-            analyst = get_error_analyst_agent(self.get_llm_for_role("debugger"), verbose=self.verbose)
+            analyst = get_error_analyst_agent(self.get_llm_for_role("fixer"), verbose=self.verbose)
             analysis_task = Task(
                 description=f'''Analyze this Verification Failure for "{self.name}".
 
@@ -3878,7 +3878,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 from .config import SBY_BIN as _SBY_BIN, YOSYS_BIN as _YOSYS_BIN
                 if os.path.exists(_sby_cfg) and os.path.exists(_rtl_path_fv):
                     _debugger = DeepDebuggerModule(
-                        llm=self.get_llm_for_role("verifier"),
+                        llm=self.get_llm_for_role("debugger"),
                         sby_bin=_SBY_BIN or "sby",
                         yosys_bin=_YOSYS_BIN or "yosys",
                         verbose=self.verbose,
@@ -4143,7 +4143,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        tb_agent = get_testbench_agent(self.get_llm_for_role("verifier"), f"Improve coverage for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
+        tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Improve coverage for {self.name}", verbose=self.verbose, strategy=self.strategy.name)
 
         branch_target = float(thresholds['branch'])
         improve_prompt = f"""The current testbench for "{self.name}" does not meet coverage thresholds.
@@ -4227,7 +4227,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         self.log("Starting Regression Testing...", refined=True)
         
         regression_agent = get_regression_agent(
-            self.get_llm_for_role("fixer"), 
+            self.get_llm_for_role("testbench_designer"), 
             f"Generate regression tests for {self.name}", 
             verbose=self.verbose
         )

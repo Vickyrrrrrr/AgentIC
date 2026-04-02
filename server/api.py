@@ -181,7 +181,7 @@ def _get_role_llm_map(byok_key: str = None) -> Dict[str, Any]:
     from agentic.config import get_role_llm_config
     from crewai import LLM
     
-    roles = ["architect", "designer", "verifier", "fixer", "debugger", "manager", "physical"]
+    roles = ["architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager", "physical"]
     role_map = {}
     
     for role in roles:

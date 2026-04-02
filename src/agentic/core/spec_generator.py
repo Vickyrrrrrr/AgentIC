@@ -712,17 +712,19 @@ Return ONLY this JSON (no markdown, no commentary):
 
                 if validation_issues:
                     last_error = "Validation issues:\n" + "\n".join(f"  - {i}" for i in validation_issues)
-                    issues.extend(validation_issues)
-                    # Accept with warnings on last attempt
+                    # Only collect issues on the FINAL attempt if they still persist, 
+                    # or allow them to be updated. For logging clarity, we only return 
+                    # the latest set of issues.
                     if attempt == self.max_retries:
-                        spec.warnings.extend(validation_issues)
-                        logger.warning(f"[SpecGen] Accepting spec with {len(validation_issues)} warnings")
+                        issues = list(dict.fromkeys(validation_issues)) # Deduplicated
+                        spec.warnings.extend(issues)
+                        logger.warning(f"[SpecGen] Accepting spec with {len(issues)} warnings")
                         return spec, issues
                     continue
 
                 logger.info(f"[SpecGen] Spec generated successfully: {len(spec.submodules)} submodules, "
                             f"{len(spec.behavioral_contract)} contract statements")
-                return spec, issues
+                return spec, [] # Return empty issues if generation succeeds
 
             except Exception as e:
                 last_error = f"Error: {e}"
