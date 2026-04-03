@@ -14,12 +14,27 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          lfs: true
+          lfs: false
 
       - name: Configure Git identity
         run: |
           git config user.email "deploy-bot@github-actions"
           git config user.name "GitHub Actions Deploy Bot"
+
+      - name: Install git-lfs
+        run: |
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Migrate binary files to LFS across full history
+        run: |
+          # This rewrites ALL commits in history to store binaries as LFS pointers.
+          # This is required because HuggingFace checks every commit, not just the latest.
+          git lfs migrate import \
+            --include="*.woff2,*.wasm,*.woff,*.ttf,*.otf,*.png,*.jpg,*.jpeg,*.ico,*.gif,*.mp4,*.webp" \
+            --everything \
+            --yes
+          echo "✓ LFS migration complete"
 
       - name: Push to Hugging Face Space
         env:
@@ -29,22 +44,8 @@ jobs:
             echo "::error::HF_TOKEN secret is not set. Go to repo Settings → Secrets → Actions → New secret"
             exit 1
           fi
-
-          # Install and initialize LFS in the GH actions runner
-          git lfs install
-          
-          # Force track files that were rejected (if not already tracked)
-          git lfs track "*.woff2" "*.wasm" "*.woff" "*.ttf" "*.png" "*.jpg" "*.jpeg"
-          
-          # Renormalize files to LFS pointers
-          git add --renormalize .
-          if ! git diff --cached --quiet; then
-            git config user.email "deploy-bot@github-actions"
-            git config user.name "GitHub Actions Deploy Bot"
-            git commit -m "chore: convert binaries to LFS pointers for HF"
-          fi
-
           git remote add hf "https://hf_user:${HF_TOKEN}@huggingface.co/spaces/vxkyyy/AgentIC"
+          # Force push because history was rewritten by lfs migrate import
           git push hf main --force
 
       - name: Sync LLM secrets to HuggingFace Space
