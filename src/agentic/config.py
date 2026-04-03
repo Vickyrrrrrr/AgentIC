@@ -11,7 +11,9 @@ _dotenv_path = os.path.join(WORKSPACE_ROOT, ".env")
 if os.path.isfile(_dotenv_path):
     load_dotenv(_dotenv_path, override=False)
 
-OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/MVP/OpenLane"))
+# For end-users, we want designs to generate exactly where they run the command.
+# Developers can still override OPENLANE_ROOT with an environment variable.
+OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.getcwd())
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 

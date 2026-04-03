@@ -378,6 +378,7 @@ def _emit_stage_complete(job_id: str, payload: dict):
 
 # ─── Models ──────────────────────────────────────────────────────────
 class BuildRequest(BaseModel):
+    api_key: Optional[str] = None
     design_name: str
     description: str
     skip_openlane: bool = False
@@ -498,6 +499,29 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
     and waits for user approval via the /approve or /reject endpoints.
     """
     try:
+        import src.agentic.config as _cfg
+        if req.api_key:
+            import json
+            try:
+                byok = json.loads(req.api_key)
+            except:
+                byok = {
+                    "group1": {"api_key": req.api_key},
+                    "group2": {"api_key": req.api_key},
+                    "group3": {"api_key": req.api_key}
+                }
+            
+            def safe_set(config_obj, grp):
+                if grp.get("api_key"): config_obj["api_key"] = grp["api_key"]
+                if grp.get("model"): config_obj["model"] = grp["model"]
+                if grp.get("base_url"): config_obj["base_url"] = grp["base_url"]
+
+            safe_set(_cfg.GLM_CONFIG, byok.get("group1", {}))
+            safe_set(_cfg.CLOUD_CONFIG, byok.get("group2", {}))
+            safe_set(_cfg.NVIDIA_CONFIG, byok.get("group2", {}))
+            safe_set(_cfg.GROQ_CONFIG, byok.get("group3", {}))
+            safe_set(_cfg.LOCAL_CONFIG, byok.get("group1", {}))
+
         from agentic.orchestrator import BuildOrchestrator, BuildState
 
         JOB_STORE[job_id]["status"] = "running"
@@ -1207,14 +1231,30 @@ def get_doc_content(doc_id: str):
 
 
 @app.post("/build")
-async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_user)):
+async def trigger_build(req: BuildRequest, request: Request, profile: dict = Depends(get_current_user)):
     """Start a new chip build. Returns job_id immediately.
 
     When auth is enabled, checks plan quota and uses BYOK key if applicable.
     """
+    header_key = request.headers.get("X-LLM-API-Key")
+    if header_key:
+        req.api_key = header_key
+
     # ── Auth guard: check plan + build count ──
     check_build_allowed(profile)
     byok_key = get_byok_config_for_user(profile)
+
+    # Allow header explicitly over backend profile key for public clouds mapped correctly
+    if req.api_key:
+        try:
+            import json
+            byok_key = json.loads(req.api_key)
+        except json.JSONDecodeError:
+            byok_key = {
+                "group1": {"api_key": req.api_key},
+                "group2": {"api_key": req.api_key},
+                "group3": {"api_key": req.api_key}
+            }
 
     # ── LLM pre-flight: fail fast with a clear message ──
     try:

@@ -12,17 +12,22 @@ export const api = axios.create({
 
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
 
-// Attach Supabase JWT to every request
+// Attach Supabase JWT and BYOK Key to every request
 api.interceptors.request.use(async (config) => {
-  if (!AUTH_ENABLED) return config;
-  
   try {
+    const byokKey = localStorage.getItem('agentic_byok_key');
+    if (byokKey) {
+      config.headers['X-LLM-API-Key'] = byokKey;
+    }
+
+    if (!AUTH_ENABLED) return config;
+
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       config.headers.Authorization = `Bearer ${session.access_token}`;
     }
   } catch {
-    // No session — request goes without auth (backend will 401 if needed)
+    // No session — request goes without auth
   }
   return config;
 });

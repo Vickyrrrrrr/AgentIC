@@ -73,19 +73,157 @@ console = Console(theme=claude_theme)
 
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic_credentials.json")
 
+
+
+
+
+
+
+
+def check_dependencies(skip_openlane: bool):
+    import shutil
+    import typer
+    from rich.panel import Panel
+    
+    missing = []
+    
+    # Only block for Docker if the user actually wants physical GDSII layout!
+    if not skip_openlane and not shutil.which("docker"):
+        missing.append("🐳 [bold red]Docker[/bold red] (required for OpenLane physical GDSII synthesis)")
+        
+    if not shutil.which("yosys"):
+        missing.append("🛠️  [bold red]OSS CAD Suite[/bold red] (required for verifying the logic via Yosys/Verilator)")
+        
+    if missing:
+        console.print(Panel(
+            "AgentIC requires standard open-source hardware tools to compile silicon.\n\n"
+            "The following tools are missing from your system PATH:\n" + 
+            "\n".join(["  - " + m for m in missing]) + 
+            "\n\n[info]💡 Note: You can bypass the physical layout phase by adding `--skip-openlane` to your build command (Docker will not be required).[/info]\n\n"
+            "[info]Please refer to the installation guide (README) for setup instructions.[/info]",
+            title="[bold red]❌ Missing Dependencies[/bold red]",
+            border_style="red"
+        ))
+        raise typer.Exit(1)
+
+
 def verify_license():
-    """Verify license key before running any CLI commands (Mock Lemon Squeezy integration)"""
-    # Skip license checking when running locally (not packaged by PyInstaller)
-    if not getattr(sys, "frozen", False):
+    """Verify license key before running any CLI commands (Real Lemon Squeezy integration)"""
+    # Developer backdoor/bypass
+    if os.environ.get("AGENTIC_DEV_MODE") == "1":
+        return
+        
+    # Also skip license checking when running locally (not packaged by PyInstaller)
+    if not getattr(sys, "frozen", False) and not os.environ.get("AGENTIC_FORCE_LICENSE_CHECK"):
         return
 
     if not os.path.exists(CREDENTIALS_FILE):
         console.print(Panel(
-            "[error]Authorization Required[/error]\n"
-            "You do not have a valid license locally.\n"
+            "[error]Authorization Required[/error]
+"
+            "You do not have a valid license locally.
+"
             "Please run: [accent]agentic login <your_license_key>[/accent]",
             title="🔒 License Check Failed"
         ))
+        raise typer.Exit(1)
+    
+    import json
+    import requests
+    try:
+        with open(CREDENTIALS_FILE, 'r') as f:
+            data = json.load(f)
+            key = data.get("license_key", "")
+            
+            # Real Lemon Squeezy integration
+            try:
+                # Need a real API endpoint, but using validate endpoint for now
+                response = requests.post(
+                    "https://api.lemonsqueezy.com/v1/licenses/validate",
+                    headers={"Accept": "application/json"},
+                    data={"license_key": key}
+                )
+                
+                if response.status_code != 200 or not response.json().get("valid"):
+                    if key.startswith("sk_test_dev_bypass"): # local backdoor
+                        pass
+                    else:
+                        console.print(Panel(
+                            f"[error]Invalid License Key[/error]
+"
+                            f"The key we found ({key[:8]}...) was rejected by the server.
+"
+                            "Please run: [accent]agentic login <your_license_key>[/accent]",
+                            title="🔒 License Check Failed"
+                        ))
+                        raise typer.Exit(1)
+            except requests.exceptions.RequestException as e:
+                console.print(f"[warning]Warning: Could not connect to license server to verify your key. Allowing offline bypass for now.[/warning]")
+                # We let it pass if there's no internet since they already bought it
+
+            # --- Inject user-provided API keys into runtime configs ---
+            from . import config
+            if data.get("nvidia_api_key"): 
+                config.CLOUD_CONFIG["api_key"] = data["nvidia_api_key"]
+                os.environ["NVIDIA_API_KEY"] = data["nvidia_api_key"]
+            if data.get("groq_api_key"): 
+                config.GROQ_CONFIG["api_key"] = data["groq_api_key"]
+                os.environ["GROQ_API_KEY"] = data["groq_api_key"]
+            if data.get("glm_api_key"): 
+                config.GLM_CONFIG["api_key"] = data["glm_api_key"]
+                os.environ["GLM_API_KEY"] = data["glm_api_key"]
+                
+    except Exception as e:
+        console.print(f"[error]Error reading credentials: {e}[/error]")
+        raise typer.Exit(1)
+    
+    import json
+    import requests
+    try:
+        with open(CREDENTIALS_FILE, 'r') as f:
+            data = json.load(f)
+            key = data.get("license_key", "")
+            
+            # Real Lemon Squeezy integration
+            try:
+                # Need a real API endpoint, but using validate endpoint for now
+                response = requests.post(
+                    "https://api.lemonsqueezy.com/v1/licenses/validate",
+                    headers={"Accept": "application/json"},
+                    data={"license_key": key}
+                )
+                
+                if response.status_code != 200 or not response.json().get("valid"):
+                    if key.startswith("sk_test_dev_bypass"): # local backdoor
+                        pass
+                    else:
+                        console.print(Panel(
+                            f"[error]Invalid License Key[/error]
+"
+                            f"The key we found ({key[:8]}...) was rejected by the server.
+"
+                            "Please run: [accent]agentic login <your_license_key>[/accent]",
+                            title="🔒 License Check Failed"
+                        ))
+                        raise typer.Exit(1)
+            except requests.exceptions.RequestException as e:
+                console.print(f"[warning]Warning: Could not connect to license server to verify your key. Allowing offline bypass for now.[/warning]")
+                # We let it pass if there's no internet since they already bought it
+
+            # --- Inject user-provided API keys into runtime configs ---
+            from . import config
+            if data.get("nvidia_api_key"): 
+                config.CLOUD_CONFIG["api_key"] = data["nvidia_api_key"]
+                os.environ["NVIDIA_API_KEY"] = data["nvidia_api_key"]
+            if data.get("groq_api_key"): 
+                config.GROQ_CONFIG["api_key"] = data["groq_api_key"]
+                os.environ["GROQ_API_KEY"] = data["groq_api_key"]
+            if data.get("glm_api_key"): 
+                config.GLM_CONFIG["api_key"] = data["glm_api_key"]
+                os.environ["GLM_API_KEY"] = data["glm_api_key"]
+                
+    except Exception as e:
+        console.print(f"[error]Error reading credentials: {e}[/error]")
         raise typer.Exit(1)
     
     import json
@@ -122,20 +260,38 @@ def verify_license():
         raise typer.Exit(1)
 
 @app.command()
-def login(key: str = typer.Argument(..., help="Your AgentIC (Squeeaze Lemon) License Key (e.g., sk_live_...)")):
+def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) License Key")):
     """Authenticate this computer and setup LLM API keys for multi-agent capabilities."""
     import json
+    import requests
     
     console.print(f"Verifying license key securely with server...")
     
-    # Mock server verification for Squeeaze Lemon / Lemon Squeezy
-    if not key.startswith("sk_live_"):
-        console.print("[error]✗ Invalid License Key. Must start with sk_live_[/error]")
-        raise typer.Exit(1)
+    if key.startswith("sk_test_dev_bypass"):
+        console.print("[success]Developer Bypass active.[/success]")
+    else:
+        # Real Lemon Squeezy API Request
+        try:
+            response = requests.post(
+                "https://api.lemonsqueezy.com/v1/licenses/validate",
+                headers={"Accept": "application/json"},
+                data={"license_key": key}
+            )
+            data = response.json()
+            
+            if response.status_code != 200 or not data.get("valid"):
+                error_msg = data.get("error", "Key rejected by server")
+                console.print(f"[error]✗ Invalid License Key: {error_msg}[/error]")
+                raise typer.Exit(1)
+        except requests.exceptions.RequestException as e:
+            console.print(f"[error]✗ Could not reach license verification server. Check your connection.[/error]")
+            raise typer.Exit(1)
     
     console.print(Panel(
-        f"[success]Authentication Successful![/success]\n"
-        f"License verified. Now, let's configure your AI engines.\n"
+        f"[success]Authentication Successful![/success]
+"
+        f"License verified. Now, let's configure your AI engines.
+"
         f"AgentIC relies on 3 specific models for optimal speed & logic.",
         title="🔒 Login Complete"
     ))
@@ -159,10 +315,12 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Squeeaze Lemon) Lic
     config.GROQ_CONFIG["api_key"] = groq_key
     config.GLM_CONFIG["api_key"] = glm_key
 
-    console.print(f"\n[success]✅ API Keys securely saved in {CREDENTIALS_FILE}[/success]")
+    console.print(f"
+[success]✅ API Keys securely saved in {CREDENTIALS_FILE}[/success]")
     
     # Now trigger diagnostics to ensure they have the compilers installed
-    console.print("\n[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
+    console.print("
+[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
     from .tools.vlsi_tools import startup_self_check
     status = startup_self_check()
     if not status["ok"]:
@@ -266,6 +424,7 @@ def simulate(
 ):
     """Run simulation on an existing design with AUTO-FIX loop."""
     verify_license()
+    check_dependencies(skip_openlane)
     console.print(Panel(
         f"[accent]AgentIC: Manual Simulation + Auto-Fix Mode[/accent]\n"
         f"Design: [warning]{name}[/warning]",
@@ -506,6 +665,7 @@ def harden(
 ):
     """Run OpenLane hardening (RTL -> GDSII) on an existing design."""
     verify_license()
+    check_dependencies(skip_openlane)
     console.print(Panel(
         f"[accent]AgentIC: Manual Hardening Mode[/accent]\n"
         f"Design: [warning]{name}[/warning]",
@@ -590,6 +750,7 @@ def build(
 ):
     """Build a chip from natural language description (Autonomous Orchestrator 2.0)."""
     verify_license()
+    check_dependencies(skip_openlane)
     
     from .orchestrator import BuildOrchestrator
     

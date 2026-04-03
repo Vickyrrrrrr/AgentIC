@@ -84,9 +84,17 @@ export const DesignStudio = () => {
             .catch(() => setProfile(null)); // Ignored explicitly if no auth
     }, []);
 
+
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
         setError('');
+
+        const byokKey = localStorage.getItem('agentic_byok_key');
+        if (!byokKey) {
+            setShowBillingModal(true);
+            return;
+        }
+
 
         // Billing Guard: enforce 2 free successful builds
         if (profile?.auth_enabled) {
@@ -229,7 +237,10 @@ export const DesignStudio = () => {
                         transition={{ duration: 0.5 }}
                     >
                         <div className="prompt-modern-container">
-                            <h1 className="prompt-title-modern">AgentIC Studio</h1>
+                            <h1 className="prompt-title-modern" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                                AgentIC Studio
+                                <button onClick={() => setShowBillingModal(true)} style={{ fontSize: '0.4em', background: 'rgba(255,255,255,0.1)', border: 'none', padding: '4px 10px', borderRadius: '15px', color: '#fff', cursor: 'pointer' }}>🔑 Configure API Keys</button>
+                            </h1>
                             
                             <div className="prompt-input-wrapper">
                                 <div className="prompt-input-inner">

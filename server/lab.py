@@ -125,7 +125,7 @@ class TestbenchPayload(BaseModel):
     code: str
 
 @router.post("/generate-testbench")
-async def generate_testbench(req: TestbenchPayload, profile: dict = Depends(get_current_user)):
+async def generate_testbench(req: TestbenchPayload, request: Request, profile: dict = Depends(get_current_user)):
     """Uses LLM to automatically append a testbench to the provided Verilog code."""
     try:
         from litellm import completion
@@ -141,7 +141,16 @@ IMPORTANT:
 
         # Grab user API keys dynamically mapped by auth middleware
         from server.auth import get_llm_key_for_user
-        llm_api_key = get_llm_key_for_user(profile)
+        llm_api_key = request.headers.get("X-LLM-API-Key") or get_llm_key_for_user(profile)
+        
+        # If the BYOK is JSON grouped, unpack group2 (coding agents)
+        import json
+        try:
+            bk = json.loads(llm_api_key)
+            llm_api_key = bk.get("group2", {}).get("api_key", llm_api_key)
+        except:
+            pass
+
         llm_model = "gpt-4o" # default model if BYOK doesn't specify one, wait, let's just use env defaults
         
         # Fallback to defaults
@@ -187,7 +196,7 @@ IMPORTANT:
         return {"success": False, "error": str(e)}
 
 @router.post("/ai-assist")
-async def ai_assist(req: AIFixPayload, profile: dict = Depends(get_current_user)):
+async def ai_assist(req: AIFixPayload, request: Request, profile: dict = Depends(get_current_user)):
     """A direct, lightweight LLM call to assist the user in the Lab IDE.
     
     Enhanced flow:
@@ -228,8 +237,21 @@ async def ai_assist(req: AIFixPayload, profile: dict = Depends(get_current_user)
         # Re-read API keys live from environment at request time.
         # get_role_llm_config() is evaluated at startup and may have cached an
         # empty string if HF Secrets weren't mounted yet. Reading os.environ
-        # directly here always reflects the current runtime value.
-        if profile and profile.get("plan") == "byok":
+        header_byok = request.headers.get("X-LLM-API-Key")
+        if header_byok:
+            import json
+            try:
+                byok_config = json.loads(header_byok)
+            except:
+                byok_config = {"group3": {"api_key": header_byok}}
+            g = byok_config.get("group3", {})
+            api_key = g.get("api_key", header_byok)
+            if getattr(g, "model", None) or g.get("model"):
+                cfg["model"] = g.get("model")
+            if getattr(g, "base_url", None) or g.get("base_url"):
+                cfg["base_url"] = g.get("base_url")
+
+        elif profile and profile.get("plan") == "byok":
             byok_config = get_byok_config_for_user(profile)
             if byok_config and "group3" in byok_config:
                 g = byok_config["group3"]

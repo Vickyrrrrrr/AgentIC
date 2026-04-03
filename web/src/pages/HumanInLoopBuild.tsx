@@ -175,9 +175,17 @@ export const HumanInLoopBuild = () => {
         }
     }, [prompt]);
 
+
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
         setError('');
+
+        const byokKey = localStorage.getItem('agentic_byok_key');
+        if (!byokKey) {
+            setShowBillingModal(true);
+            return;
+        }
+
         // Quick RTL mode implies skip_openlane
         const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
         const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
@@ -503,7 +511,10 @@ export const HumanInLoopBuild = () => {
             {phase === 'prompt' && (
                 <div className="hitl-prompt-screen">
                     <div className="hitl-prompt-hero">
-                        <h1 className="hitl-hero-title">Design Your Chip</h1>
+                        <h1 className="hitl-hero-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                            Design Your Chip
+                            <button onClick={() => setShowBillingModal(true)} style={{ fontSize: '0.4em', background: 'rgba(255,255,255,0.1)', border: 'none', padding: '4px 10px', borderRadius: '15px', color: '#fff', cursor: 'pointer' }}>🔑 Configure API Keys</button>
+                        </h1>
                         <p className="hitl-hero-sub">
                             Human-in-the-Loop — review and approve every stage of the autonomous pipeline.
                         </p>

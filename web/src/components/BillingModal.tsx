@@ -27,7 +27,7 @@ export const BillingModal = ({ isOpen, onClose, onKeySaved }: { isOpen: boolean,
     }
 
     try {
-      await api.post('/profile/api-key', { api_key: payload });
+      localStorage.setItem('agentic_byok_key', payload);
       onKeySaved();
       onClose();
     } catch (err: any) {
