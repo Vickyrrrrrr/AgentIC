@@ -160,7 +160,50 @@ async def ai_assist(req: AIFixPayload, profile: dict = Depends(get_current_user)
         
         # ── Step 2: LLM call with error context ──
         cfg = get_role_llm_config("fixer")
-        api_key = profile.get("llm_api_key") if profile and profile.get("plan") == "byok" else cfg.get("api_key")
+
+        # Re-read API keys live from environment at request time.
+        # get_role_llm_config() is evaluated at startup and may have cached an
+        # empty string if HF Secrets weren't mounted yet. Reading os.environ
+        # directly here always reflects the current runtime value.
+        if profile and profile.get("plan") == "byok":
+            api_key = profile.get("llm_api_key")
+        else:
+            # Try Groq first (preferred for fixer), then NVIDIA, then GLM
+            api_key = (
+                os.environ.get("GROQ_API_KEY")
+                or os.environ.get("NVIDIA_API_KEY")
+                or os.environ.get("GLM_API_KEY")
+                or os.environ.get("LLM_API_KEY")
+                or cfg.get("api_key")
+            )
+            # Pick the matching model for whichever key we found
+            if os.environ.get("GROQ_API_KEY"):
+                cfg = {
+                    "model": os.environ.get("GROQ_MODEL", "groq/llama-3.3-70b-versatile"),
+                    "api_key": os.environ["GROQ_API_KEY"],
+                    "base_url": "",
+                }
+            elif os.environ.get("NVIDIA_API_KEY"):
+                cfg = {
+                    "model": os.environ.get("NVIDIA_MODEL", "openai/meta/llama-3.3-70b-instruct"),
+                    "api_key": os.environ["NVIDIA_API_KEY"],
+                    "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+                }
+            elif os.environ.get("GLM_API_KEY"):
+                cfg = {
+                    "model": f"openai/{os.environ.get('GLM_MODEL', 'glm-4-plus')}",
+                    "api_key": os.environ["GLM_API_KEY"],
+                    "base_url": os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
+                }
+
+        if not api_key:
+            return {
+                "success": False,
+                "response": "❌ No LLM API key found. Please add GROQ_API_KEY, NVIDIA_API_KEY, or GLM_API_KEY to your Hugging Face Space secrets.",
+                "fixed_code": None,
+                "line_changes": [],
+                "explanation": "",
+            }
         
         messages = [
             {"role": "system", "content": """You are an expert Verilog/SystemVerilog engineer. Your job is to fix ALL issues in the provided code and produce FULLY SYNTHESIZABLE, error-free Verilog.
