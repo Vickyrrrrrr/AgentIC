@@ -220,10 +220,7 @@ def check_build_allowed(profile: Optional[dict]) -> None:
 
 
 def get_llm_key_for_user(profile: Optional[dict]) -> Optional[str]:
-    """Return the user's own LLM API key if they're on the BYOK plan.
-
-    Returns None for all other plans (server uses global NVIDIA_API_KEY).
-    """
+    """Return the user's decrypted BYOK key payload (JSON string or bare key)."""
     if profile is None:
         return None
 
@@ -234,13 +231,27 @@ def get_llm_key_for_user(profile: Optional[dict]) -> Optional[str]:
     if not encrypted_key:
         raise HTTPException(
             status_code=400,
-            detail="BYOK plan requires an API key. Set it in your profile settings.",
+            detail="BYOK plan requires an API key setup. Set it in your profile settings.",
         )
 
     try:
         return decrypt_api_key(encrypted_key)
     except ValueError:
         raise HTTPException(status_code=500, detail="Failed to decrypt stored API key")
+
+def get_byok_config_for_user(profile: Optional[dict]) -> Optional[dict]:
+    import json
+    val = get_llm_key_for_user(profile)
+    if not val:
+        return None
+    try:
+        return json.loads(val)
+    except json.JSONDecodeError:
+        return {
+            "group1": {"api_key": val},
+            "group2": {"api_key": val},
+            "group3": {"api_key": val}
+        }
 
 
 def record_build_start(profile: Optional[dict], job_id: str, design_name: str) -> None:

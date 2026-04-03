@@ -54,19 +54,19 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     """
     Resolve the LLM config for a specific multi-agent role.
     Intelligently maps agent roles to preferred backend engines:
-    - Architect, Designer, Verifier -> NVIDIA (Heavy code generation & JSON formatting)
-    - Debugger, Manager -> GLM (Deep reasoning & log summarization)
-    - Fixer, Physical -> Groq (Blazing fast iterative speed)
+    - Defaulting Heavy Logic (Architect, Designer, Fixer, etc.) to GLM-4-Plus
+    - Physical -> Groq (Blazing fast iterative speed)
+    - Documenter/Reporter -> NVIDIA (Excellent prose generation, lower precision required)
     """
     role = role.lower()
     
     # 1. Select the preferred engine
-    preferred_engine = CLOUD_CONFIG
-    if role in ("architect", "debugger", "manager"):
+    preferred_engine = GLM_CONFIG
+    if role in ("architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager"):
         preferred_engine = GLM_CONFIG
-    elif role in ("designer", "testbench_designer", "verifier"):
-        preferred_engine = CLOUD_CONFIG
-    elif role in ("fixer", "physical"):
+    elif role in ("documenter", "reporter", "doc_gen"):
+        preferred_engine = CLOUD_CONFIG  # Maps to NVIDIA Nim
+    elif role in ("physical",):
         preferred_engine = GROQ_CONFIG
 
     # Helper to check if an engine has a valid API key

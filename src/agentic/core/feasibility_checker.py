@@ -272,18 +272,22 @@ class FeasibilityChecker:
         warnings: List[str] = []
         rejections: List[str] = []
 
-        if target_mhz > 200:
+        is_gf180 = "gf180" in self.pdk.lower()
+        max_reliable_mhz = 150 if not is_gf180 else 100
+        upper_limit_mhz = 200 if not is_gf180 else 125
+
+        if target_mhz > upper_limit_mhz:
             rejections.append(
-                f"FEASIBILITY_REJECTED: Sky130 cannot reliably achieve "
+                f"FEASIBILITY_REJECTED: {self.pdk} cannot reliably achieve "
                 f"{target_mhz} MHz for synthesized digital logic in OpenLane. "
-                f"Recommend redesigning with target_frequency_mhz <= 100."
+                f"Recommend redesigning with target_frequency_mhz <= {max_reliable_mhz}."
             )
             return warnings, rejections
 
-        if target_mhz > 150:
+        if target_mhz > max_reliable_mhz:
             warnings.append(
                 f"HIGH_RISK: Target frequency {target_mhz} MHz is at the upper "
-                f"limit of Sky130. Only feasible for highly pipelined datapaths "
+                f"limit of {self.pdk}. Only feasible for highly pipelined datapaths "
                 f"with no combinational paths longer than 3 logic levels."
             )
             # Flag submodules with likely deep logic

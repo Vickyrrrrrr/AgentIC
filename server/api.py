@@ -9,6 +9,9 @@ import re
 import sys
 import os
 
+# Force API server mode globally so orchestrator.py respects HITL loops
+os.environ["AGENTIC_API_SERVER"] = "1"
+
 # Add src to Python path so 'agentic' module can be found when run locally or via docker
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 import time
@@ -30,6 +33,7 @@ from server.auth import (
     encrypt_api_key,
     get_current_user,
     get_llm_key_for_user,
+    get_byok_config_for_user,
     record_build_failure,
     record_build_start,
     record_build_success,
@@ -63,12 +67,8 @@ app.include_router(lab_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",       # Vite dev server
-        "http://localhost:3000",        # Alternative dev port
-        "https://agent-ic.vercel.app",  # Production Vercel
-        os.environ.get("CORS_ORIGIN", ""),  # Custom override
-    ],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7860", "http://127.0.0.1:7860"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -180,18 +180,29 @@ STAGE_META: Dict[str, Dict[str, str]] = {
 }
 
 
-def _get_llm(byok_api_key: str = None):
-    """Tries cloud backends first, then local Ollama.
-    Priority: NVIDIA Cloud → Groq LLaMA-3.3 → Local Ollama
-
-    If byok_api_key is provided (BYOK plan), it overrides the cloud config key.
-    """
-    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG, GLM_CONFIG
-
+def _get_llm(byok_config: dict = None):
     try:
         from crewai import LLM
     except Exception as imp_err:
         raise RuntimeError(f"Cannot import crewai.LLM: {imp_err}")
+
+    # If BYOK config is provided and has group1, try to use it directly
+    if byok_config and "group1" in byok_config and byok_config["group1"].get("api_key"):
+        g = byok_config["group1"]
+        model = g.get("model", "")
+        _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
+        if g.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
+             model = f"openai/{model}"
+        llm_kwargs = dict(model=model, api_key=g.get("api_key"), temperature=0.6, max_tokens=16384)
+        if g.get("base_url"):
+            llm_kwargs["base_url"] = g.get("base_url")
+        try:
+            return LLM(**llm_kwargs), f"{model} (BYOK)"
+        except Exception as e:
+            raise RuntimeError(f"BYOK Compute Engine Failed: {e}")
+
+    # Fallback to existing cloud configs
+    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG, GLM_CONFIG
 
     configs = [
         ("ZhipuAI Compute Engine", GLM_CONFIG),
@@ -201,6 +212,10 @@ def _get_llm(byok_api_key: str = None):
     ]
 
     backend_errors: list = []
+    
+    # If legacy BYOK key acts as fallback string
+    byok_api_key = byok_config.get("group1", {}).get("api_key", "") if byok_config else ""
+    
     for name, cfg in configs:
         is_local = "Local" in name
         key = byok_api_key if (byok_api_key and not is_local) else cfg.get("api_key", "")
@@ -210,16 +225,10 @@ def _get_llm(byok_api_key: str = None):
                 continue
         try:
             model = cfg["model"]
-
-            # ── Auto-prefix for OpenAI-compatible endpoints ──
-            # If a base_url is set but the model lacks a litellm provider
-            # prefix, prepend "openai/" so litellm routes it correctly.
-            _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/",
-                       "azure/", "huggingface/", "together_ai/", "mistral/")
+            _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
             if cfg.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
                 model = f"openai/{model}"
 
-            # Only use BYOK key if it matches the current backend provider
             if byok_api_key and not is_local:
                 if byok_api_key.startswith("gsk_") and "Groq" not in name:
                     pass
@@ -228,11 +237,7 @@ def _get_llm(byok_api_key: str = None):
                 else:
                     key = byok_api_key
 
-            llm_kwargs: dict = dict(
-                model=model,
-                api_key=key,
-                temperature=0.6,
-            )
+            llm_kwargs: dict = dict(model=model, api_key=key, temperature=0.6)
             if cfg.get("base_url"):
                 llm_kwargs["base_url"] = cfg["base_url"]
 
@@ -242,14 +247,10 @@ def _get_llm(byok_api_key: str = None):
             backend_errors.append(f"{name} ({cfg.get('model','?')}): {type(e).__name__}: {e}")
             continue
 
-    raise RuntimeError(
-        "No valid LLM backend found. "
-        + " | ".join(backend_errors)
-    )
+    raise RuntimeError("No valid LLM backend found. " + " | ".join(backend_errors))
 
 
-def _get_role_llm_map(byok_key: str = None) -> Dict[str, Any]:
-    """Build a dictionary of crewai.LLM instances for each agent role."""
+def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
     from agentic.config import get_role_llm_config
     from crewai import LLM
     
@@ -257,9 +258,29 @@ def _get_role_llm_map(byok_key: str = None) -> Dict[str, Any]:
     role_map = {}
     
     for role in roles:
+        if byok_config and "group1" in byok_config:
+            if role in ("architect", "debugger", "manager"):
+                g = byok_config.get("group1", {})
+            elif role in ("designer", "testbench_designer", "verifier"):
+                g = byok_config.get("group2", {})
+            else:
+                g = byok_config.get("group3", {})
+                
+            if g and g.get("api_key"):
+                model = g.get("model", "")
+                _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
+                if g.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
+                     model = f"openai/{model}"
+                llm_kwargs = dict(model=model, api_key=g.get("api_key"), temperature=0.6)
+                if g.get("base_url"):
+                    llm_kwargs["base_url"] = g.get("base_url")
+                role_map[role] = LLM(**llm_kwargs)
+                continue
+                
+        # fallback behavior
         cfg = get_role_llm_config(role)
+        byok_key = byok_config.get("group1", {}).get("api_key", "") if byok_config else ""
         key = byok_key if byok_key else cfg.get("api_key", "")
-        # fallback if byok not suitable for the override
         if not key or key in ("mock-key", "NA"):
             key = cfg.get("api_key", "")
             
@@ -506,8 +527,8 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
 
         # Use smart LLM selection: Cloud first (NVIDIA → Groq) → Local fallback
         byok_key = JOB_STORE[job_id].get("byok_key")
-        llm, llm_name = _get_llm(byok_api_key=byok_key)
-        role_llms = _get_role_llm_map(byok_key=byok_key)
+        llm, llm_name = _get_llm(byok_config=byok_key)
+        role_llms = _get_role_llm_map(byok_config=byok_key)
         _emit_event(job_id, "checkpoint", "INIT", f"🤖 Compute engine ready", step=1)
 
         IS_HUGGINGFACE = os.environ.get("SPACE_ID") is not None
@@ -786,16 +807,16 @@ def _run_with_approval_gates(job_id: str, orchestrator, req, llm):
             # so the web UI can surface an interactive option picker card.
             if orchestrator.artifacts.get("spec_elaboration_needed"):
                 options = orchestrator.artifacts.get("spec_elaboration_options", [])
-                elaboration_payload = {
-                    "job_id": job_id,
-                    "event": "design_options",
-                    "stage": "SPEC_VALIDATE",
-                    "design_name": design_name,
-                    "message": "Your description was brief — here are 3 expert design interpretations:",
-                    "options": options,
-                    "auto_selected": orchestrator.artifacts.get("elaborated_desc", ""),
-                }
-                _emit_event(job_id, elaboration_payload)
+                _emit_event(
+                    job_id,
+                    event_type="design_options",
+                    state="SPEC_VALIDATE",
+                    message="Your description was brief — here are 3 expert design interpretations:",
+                    extra={
+                        "options": options,
+                        "auto_selected": orchestrator.artifacts.get("elaborated_desc", ""),
+                    }
+                )
                 # Clear the flag so we don't re-emit on the retry
                 orchestrator.artifacts.pop("spec_elaboration_needed", None)
 
@@ -912,14 +933,17 @@ def _emit_stage_summary(job_id: str, orchestrator, stage_name: str, design_name:
             "timestamp": time.time(),
         }
     
+    if wait:
+        # Create approval gate FIRST so that stream API `is_live_waiting` evaluates true immediately
+        approval_manager.create_gate(design_name, stage_name)
+        
     # Emit the stage_complete event
     _emit_stage_complete(job_id, payload)
     
     if not wait:
         return True
     
-    # Create approval gate and wait
-    approval_manager.create_gate(design_name, stage_name)
+    # Wait for frontend approval signal via the gate
     gate = approval_manager.wait_for_approval(design_name, stage_name, timeout=7200.0)
     
     JOB_STORE[job_id]["waiting_approval"] = False
@@ -1190,11 +1214,11 @@ async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_u
     """
     # ── Auth guard: check plan + build count ──
     check_build_allowed(profile)
-    byok_key = get_llm_key_for_user(profile)
+    byok_key = get_byok_config_for_user(profile)
 
     # ── LLM pre-flight: fail fast with a clear message ──
     try:
-        _get_llm(byok_api_key=byok_key)
+        _get_llm(byok_config=byok_key)
     except RuntimeError as e:
         raise HTTPException(
             status_code=503,
@@ -1253,7 +1277,7 @@ async def trigger_build(req: BuildRequest, profile: dict = Depends(get_current_u
     return {"job_id": job_id, "design_name": design_name, "status": "queued"}
 
 
-@app.post("/api/build/elaborate")
+@app.post("/build/elaborate")
 async def elaborate_build(req: BuildElaborateRequest, user: dict = Depends(get_current_user)):
     """Inject a user choice into a waiting orchestrator (HITL Elaboration)."""
     job_id = req.job_id

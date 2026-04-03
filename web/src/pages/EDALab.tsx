@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import { api } from '../api';
-import { Play, CheckCircle, Wand2, TerminalSquare, Cpu, XCircle, Layers, FileDown, Eye, ExternalLink } from 'lucide-react';
+import { Play, CheckCircle, Wand2, TerminalSquare, Cpu, XCircle, Layers, FileDown, Eye, ExternalLink, Beaker } from 'lucide-react';
 
 const IS_CLOUD_DEPLOY = import.meta.env.VITE_IS_CLOUD === 'true';
 
@@ -57,7 +57,7 @@ endmodule
     const [output, setOutput] = useState<string>('');
     const [vcdData, setVcdData] = useState<string | null>(null);
     const [viewerOpen, setViewerOpen] = useState<boolean>(false);
-    const [loading, setLoading] = useState<'syntax' | 'synthesize' | 'simulate' | 'ai' | null>(null);
+    const [loading, setLoading] = useState<'syntax' | 'synthesize' | 'simulate' | 'testbench' | 'ai' | null>(null);
     const [theme, setTheme] = useState<'vs-dark' | 'vs-light'>('vs-dark');
 
     useEffect(() => {
@@ -70,11 +70,29 @@ endmodule
         return () => observer.disconnect();
     }, []);
 
+    const extractTopModule = () => {
+        const matches = [...code.matchAll(/module\s+([a-zA-Z0-9_]+)/g)];
+        if (matches.length === 0) return 'top';
+        
+        // Find the first module that isn't a testbench for synthesis
+        const designModule = matches.find(m => !m[1].toLowerCase().includes('tb') && !m[1].toLowerCase().includes('test'));
+        return designModule ? designModule[1] : matches[0][1];
+    };
+
+    const extractTbModule = () => {
+        const matches = [...code.matchAll(/module\s+([a-zA-Z0-9_]+)/g)];
+        if (matches.length === 0) return 'tb_top';
+
+        // Find the first module that IS a testbench
+        const tbModule = matches.find(m => m[1].toLowerCase().includes('tb') || m[1].toLowerCase().includes('test'));
+        return tbModule ? tbModule[1] : `tb_${extractTopModule()}`;
+    };
+
     const runSyntaxCheck = async () => {
         setLoading('syntax');
         setOutput('Running Verilator syntax check...\n');
         try {
-            const res = await api.post('/lab/syntax-check', { code, top_module: 'simple_counter' });
+            const res = await api.post('/lab/syntax-check', { code, top_module: extractTopModule() });
             if (res.data.success) {
                 setOutput(prev => prev + '\n✅ Syntax Pass (Verilator)\n' + res.data.logs);
             } else {
@@ -90,11 +108,29 @@ endmodule
         setLoading('synthesize');
         setOutput('Synthesizing RTL (Yosys)...\n');
         try {
-            const res = await api.post('/lab/synthesize', { code, top_module: 'simple_counter' });
+            const res = await api.post('/lab/synthesize', { code, top_module: extractTopModule() });
             if (res.data.success) {
                 setOutput(prev => prev + '\n✅ Synthesis Pass (Yosys)\n' + res.data.logs);
             } else {
                 setOutput(prev => prev + '\n❌ Synthesis Failed (Yosys)\n' + res.data.logs);
+            }
+        } catch (e: any) {
+            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
+        }
+        setLoading(null);
+    };
+
+    const genTestbench = async () => {
+        setLoading('testbench');
+        setOutput('Applying AgentIC LLM to generate testbench...\n');
+        try {
+            const res = await api.post('/lab/generate-testbench', { code });
+            if (res.data.success) {
+                // Prepend an extra newline and append the testbench to the existing code
+                setCode(prev => prev + '\n\n// === AgentIC Auto-Generated Testbench ===\n' + res.data.testbench);
+                setOutput(prev => prev + '\n✅ Testbench generated and appended successfully!\n');
+            } else {
+                setOutput(prev => prev + '\n❌ Failed to generate testbench: ' + res.data.error);
             }
         } catch (e: any) {
             setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
@@ -107,7 +143,7 @@ endmodule
         setOutput('Setting up Icarus Verilog Simulation...\n');
         setVcdData(null);
         try {
-            const res = await api.post('/lab/simulate', { code, top_module: 'tb_simple_counter' });
+            const res = await api.post('/lab/simulate', { code, top_module: extractTbModule() });
             if (res.data.success) {
                 setOutput(prev => prev + '\n✅ Simulation Complete\n' + res.data.logs);
                 if (res.data.vcd) {
@@ -276,6 +312,16 @@ endmodule
                         <span className="shimmer-btn-content">
                             {loading === 'simulate' ? <span className="spinner"/> : <Play size={14} />}
                             Simulate
+                        </span>
+                    </button>
+                    <button
+                        onClick={genTestbench}
+                        disabled={!!loading}
+                        className="shimmer-btn"
+                        style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', background: '#2563eb', color: '#fff', opacity: loading && loading !== 'testbench' ? 0.5 : 1 }}>
+                        <span className="shimmer-btn-content" style={{gap: '0.4rem', display: 'flex', alignItems: 'center'}}>
+                            {loading === 'testbench' ? <span className="spinner"/> : <Beaker size={14} />}
+                            Generate Testbench
                         </span>
                     </button>
                     {vcdData && (

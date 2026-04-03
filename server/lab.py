@@ -4,7 +4,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from server.auth import get_current_user
+from server.auth import get_current_user, get_byok_config_for_user
 from agentic.config import get_role_llm_config
 
 router = APIRouter(prefix="/lab", tags=["Manual EDA Lab"])
@@ -121,6 +121,70 @@ async def simulate_code(req: SimPayload, profile: dict = Depends(get_current_use
             "logs": output.strip(),
             "vcd": vcd_data
         }
+class TestbenchPayload(BaseModel):
+    code: str
+
+@router.post("/generate-testbench")
+async def generate_testbench(req: TestbenchPayload, profile: dict = Depends(get_current_user)):
+    """Uses LLM to automatically append a testbench to the provided Verilog code."""
+    try:
+        from litellm import completion
+        
+        system_prompt = \"\"\"
+You are an expert IC verification engineer. The user will provide a Verilog design module.
+Your job is to write a comprehensive testbench for it (`tb_<modulename>`), including clock generation (if applicable) and a reasonable set of stimulus/vectors to verify functionality.
+IMPORTANT:
+- Ensure the testbench includes `$dumpfile("dump.vcd");` and `$dumpvars(0, <tb_module_name>);` so GTKWave simulation viewing works.
+- Output ONLY the new testbench Verilog code, without markdown blocks, without explanations, and DO NOT repeat the original code. Just the `module tb_...` block.
+\"\"\"
+        user_prompt = f"Here is my Verilog design:\n\n```verilog\n{req.code}\n```\n\nPlease write just the testbench module for it."
+
+        # Grab user API keys dynamically mapped by auth middleware
+        from server.auth import get_llm_key_for_user
+        llm_api_key = get_llm_key_for_user(profile)
+        llm_model = "gpt-4o" # default model if BYOK doesn't specify one, wait, let's just use env defaults
+        
+        # Fallback to defaults
+        if not llm_api_key:
+            import os
+            llm_model = os.environ.get("LLM_MODEL", "gpt-4o")
+            llm_api_key = (
+                os.environ.get("LLM_API_KEY") 
+                or os.environ.get("OPENAI_API_KEY") 
+                or os.environ.get("GROQ_API_KEY")
+                or os.environ.get("NVIDIA_API_KEY")
+            )
+            if os.environ.get("GROQ_API_KEY"):
+                llm_model = os.environ.get("GROQ_MODEL", "groq/llama-3.3-70b-versatile")
+            elif os.environ.get("NVIDIA_API_KEY"):
+                llm_model = os.environ.get("NVIDIA_MODEL", "openai/meta/llama-3.3-70b-instruct")
+
+        if not llm_api_key:
+            return {"success": False, "error": "No LLM API key configured for Workspace."}
+
+        response = completion(
+            model=llm_model,
+            api_key=llm_api_key,
+            messages=[
+                {"role": "system", "content": system_prompt.strip()},
+                {"role": "user", "content": user_prompt.strip()}
+            ],
+            temperature=0.2,
+            max_tokens=2048
+        )
+        
+        tb_code = response.choices[0].message.content.strip()
+        
+        # Clean up markdown if the LLM leaked them
+        if tb_code.startswith("```verilog"):
+            tb_code = tb_code.split("```verilog", 1)[1]
+            if tb_code.endswith("```"):
+                tb_code = tb_code.rsplit("```", 1)[0]
+        
+        return {"success": True, "testbench": tb_code.strip()}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 @router.post("/ai-assist")
 async def ai_assist(req: AIFixPayload, profile: dict = Depends(get_current_user)):
@@ -166,14 +230,27 @@ async def ai_assist(req: AIFixPayload, profile: dict = Depends(get_current_user)
         # empty string if HF Secrets weren't mounted yet. Reading os.environ
         # directly here always reflects the current runtime value.
         if profile and profile.get("plan") == "byok":
-            api_key = profile.get("llm_api_key")
+            byok_config = get_byok_config_for_user(profile)
+            if byok_config and "group3" in byok_config:
+                g = byok_config["group3"]
+                api_key = g.get("api_key", "")
+                if getattr(g, "model", None) or g.get("model"):
+                    cfg["model"] = g.get("model")
+                _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
+                if g.get("base_url") and not any(cfg["model"].startswith(p) for p in _KNOWN):
+                    cfg["model"] = f"openai/{cfg['model']}"
+                if g.get("base_url"):
+                    cfg["base_url"] = g.get("base_url")
+            else:
+                api_key = ""
         else:
-            # Try Groq first (preferred for fixer), then NVIDIA, then GLM
+            # Try Groq first (preferred for fixer), then NVIDIA, then GLM, then generic LLM
             api_key = (
                 os.environ.get("GROQ_API_KEY")
                 or os.environ.get("NVIDIA_API_KEY")
                 or os.environ.get("GLM_API_KEY")
                 or os.environ.get("LLM_API_KEY")
+                or os.environ.get("OPENAI_API_KEY")
                 or cfg.get("api_key")
             )
             # Pick the matching model for whichever key we found
@@ -195,11 +272,17 @@ async def ai_assist(req: AIFixPayload, profile: dict = Depends(get_current_user)
                     "api_key": os.environ["GLM_API_KEY"],
                     "base_url": os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
                 }
+            elif os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+                cfg = {
+                    "model": os.environ.get("LLM_MODEL", "gpt-4o"),
+                    "api_key": os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+                    "base_url": os.environ.get("LLM_BASE_URL", ""),
+                }
 
         if not api_key:
             return {
                 "success": False,
-                "response": "❌ No LLM API key found. Please add GROQ_API_KEY, NVIDIA_API_KEY, or GLM_API_KEY to your Hugging Face Space secrets.",
+                "response": "❌ No LLM API key found. Please add OPENAI_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, or GLM_API_KEY to your environment variables.",
                 "fixed_code": None,
                 "line_changes": [],
                 "explanation": "",
@@ -214,6 +297,7 @@ You MUST fix:
 3. All synthesizability issues (latches from incomplete case/if, unsupported constructs)
 4. Ensure all outputs are driven in all code paths
 5. Ensure all registers have proper reset values
+6. You MUST return the ENTIRE file contents (including any modules, testbenches, or comments you did not change). Do not truncate or omit any parts of the provided code!
 
 Output format: Place the COMPLETE fixed Verilog code inside exactly one ```verilog codeblock.
 After the code block, provide a concise explanation of every change you made, referencing line numbers from the ORIGINAL code.

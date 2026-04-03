@@ -84,3 +84,10 @@ agentic_jobs.db
 # Temporary fix scripts
 fix_*.py
 
+
+# Security build outputs
+secure_build/
+build_secure_ip.py
+update_readme.py
+test.js
+modify_*.py

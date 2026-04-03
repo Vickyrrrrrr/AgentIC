@@ -1,7 +1,8 @@
 import axios from 'axios';
 import { supabase } from './supabaseClient';
 
-export const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:7860').replace(/\/$/, '');
+const base = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? '/api' : '');
+export const API_BASE = base.replace(/\/$/, '');
 
 // Pre-configured axios instance with auth + ngrok header
 export const api = axios.create({

@@ -216,7 +216,7 @@ def get_llm():
                 api_key=key if key and key != "NA" else "mock-key", # Local LLMs might use mock-key
                 temperature=0.2, # Standardized for RTL generation stability
                 top_p=0.7,   # Optimized for code output
-                max_tokens=8192,
+                max_tokens=16384,
                 timeout=300,
                 extra_body=extra_t,
                 model_kwargs={"presence_penalty": 0, "repetition_penalty": 1}
@@ -631,7 +631,7 @@ def build(
     role_llms = {}
     for role in roles:
         cfg = get_role_llm_config(role)
-        llm_kwargs = dict(model=cfg["model"], api_key=cfg["api_key"], temperature=0.6)
+        llm_kwargs = dict(model=cfg["model"], api_key=cfg["api_key"], temperature=0.6, max_tokens=16384)
         if cfg.get("base_url"):
             llm_kwargs["base_url"] = cfg["base_url"]
         try:

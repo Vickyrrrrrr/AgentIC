@@ -210,7 +210,7 @@ export const WaitlistDashboard = ({ email }: { email: string }) => {
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 1.5, duration: 0.5 }}
         >
-          <button style={{ background: '#ffffff0d', border: '1px solid #ffffff1a', color: '#fff', borderRadius: 14, padding: '1.1rem 2rem', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.75rem', transition: 'all 0.2s ease' }} onClick={() => window.open('https://docs.agentic.ai')} onMouseOver={(e) => e.currentTarget.style.background = '#ffffff1a'} onMouseOut={(e) => e.currentTarget.style.background = '#ffffff0d'}>
+          <button style={{ background: '#ffffff0d', border: '1px solid #ffffff1a', color: '#fff', borderRadius: 14, padding: '1.1rem 2rem', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.75rem', transition: 'all 0.2s ease' }} onClick={() => window.open('https://www.buildstack.live')} onMouseOver={(e) => e.currentTarget.style.background = '#ffffff1a'} onMouseOut={(e) => e.currentTarget.style.background = '#ffffff0d'}>
             <Bell size={18} /> Documentation
           </button>
           <button className="waitlist-btn-primary" onClick={handleLogout}>

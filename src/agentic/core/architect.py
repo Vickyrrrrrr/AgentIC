@@ -149,10 +149,10 @@ MANDATORY RULES:
 3. For sequential designs, clk and rst_n ports are MANDATORY.
 4. FSM modules MUST list ALL states with transitions and outputs.
 5. Use "parameters" for configurable widths/depths — NEVER hardcode magic numbers.
-6. "functional_logic" must be a COMPLETE natural-language specification of the behavior,
-   not a placeholder like "implements counter logic".
-7. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces.
-8. Return ONLY the JSON object — no markdown fences, no commentary.
+6. "functional_logic" must be a CONCISE (under 100 words) specification of the behavior. DO NOT generate Verilog skeletons in this JSON.
+7. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces. Ensure all objects and arrays are properly closed.
+8. Limit the JSON size by omitting any unnecessary commentary, and avoiding massive unneeded string literals.
+9. IF THE DESIGN IS MASSIVE (e.g. CPUs, SoCs, Superscalar systems): You MUST OMIT the `fsm_states` and `internal_signals` arrays entirely to save tokens. The Designer module will independently infer those.
 """
 
 DECOMPOSE_USER_PROMPT = """\
@@ -193,8 +193,7 @@ class ArchitectModule:
             "parameters": [{"name": "str", "default": "str", "description": "str"}],
             "ports": [{"name": "str", "direction": "input|output|inout",
                         "width": "str", "description": "str", "reset_value": "str"}],
-            "functional_logic": "COMPLETE natural-language description of behavior",
-            "rtl_skeleton": "optional Verilog snippet",
+            "functional_logic": "CONCISE natural-language description of behavior (Max 100 words)",
             "fsm_states": [{"name": "str", "encoding": "str", "description": "str",
                             "transitions": [{"condition": "str", "next_state": "str"}],
                             "outputs": {"signal": "value"}}],
@@ -243,7 +242,7 @@ class ArchitectModule:
             if last_error:
                 retry_context = (
                     f"\n\nPREVIOUS ATTEMPT FAILED WITH:\n{last_error}\n"
-                    "Fix the issues and return a corrected JSON."
+                    "Fix the issues and return a corrected JSON. Ensure there are no trailing commas and double quotes are escaped."
                 )
 
             agent = Agent(

@@ -284,6 +284,7 @@ The design has been classified as: {category}
 
 Design description: {description}
 Design name: {design_name}
+Target PDK: {target_pdk}
 
 Perform ALL of the following steps and return a single JSON object:
 
@@ -297,7 +298,7 @@ For each field:
 - If missing and no safe default → set status to "missing"
 
 Safe defaults you may use:
-- Reset: synchronous active-low (standard for Sky130)
+- Reset: synchronous active-low (standard for {target_pdk})
 - Clock: single domain unless explicitly specified
 - Memory reset: all zeros
 - FSM encoding: binary for small FSMs
@@ -403,7 +404,7 @@ class HardwareSpecGenerator:
         word_count = len(description.strip().split())
         if word_count < 10:
             logger.info(f"[SpecGen] Description is short ({word_count} words) — elaborating via LLM")
-            options = self._elaborate_description(design_name, description)
+            options = self._elaborate_description(design_name, description, target_pdk=target_pdk)
             # Return a special spec that signals the orchestrator to present options
             spec = HardwareSpec(
                 design_category="ELABORATION_NEEDED",
@@ -437,7 +438,7 @@ class HardwareSpecGenerator:
         return spec, issues
 
     def _elaborate_description(
-        self, design_name: str, description: str
+        self, design_name: str, description: str, target_pdk: str = "sky130"
     ) -> List[str]:
         """
         When the user's description is short or vague, use LLM VLSI knowledge to
@@ -453,13 +454,19 @@ This is very brief. Using your expertise, generate EXACTLY 3 distinct, detailed 
 for this chip. Each option should specify the architectural variant, key features, I/O ports, and 
 typical use cases. Make each option meaningfully different from the others.
 
+CRITICAL HARDWARE CONSTRAINT:
+The target PDK is {target_pdk.upper()}. 
+Ensure that the `target_frequency_mhz` for every option is physically realizable on {target_pdk.upper()}.
+For Sky130, standard digital logic rarely exceeds 50-100 MHz reliably without extreme pipelining.
+DO NOT suggest frequencies above the safe upper limits of the {target_pdk.upper()} PDK.
+
 Return ONLY this JSON (no markdown, no commentary):
 {{
   "options": [
     {{
       "id": 1,
       "title": "<short title, max 8 words>",
-      "description": "<2-3 sentence detailed technical description including: bit-widths, port count, reset style, key functionality, and typical target clock frequency on Sky130>",
+      "description": "<2-3 sentence detailed technical description including: bit-widths, port count, reset style, key functionality, and typical realizable target clock frequency on {target_pdk}>",
       "category": "<PROCESSOR|MEMORY|INTERFACE|ARITHMETIC|CONTROL|DATAPATH>",
       "key_ports": ["clk", "rst_n", "<port1>", "<port2>"],
       "target_frequency_mhz": <number>
@@ -667,6 +674,7 @@ Return ONLY this JSON (no markdown, no commentary):
             category=category,
             description=description[:6000],
             design_name=design_name,
+            target_pdk=target_pdk,
             mandatory_fields=json.dumps(mandatory, indent=2),
             valid_submodules=json.dumps(valid_subs),
         )

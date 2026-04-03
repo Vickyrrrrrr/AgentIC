@@ -1,5 +1,5 @@
 # Build frontend web UI
-FROM node:20 as frontend-builder
+FROM node:20 AS frontend-builder
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm install

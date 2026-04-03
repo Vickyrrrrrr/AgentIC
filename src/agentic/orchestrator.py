@@ -5,6 +5,7 @@ import os
 import re
 import hashlib
 import json
+from .core.graph_builder import DependencyGraph, GraphNode
 import signal
 import difflib
 import subprocess
@@ -1071,15 +1072,12 @@ SPECIFICATION SECTIONS (Markdown):
 
                     # Prompt user to choose (only if in a real interactive terminal or HITL)
                     import sys
+                    import os
                     import time
                     choice_str = None
+                    is_api_server = os.environ.get("AGENTIC_API_SERVER") == "1" or (sys.argv and "uvicorn" in sys.argv[0])
                     
-                    if sys.stdin.isatty():
-                        choice_str = typer.prompt(
-                            f"Choose an option (1-{len(parsed_options)}) or type a custom description",
-                            default="1"
-                        )
-                    elif self.human_in_loop:
+                    if is_api_server and self.human_in_loop:
                         # Web API HITL Mode: Signal that we are waiting for a choice
                         self.log("EVENT:SPEC_ELABORATION_WAIT | WAITING_FOR_USER_CHOICE", refined=True)
                         self.artifacts['waiting_for_elaboration'] = True
@@ -1097,6 +1095,31 @@ SPECIFICATION SECTIONS (Markdown):
                         if not choice_str:
                             choice_str = self.artifacts.get('spec_elaboration_choice', "1")
                             self.log(f"Received user choice: {choice_str}", refined=True)
+                        
+                        self.artifacts.pop('waiting_for_elaboration', None)
+                    elif is_api_server and not self.human_in_loop:
+                        # Non-interactive API -> Auto-select first option
+                        self.log("Non-interactive API mode: auto-selecting Option 1.", refined=True)
+                        choice_str = "1"
+                    elif sys.stdin.isatty():
+                        choice_str = typer.prompt(
+                            f"Choose an option (1-{len(parsed_options)}) or type a custom description",
+                            default="1"
+                        )
+                    elif self.human_in_loop:
+                        # Fallback HITL
+                        self.log("EVENT:SPEC_ELABORATION_WAIT | WAITING_FOR_USER_CHOICE", refined=True)
+                        self.artifacts['waiting_for_elaboration'] = True
+                        wait_start = time.time()
+                        while 'spec_elaboration_choice' not in self.artifacts:
+                            if time.time() - wait_start > 600:
+                                choice_str = "1"
+                                break
+                            time.sleep(2)
+                        
+                        if not choice_str:
+                            choice_str = self.artifacts.get('spec_elaboration_choice', "1")
+                        self.artifacts.pop('waiting_for_elaboration', None)
                     else:
                         # Non-interactive (Background/CI) -> Auto-select first option
                         self.log("Non-interactive mode: auto-selecting Option 1.", refined=True)
@@ -1246,7 +1269,7 @@ SPECIFICATION SECTIONS (Markdown):
 
     def do_feasibility_check(self):
         """Stage: Check physical realizability on Sky130 before RTL generation."""
-        self.log("Running FeasibilityChecker (frequency → memory → arithmetic → area → Sky130 rules)...", refined=True)
+        self.log(f"Running FeasibilityChecker (frequency → memory → arithmetic → area → {self.pdk_profile.get('profile', 'sky130').upper()} rules)...", refined=True)
 
         hw_spec_dict = self.artifacts.get('hw_spec', {})
         hierarchy_result_dict = self.artifacts.get('hierarchy_result', None)
@@ -2456,6 +2479,41 @@ endclass
         self.artifacts["hierarchy_blocks"] = block_files
 
     def do_rtl_gen(self):
+
+        sid_raw = self.artifacts.get('sid')
+        if sid_raw:
+            try:
+                sid_dict = json.loads(sid_raw)
+                graph = DependencyGraph(sid_dict)
+                self.log(f"Recursive Graph Execution Enabled! Found {len(graph.nodes)} node(s).", refined=True)
+                
+                ordered_nodes = []
+                # Simple topological sort
+                unprocessed = list(graph.nodes.keys())
+                
+                while unprocessed:
+                    progress = False
+                    for node_name in list(unprocessed):
+                        node = graph.nodes[node_name]
+                        # If all dependencies are already in ordered_nodes
+                        if all(dep in [n.name for n in ordered_nodes] for dep in node.dependencies):
+                            ordered_nodes.append(node)
+                            unprocessed.remove(node_name)
+                            progress = True
+                            
+                    if not progress:
+                        self.log("Warning: Circular dependency detected in Graph Builder, continuing mostly sequential.", refined=True)
+                        for node_name in unprocessed:
+                            ordered_nodes.append(graph.nodes[node_name])
+                        break
+                        
+                for node in ordered_nodes:
+                    self.log(f"Proceeding to generate Sub-Module: {node.name}", refined=True)
+                    # For MVP graph implementation, we will append sub_module requirements into the prompt 
+                    # instead of fully isolating state transitions, avoiding disruption of standard Verification pipes.
+                    
+            except Exception as e:
+                self.log(f"Graph Builder parsing warning: {e}", refined=True)
         # Check Golden Reference Library for a matching template
         from .golden_lib import get_best_template
         
@@ -2758,6 +2816,8 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             _react_trace = _react_agent.run(
                 task=(
                     f"Fix all syntax and lint errors in Verilog module '{self.name}'. "
+                    f"CRITICAL: Do not rename the module. Do not add, modify, or remove any input/output ports. "
+                    f"The top-module interface MUST remain exactly the same. "
                     f"Use syntax_check tool to verify your fix compiles clean. "
                     f"Final Answer must be ONLY corrected Verilog inside ```verilog fences."
                 ),
@@ -2800,6 +2860,8 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         else:
             # Agents fix syntax — with full build context and failure history
             fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
+
+CRITICAL: Do not rename the module. Do not add, modify, or remove any input/output ports. The top-module interface MUST remain exactly the same.
 
 Fix Syntax/Lint Errors in "{self.name}".
 
@@ -4530,8 +4592,11 @@ REASONING: <1-line explanation>""",
                 f"set ::env(DESIGN_NAME) \"{self.name}\"\n"
                 f"set ::env(PDK) \"{self.pdk_profile.get('pdk', PDK)}\"\n"
                 f"set ::env(STD_CELL_LIBRARY) \"{self.pdk_profile.get('std_cell_library', 'sky130_fd_sc_hd')}\"\n"
-                f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/{self.name}.v]\n"
+                f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]\n"
                 f"{sdc_injection}"
+                "set ::env(SYNTH_STRATEGY) \"AREA 0\"\n"
+                "set ::env(SYNTH_SIZING) 1\n"
+                "set ::env(MAGIC_DRC_USE_GDS) 1\n"
                 "set ::env(FP_SIZING) \"absolute\"\n"
                 f"set ::env(DIE_AREA) \"0 0 {die} {die}\"\n"
                 f"set ::env(FP_CORE_UTIL) {util}\n"

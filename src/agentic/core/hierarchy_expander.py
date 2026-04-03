@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from crewai import Agent, Crew, LLM, Task
+from rich.console import Console
+console = Console()
 
 from .spec_generator import (
     BehavioralStatement,
@@ -210,6 +212,7 @@ class HierarchyExpander:
     """
 
     MAX_DEPTH = 3
+    MAX_EXPANSIONS = 8
     MAX_PORTS_SIMPLE = 8
 
     def __init__(self, llm: LLM, verbose: bool = False, max_retries: int = 2):
@@ -426,6 +429,7 @@ class HierarchyExpander:
             (nested_spec_dict, depth_reached, warnings, expansion_count)
         """
         warnings: List[str] = []
+        console.print(f"[bold cyan]🔍 Hierarchy Expander:[/bold cyan] Deep-diving into complex sub-module: [bold yellow]{sub_name}[/bold yellow] (Depth: {current_depth})...")
 
         if current_depth > self.MAX_DEPTH:
             warnings.append(
