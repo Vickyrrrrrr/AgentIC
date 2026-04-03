@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import { HomeComponent } from './components/HomeComponent';
-
+import { LandingPage } from './pages/LandingPage';
+import { WaitlistDashboard } from './pages/WaitlistDashboard';
 import { Dashboard } from './pages/Dashboard';
 import { DesignStudio } from './pages/DesignStudio';
 import { HumanInLoopBuild } from './pages/HumanInLoopBuild';
@@ -16,12 +17,7 @@ import { useCursorGlow } from './utils/useAnimations';
 import './index.css';
 import { Home, Zap, Users, BarChart2, BookOpen, Scaling, Factory, TerminalSquare } from 'lucide-react';
 
-import { LandingPage } from './pages/LandingPage';
-import { WaitlistDashboard } from './pages/WaitlistDashboard';
-
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
-const WAITLIST_MODE = import.meta.env.VITE_WAITLIST_MODE === 'true';
-const WHITELISTED_EMAILS = (import.meta.env.VITE_WHITELISTED_EMAILS || '').split(',').map((e: string) => e.trim().toLowerCase());
 
 const App = () => {
   const [session, setSession] = useState<Session | null>(null);
@@ -111,20 +107,18 @@ const App = () => {
     );
   }
 
-  // ── Unauthenticated State: Show Landing Page ──
   if (AUTH_ENABLED && !session) {
-    return (
-      <LandingPage onAuthSuccess={() => 
-        supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))
-      } />
-    );
+    return <LandingPage onAuthSuccess={() => supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => setSession(s))} />;
   }
 
-  // ── Waitlist Check: Show Waitlist Dashboard index if mode on ──
-  if (WAITLIST_MODE && session) {
-    const isWhitelisted = WHITELISTED_EMAILS.includes(session.user.email?.toLowerCase() || '');
-    if (!isWhitelisted) {
-      return <WaitlistDashboard email={session.user.email || 'Explorer'} />;
+  if (AUTH_ENABLED && session) {
+    const userEmail = session.user.email?.toLowerCase() || '';
+    
+    // STRICT BYPASS: Only allow vickynishad110@gmail.com
+    const isApproved = userEmail === 'vickynishad110@gmail.com';
+
+    if (!isApproved) {
+      return <WaitlistDashboard email={session.user.email || ''} />;
     }
   }
 
@@ -150,7 +144,6 @@ const App = () => {
         return <HomeComponent designsLength={designs.length} setSelectedPage={setSelectedPage} />;
     }
   };
-
 
   return (
     <div className="app-shell">
