@@ -29,6 +29,21 @@ jobs:
             echo "::error::HF_TOKEN secret is not set. Go to repo Settings → Secrets → Actions → New secret"
             exit 1
           fi
+
+          # Install and initialize LFS in the GH actions runner
+          git lfs install
+          
+          # Force track files that were rejected (if not already tracked)
+          git lfs track "*.woff2" "*.wasm" "*.woff" "*.ttf" "*.png" "*.jpg" "*.jpeg"
+          
+          # Renormalize files to LFS pointers
+          git add --renormalize .
+          if ! git diff --cached --quiet; then
+            git config user.email "deploy-bot@github-actions"
+            git config user.name "GitHub Actions Deploy Bot"
+            git commit -m "chore: convert binaries to LFS pointers for HF"
+          fi
+
           git remote add hf "https://hf_user:${HF_TOKEN}@huggingface.co/spaces/vxkyyy/AgentIC"
           git push hf main --force
 
