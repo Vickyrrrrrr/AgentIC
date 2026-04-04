@@ -67,7 +67,7 @@ app.include_router(lab_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7860", "http://127.0.0.1:7860"],
+    allow_origins=["*"], # Allow your Vercel frontend to proxy requests securely
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
