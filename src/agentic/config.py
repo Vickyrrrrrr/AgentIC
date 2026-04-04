@@ -23,6 +23,14 @@ CLOUD_CONFIG = {
     "api_key": os.environ.get("NVIDIA_API_KEY", ""),
 }
 
+DEEPSEEK_CONFIG = {
+    "model": os.environ.get("DEEPSEEK_MODEL", "openai/deepseek-ai/deepseek-v3.2"),
+    "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+    "api_key": os.environ.get("DEEPSEEK_API_KEY", ""),
+    "extra_body": {"chat_template_kwargs": {"thinking": True}}
+}
+
+
 GLM_CONFIG = {
     "model": os.environ.get("GLM_MODEL", "glm-4-plus"),
     "base_url": os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
@@ -59,16 +67,17 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     - Defaulting Heavy Logic (Architect, Designer, Fixer, etc.) to GLM-4-Plus
     - Physical -> Groq (Blazing fast iterative speed)
     - Documenter/Reporter -> NVIDIA (Excellent prose generation, lower precision required)
+    - Reasoning parts (Architect, Fixer, Debugger) -> DeepSeek via NVIDIA
     """
     role = role.lower()
     
     # 1. Select the preferred engine
     preferred_engine = GLM_CONFIG
-    if role in ("architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager"):
+    if role in ("architect", "fixer", "debugger", "reasoner"):
+        preferred_engine = DEEPSEEK_CONFIG
+    elif role in ("designer", "testbench_designer", "verifier", "manager"):
         preferred_engine = GLM_CONFIG
-    elif role in ("documenter", "reporter", "doc_gen"):
-        preferred_engine = CLOUD_CONFIG  # Maps to NVIDIA Nim
-    elif role in ("physical",):
+    elif role in ("physical", "documenter", "reporter", "doc_gen"):
         preferred_engine = GROQ_CONFIG
 
     # Helper to check if an engine has a valid API key
@@ -76,9 +85,9 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
         k = cfg.get("api_key", "")
         return bool(k and k not in ("mock-key", "NA", ""))
 
-    # 2. Fallback execution order (Preferred -> GLM -> NVIDIA -> Groq -> Local)
+    # 2. Fallback execution order (Preferred -> DeepSeek -> GLM -> NVIDIA -> Groq -> Local)
     # If the user's setup lacks a key for the preferred engine, shift to the next best
-    engines = [preferred_engine, GLM_CONFIG, CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG]
+    engines = [preferred_engine, DEEPSEEK_CONFIG, GLM_CONFIG, CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG]
     
     for cfg in engines:
         # LOCAL_CONFIG is always considered a valid fallback if we reach the end
@@ -87,12 +96,17 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
             # Ensure proper prefixing: use 'openai/' for custom OpenAI-compatible endpoints like Zhipu
             if cfg is GLM_CONFIG and not model.startswith("openai/"):
                 model = f"openai/{model}"
+            if cfg is DEEPSEEK_CONFIG and not model.startswith("openai/"):
+                model = f"openai/{model}"
             
-            return {
+            result = {
                 "model": model,
                 "api_key": cfg.get("api_key", ""),
                 "base_url": cfg.get("base_url", "")
             }
+            if "extra_body" in cfg:
+                result["extra_body"] = cfg["extra_body"]
+            return result
             
     return LOCAL_CONFIG.copy()
 

@@ -715,6 +715,8 @@ def build(
         llm_kwargs = dict(model=cfg["model"], api_key=cfg["api_key"], temperature=0.6, max_tokens=16384)
         if cfg.get("base_url"):
             llm_kwargs["base_url"] = cfg["base_url"]
+        if "extra_body" in cfg:
+            llm_kwargs["extra_body"] = cfg["extra_body"]
         try:
             role_llms[role] = LLM(**llm_kwargs)
         except Exception:
