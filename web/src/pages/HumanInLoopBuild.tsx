@@ -4,6 +4,7 @@ import { ActivityFeed } from '../components/ActivityFeed';
 import { StageProgressBar } from '../components/StageProgressBar';
 import { ApprovalCard } from '../components/ApprovalCard';
 import ElaborationCard from '../components/ElaborationCard';
+import { BillingModal } from '../components/BillingModal';
 import { api, API_BASE } from '../api';
 import '../hitl.css';
 
@@ -130,6 +131,7 @@ export const HumanInLoopBuild = () => {
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [showBillingModal, setShowBillingModal] = useState(false);
     const abortCtrlRef = useRef<AbortController | null>(null);
 
     // Build options
@@ -979,6 +981,11 @@ export const HumanInLoopBuild = () => {
                     </div>
                 </div>
             )}
+            <BillingModal 
+                isOpen={showBillingModal}
+                onClose={() => setShowBillingModal(false)}
+                onKeySaved={() => setShowBillingModal(false)}
+            />
         </div>
     );
 };

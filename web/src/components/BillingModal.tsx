@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api } from '../api';
+
 import { motion, AnimatePresence } from 'framer-motion';
 
 export const BillingModal = ({ isOpen, onClose, onKeySaved }: { isOpen: boolean, onClose: () => void, onKeySaved: () => void }) => {
