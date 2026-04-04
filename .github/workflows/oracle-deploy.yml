@@ -1,6 +1,7 @@
 name: Deploy Backend to Oracle Cloud
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
