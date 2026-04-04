@@ -258,12 +258,13 @@ def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
     
     roles = ["architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager", "physical"]
     role_map = {}
+    debug_log_map = {}
     
     for role in roles:
         if byok_config and "group1" in byok_config:
-            if role in ("architect", "debugger", "manager"):
+            if role in ("fixer", "debugger", "reasoner"):
                 g = byok_config.get("group1", {})
-            elif role in ("designer", "testbench_designer", "verifier"):
+            elif role in ("architect", "designer", "testbench_designer", "verifier", "manager", "physical"):
                 g = byok_config.get("group2", {})
             else:
                 g = byok_config.get("group3", {})
@@ -279,6 +280,7 @@ def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
                 if "deepseek" in model.lower():
                     llm_kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
                 role_map[role] = LLM(**llm_kwargs)
+                debug_log_map[role] = f"{model} [BYOK X-LLM-API-Key override]"
                 continue
                 
         # fallback behavior
@@ -296,6 +298,17 @@ def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
             llm_kwargs["extra_body"] = cfg["extra_body"]
             
         role_map[role] = LLM(**llm_kwargs)
+        
+        # Determine source label
+        source = "Local .env config"
+        if byok_key: source = "Stored Profile BYOK"
+        debug_log_map[role] = f"{model} [{source}]"
+        
+    # Print the assignments so they appear in Docker logs
+    print("\n--- 🤖 Backend Compute Routing Map ---", flush=True)
+    for r, m in debug_log_map.items():
+        print(f"[Router] {r.upper():<20} -> {m}", flush=True)
+    print("--------------------------------------\n", flush=True)
         
     return role_map
 

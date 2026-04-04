@@ -73,11 +73,11 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     
     # 1. Select the preferred engine
     preferred_engine = GLM_CONFIG
-    if role in ("architect", "fixer", "debugger", "reasoner"):
+    if role in ("fixer", "debugger", "reasoner"):
         preferred_engine = DEEPSEEK_CONFIG
-    elif role in ("designer", "testbench_designer", "verifier", "manager"):
+    elif role in ("architect", "designer", "testbench_designer", "verifier", "manager", "physical"):
         preferred_engine = GLM_CONFIG
-    elif role in ("physical", "documenter", "reporter", "doc_gen"):
+    elif role in ("documenter", "reporter", "doc_gen"):
         preferred_engine = GROQ_CONFIG
 
     # Helper to check if an engine has a valid API key
