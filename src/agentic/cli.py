@@ -710,6 +710,8 @@ def build(
     from crewai import LLM
     roles = ["architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager", "physical"]
     role_llms = {}
+    
+    print("\n--- 🤖 Local Compute Routing Map ---", flush=True)
     for role in roles:
         cfg = get_role_llm_config(role)
         llm_kwargs = dict(model=cfg["model"], api_key=cfg["api_key"], temperature=0.6, max_tokens=16384)
@@ -717,10 +719,13 @@ def build(
             llm_kwargs["base_url"] = cfg["base_url"]
         if "extra_body" in cfg:
             llm_kwargs["extra_body"] = cfg["extra_body"]
+            
+        print(f"[Router] {role.upper():<20} -> Model: {cfg['model']}", flush=True)
         try:
             role_llms[role] = LLM(**llm_kwargs)
         except Exception:
             role_llms[role] = llm
+    print("------------------------------------\n", flush=True)
             
     orchestrator = BuildOrchestrator(
         name=name,

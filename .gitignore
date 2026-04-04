@@ -81,6 +81,7 @@ parsetab.py
 agentic_jobs.db
 *.sqlite3
 
+
 # Temporary fix scripts
 fix_*.py
 
