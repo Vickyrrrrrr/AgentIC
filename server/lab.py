@@ -130,13 +130,13 @@ async def generate_testbench(req: TestbenchPayload, request: Request, profile: d
     try:
         from litellm import completion
         
-        system_prompt = \"\"\"
+        system_prompt = """
 You are an expert IC verification engineer. The user will provide a Verilog design module.
 Your job is to write a comprehensive testbench for it (`tb_<modulename>`), including clock generation (if applicable) and a reasonable set of stimulus/vectors to verify functionality.
 IMPORTANT:
 - Ensure the testbench includes `$dumpfile("dump.vcd");` and `$dumpvars(0, <tb_module_name>);` so GTKWave simulation viewing works.
 - Output ONLY the new testbench Verilog code, without markdown blocks, without explanations, and DO NOT repeat the original code. Just the `module tb_...` block.
-\"\"\"
+"""
         user_prompt = f"Here is my Verilog design:\n\n```verilog\n{req.code}\n```\n\nPlease write just the testbench module for it."
 
         # Grab user API keys dynamically mapped by auth middleware
