@@ -1,7 +1,7 @@
 import os
 import tempfile
 import asyncio
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 from server.auth import get_current_user, get_byok_config_for_user
