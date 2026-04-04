@@ -196,6 +196,8 @@ def _get_llm(byok_config: dict = None):
         llm_kwargs = dict(model=model, api_key=g.get("api_key"), temperature=0.6, max_tokens=16384)
         if g.get("base_url"):
             llm_kwargs["base_url"] = g.get("base_url")
+        if "deepseek" in model.lower():
+            llm_kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
         try:
             return LLM(**llm_kwargs), f"{model} (BYOK)"
         except Exception as e:
@@ -274,6 +276,8 @@ def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
                 llm_kwargs = dict(model=model, api_key=g.get("api_key"), temperature=0.6)
                 if g.get("base_url"):
                     llm_kwargs["base_url"] = g.get("base_url")
+                if "deepseek" in model.lower():
+                    llm_kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
                 role_map[role] = LLM(**llm_kwargs)
                 continue
                 
@@ -288,6 +292,8 @@ def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
         llm_kwargs = dict(model=model, api_key=key, temperature=0.6)
         if cfg.get("base_url"):
             llm_kwargs["base_url"] = cfg["base_url"]
+        if "extra_body" in cfg:
+            llm_kwargs["extra_body"] = cfg["extra_body"]
             
         role_map[role] = LLM(**llm_kwargs)
         
@@ -580,7 +586,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             coverage_fallback_policy=req.coverage_fallback_policy,
             coverage_profile=req.coverage_profile,
             event_sink=event_sink,
-            role_llms=role_llms,
+            role_llms=_get_role_llm_map(byok_config=byok_key),
             human_in_loop=req.human_in_loop,
         )
 
