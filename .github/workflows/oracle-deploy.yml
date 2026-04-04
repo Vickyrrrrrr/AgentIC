@@ -1,0 +1,39 @@
+name: Deploy Backend to Oracle Cloud
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/**'
+      - 'docker-compose.yml'
+      - 'Dockerfile'
+      - 'requirements.txt'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh/
+          echo "${{ secrets.ORACLE_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Sync files to Oracle VM via rsync
+        run: |
+          rsync -avz --exclude '.git' --exclude '.env' --exclude 'node_modules' --exclude '__pycache__' ./ ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:~/AgentIC/
+
+      - name: Rebuild & Restart Docker Containers
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            cd ~/AgentIC
+            sudo docker-compose up -d --build api worker
