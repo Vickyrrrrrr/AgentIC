@@ -284,10 +284,19 @@ class BuildOrchestrator:
 
     def setup_logger(self):
         """Sets up a file logger for the build process."""
+        import shutil
+        import datetime
+        
         log_file = os.path.join(self.artifacts['root'], f"{self.name}.log")
         
         # Ensure directory exists
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        
+        # If a previous log exists, rotate it so we don't lose the old run's terminal output/errors
+        if os.path.exists(log_file):
+            timestamp = datetime.datetime.fromtimestamp(os.path.getmtime(log_file)).strftime('%Y%m%d_%H%M%S')
+            backup_log = os.path.join(self.artifacts['root'], f"{self.name}_{timestamp}_previous.log")
+            shutil.copy2(log_file, backup_log)
         
         self.logger = logging.getLogger(self.name)
         self.logger.setLevel(logging.DEBUG)
@@ -575,20 +584,22 @@ class BuildOrchestrator:
 
     def _normalize_react_result(self, trace: Any) -> AgentResult:
         final_answer = getattr(trace, "final_answer", "") or ""
-        code_match = re.search(r"```verilog\s*(.*?)```", final_answer, re.DOTALL)
+        code_match = re.search(r"```(?:verilog|systemverilog|sv|v)?\s*(.*?)```", final_answer, re.DOTALL | re.IGNORECASE)
+        code_str = code_match.group(1).strip() if code_match else final_answer.strip()
+        has_code = bool(code_match) or ("module " in code_str and "endmodule" in code_str)
         payload = {
-            "code": code_match.group(1).strip() if code_match else "",
+            "code": code_str if has_code else "",
             "self_check_status": "verified" if getattr(trace, "success", False) else "unverified",
             "tool_observations": [getattr(step, "observation", "") for step in getattr(trace, "steps", []) if getattr(step, "observation", "")],
-            "final_decision": "accept" if code_match else "fallback",
+            "final_decision": "accept" if has_code else "fallback",
         }
-        failure_class = FailureClass.UNKNOWN if code_match else FailureClass.LLM_FORMAT_ERROR
+        failure_class = FailureClass.UNKNOWN if has_code else FailureClass.LLM_FORMAT_ERROR
         return AgentResult(
             agent="ReAct",
-            ok=bool(code_match),
+            ok=has_code,
             producer="agent_react",
             payload=payload,
-            diagnostics=[] if code_match else ["ReAct did not return fenced Verilog code."],
+            diagnostics=[] if has_code else ["ReAct did not return valid Verilog code."],
             failure_class=failure_class,
             raw_output=final_answer,
         )

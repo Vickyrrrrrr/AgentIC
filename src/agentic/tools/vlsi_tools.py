@@ -562,6 +562,7 @@ def run_lint_check(file_path: str) -> tuple:
         staged_map = _stage_inputs(tmpdir, rtl_files)
         cmd = [
             "verilator", "--lint-only", "--sv", "--timing",
+            "-I" + src_dir,
             "-Wno-fatal",
             "-Wno-UNUSED",
             "-Wno-PINMISSING",

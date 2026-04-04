@@ -346,7 +346,7 @@ Return ONLY this JSON (no markdown fences, no commentary):
     "<field_name>": {{"status": "present|inferred|missing", "value": "<value>", "reasoning": "<if inferred>"}}
   }},
   "ports": [
-    {{"name": "<name>", "direction": "input|output|inout", "data_type": "logic|logic [N:0]", "description": "<purpose>"}}
+    {{"name": "<name>", "direction": "input|output", "data_type": "logic|logic [N:0]", "description": "<purpose>"}}
   ],
   "submodules": [
     {{

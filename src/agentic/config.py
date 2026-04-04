@@ -32,7 +32,7 @@ GLM_CONFIG = {
 LOCAL_CONFIG = {
     "model": os.environ.get(
         "LLM_MODEL",
-        "ollama/hf.co/mradermacher/VeriReason-Qwen2.5-3b-RTLCoder-Verilog-GRPO-reasoning-tb-GGUF:Q4_K_M",
+        "ollama/qwen2.5-coder:7b",
     ),
     "base_url": os.environ.get("LLM_BASE_URL", "http://localhost:11434"),
     "api_key": os.environ.get("LLM_API_KEY", "NA"),

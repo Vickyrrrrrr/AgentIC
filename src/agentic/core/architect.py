@@ -191,7 +191,7 @@ class ArchitectModule:
             "name": "str (Verilog identifier)",
             "description": "str",
             "parameters": [{"name": "str", "default": "str", "description": "str"}],
-            "ports": [{"name": "str", "direction": "input|output|inout",
+            "ports": [{"name": "str", "direction": "input|output",
                         "width": "str", "description": "str", "reset_value": "str"}],
             "functional_logic": "CONCISE natural-language description of behavior (Max 100 words)",
             "fsm_states": [{"name": "str", "encoding": "str", "description": "str",

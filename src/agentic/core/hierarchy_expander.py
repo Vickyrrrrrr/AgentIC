@@ -168,6 +168,11 @@ Generate a COMPLETE nested specification for this submodule. It must include:
    - Max 8 submodules
    - Each must have: name (snake_case), one-sentence description, port list
    - Do NOT expand further here — we handle recursion externally
+   
+CRITICAL FOUNDRY / PDK RULES YOU MUST OBEY:
+- NO TRI-STATE LOGIC: Standard-cell ASIC flows (like Sky130/TSMC) do NOT support internal tri-states. Never use `inout` ports internally or bidirectional busses. Use valid/ready handshakes or multiplexers.
+- MEMORY LIMITS: Never synthesize memory arrays larger than 8KB (e.g., max 8-bit or 10-bit address bus lengths). Do not define 32-bit address buses for internal buffered data arrays. Let external memory controllers handle massive GB files.
+- PIPELINED MATH: All large arithmetic (multipliers > 16-bit) must be pipelined or broken down. Do not ask for single-cycle 32-bit MACs.
 
 3. A behavioral contract — minimum 3 GIVEN/WHEN/THEN/WITHIN statements:
    - 1 reset behavior
@@ -181,7 +186,7 @@ Return ONLY this JSON (no markdown, no commentary):
   "design_category": "{sub_category}",
   "top_module_name": "{sub_name}",
   "ports": [
-    {{"name": "<name>", "direction": "input|output|inout", "data_type": "logic|logic [N:0]", "description": "<purpose>"}}
+    {"name": "<name>", "direction": "input|output", "data_type": "logic|logic [N:0]", "description": "<purpose>"}
   ],
   "submodules": [
     {{

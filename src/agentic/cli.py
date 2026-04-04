@@ -3,12 +3,9 @@
 AgentIC - Natural Language to GDSII Pipeline
 =============================================
 Uses CrewAI + LLM (DeepSeek/Llama/Groq) to generate chips from natural language.
-
-
 Usage:
     python3 main.py build --name counter --desc "8-bit counter with enable and reset"
 """
-
 import os
 import re
 import sys
@@ -17,7 +14,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from crewai import Agent, Task, Crew, LLM
-
 # Local imports
 from .config import (
     OPENLANE_ROOT,
@@ -54,7 +50,6 @@ from .tools.vlsi_tools import (
     signoff_check_tool,
     startup_self_check,
 )
-
 # --- INITIALIZE ---
 app = typer.Typer()
 from rich.theme import Theme
@@ -69,17 +64,7 @@ claude_theme = Theme({
     "spinner": "#d97757"
 })
 console = Console(theme=claude_theme)
-
-
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic_credentials.json")
-
-
-
-
-
-
-
-
 def check_dependencies(skip_openlane: bool):
     import shutil
     import typer
@@ -105,8 +90,6 @@ def check_dependencies(skip_openlane: bool):
             border_style="red"
         ))
         raise typer.Exit(1)
-
-
 def verify_license():
     """Verify license key before running any CLI commands (Real Lemon Squeezy integration)"""
     # Developer backdoor/bypass
@@ -116,13 +99,10 @@ def verify_license():
     # Also skip license checking when running locally (not packaged by PyInstaller)
     if not getattr(sys, "frozen", False) and not os.environ.get("AGENTIC_FORCE_LICENSE_CHECK"):
         return
-
     if not os.path.exists(CREDENTIALS_FILE):
         console.print(Panel(
-            "[error]Authorization Required[/error]
-"
-            "You do not have a valid license locally.
-"
+            "[error]Authorization Required[/error]\n" \
+            "You do not have a valid license locally.\n" \
             "Please run: [accent]agentic login <your_license_key>[/accent]",
             title="🔒 License Check Failed"
         ))
@@ -149,10 +129,8 @@ def verify_license():
                         pass
                     else:
                         console.print(Panel(
-                            f"[error]Invalid License Key[/error]
-"
-                            f"The key we found ({key[:8]}...) was rejected by the server.
-"
+                            f"[error]Invalid License Key[/error]\n" \
+                            f"The key we found ({key[:8]}...) was rejected by the server.\n" \
                             "Please run: [accent]agentic login <your_license_key>[/accent]",
                             title="🔒 License Check Failed"
                         ))
@@ -160,7 +138,6 @@ def verify_license():
             except requests.exceptions.RequestException as e:
                 console.print(f"[warning]Warning: Could not connect to license server to verify your key. Allowing offline bypass for now.[/warning]")
                 # We let it pass if there's no internet since they already bought it
-
             # --- Inject user-provided API keys into runtime configs ---
             from . import config
             if data.get("nvidia_api_key"): 
@@ -198,10 +175,8 @@ def verify_license():
                         pass
                     else:
                         console.print(Panel(
-                            f"[error]Invalid License Key[/error]
-"
-                            f"The key we found ({key[:8]}...) was rejected by the server.
-"
+                            f"[error]Invalid License Key[/error]\n" \
+                            f"The key we found ({key[:8]}...) was rejected by the server.\n" \
                             "Please run: [accent]agentic login <your_license_key>[/accent]",
                             title="🔒 License Check Failed"
                         ))
@@ -209,7 +184,6 @@ def verify_license():
             except requests.exceptions.RequestException as e:
                 console.print(f"[warning]Warning: Could not connect to license server to verify your key. Allowing offline bypass for now.[/warning]")
                 # We let it pass if there's no internet since they already bought it
-
             # --- Inject user-provided API keys into runtime configs ---
             from . import config
             if data.get("nvidia_api_key"): 
@@ -242,7 +216,6 @@ def verify_license():
                     title="🔒 License Check Failed"
                 ))
                 raise typer.Exit(1)
-
             # --- Inject user-provided API keys into runtime configs ---
             from . import config
             if data.get("nvidia_api_key"): 
@@ -258,7 +231,6 @@ def verify_license():
     except Exception as e:
         console.print(f"[error]Error reading credentials: {e}[/error]")
         raise typer.Exit(1)
-
 @app.command()
 def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) License Key")):
     """Authenticate this computer and setup LLM API keys for multi-agent capabilities."""
@@ -288,10 +260,8 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) Lice
             raise typer.Exit(1)
     
     console.print(Panel(
-        f"[success]Authentication Successful![/success]
-"
-        f"License verified. Now, let's configure your AI engines.
-"
+        f"[success]Authentication Successful![/success]\n" \
+        f"License verified. Now, let's configure your AI engines.\n" \
         f"AgentIC relies on 3 specific models for optimal speed & logic.",
         title="🔒 Login Complete"
     ))
@@ -314,13 +284,10 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) Lice
     config.CLOUD_CONFIG["api_key"] = nvidia_key
     config.GROQ_CONFIG["api_key"] = groq_key
     config.GLM_CONFIG["api_key"] = glm_key
-
-    console.print(f"
-[success]✅ API Keys securely saved in {CREDENTIALS_FILE}[/success]")
+    console.print(f"\n[success]✅ API Keys securely saved in {CREDENTIALS_FILE}[/success]")
     
     # Now trigger diagnostics to ensure they have the compilers installed
-    console.print("
-[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
+    console.print("\n[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
     from .tools.vlsi_tools import startup_self_check
     status = startup_self_check()
     if not status["ok"]:
@@ -334,8 +301,6 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) Lice
         console.print("[success]Compiler environment looks pristine! 🚀[/success]")
         
     console.print("\n[success]You are completely set up! Try running: agentic build --name my_design --desc '...'[/success]")
-
-
 # Setup Brain
 def get_llm():
     """Returns the LLM instance from the best available provider:
@@ -401,8 +366,6 @@ def get_llm():
         border_style="red"
     ))
     raise typer.Exit(1)
-
-
 def run_startup_diagnostics(strict: bool = True):
     diag = startup_self_check()
     ok = bool(diag.get("ok", False))
@@ -414,8 +377,6 @@ def run_startup_diagnostics(strict: bool = True):
                 console.print(f"  [error]✗ {check.get('tool')}[/error] -> {check.get('resolved')}")
         if strict:
             raise typer.Exit(1)
-
-
 @app.command()
 def simulate(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
@@ -430,19 +391,15 @@ def simulate(
         f"Design: [warning]{name}[/warning]",
         title="🚀 Starting Simulation"
     ))
-
     llm = get_llm()
-
     def log_thinking(raw_text: str, step: str):
         """Emit DeepSeek <think> content."""
         if not show_thinking: return
         # Simple logging for sim tool
         pass 
-
     
     rtl_path = f"{OPENLANE_ROOT}/designs/{name}/src/{name}.v"
     tb_path = f"{OPENLANE_ROOT}/designs/{name}/src/{name}_tb.v"
-
     def _fix_with_llm(agent_role: str, goal: str, prompt: str) -> str:
         # Give the agent TOOLS to self-correct
         fix_agent = Agent(
@@ -469,11 +426,9 @@ def simulate(
         sim_tries += 1
         console.print(f"[error]✗ SIMULATION FAILED (attempt {sim_tries}/{max_retries})[/error]")
         sim_output_text = sim_output or ""
-
         # 1) If compilation failed, fix TB first.
         if "Compilation failed:" in sim_output_text or "syntax error" in sim_output_text:
             fix_tb_prompt = f'''Fix this SystemVerilog testbench so it compiles and avoids directionality errors.
-
 CRITICAL FIXING RULES:
 1. **Unresolved Wires**: If you see "Unable to assign to unresolved wires", it means you are driving a DUT OUTPUT. Stop driving it!
 2. **Signal Directions**:
@@ -481,15 +436,12 @@ CRITICAL FIXING RULES:
    - If a port is `output` in DUT, it is a `wire` in TB (Read-Only).
    - If a port is `input` in DUT, it is a `reg/logic` in TB (Write-Only).
 3. **Format**: Return ONLY corrected testbench code inside ```verilog fences.
-
 Simulation output / errors:
 {sim_output_text}
-
 Current RTL (do not modify unless absolutely necessary):
 ```verilog
 {read_file_content(rtl_path)}
 ```
-
 Current testbench:
 ```verilog
 {read_file_content(tb_path)}
@@ -503,7 +455,6 @@ Current testbench:
             tb_path = result_path
             sim_success, sim_output = run_simulation(name)
             continue
-
         # 2) Logic or Runtime Errors
         if "TEST FAILED" in sim_output_text or "TEST PASSED" not in sim_output_text:
             
@@ -523,7 +474,6 @@ Reply with ONLY "A" or "B".''',
             analysis = str(Crew(verbose=False, agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
             
             is_tb_issue = "A" in analysis
-
             if is_tb_issue:
                  console.print("[warning]  -> [Analyst] Root Cause: Testbench Error. Fixing TB...[/warning]")
                  fix_tb_logic_prompt = f'''Fix the Testbench logic/syntax. The simulation failed or generated runtime errors.
@@ -537,15 +487,12 @@ CRITICAL FIXING RULES:
 3. **Reset**: Ensure reset is held for at least 4 clock cycles.
 4. **Between Tests**: Wait for FSM to return to IDLE with `repeat(10) @(posedge clk);`
 5. **Format**: Return ONLY corrected testbench code inside ```verilog fences.
-
 Simulation Error/Output:
 {sim_output_text}
-
 Current RTL (Reference - count the FSM states):
 ```verilog
 {read_file_content(rtl_path)}
 ```
-
 Current Testbench (To Fix - increase wait cycles):
 ```verilog
 {read_file_content(tb_path)}
@@ -559,11 +506,9 @@ Current Testbench (To Fix - increase wait cycles):
                  tb_path = result_path
                  sim_success, sim_output = run_simulation(name)
                  continue
-
             else:
                 console.print("[warning]  -> Detecting Design Logic mismatch. Fixing RTL...[/warning]")
                 fix_rtl_prompt = f'''The simulation did not pass. Fix the RTL (module "{name}") so that the testbench passes.
-
 CRITICAL REQUIREMENTS:
 - **NO CONVERSATION**: Return ONLY the code inside ```verilog fences. Do NOT write "Thought:", "Here is the code", or any explanation.
 - Keep module name exactly "{name}"
@@ -574,15 +519,12 @@ CRITICAL REQUIREMENTS:
   - You must fix the BUGS in the implementation, not delete the implementation.
   - If the testbench expects a result after N cycles, ensure your pipeline matches that latency.
 - Return ONLY corrected RTL code inside ```verilog fences
-
 Simulation output:
 {sim_output_text}
-
 Current testbench (do not change in this step):
 ```verilog
 {read_file_content(tb_path)}
 ```
-
 Current RTL:
 ```verilog
 {read_file_content(rtl_path)}
@@ -596,20 +538,16 @@ Current RTL:
                 if not success:
                     sim_output = f"RTL fix introduced syntax error:\n{errors}"
                     continue
-
                 sim_success, sim_output = run_simulation(name)
                 continue
     
     if not sim_success:
         console.print(f"[error]✗ SIMULATION FAILED:[/error]\n{sim_output}")
         raise typer.Exit(1)
-
     sim_lines = sim_output.strip().split('\n')
     for line in sim_lines[-20:]:  # Print last 20 lines of log
         console.print(f"  [dim]{line}[/dim]")
     console.print("  ✓ Simulation [success]passed[/success]")
-
-
 def _generate_config_tcl(design_name: str, rtl_file: str) -> str:
     """Auto-generate OpenLane config.tcl based on design complexity.
     
@@ -623,7 +561,6 @@ def _generate_config_tcl(design_name: str, rtl_file: str) -> str:
         line_count = len(rtl_content.strip().split('\n'))
     except IOError:
         line_count = 100  # Fallback
-
     # Scale parameters based on complexity
     if line_count < 100:
         # Small: counter, shift register, PWM
@@ -634,31 +571,24 @@ def _generate_config_tcl(design_name: str, rtl_file: str) -> str:
     else:
         # Large: TMR, AES, processors
         die_size, util, clock_period = 800, 35, "20"
-
     return f'''# Auto-generated by AgentIC for {design_name}
 set ::env(DESIGN_NAME) "{design_name}"
 set ::env(VERILOG_FILES) "$::env(DESIGN_DIR)/src/{design_name}.v"
 set ::env(CLOCK_PORT) "clk"
 set ::env(CLOCK_PERIOD) "{clock_period}"
-
 # Floorplanning (scaled for ~{line_count} lines of RTL)
 set ::env(FP_SIZING) "absolute"
 set ::env(DIE_AREA) "0 0 {die_size} {die_size}"
 set ::env(FP_CORE_UTIL) {util}
 set ::env(PL_TARGET_DENSITY) {util / 100 + 0.05:.2f}
-
 # Synthesis
 set ::env(SYNTH_STRATEGY) "AREA 0"
 set ::env(MAX_FANOUT_CONSTRAINT) 8
-
 # Routing
 set ::env(GRT_OVERFLOW_ITERS) 64
-
 # PDK
 set ::env(PDK) "{PDK}"
 '''
-
-
 @app.command()
 def harden(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
@@ -674,7 +604,6 @@ def harden(
     
     new_config = f"{OPENLANE_ROOT}/designs/{name}/config.tcl"
     rtl_file = f"{OPENLANE_ROOT}/designs/{name}/src/{name}.v"
-
     if not os.path.exists(new_config):
         if not os.path.exists(rtl_file):
             console.print(f"[error]✗ RTL file not found: {rtl_file}[/error]")
@@ -694,7 +623,6 @@ def harden(
         console.print("  [dim]Launching background process...[/dim]")
     else:
         console.print("  [dim]Running OpenLane (this may take 10-30 minutes)...[/dim]")
-
     ol_success, ol_result = run_openlane(name, background=run_bg)
     
     if ol_success:
@@ -718,12 +646,10 @@ def harden(
             console.print(f"[error]❌ SIGNOFF FAILED[/error]")
             console.print(report)
             raise typer.Exit(1)
-
     else:
         console.print(f"[error]✗ OpenLane failed[/error]")
         console.print(f"  Error: {ol_result[:500]}...")
         raise typer.Exit(1)
-
 # --- THE BUILD COMMAND ---
 @app.command()
 def build(
@@ -761,27 +687,21 @@ def build(
         f"{'[success]Full Industry Signoff Enabled[/success]' if full_signoff else ''}",
         title="🚀 Starting Autonomous Orchestrator"
     ))
-
     tb_gate_mode = tb_gate_mode.lower().strip()
     if tb_gate_mode not in {"strict", "relaxed"}:
         raise typer.BadParameter("--tb-gate-mode must be one of: strict, relaxed")
-
     tb_fallback_template = tb_fallback_template.lower().strip()
     if tb_fallback_template not in {"uvm_lite", "classic"}:
         raise typer.BadParameter("--tb-fallback-template must be one of: uvm_lite, classic")
-
     coverage_backend = coverage_backend.lower().strip()
     if coverage_backend not in {"auto", "verilator", "iverilog"}:
         raise typer.BadParameter("--coverage-backend must be one of: auto, verilator, iverilog")
-
     coverage_fallback_policy = coverage_fallback_policy.lower().strip()
     if coverage_fallback_policy not in {"fail_closed", "fallback_oss", "skip"}:
         raise typer.BadParameter("--coverage-fallback-policy must be one of: fail_closed, fallback_oss, skip")
-
     coverage_profile = coverage_profile.lower().strip()
     if coverage_profile not in {"balanced", "aggressive", "relaxed"}:
         raise typer.BadParameter("--coverage-profile must be one of: balanced, aggressive, relaxed")
-
     run_startup_diagnostics(strict=strict_gates)
     llm = get_llm()
     
@@ -805,7 +725,6 @@ def build(
         desc=desc,
         llm=llm,
         role_llms=role_llms,
-
         max_retries=max_retries,
         verbose=show_thinking,
         skip_openlane=skip_openlane,
@@ -827,15 +746,11 @@ def build(
     )
     
     orchestrator.run()
-
 @app.command()
 def verify(name: str = typer.Argument(..., help="Design name to verify")):
     """Run verification on an existing design."""
     console.print(f"[warning]Running verification for {name}...[/warning]")
     output = run_verification(name)
     console.print(output)
-
-
-
 if __name__ == "__main__":
     app()
