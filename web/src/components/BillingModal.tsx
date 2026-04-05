@@ -1,30 +1,113 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { motion, AnimatePresence } from 'framer-motion';
 
+type GroupKey = 'group1' | 'group2' | 'group3';
+
+type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: string }>;
+
+const DEFAULT_GROUPS: GroupState = {
+  group1: { model: '', apiKey: '', baseUrl: '' },
+  group2: { model: '', apiKey: '', baseUrl: '' },
+  group3: { model: '', apiKey: '', baseUrl: '' },
+};
+
+const GROUP_META: Record<
+  GroupKey,
+  { title: string; subtitle: string; recommended: string; modelPlaceholder: string }
+> = {
+  group1: {
+    title: 'Fix & Debug Agents',
+    subtitle: 'Fixer, Debugger, Reasoner',
+    recommended: 'openai/deepseek-ai/deepseek-v3.2 or another strong reasoning model',
+    modelPlaceholder: 'Model (e.g. openai/deepseek-ai/deepseek-v3.2)',
+  },
+  group2: {
+    title: 'Core Build Agents',
+    subtitle: 'Architect, Designer, Testbench, Verifier, Manager, Physical',
+    recommended: 'glm-4-plus or another strong coding / planning model',
+    modelPlaceholder: 'Model (e.g. glm-4-plus)',
+  },
+  group3: {
+    title: 'Documentation Agents',
+    subtitle: 'Documenter, Reporter, fast text tasks',
+    recommended: 'groq/llama-3.3-70b-versatile',
+    modelPlaceholder: 'Model (e.g. groq/llama-3.3-70b-versatile)',
+  },
+};
+
 export const BillingModal = ({ isOpen, onClose, onKeySaved }: { isOpen: boolean, onClose: () => void, onKeySaved: () => void }) => {
-  const [apiKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [groups, setGroups] = useState<GroupState>(DEFAULT_GROUPS);
 
-  const [group1, setGroup1] = useState({ model: '', apiKey: '', baseUrl: '' });
-  const [group2, setGroup2] = useState({ model: '', apiKey: '', baseUrl: '' });
-  const [group3, setGroup3] = useState({ model: '', apiKey: '', baseUrl: '' });
+  useEffect(() => {
+    if (!isOpen) return;
+    setError('');
+    try {
+      const raw = localStorage.getItem('agentic_byok_key');
+      if (!raw) {
+        setGroups(DEFAULT_GROUPS);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+
+      const nextGroups: GroupState = {
+        group1: {
+          model: parsed.group1?.model || '',
+          apiKey: parsed.group1?.api_key || '',
+          baseUrl: parsed.group1?.base_url || '',
+        },
+        group2: {
+          model: parsed.group2?.model || '',
+          apiKey: parsed.group2?.api_key || '',
+          baseUrl: parsed.group2?.base_url || '',
+        },
+        group3: {
+          model: parsed.group3?.model || '',
+          apiKey: parsed.group3?.api_key || '',
+          baseUrl: parsed.group3?.base_url || '',
+        },
+      };
+      setGroups(nextGroups);
+    } catch {
+      // Legacy single-key payload; start with blank grouped UI.
+      setGroups(DEFAULT_GROUPS);
+    }
+  }, [isOpen]);
+
+  const hasAnyKey = Object.values(groups).some((group) => group.apiKey.trim());
+
+  const updateGroup = (key: GroupKey, field: 'model' | 'apiKey' | 'baseUrl', value: string) => {
+    setGroups((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], [field]: value },
+    }));
+  };
 
   const handleSaveKey = async () => {
-    if (!group1.apiKey.trim() && !apiKey.trim()) return;
+    if (!hasAnyKey) return;
     setSaving(true);
     setError('');
-    
-    // Fallback to legacy single key if they just filled the first box or something
-    let payload = apiKey;
-    if (group1.apiKey || group2.apiKey || group3.apiKey) {
-      payload = JSON.stringify({
-        group1: { model: group1.model, api_key: group1.apiKey, base_url: group1.baseUrl },
-        group2: { model: group2.model, api_key: group2.apiKey, base_url: group2.baseUrl },
-        group3: { model: group3.model, api_key: group3.apiKey, base_url: group3.baseUrl }
-      });
-    }
+
+    const payload = JSON.stringify({
+      group1: {
+        model: groups.group1.model,
+        api_key: groups.group1.apiKey,
+        base_url: groups.group1.baseUrl,
+      },
+      group2: {
+        model: groups.group2.model,
+        api_key: groups.group2.apiKey,
+        base_url: groups.group2.baseUrl,
+      },
+      group3: {
+        model: groups.group3.model,
+        api_key: groups.group3.apiKey,
+        base_url: groups.group3.baseUrl,
+      },
+    });
 
     try {
       localStorage.setItem('agentic_byok_key', payload);
@@ -41,65 +124,80 @@ export const BillingModal = ({ isOpen, onClose, onKeySaved }: { isOpen: boolean,
 
   return (
     <AnimatePresence>
-      <div className="billing-modal-overlay">
-        <motion.div 
-          className="sci-fi-card billing-modal-content"
-          initial={{ opacity: 0, scale: 0.95, y: 10 }}
+      <div className="billing-modal-overlay" onClick={onClose}>
+        <motion.div
+          className="billing-modal-content byok-modal"
+          initial={{ opacity: 0, scale: 0.98, y: 8 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 10 }}
-          transition={{ duration: 0.2 }}
-          style={{ width: "90%", maxWidth: "600px", maxHeight: "90vh", overflowY: "auto" }}
+          exit={{ opacity: 0, scale: 0.98, y: 8 }}
+          transition={{ duration: 0.16 }}
+          onClick={(e) => e.stopPropagation()}
         >
-          <button className="billing-modal-close" onClick={onClose}>✕</button>
-          
-          <div className="billing-header">
-            <div className="billing-icon">⚠️</div>
-            <h2 className="billing-title">Bring Your Own Key (BYOK)</h2>
+          <button className="billing-modal-close" onClick={onClose} aria-label="Close BYOK modal">
+            Close
+          </button>
+
+          <div className="billing-header byok-header">
+            <h2 className="billing-title">Configure BYOK Keys</h2>
+            <p className="billing-sub">
+              AgentIC routes different agent roles to different model groups. Leave model and base URL blank if you only want to provide keys.
+            </p>
           </div>
-          
-          <p className="billing-sub" style={{marginBottom: "20px"}}>
-            AgentIC requires 3 separate LLM configurations to run efficiently. 
-            You can configure different models (e.g. Claude, OpenAI, Groq) for each group of multi-agent roles.
-          </p>
 
-          <div className="byok-section">
-            <h3 className="byok-title">1. Reasoning Agents (Architect, Debugger, Manager)</h3>
-            <p className="byok-desc">Used for deep reasoning and planning. (Recommended: <strong>openai/gpt-4o</strong> or <strong>anthropic/claude-3-5-sonnet-20241022</strong>)</p>
-            <div style={{display: 'flex', gap: '10px', marginBottom: '10px'}}>
-               <input className="byok-input" placeholder="Model (e.g. openai/gpt-4o)" value={group1.model} onChange={e => setGroup1({...group1, model: e.target.value})} />
-               <input className="byok-input" placeholder="Base URL (optional, for custom endpoints)" value={group1.baseUrl} onChange={e => setGroup1({...group1, baseUrl: e.target.value})} />
-            </div>
-            <input className="byok-input" type="password" placeholder="API Key (sk-...)" value={group1.apiKey} onChange={e => setGroup1({...group1, apiKey: e.target.value})} autoFocus />
-            
-            <h3 className="byok-title" style={{marginTop: "20px"}}>2. Coding Agents (Designer, Testbench, Verifier)</h3>
-            <p className="byok-desc">Used for heavy code generation. (Recommended: <strong>openai/gpt-4o</strong> or <strong>anthropic/claude-3-5-sonnet-20241022</strong>)</p>
-            <div style={{display: 'flex', gap: '10px', marginBottom: '10px'}}>
-               <input className="byok-input" placeholder="Model (e.g. anthropic/claude-3-5-sonnet-20241022)" value={group2.model} onChange={e => setGroup2({...group2, model: e.target.value})} />
-               <input className="byok-input" placeholder="Base URL (optional)" value={group2.baseUrl} onChange={e => setGroup2({...group2, baseUrl: e.target.value})} />
-            </div>
-            <input className="byok-input" type="password" placeholder="API Key (sk-...)" value={group2.apiKey} onChange={e => setGroup2({...group2, apiKey: e.target.value})} />
+          <div className="byok-cards">
+            {(['group1', 'group2', 'group3'] as GroupKey[]).map((key, index) => {
+              const meta = GROUP_META[key];
+              const group = groups[key];
+              return (
+                <section className="byok-card" key={key}>
+                  <div className="byok-card-head">
+                    <span className="byok-card-index">{index + 1}</span>
+                    <div>
+                      <h3 className="byok-title">{meta.title}</h3>
+                      <p className="byok-desc">{meta.subtitle}</p>
+                    </div>
+                  </div>
+                  <p className="byok-recommendation">Recommended: {meta.recommended}</p>
 
-            <h3 className="byok-title" style={{marginTop: "20px"}}>3. Iterative Agents (Fixer, Physical)</h3>
-            <p className="byok-desc">Used for blazing fast iteration and syntax fixing. (Recommended: <strong>groq/llama-3.3-70b-versatile</strong>)</p>
-            <div style={{display: 'flex', gap: '10px', marginBottom: '10px'}}>
-               <input className="byok-input" placeholder="Model (e.g. groq/llama-3.3-70b-versatile)" value={group3.model} onChange={e => setGroup3({...group3, model: e.target.value})} />
-               <input className="byok-input" placeholder="Base URL (optional)" value={group3.baseUrl} onChange={e => setGroup3({...group3, baseUrl: e.target.value})} />
-            </div>
-            <input className="byok-input" type="password" placeholder="API Key (sk-...)" value={group3.apiKey} onChange={e => setGroup3({...group3, apiKey: e.target.value})} />
+                  <div className="byok-row">
+                    <input
+                      className="byok-input"
+                      placeholder={meta.modelPlaceholder}
+                      value={group.model}
+                      onChange={(e) => updateGroup(key, 'model', e.target.value)}
+                    />
+                    <input
+                      className="byok-input"
+                      placeholder="Base URL (optional)"
+                      value={group.baseUrl}
+                      onChange={(e) => updateGroup(key, 'baseUrl', e.target.value)}
+                    />
+                  </div>
+                  <input
+                    className="byok-input"
+                    type="password"
+                    placeholder="API Key"
+                    value={group.apiKey}
+                    onChange={(e) => updateGroup(key, 'apiKey', e.target.value)}
+                    autoFocus={key === 'group1' && !groups.group1.apiKey}
+                  />
+                </section>
+              );
+            })}
+          </div>
 
-            {error && <div className="byok-error">{error}</div>}
-            
+          {error && <div className="byok-error">{error}</div>}
+
+          <div className="byok-actions">
+            <button className="byok-cancel" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
             <button
               className="action-btn byok-submit"
               onClick={handleSaveKey}
-              style={{marginTop: "20px"}}
-              disabled={saving || !group1.apiKey.trim()}
+              disabled={saving || !hasAnyKey}
             >
-              {saving ? (
-                <span>Encrypting & Saving...</span>
-              ) : (
-                <span>Save All Encrypted Keys →</span>
-              )}
+              {saving ? 'Saving...' : 'Save Keys'}
             </button>
           </div>
         </motion.div>

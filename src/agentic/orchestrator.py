@@ -5066,7 +5066,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # 5. Documentation
         self.log("Generating Design Documentation (AI-Powered)...", refined=True)
         
-        doc_agent = get_doc_agent(self.get_llm_for_role("manager"))
+        doc_agent = get_doc_agent(self.get_llm_for_role("documenter"))
         
         doc_task = Task(
             description=f"""Generate a comprehensive Datasheet (Markdown) for "{self.name}".

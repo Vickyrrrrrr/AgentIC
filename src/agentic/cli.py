@@ -6,9 +6,11 @@ Uses CrewAI + LLM (DeepSeek/Llama/Groq) to generate chips from natural language.
 Usage:
     python3 main.py build --name counter --desc "8-bit counter with enable and reset"
 """
+import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -65,6 +67,14 @@ claude_theme = Theme({
 })
 console = Console(theme=claude_theme)
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic_credentials.json")
+LICENSE_VERIFY_URL = "https://api.lemonsqueezy.com/v1/licenses/validate"
+LICENSE_TIMEOUT_SECONDS = 20
+LICENSE_OFFLINE_GRACE_HOURS = max(
+    0,
+    int(os.environ.get("AGENTIC_LICENSE_OFFLINE_GRACE_HOURS", "168")),
+)
+
+
 def check_dependencies(skip_openlane: bool):
     import shutil
     import typer
@@ -90,202 +100,242 @@ def check_dependencies(skip_openlane: bool):
             border_style="red"
         ))
         raise typer.Exit(1)
-def verify_license():
-    """Verify license key before running any CLI commands (Real Lemon Squeezy integration)"""
-    # Developer backdoor/bypass
-    if os.environ.get("AGENTIC_DEV_MODE") == "1":
-        return
-        
-    # Also skip license checking when running locally (not packaged by PyInstaller)
-    if not getattr(sys, "frozen", False) and not os.environ.get("AGENTIC_FORCE_LICENSE_CHECK"):
-        return
+
+
+def _is_packaged_runtime() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _allow_dev_bypass() -> bool:
+    return os.environ.get("AGENTIC_DEV_MODE") == "1" and not _is_packaged_runtime()
+
+
+def _should_enforce_license() -> bool:
+    if _allow_dev_bypass():
+        return False
+    return _is_packaged_runtime() or bool(os.environ.get("AGENTIC_FORCE_LICENSE_CHECK"))
+
+
+def _mask_secret(value: str) -> str:
+    value = (value or "").strip()
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _load_credentials(required: bool = True) -> dict:
     if not os.path.exists(CREDENTIALS_FILE):
+        if required:
+            console.print(Panel(
+                "[error]Authorization Required[/error]\n"
+                "No local AgentIC license was found on this machine.\n"
+                "Please run: [accent]agentic login <your_license_key>[/accent]",
+                title="🔒 License Check Failed"
+            ))
+            raise typer.Exit(1)
+        return {}
+
+    try:
+        with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        console.print(f"[error]Error reading credentials: {exc}[/error]")
+        raise typer.Exit(1)
+
+    if required and not (data.get("license_key") or "").strip():
         console.print(Panel(
-            "[error]Authorization Required[/error]\n" \
-            "You do not have a valid license locally.\n" \
+            "[error]Stored credentials are incomplete.[/error]\n"
+            "Please re-run: [accent]agentic login <your_license_key>[/accent]",
+            title="🔒 License Check Failed"
+        ))
+        raise typer.Exit(1)
+    return data
+
+
+def _persist_credentials(data: dict) -> None:
+    os.makedirs(os.path.dirname(CREDENTIALS_FILE) or ".", exist_ok=True)
+    with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    try:
+        os.chmod(CREDENTIALS_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _apply_runtime_keys(data: dict) -> None:
+    from . import config
+
+    mappings = (
+        ("nvidia_api_key", config.CLOUD_CONFIG, "NVIDIA_API_KEY"),
+        ("groq_api_key", config.GROQ_CONFIG, "GROQ_API_KEY"),
+        ("glm_api_key", config.GLM_CONFIG, "GLM_API_KEY"),
+    )
+    for field, cfg, env_name in mappings:
+        value = (data.get(field) or "").strip()
+        if value:
+            cfg["api_key"] = value
+            os.environ[env_name] = value
+
+
+def _validate_license_with_server(key: str) -> tuple[bool, str]:
+    import requests
+
+    response = requests.post(
+        LICENSE_VERIFY_URL,
+        headers={"Accept": "application/json"},
+        data={"license_key": key},
+        timeout=LICENSE_TIMEOUT_SECONDS,
+    )
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+
+    if response.status_code != 200:
+        return False, payload.get("error") or f"HTTP {response.status_code}"
+    if not payload.get("valid"):
+        return False, payload.get("error") or "Key rejected by server"
+    return True, ""
+
+
+def _offline_grace_remaining(data: dict) -> timedelta | None:
+    raw_value = (data.get("last_verified_at") or "").strip()
+    if not raw_value or LICENSE_OFFLINE_GRACE_HOURS <= 0:
+        return None
+    try:
+        verified_at = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if verified_at.tzinfo is None:
+        verified_at = verified_at.replace(tzinfo=timezone.utc)
+
+    deadline = verified_at + timedelta(hours=LICENSE_OFFLINE_GRACE_HOURS)
+    remaining = deadline - datetime.now(timezone.utc)
+    if remaining.total_seconds() <= 0:
+        return None
+    return remaining
+
+
+def _remember_verified_license(data: dict) -> None:
+    data["last_verified_at"] = datetime.now(timezone.utc).isoformat()
+    _persist_credentials(data)
+
+
+def _prompt_secret(label: str, existing_value: str = "", optional: bool = False) -> str:
+    existing_value = (existing_value or "").strip()
+    if existing_value and typer.confirm(
+        f"Keep the saved {label} ({_mask_secret(existing_value)})?",
+        default=True,
+    ):
+        return existing_value
+
+    while True:
+        if optional:
+            value = typer.prompt(label, hide_input=True, default="").strip()
+        else:
+            value = typer.prompt(label, hide_input=True).strip()
+        if value or optional:
+            return value
+        console.print("[warning]This key is required for the packaged multi-agent flow.[/warning]")
+
+
+def verify_license():
+    """Verify the packaged CLI license and load saved BYOK provider keys."""
+    if not _should_enforce_license():
+        return
+
+    data = _load_credentials(required=True)
+    key = (data.get("license_key") or "").strip()
+
+    try:
+        valid, error_msg = _validate_license_with_server(key)
+    except Exception:
+        remaining = _offline_grace_remaining(data)
+        if remaining is None:
+            console.print(Panel(
+                "[error]Could not verify your license with Lemon Squeezy.[/error]\n"
+                "This packaged CLI requires a successful verification at least once every "
+                f"{LICENSE_OFFLINE_GRACE_HOURS} hours.\n"
+                "Reconnect to the internet and run: [accent]agentic login <your_license_key>[/accent]",
+                title="🔒 License Check Failed"
+            ))
+            raise typer.Exit(1)
+
+        hours_left = max(1, int(remaining.total_seconds() // 3600))
+        console.print(
+            f"[warning]License server unreachable. Using cached verification for up to {hours_left} more hour(s).[/warning]"
+        )
+        _apply_runtime_keys(data)
+        return
+
+    if not valid:
+        console.print(Panel(
+            f"[error]Invalid License Key[/error]\n"
+            f"The stored key ({_mask_secret(key)}) was rejected by the server: {error_msg}\n"
             "Please run: [accent]agentic login <your_license_key>[/accent]",
             title="🔒 License Check Failed"
         ))
         raise typer.Exit(1)
-    
-    import json
-    import requests
-    try:
-        with open(CREDENTIALS_FILE, 'r') as f:
-            data = json.load(f)
-            key = data.get("license_key", "")
-            
-            # Real Lemon Squeezy integration
-            try:
-                # Need a real API endpoint, but using validate endpoint for now
-                response = requests.post(
-                    "https://api.lemonsqueezy.com/v1/licenses/validate",
-                    headers={"Accept": "application/json"},
-                    data={"license_key": key}
-                )
-                
-                if response.status_code != 200 or not response.json().get("valid"):
-                    if key.startswith("sk_test_dev_bypass"): # local backdoor
-                        pass
-                    else:
-                        console.print(Panel(
-                            f"[error]Invalid License Key[/error]\n" \
-                            f"The key we found ({key[:8]}...) was rejected by the server.\n" \
-                            "Please run: [accent]agentic login <your_license_key>[/accent]",
-                            title="🔒 License Check Failed"
-                        ))
-                        raise typer.Exit(1)
-            except requests.exceptions.RequestException as e:
-                console.print(f"[warning]Warning: Could not connect to license server to verify your key. Allowing offline bypass for now.[/warning]")
-                # We let it pass if there's no internet since they already bought it
-            # --- Inject user-provided API keys into runtime configs ---
-            from . import config
-            if data.get("nvidia_api_key"): 
-                config.CLOUD_CONFIG["api_key"] = data["nvidia_api_key"]
-                os.environ["NVIDIA_API_KEY"] = data["nvidia_api_key"]
-            if data.get("groq_api_key"): 
-                config.GROQ_CONFIG["api_key"] = data["groq_api_key"]
-                os.environ["GROQ_API_KEY"] = data["groq_api_key"]
-            if data.get("glm_api_key"): 
-                config.GLM_CONFIG["api_key"] = data["glm_api_key"]
-                os.environ["GLM_API_KEY"] = data["glm_api_key"]
-                
-    except Exception as e:
-        console.print(f"[error]Error reading credentials: {e}[/error]")
-        raise typer.Exit(1)
-    
-    import json
-    import requests
-    try:
-        with open(CREDENTIALS_FILE, 'r') as f:
-            data = json.load(f)
-            key = data.get("license_key", "")
-            
-            # Real Lemon Squeezy integration
-            try:
-                # Need a real API endpoint, but using validate endpoint for now
-                response = requests.post(
-                    "https://api.lemonsqueezy.com/v1/licenses/validate",
-                    headers={"Accept": "application/json"},
-                    data={"license_key": key}
-                )
-                
-                if response.status_code != 200 or not response.json().get("valid"):
-                    if key.startswith("sk_test_dev_bypass"): # local backdoor
-                        pass
-                    else:
-                        console.print(Panel(
-                            f"[error]Invalid License Key[/error]\n" \
-                            f"The key we found ({key[:8]}...) was rejected by the server.\n" \
-                            "Please run: [accent]agentic login <your_license_key>[/accent]",
-                            title="🔒 License Check Failed"
-                        ))
-                        raise typer.Exit(1)
-            except requests.exceptions.RequestException as e:
-                console.print(f"[warning]Warning: Could not connect to license server to verify your key. Allowing offline bypass for now.[/warning]")
-                # We let it pass if there's no internet since they already bought it
-            # --- Inject user-provided API keys into runtime configs ---
-            from . import config
-            if data.get("nvidia_api_key"): 
-                config.CLOUD_CONFIG["api_key"] = data["nvidia_api_key"]
-                os.environ["NVIDIA_API_KEY"] = data["nvidia_api_key"]
-            if data.get("groq_api_key"): 
-                config.GROQ_CONFIG["api_key"] = data["groq_api_key"]
-                os.environ["GROQ_API_KEY"] = data["groq_api_key"]
-            if data.get("glm_api_key"): 
-                config.GLM_CONFIG["api_key"] = data["glm_api_key"]
-                os.environ["GLM_API_KEY"] = data["glm_api_key"]
-                
-    except Exception as e:
-        console.print(f"[error]Error reading credentials: {e}[/error]")
-        raise typer.Exit(1)
-    
-    import json
-    try:
-        with open(CREDENTIALS_FILE, 'r') as f:
-            data = json.load(f)
-            key = data.get("license_key", "")
-            
-            # TODO: Replace with real API call to Stripe/LemonSqueezy
-            # For now, we simulate that any key starting with "sk_live_" is valid
-            if not key.startswith("sk_live_"):
-                console.print(Panel(
-                    f"[error]Invalid License Key[/error]\n"
-                    f"The key we found ({key[:8]}...) was rejected by the server.\n"
-                    "Please run: [accent]agentic login <your_license_key>[/accent]",
-                    title="🔒 License Check Failed"
-                ))
-                raise typer.Exit(1)
-            # --- Inject user-provided API keys into runtime configs ---
-            from . import config
-            if data.get("nvidia_api_key"): 
-                config.CLOUD_CONFIG["api_key"] = data["nvidia_api_key"]
-                os.environ["NVIDIA_API_KEY"] = data["nvidia_api_key"]
-            if data.get("groq_api_key"): 
-                config.GROQ_CONFIG["api_key"] = data["groq_api_key"]
-                os.environ["GROQ_API_KEY"] = data["groq_api_key"]
-            if data.get("glm_api_key"): 
-                config.GLM_CONFIG["api_key"] = data["glm_api_key"]
-                os.environ["GLM_API_KEY"] = data["glm_api_key"]
-                
-    except Exception as e:
-        console.print(f"[error]Error reading credentials: {e}[/error]")
-        raise typer.Exit(1)
+
+    _remember_verified_license(data)
+    _apply_runtime_keys(data)
+
+
 @app.command()
 def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) License Key")):
     """Authenticate this computer and setup LLM API keys for multi-agent capabilities."""
-    import json
-    import requests
-    
-    console.print(f"Verifying license key securely with server...")
-    
-    if key.startswith("sk_test_dev_bypass"):
-        console.print("[success]Developer Bypass active.[/success]")
+    key = key.strip()
+    console.print("[accent]Verifying your AgentIC license with Lemon Squeezy...[/accent]")
+
+    if _allow_dev_bypass() and key.startswith("sk_test_dev_bypass"):
+        console.print("[warning]Developer bypass active for local non-packaged testing.[/warning]")
     else:
-        # Real Lemon Squeezy API Request
         try:
-            response = requests.post(
-                "https://api.lemonsqueezy.com/v1/licenses/validate",
-                headers={"Accept": "application/json"},
-                data={"license_key": key}
-            )
-            data = response.json()
-            
-            if response.status_code != 200 or not data.get("valid"):
-                error_msg = data.get("error", "Key rejected by server")
-                console.print(f"[error]✗ Invalid License Key: {error_msg}[/error]")
-                raise typer.Exit(1)
-        except requests.exceptions.RequestException as e:
-            console.print(f"[error]✗ Could not reach license verification server. Check your connection.[/error]")
+            valid, error_msg = _validate_license_with_server(key)
+        except Exception:
+            console.print("[error]✗ Could not reach the license verification server. Check your connection.[/error]")
             raise typer.Exit(1)
-    
+        if not valid:
+            console.print(f"[error]✗ Invalid License Key: {error_msg}[/error]")
+            raise typer.Exit(1)
+
+    existing = _load_credentials(required=False)
     console.print(Panel(
-        f"[success]Authentication Successful![/success]\n" \
-        f"License verified. Now, let's configure your AI engines.\n" \
-        f"AgentIC relies on 3 specific models for optimal speed & logic.",
+        "[success]Authentication Successful![/success]\n"
+        "License verified. Now configure the provider keys used by each agent class.\n\n"
+        "[heading]Role Map[/heading]\n"
+        "GLM / ZhipuAI: architect, designer, verifier, manager, physical\n"
+        "NVIDIA / DeepSeek-style routing: fixer, debugger, reasoner\n"
+        "Groq: documenter and reporting flows",
         title="🔒 Login Complete"
     ))
-    
-    nvidia_key = typer.prompt("🔑 Enter your NVIDIA API Key (for Heavy Reasoning)", hide_input=True)
-    groq_key = typer.prompt("⚡ Enter your GROQ API Key (for Fast Iterations)", hide_input=True)
-    glm_key = typer.prompt("🧠 Enter your ZhipuAI/GLM API Key (Optional, press Enter to skip)", default="", hide_input=True)
-        
-    os.makedirs(os.path.dirname(CREDENTIALS_FILE) or ".", exist_ok=True)
-    with open(CREDENTIALS_FILE, 'w') as f:
-        json.dump({
-            "license_key": key,
-            "nvidia_api_key": nvidia_key,
-            "groq_api_key": groq_key,
-            "glm_api_key": glm_key
-        }, f, indent=4)
-        
-    # Inject them immediately for this session
-    from . import config
-    config.CLOUD_CONFIG["api_key"] = nvidia_key
-    config.GROQ_CONFIG["api_key"] = groq_key
-    config.GLM_CONFIG["api_key"] = glm_key
-    console.print(f"\n[success]✅ API Keys securely saved in {CREDENTIALS_FILE}[/success]")
-    
+
+    glm_key = _prompt_secret(
+        "GLM / ZhipuAI API key for core build agents",
+        existing.get("glm_api_key", ""),
+        optional=True,
+    )
+    nvidia_key = _prompt_secret(
+        "NVIDIA API key for fixer and debugger agents",
+        existing.get("nvidia_api_key", ""),
+        optional=False,
+    )
+    groq_key = _prompt_secret(
+        "Groq API key for report and documentation agents",
+        existing.get("groq_api_key", ""),
+        optional=False,
+    )
+
+    data = {
+        "license_key": key,
+        "nvidia_api_key": nvidia_key,
+        "groq_api_key": groq_key,
+        "glm_api_key": glm_key,
+    }
+    _remember_verified_license(data)
+    _apply_runtime_keys(data)
+    console.print(f"\n[success]✅ Credentials saved locally in {CREDENTIALS_FILE}[/success]")
+
     # Now trigger diagnostics to ensure they have the compilers installed
     console.print("\n[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
     from .tools.vlsi_tools import startup_self_check
@@ -708,7 +758,18 @@ def build(
     # Build Multi-LLM Role Map for the CLI
     from .config import get_role_llm_config
     from crewai import LLM
-    roles = ["architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager", "physical"]
+    roles = [
+        "architect",
+        "designer",
+        "testbench_designer",
+        "verifier",
+        "fixer",
+        "debugger",
+        "manager",
+        "physical",
+        "documenter",
+        "reporter",
+    ]
     role_llms = {}
     
     print("\n--- 🤖 Local Compute Routing Map ---", flush=True)

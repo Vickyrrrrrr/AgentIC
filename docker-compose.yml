@@ -12,15 +12,15 @@ services:
       - .env
     environment:
       # Pass database and redis URIs to connect
-      - DATABASE_URL=postgresql://agentic_user:password@db:5432/agentic_db
+      - DATABASE_URL=postgresql://agentic_user:${POSTGRES_PASSWORD:-password}@db:5432/agentic_db
       - REDIS_URL=redis://redis:6379/0
       - RUN_CELERY=true
       - CELERY_TASK_SOFT_TIME_LIMIT=7200
       - CELERY_TASK_TIME_LIMIT=7300
       # MinIO (S3 Compatible) Storage
       - S3_ENDPOINT_URL=http://minio:9000
-      - S3_ACCESS_KEY=minioadmin
-      - S3_SECRET_KEY=minioadmin
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - S3_BUCKET_NAME=agentic-artifacts
     depends_on:
       - redis
@@ -35,6 +35,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/volare:/root/.volare
     command: uvicorn server.api:app --host 0.0.0.0 --port 7860 --reload
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7860/livez >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   # The Background Worker (handles heavy LLM & VLSI builds)
@@ -48,15 +54,15 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://agentic_user:password@db:5432/agentic_db
+      - DATABASE_URL=postgresql://agentic_user:${POSTGRES_PASSWORD:-password}@db:5432/agentic_db
       - REDIS_URL=redis://redis:6379/0
       - RUN_CELERY=true
       - CELERY_TASK_SOFT_TIME_LIMIT=7200
       - CELERY_TASK_TIME_LIMIT=7300
       # MinIO (S3 Compatible) Storage
       - S3_ENDPOINT_URL=http://minio:9000
-      - S3_ACCESS_KEY=minioadmin
-      - S3_SECRET_KEY=minioadmin
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - S3_BUCKET_NAME=agentic-artifacts
     depends_on:
       - redis
@@ -70,14 +76,28 @@ services:
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/volare:/root/.volare
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import server.tasks' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   # Redis (Message Broker for Celery Queue)
   redis:
     image: redis:alpine
     container_name: agentic_redis
+    command: redis-server --appendonly yes --save 60 1000
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   # PostgreSQL (Persistent Database for Job Tracking/Status)
@@ -86,12 +106,17 @@ services:
     container_name: agentic_db
     environment:
       - POSTGRES_USER=agentic_user
-      - POSTGRES_PASSWORD=password
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_DB=agentic_db
     ports:
       - "5432:5432"
     volumes:
       - agentic_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentic_user -d agentic_db"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   # MinIO (Self-hosted S3 Object Storage)
@@ -102,8 +127,8 @@ services:
       - "9000:9000" # API Port
       - "9001:9001" # Web Console Port
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
     command: server /data --console-address ":9001"
     volumes:
       - agentic_minio_data:/data
@@ -118,7 +143,7 @@ services:
     entrypoint: >
       /bin/sh -c "
       sleep 5;
-      until /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin > /dev/null 2>&1; do
+      until /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin} > /dev/null 2>&1; do
         echo 'waiting for minio...';
         sleep 2;
       done;
@@ -127,6 +152,39 @@ services:
       exit 0;
       "
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agentic_prometheus
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: agentic_grafana
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   agentic_db_data:
   agentic_minio_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

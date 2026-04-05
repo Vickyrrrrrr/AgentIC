@@ -4,6 +4,7 @@ Real-time SSE streaming, job management, human-in-the-loop approval, and chip re
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -21,10 +22,12 @@ import io
 import threading
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from server.approval import approval_manager
 from server.auth import (
@@ -73,14 +76,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+logger = logging.getLogger("agentic.api")
+
+HTTP_REQUESTS_TOTAL = Counter(
+    "agentic_http_requests_total",
+    "Total HTTP requests served by AgentIC.",
+    ["method", "path", "status"],
+)
+HTTP_REQUEST_LATENCY_SECONDS = Histogram(
+    "agentic_http_request_latency_seconds",
+    "HTTP request latency for AgentIC routes.",
+    ["method", "path"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120),
+)
+HTTP_INFLIGHT_REQUESTS = Gauge(
+    "agentic_http_inflight_requests",
+    "Number of in-flight HTTP requests.",
+)
+BUILDS_STARTED_TOTAL = Counter(
+    "agentic_builds_started_total",
+    "Number of build requests accepted by AgentIC.",
+)
+BUILDS_COMPLETED_TOTAL = Counter(
+    "agentic_builds_completed_total",
+    "Number of builds that reached a terminal state.",
+    ["outcome"],
+)
+JOBS_BY_STATUS = Gauge(
+    "agentic_jobs_by_status",
+    "Current in-memory job counts by status.",
+    ["status"],
+)
+
+
+@app.middleware("http")
+async def prometheus_http_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    HTTP_INFLIGHT_REQUESTS.inc()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        route = request.scope.get("route")
+        path_template = getattr(route, "path", request.url.path)
+        status_code = str(getattr(response, "status_code", 500))
+        duration = time.perf_counter() - start
+        HTTP_REQUESTS_TOTAL.labels(request.method, path_template, status_code).inc()
+        HTTP_REQUEST_LATENCY_SECONDS.labels(request.method, path_template).observe(duration)
+        HTTP_INFLIGHT_REQUESTS.dec()
+
 # ─── Job Store ───────────────────────────────────────────────────────
 # Structure: { job_id: { status, design_name, events: [], result: {}, cancelled: bool } }
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
 
 try:
-    from .db import SessionLocal, Job as DBJob
+    from .db import SessionLocal, Job as DBJob, engine as DB_ENGINE
 except ImportError:
     SessionLocal = None
+    DB_ENGINE = None
     pass
 
 def _sync_job_to_db(job_id: str):
@@ -140,6 +194,89 @@ def _pull_job_from_db(job_id: str):
     except Exception as e:
         logger.error(f"Failed to pull {job_id} from DB: {e}")
 
+
+def _job_status_counts() -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for job in JOB_STORE.values():
+        status = job.get("status", "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _check_database() -> Dict[str, Any]:
+    if DB_ENGINE is None:
+        return {"ok": False, "detail": "database engine unavailable"}
+    try:
+        with DB_ENGINE.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "detail": str(exc)}
+
+
+def _check_redis() -> Dict[str, Any]:
+    redis_url = os.getenv("REDIS_URL", "").strip()
+    if not redis_url:
+        return {"ok": False, "detail": "REDIS_URL not configured"}
+    try:
+        import redis as redis_lib
+        client = redis_lib.Redis.from_url(redis_url, socket_timeout=1, socket_connect_timeout=1)
+        client.ping()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "detail": str(exc)}
+
+
+def _check_object_storage() -> Dict[str, Any]:
+    try:
+        from server.storage import S3_BUCKET_NAME, S3_ENDPOINT_URL, get_s3_client
+        client = get_s3_client()
+        if not client:
+            return {"ok": False, "enabled": False, "detail": "object storage disabled"}
+        client.list_objects_v2(Bucket=S3_BUCKET_NAME, MaxKeys=1)
+        return {
+            "ok": True,
+            "enabled": True,
+            "bucket": S3_BUCKET_NAME,
+            "endpoint": S3_ENDPOINT_URL,
+        }
+    except Exception as exc:
+        return {"ok": False, "enabled": True, "detail": str(exc)}
+
+
+def _collect_platform_status(include_llm: bool = False) -> Dict[str, Any]:
+    db_status = _check_database()
+    redis_status = _check_redis()
+    storage_status = _check_object_storage()
+
+    llm_ok = None
+    llm_name = None
+    llm_error = None
+    if include_llm:
+        try:
+            _, llm_name = _get_llm()
+            llm_ok = True
+        except Exception as exc:
+            llm_ok = False
+            llm_error = str(exc)
+
+    ready = db_status["ok"] and redis_status["ok"] and (storage_status["ok"] or not storage_status.get("enabled", False))
+    if include_llm and llm_ok is False:
+        ready = False
+
+    return {
+        "status": "ok" if ready else "degraded",
+        "database": db_status,
+        "redis": redis_status,
+        "object_storage": storage_status,
+        "jobs": _job_status_counts(),
+        "run_celery": os.getenv("RUN_CELERY", "false").lower() == "true",
+        "llm_backend": llm_name,
+        "llm_ok": llm_ok,
+        "llm_error": llm_error,
+        "version": "3.0.0",
+    }
+
 # Registry for active orchestrator instances to support HITL interaction
 RUNNING_ORCHESTRATORS: Dict[str, Any] = {}
 
@@ -179,6 +316,125 @@ STAGE_META: Dict[str, Dict[str, str]] = {
     "FAIL": {"label": "Build Failed", "icon": "❌"},
 }
 
+_KNOWN_MODEL_PREFIXES = (
+    "openai/",
+    "groq/",
+    "ollama/",
+    "anthropic/",
+    "nvidia_nim/",
+    "azure/",
+    "huggingface/",
+    "together_ai/",
+    "mistral/",
+)
+
+ROLE_GROUP_MAP: Dict[str, str] = {
+    "fixer": "group1",
+    "debugger": "group1",
+    "reasoner": "group1",
+    "architect": "group2",
+    "designer": "group2",
+    "testbench_designer": "group2",
+    "verifier": "group2",
+    "manager": "group2",
+    "physical": "group2",
+    "documenter": "group3",
+    "reporter": "group3",
+    "doc_gen": "group3",
+}
+
+PRIMARY_GROUP_FALLBACK_ROLE: Dict[str, str] = {
+    "group1": "fixer",
+    "group2": "architect",
+    "group3": "documenter",
+}
+
+
+def _normalize_model_name(model: str, base_url: str) -> str:
+    model = (model or "").strip()
+    base_url = (base_url or "").strip()
+    if base_url and model and not any(model.startswith(prefix) for prefix in _KNOWN_MODEL_PREFIXES):
+        return f"openai/{model}"
+    return model
+
+
+def _load_request_byok_config(request: Request, profile: Optional[dict]) -> tuple[Optional[dict], str]:
+    header_key = request.headers.get("X-LLM-API-Key")
+    if header_key:
+        try:
+            parsed = json.loads(header_key)
+        except json.JSONDecodeError:
+            parsed = {
+                "group1": {"api_key": header_key},
+                "group2": {"api_key": header_key},
+                "group3": {"api_key": header_key},
+            }
+        return parsed, "request_header"
+
+    profile_byok = get_byok_config_for_user(profile)
+    if profile_byok:
+        return profile_byok, "stored_profile"
+    return None, "backend_env"
+
+
+def _resolve_role_llm_details(role: str, byok_config: dict = None) -> Dict[str, Any]:
+    from agentic.config import get_role_llm_config
+
+    cfg = get_role_llm_config(role)
+    target_group = ROLE_GROUP_MAP.get(role, "group2")
+    group = (byok_config or {}).get(target_group, {}) if byok_config else {}
+
+    if group.get("api_key"):
+        model = _normalize_model_name(group.get("model") or cfg.get("model", ""), group.get("base_url") or cfg.get("base_url", ""))
+        result: Dict[str, Any] = {
+            "role": role,
+            "group": target_group,
+            "model": model or cfg.get("model", ""),
+            "api_key": group.get("api_key", ""),
+            "base_url": (group.get("base_url") or cfg.get("base_url") or "").strip(),
+            "source": f"BYOK {target_group}",
+        }
+        if "deepseek" in result["model"].lower():
+            result["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
+        return result
+
+    # Legacy behavior: if only a single BYOK key exists, keep it usable for all roles.
+    legacy_byok_key = (byok_config or {}).get("group1", {}).get("api_key", "") if byok_config else ""
+    result = {
+        "role": role,
+        "group": target_group,
+        "model": cfg.get("model", ""),
+        "api_key": legacy_byok_key if legacy_byok_key else cfg.get("api_key", ""),
+        "base_url": cfg.get("base_url", ""),
+        "source": "Stored Profile BYOK fallback" if legacy_byok_key else "Local .env config",
+    }
+    if "extra_body" in cfg:
+        result["extra_body"] = cfg["extra_body"]
+    return result
+
+
+def _resolve_primary_llm_details(byok_config: dict = None) -> Optional[Dict[str, Any]]:
+    from agentic.config import get_role_llm_config
+
+    for group_name in ("group2", "group1", "group3"):
+        group = (byok_config or {}).get(group_name, {}) if byok_config else {}
+        if not group.get("api_key"):
+            continue
+        fallback_role = PRIMARY_GROUP_FALLBACK_ROLE[group_name]
+        cfg = get_role_llm_config(fallback_role)
+        model = _normalize_model_name(group.get("model") or cfg.get("model", ""), group.get("base_url") or cfg.get("base_url", ""))
+        result: Dict[str, Any] = {
+            "group": group_name,
+            "model": model or cfg.get("model", ""),
+            "api_key": group.get("api_key", ""),
+            "base_url": (group.get("base_url") or cfg.get("base_url") or "").strip(),
+            "source": f"BYOK {group_name}",
+        }
+        if "deepseek" in result["model"].lower():
+            result["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
+        return result
+    return None
+
 
 def _get_llm(byok_config: dict = None):
     try:
@@ -186,20 +442,21 @@ def _get_llm(byok_config: dict = None):
     except Exception as imp_err:
         raise RuntimeError(f"Cannot import crewai.LLM: {imp_err}")
 
-    # If BYOK config is provided and has group1, try to use it directly
-    if byok_config and "group1" in byok_config and byok_config["group1"].get("api_key"):
-        g = byok_config["group1"]
-        model = g.get("model", "")
-        _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
-        if g.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
-             model = f"openai/{model}"
-        llm_kwargs = dict(model=model, api_key=g.get("api_key"), temperature=0.6, max_tokens=16384)
-        if g.get("base_url"):
-            llm_kwargs["base_url"] = g.get("base_url")
-        if "deepseek" in model.lower():
-            llm_kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
+    # Prefer the main build group, then fixer, then documentation if BYOK is present.
+    primary_byok = _resolve_primary_llm_details(byok_config)
+    if primary_byok:
+        llm_kwargs = dict(
+            model=primary_byok["model"],
+            api_key=primary_byok["api_key"],
+            temperature=0.6,
+            max_tokens=16384,
+        )
+        if primary_byok.get("base_url"):
+            llm_kwargs["base_url"] = primary_byok["base_url"]
+        if "extra_body" in primary_byok:
+            llm_kwargs["extra_body"] = primary_byok["extra_body"]
         try:
-            return LLM(**llm_kwargs), f"{model} (BYOK)"
+            return LLM(**llm_kwargs), f"{primary_byok['model']} ({primary_byok['source']})"
         except Exception as e:
             raise RuntimeError(f"BYOK Compute Engine Failed: {e}")
 
@@ -227,9 +484,7 @@ def _get_llm(byok_config: dict = None):
                 continue
         try:
             model = cfg["model"]
-            _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
-            if cfg.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
-                model = f"openai/{model}"
+            model = _normalize_model_name(model, cfg.get("base_url", ""))
 
             if byok_api_key and not is_local:
                 if byok_api_key.startswith("gsk_") and "Groq" not in name:
@@ -253,56 +508,37 @@ def _get_llm(byok_config: dict = None):
 
 
 def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
-    from agentic.config import get_role_llm_config
     from crewai import LLM
     
-    roles = ["architect", "designer", "testbench_designer", "verifier", "fixer", "debugger", "manager", "physical"]
+    roles = [
+        "architect",
+        "designer",
+        "testbench_designer",
+        "verifier",
+        "fixer",
+        "debugger",
+        "manager",
+        "physical",
+        "documenter",
+        "reporter",
+    ]
     role_map = {}
     debug_log_map = {}
     
     for role in roles:
-        if byok_config and "group1" in byok_config:
-            if role in ("fixer", "debugger", "reasoner"):
-                g = byok_config.get("group1", {})
-            elif role in ("architect", "designer", "testbench_designer", "verifier", "manager", "physical"):
-                g = byok_config.get("group2", {})
-            else:
-                g = byok_config.get("group3", {})
-                
-            if g and g.get("api_key"):
-                model = g.get("model", "")
-                _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
-                if g.get("base_url") and not any(model.startswith(p) for p in _KNOWN):
-                     model = f"openai/{model}"
-                llm_kwargs = dict(model=model, api_key=g.get("api_key"), temperature=0.6)
-                if g.get("base_url"):
-                    llm_kwargs["base_url"] = g.get("base_url")
-                if "deepseek" in model.lower():
-                    llm_kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
-                role_map[role] = LLM(**llm_kwargs)
-                debug_log_map[role] = f"{model} [BYOK X-LLM-API-Key override]"
-                continue
-                
-        # fallback behavior
-        cfg = get_role_llm_config(role)
-        byok_key = byok_config.get("group1", {}).get("api_key", "") if byok_config else ""
-        key = byok_key if byok_key else cfg.get("api_key", "")
-        if not key or key in ("mock-key", "NA"):
-            key = cfg.get("api_key", "")
-            
-        model = cfg["model"]
-        llm_kwargs = dict(model=model, api_key=key, temperature=0.6)
-        if cfg.get("base_url"):
-            llm_kwargs["base_url"] = cfg["base_url"]
-        if "extra_body" in cfg:
-            llm_kwargs["extra_body"] = cfg["extra_body"]
-            
+        resolved = _resolve_role_llm_details(role, byok_config=byok_config)
+        llm_kwargs = dict(
+            model=resolved["model"],
+            api_key=resolved.get("api_key", ""),
+            temperature=0.6,
+        )
+        if resolved.get("base_url"):
+            llm_kwargs["base_url"] = resolved["base_url"]
+        if "extra_body" in resolved:
+            llm_kwargs["extra_body"] = resolved["extra_body"]
+
         role_map[role] = LLM(**llm_kwargs)
-        
-        # Determine source label
-        source = "Local .env config"
-        if byok_key: source = "Stored Profile BYOK"
-        debug_log_map[role] = f"{model} [{source}]"
+        debug_log_map[role] = f"{resolved['model']} [{resolved['source']}]"
         
     # Print the assignments so they appear in Docker logs
     print("\n--- 🤖 Backend Compute Routing Map ---", flush=True)
@@ -311,6 +547,54 @@ def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
     print("--------------------------------------\n", flush=True)
         
     return role_map
+
+
+@app.get("/debug/llm-routing")
+async def debug_llm_routing(request: Request, profile: dict = Depends(get_current_user)):
+    byok_config, byok_source = _load_request_byok_config(request, profile)
+    roles = [
+        "architect",
+        "designer",
+        "testbench_designer",
+        "verifier",
+        "fixer",
+        "debugger",
+        "manager",
+        "physical",
+        "documenter",
+        "reporter",
+    ]
+    resolved_roles = {}
+    for role in roles:
+        resolved = _resolve_role_llm_details(role, byok_config=byok_config)
+        resolved_roles[role] = {
+            "group": resolved["group"],
+            "source": resolved["source"],
+            "model": resolved["model"],
+            "base_url": resolved.get("base_url", ""),
+            "has_api_key": bool((resolved.get("api_key") or "").strip() and (resolved.get("api_key") or "").strip() not in ("NA", "mock-key")),
+        }
+
+    return {
+        "byok_source": byok_source,
+        "primary_llm": (
+            {
+                "group": primary["group"],
+                "source": primary["source"],
+                "model": primary["model"],
+                "base_url": primary.get("base_url", ""),
+                "has_api_key": bool((primary.get("api_key") or "").strip()),
+            }
+            if (primary := _resolve_primary_llm_details(byok_config))
+            else None
+        ),
+        "groups_present": {
+            "group1": bool((byok_config or {}).get("group1", {}).get("api_key")),
+            "group2": bool((byok_config or {}).get("group2", {}).get("api_key")),
+            "group3": bool((byok_config or {}).get("group3", {}).get("api_key")),
+        },
+        "roles": resolved_roles,
+    }
 
 
 def _emit_event(job_id: str, event_type: str, state: str, message: str, step: int = 0, extra: dict = None):
@@ -484,7 +768,8 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
     and save them into the design's workspace directory as artifacts.
     """
     job = JOB_STORE.get(job_id)
-    if not job: return
+    if not job:
+        return
     
     stages = job.get("stages", {})
     events = job.get("events", [])
@@ -492,22 +777,74 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
     
     workspace_dir = os.path.join(_repo_root(), "designs", design_name)
     os.makedirs(workspace_dir, exist_ok=True)
+    manifest = {
+        "job_id": job_id,
+        "design_name": design_name,
+        "build_status": build_status,
+        "generated_at": int(time.time()),
+        "workspace_dir": workspace_dir,
+        "artifacts": [],
+    }
+
+    try:
+        from server.storage import S3_BUCKET_NAME, upload_artifact_to_cloud
+        storage_bucket = S3_BUCKET_NAME
+    except Exception:
+        upload_artifact_to_cloud = None
+        storage_bucket = ""
+
+    def _register_artifact(local_path: str) -> None:
+        if not os.path.exists(local_path):
+            return
+        entry = {
+            "name": os.path.basename(local_path),
+            "local_path": local_path,
+            "size": os.path.getsize(local_path),
+            "type": _classify_artifact(local_path),
+            "cloud_url": "",
+        }
+        if upload_artifact_to_cloud is not None:
+            cloud_url = upload_artifact_to_cloud(local_path, f"{design_name}/{os.path.basename(local_path)}")
+            if cloud_url:
+                entry["cloud_url"] = cloud_url
+        manifest["artifacts"].append(entry)
     
     try:
         pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events)
         pdf_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.pdf")
         with open(pdf_path, "wb") as f:
             f.write(pdf_bytes)
+        _register_artifact(pdf_path)
     except Exception as e:
-        print(f"Failed to generate auto PDF report: {e}")
+        logger.warning("Failed to generate auto PDF report for %s: %s", design_name, e)
         
     try:
         docx_bytes = generate_full_report_docx(stages, design_name, build_status, events)
         docx_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.docx")
         with open(docx_path, "wb") as f:
             f.write(docx_bytes)
+        _register_artifact(docx_path)
     except Exception as e:
-        print(f"Failed to generate auto DOCX report: {e}")
+        logger.warning("Failed to generate auto DOCX report for %s: %s", design_name, e)
+
+    manifest_path = os.path.join(workspace_dir, f"{design_name}_artifact_manifest.json")
+    try:
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        if upload_artifact_to_cloud is not None:
+            manifest_cloud_url = upload_artifact_to_cloud(manifest_path, f"{design_name}/{os.path.basename(manifest_path)}")
+            if manifest_cloud_url:
+                manifest["manifest_cloud_url"] = manifest_cloud_url
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2)
+    except Exception as e:
+        logger.warning("Failed to persist artifact manifest for %s: %s", design_name, e)
+
+    result = job.setdefault("result", {})
+    result["generated_reports"] = manifest["artifacts"]
+    result["artifact_manifest"] = manifest_path
+    result["object_storage_bucket"] = storage_bucket
+    _sync_job_to_db(job_id)
 
 
 # ─── Build Runner ────────────────────────────────────────────────────
@@ -650,6 +987,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         JOB_STORE[job_id]["result"] = result
         JOB_STORE[job_id]["status"] = "done" if success else "failed"
         JOB_STORE[job_id]["build_status"] = "success" if success else "failed"
+        BUILDS_COMPLETED_TOTAL.labels(outcome="success" if success else "failed").inc()
 
         # ── Record build outcome in Supabase ───────────────────────
         user_profile = JOB_STORE[job_id].get("user_profile")
@@ -671,6 +1009,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         JOB_STORE[job_id]["status"] = "failed"
         JOB_STORE[job_id]["build_status"] = "failed"
         JOB_STORE[job_id]["result"] = {"error": str(e), "traceback": err}
+        BUILDS_COMPLETED_TOTAL.labels(outcome="failed").inc()
         _emit_event(job_id, "error", "FAIL", f"💥 Critical error: {str(e)}", step=0)
         record_build_failure(job_id)
     finally:
@@ -1123,30 +1462,42 @@ def ping():
     return {"status": "ok"}
 
 
+@app.get("/livez")
+def livez():
+    """Container/process liveness probe."""
+    return {"status": "ok", "version": "3.0.0"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Infrastructure readiness probe for API, DB, Redis, and object storage."""
+    status = _collect_platform_status(include_llm=False)
+    return status
+
+
 @app.get("/health")
 def health_check():
-    """Health probe — verifies the LLM backend is reachable."""
-    import traceback
-    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG
-    llm_ok = False
-    llm_name = "none"
-    llm_error = None
-    try:
-        _, llm_name = _get_llm()
-        llm_ok = True
-    except Exception as e:
-        llm_error = traceback.format_exc()
-    return {
-        "status": "ok" if llm_ok else "degraded",
-        "llm_backend": llm_name,
-        "llm_ok": llm_ok,
+    """Deep health probe including infrastructure and LLM reachability."""
+    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG
+
+    status = _collect_platform_status(include_llm=True)
+    status.update({
         "cloud_key_set": bool(CLOUD_CONFIG.get("api_key", "").strip()),
         "cloud_model": CLOUD_CONFIG.get("model", ""),
         "groq_key_set": bool(GROQ_CONFIG.get("api_key", "").strip()),
         "groq_model": GROQ_CONFIG.get("model", ""),
-        "llm_error": llm_error,
-        "version": "3.0.0",
-    }
+    })
+    return status
+
+
+@app.get("/ops/metrics")
+def ops_metrics():
+    """Prometheus-compatible metrics endpoint for free observability tooling."""
+    counts = _job_status_counts()
+    known_statuses = {"queued", "running", "done", "failed", "cancelled", "cancelling"}
+    for status in known_statuses:
+        JOBS_BY_STATUS.labels(status=status).set(counts.get(status, 0))
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/pipeline/schema")
@@ -1309,6 +1660,7 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
         "stages": {},          # stage_name -> stage_complete payload
         "build_status": "running",
     }
+    BUILDS_STARTED_TOTAL.inc()
 
     req.design_name = design_name
 
@@ -1614,9 +1966,20 @@ def get_partial_artifacts(design_name: str):
     """
     _validate_design_name(design_name)
     artifacts = []
+    manifest_cloud_urls: Dict[str, str] = {}
     
     # Check designs/ workspace directory
     workspace_dir = os.path.join(_repo_root(), "designs", design_name)
+    manifest_path = os.path.join(workspace_dir, f"{design_name}_artifact_manifest.json")
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            for item in manifest.get("artifacts", []):
+                if item.get("name"):
+                    manifest_cloud_urls[item["name"]] = item.get("cloud_url", "")
+        except Exception:
+            pass
     if os.path.isdir(workspace_dir):
         for f in os.listdir(workspace_dir):
             fpath = os.path.join(workspace_dir, f)
@@ -1627,6 +1990,7 @@ def get_partial_artifacts(design_name: str):
                     "path": fpath,
                     "size": size,
                     "type": _classify_artifact(f),
+                    "cloud_url": manifest_cloud_urls.get(f, ""),
                 })
     
     # Check OpenLane designs directory
@@ -1643,6 +2007,7 @@ def get_partial_artifacts(design_name: str):
                         "path": fpath,
                         "size": size,
                         "type": _classify_artifact(f),
+                        "cloud_url": manifest_cloud_urls.get(f, ""),
                     })
     
     return {"design_name": design_name, "artifacts": artifacts[:50]}  # Cap at 50

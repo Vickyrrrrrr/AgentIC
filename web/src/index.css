@@ -1647,7 +1647,7 @@ body {
    DESIGN STUDIO  —  Prompt Screen
 ════════════════════════════════════════════════════════════════ */
 .studio-root {
-  height: 100vh;
+  height: calc(100vh - 62px);
   overflow-y: auto;
   background: var(--bg);
   animation: fadeIn var(--slow) var(--ease);
@@ -3599,128 +3599,160 @@ body {
   left: 0;
   width: 100vw;
   height: 100vh;
-  background: rgba(12, 11, 10, 0.85);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(8, 8, 8, 0.68);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   z-index: 9999;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 1rem;
+  padding: 1.2rem;
 }
 
 .billing-modal-content {
-  width: 100%;
-  max-width: 480px;
+  width: min(920px, 96vw);
+  max-height: 92vh;
+  overflow-y: auto;
   position: relative;
-  padding: 2rem !important;
-  background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg) 100%) !important;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05) !important;
-  overflow: visible !important;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  padding: 1.15rem 1.15rem 1rem !important;
+  background: var(--bg-card) !important;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.26) !important;
 }
 
 .billing-modal-close {
   position: absolute;
-  top: 1.25rem;
-  right: 1.25rem;
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 1.2rem;
+  top: 0.9rem;
+  right: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-mid);
+  font-size: 0.78rem;
+  font-family: inherit;
+  font-weight: 600;
   cursor: pointer;
-  transition: color var(--fast);
-  padding: 0.2rem;
+  transition: all var(--fast);
+  padding: 0.34rem 0.55rem;
 }
 
 .billing-modal-close:hover {
+  background: var(--bg-hover);
   color: var(--text);
+  border-color: var(--border-strong);
 }
 
 .billing-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
-}
-
-.billing-icon {
-  font-size: 1.5rem;
+  margin-bottom: 0.8rem;
 }
 
 .billing-title {
-  font-size: 1.25rem;
+  font-size: 1.08rem;
   font-weight: 700;
   color: var(--text);
   margin: 0;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.015em;
 }
 
 .billing-sub {
   color: var(--text-mid);
-  font-size: 0.95rem;
-  line-height: 1.6;
-  margin-bottom: 2rem;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  margin-top: 0.35rem;
+  margin-bottom: 0;
 }
 
-.byok-section {
-  background: var(--bg);
-  border: 1px solid var(--border-mid);
-  border-radius: var(--radius-md);
-  padding: 1.5rem;
-  margin-bottom: 1.5rem;
-  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.1);
+.byok-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
 }
 
-.byok-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--text);
-  margin: 0 0 0.5rem 0;
+.byok-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin-top: 0.8rem;
+}
+
+.byok-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.72rem;
+  background: color-mix(in srgb, var(--bg) 88%, var(--bg-card));
+}
+
+.byok-card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.5rem;
 }
 
-.byok-title::before {
-  content: "🔑";
-  font-size: 1rem;
+.byok-card-index {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border-mid);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-mid);
+  flex-shrink: 0;
+  margin-top: 0.08rem;
+}
+
+.byok-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 0;
 }
 
 .byok-desc {
-  font-size: 0.82rem;
+  font-size: 0.72rem;
   color: var(--text-dim);
-  margin: 0 0 1.25rem 0;
-  line-height: 1.5;
+  margin: 0.12rem 0 0;
+  line-height: 1.35;
 }
 
-.byok-desc strong {
-  color: var(--text-mid);
-  font-weight: 600;
+.byok-recommendation {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin: 0.5rem 0;
+  line-height: 1.4;
+}
+
+.byok-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.4rem;
 }
 
 .byok-input {
   width: 100%;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  padding: 0.55rem 0.62rem;
   color: var(--text);
-  font-family: 'Fira Code', monospace;
-  font-size: 0.9rem;
+  font-family: inherit;
+  font-size: 0.78rem;
   outline: none;
   transition: all var(--fast);
-  margin-bottom: 1rem;
+  margin-bottom: 0.45rem;
 }
 
 .byok-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(201, 100, 62, 0.15);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .byok-error {
   color: var(--fail);
-  font-size: 0.85rem;
-  margin-bottom: 1rem;
+  font-size: 0.8rem;
+  margin-top: 0.7rem;
+  margin-bottom: 0.6rem;
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -3731,43 +3763,77 @@ body {
   font-weight: 700;
 }
 
-.byok-submit {
-  width: 100%;
-  background: var(--text);
-  color: var(--bg);
-  border: none;
-  padding: 0.85rem;
+.byok-actions {
   display: flex;
-  justify-content: center;
-  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 0.4rem;
+}
+
+.byok-cancel {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-mid);
+  border-radius: var(--radius);
+  height: 38px;
+  padding: 0 0.85rem;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--fast);
+}
+
+.byok-cancel:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.byok-submit {
+  min-width: 130px;
+  height: 38px;
+  border-radius: var(--radius);
+  border: none;
+  padding: 0 0.9rem;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  transition: all var(--fast);
 }
 
 .byok-submit:not(:disabled):hover {
-  background: #FFF;
+  background: var(--accent-light);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(255, 255, 255, 0.15);
 }
 
 .byok-submit:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-.billing-footer {
-  text-align: center;
-  font-size: 0.85rem;
-  color: var(--text-dim);
+@media (max-width: 1020px) {
+  .byok-cards {
+    grid-template-columns: 1fr;
+  }
 }
 
-.billing-link {
-  color: var(--accent);
-  text-decoration: none;
-  font-weight: 500;
-  transition: color var(--fast);
-}
+@media (max-width: 640px) {
+  .billing-modal-content {
+    width: 100%;
+    border-radius: 12px;
+    padding: 0.95rem !important;
+  }
 
-.billing-link:hover {
-  text-decoration: underline;
+  .byok-actions {
+    flex-direction: column-reverse;
+  }
+
+  .byok-submit,
+  .byok-cancel {
+    width: 100%;
+  }
 }
 
 /* Modern EDA Home Styles */

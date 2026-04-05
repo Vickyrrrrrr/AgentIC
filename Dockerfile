@@ -48,7 +48,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir uvicorn[standard] fastapi && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir apscheduler>=3.10.0 'litellm[proxy]'
+    pip install --no-cache-dir 'apscheduler>=3.10.0'
 
 # Copy application code
 COPY . .

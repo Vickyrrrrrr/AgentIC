@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import asyncio
 from fastapi import APIRouter, HTTPException, Depends, Request
@@ -23,6 +24,69 @@ class AIFixPayload(BaseModel):
 
 class VcdPayload(BaseModel):
     vcd_data: str
+
+_KNOWN_MODEL_PREFIXES = (
+    "openai/",
+    "groq/",
+    "ollama/",
+    "anthropic/",
+    "nvidia_nim/",
+    "azure/",
+    "huggingface/",
+    "together_ai/",
+    "mistral/",
+)
+
+
+def _has_real_api_key(value: str) -> bool:
+    return bool(value and value.strip() and value.strip() not in ("NA", "mock-key"))
+
+
+def _normalize_model(model: str, base_url: str) -> str:
+    model = (model or "").strip()
+    base_url = (base_url or "").strip()
+    if base_url and model and not any(model.startswith(prefix) for prefix in _KNOWN_MODEL_PREFIXES):
+        return f"openai/{model}"
+    return model
+
+
+def _load_request_byok(request: Request, profile: dict | None) -> dict | None:
+    header = request.headers.get("X-LLM-API-Key")
+    if header:
+        try:
+            parsed = json.loads(header)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            return {
+                "group1": {"api_key": header},
+                "group2": {"api_key": header},
+                "group3": {"api_key": header},
+            }
+    return get_byok_config_for_user(profile)
+
+
+def _resolve_byok_group(
+    byok_config: dict | None,
+    group_order: tuple[str, ...],
+    fallback_cfg: dict[str, str],
+) -> dict[str, str] | None:
+    if not byok_config:
+        return None
+
+    for group_name in group_order:
+        group = byok_config.get(group_name) or {}
+        api_key = (group.get("api_key") or "").strip()
+        if not _has_real_api_key(api_key):
+            continue
+        model = _normalize_model(group.get("model") or fallback_cfg.get("model", ""), group.get("base_url") or fallback_cfg.get("base_url", ""))
+        return {
+            "group": group_name,
+            "api_key": api_key,
+            "model": model or fallback_cfg.get("model", ""),
+            "base_url": (group.get("base_url") or fallback_cfg.get("base_url") or "").strip(),
+        }
+    return None
 
 @router.post("/syntax-check")
 async def check_syntax(req: CodePayload, profile: dict = Depends(get_current_user)):
@@ -139,41 +203,26 @@ IMPORTANT:
 """
         user_prompt = f"Here is my Verilog design:\n\n```verilog\n{req.code}\n```\n\nPlease write just the testbench module for it."
 
-        # Grab user API keys dynamically mapped by auth middleware
-        from server.auth import get_llm_key_for_user
-        llm_api_key = request.headers.get("X-LLM-API-Key") or get_llm_key_for_user(profile)
-        
-        # If the BYOK is JSON grouped, unpack group2 (coding agents)
-        import json
-        try:
-            bk = json.loads(llm_api_key)
-            llm_api_key = bk.get("group2", {}).get("api_key", llm_api_key)
-        except:
-            pass
+        cfg = get_role_llm_config("testbench_designer")
+        byok_config = _load_request_byok(request, profile)
+        resolved = _resolve_byok_group(byok_config, ("group2", "group1", "group3"), cfg)
 
-        llm_model = "gpt-4o" # default model if BYOK doesn't specify one, wait, let's just use env defaults
-        
-        # Fallback to defaults
-        if not llm_api_key:
-            import os
-            llm_model = os.environ.get("LLM_MODEL", "gpt-4o")
-            llm_api_key = (
-                os.environ.get("LLM_API_KEY") 
-                or os.environ.get("OPENAI_API_KEY") 
-                or os.environ.get("GROQ_API_KEY")
-                or os.environ.get("NVIDIA_API_KEY")
-            )
-            if os.environ.get("GROQ_API_KEY"):
-                llm_model = os.environ.get("GROQ_MODEL", "groq/llama-3.3-70b-versatile")
-            elif os.environ.get("NVIDIA_API_KEY"):
-                llm_model = os.environ.get("NVIDIA_MODEL", "openai/meta/llama-3.3-70b-instruct")
+        llm_model = cfg.get("model", "gpt-4o")
+        llm_api_key = cfg.get("api_key", "")
+        llm_api_base = cfg.get("base_url", "")
 
-        if not llm_api_key:
+        if resolved:
+            llm_model = resolved["model"]
+            llm_api_key = resolved["api_key"]
+            llm_api_base = resolved["base_url"]
+
+        if not _has_real_api_key(llm_api_key):
             return {"success": False, "error": "No LLM API key configured for Workspace."}
 
         response = completion(
             model=llm_model,
             api_key=llm_api_key,
+            api_base=llm_api_base or None,
             messages=[
                 {"role": "system", "content": system_prompt.strip()},
                 {"role": "user", "content": user_prompt.strip()}
@@ -233,78 +282,18 @@ async def ai_assist(req: AIFixPayload, request: Request, profile: dict = Depends
         
         # ── Step 2: LLM call with error context ──
         cfg = get_role_llm_config("fixer")
+        byok_config = _load_request_byok(request, profile)
+        # Legacy fallback keeps Lab usable for users who filled the old UI group3 bucket.
+        resolved = _resolve_byok_group(byok_config, ("group1", "group3", "group2"), cfg)
 
-        # Re-read API keys live from environment at request time.
-        # get_role_llm_config() is evaluated at startup and may have cached an
-        # empty string if HF Secrets weren't mounted yet. Reading os.environ
-        header_byok = request.headers.get("X-LLM-API-Key")
-        if header_byok:
-            import json
-            try:
-                byok_config = json.loads(header_byok)
-            except:
-                byok_config = {"group3": {"api_key": header_byok}}
-            g = byok_config.get("group3", {})
-            api_key = g.get("api_key", header_byok)
-            if getattr(g, "model", None) or g.get("model"):
-                cfg["model"] = g.get("model")
-            if getattr(g, "base_url", None) or g.get("base_url"):
-                cfg["base_url"] = g.get("base_url")
+        api_key = (resolved or {}).get("api_key", cfg.get("api_key", ""))
+        cfg["model"] = (resolved or {}).get("model", cfg.get("model", ""))
+        cfg["base_url"] = (resolved or {}).get("base_url", cfg.get("base_url", ""))
 
-        elif profile and profile.get("plan") == "byok":
-            byok_config = get_byok_config_for_user(profile)
-            if byok_config and "group3" in byok_config:
-                g = byok_config["group3"]
-                api_key = g.get("api_key", "")
-                if getattr(g, "model", None) or g.get("model"):
-                    cfg["model"] = g.get("model")
-                _KNOWN = ("openai/", "groq/", "ollama/", "anthropic/", "nvidia_nim/", "azure/", "huggingface/", "together_ai/", "mistral/")
-                if g.get("base_url") and not any(cfg["model"].startswith(p) for p in _KNOWN):
-                    cfg["model"] = f"openai/{cfg['model']}"
-                if g.get("base_url"):
-                    cfg["base_url"] = g.get("base_url")
-            else:
-                api_key = ""
-        else:
-            # Try Groq first (preferred for fixer), then NVIDIA, then GLM, then generic LLM
-            api_key = (
-                os.environ.get("GROQ_API_KEY")
-                or os.environ.get("NVIDIA_API_KEY")
-                or os.environ.get("GLM_API_KEY")
-                or os.environ.get("LLM_API_KEY")
-                or os.environ.get("OPENAI_API_KEY")
-                or cfg.get("api_key")
-            )
-            # Pick the matching model for whichever key we found
-            if os.environ.get("GROQ_API_KEY"):
-                cfg = {
-                    "model": os.environ.get("GROQ_MODEL", "groq/llama-3.3-70b-versatile"),
-                    "api_key": os.environ["GROQ_API_KEY"],
-                    "base_url": "",
-                }
-            elif os.environ.get("NVIDIA_API_KEY"):
-                cfg = {
-                    "model": os.environ.get("NVIDIA_MODEL", "openai/meta/llama-3.3-70b-instruct"),
-                    "api_key": os.environ["NVIDIA_API_KEY"],
-                    "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-                }
-            elif os.environ.get("GLM_API_KEY"):
-                cfg = {
-                    "model": f"openai/{os.environ.get('GLM_MODEL', 'glm-4-plus')}",
-                    "api_key": os.environ["GLM_API_KEY"],
-                    "base_url": os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
-                }
-            elif os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"):
-                cfg = {
-                    "model": os.environ.get("LLM_MODEL", "gpt-4o"),
-                    "api_key": os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-                    "base_url": os.environ.get("LLM_BASE_URL", ""),
-                }
-
-        if not api_key:
+        if not _has_real_api_key(api_key):
             return {
                 "success": False,
-                "response": "❌ No LLM API key found. Please add OPENAI_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, or GLM_API_KEY to your environment variables.",
+                "response": "❌ No fixer LLM key found. Configure Group 1 for Fixer/Debugger in BYOK, or provide a valid local backend key in .env for local-only usage.",
                 "fixed_code": None,
                 "line_changes": [],
                 "explanation": "",

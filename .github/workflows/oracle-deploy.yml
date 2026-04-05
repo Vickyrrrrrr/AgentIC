@@ -7,12 +7,38 @@ on:
       - main
     paths:
       - 'server/**'
+      - 'src/**'
+      - 'ops/**'
       - 'docker-compose.yml'
       - 'Dockerfile'
       - 'requirements.txt'
 
 jobs:
+  validate:
+    name: Validate Backend Before Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile and config checks
+        run: |
+          python -m py_compile server/api.py server/lab.py server/tasks.py src/agentic/orchestrator.py src/agentic/cli.py
+          python -m json.tool ops/grafana/dashboards/agentic-overview.json > /dev/null
+          docker compose config > /dev/null
+
   deploy:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -37,5 +63,15 @@ jobs:
           key: ${{ secrets.ORACLE_SSH_KEY }}
           script: |
             cd ~/AgentIC
-            sudo docker-compose down
-            sudo docker-compose up -d --build api worker
+            COMPOSE_PROFILES=observability sudo docker-compose down --remove-orphans
+            COMPOSE_PROFILES=observability sudo docker-compose up -d --build
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1 && curl -fsS http://127.0.0.1:7860/readyz >/dev/null 2>&1; then
+                echo "AgentIC backend is healthy"
+                exit 0
+              fi
+              echo "Waiting for AgentIC backend to become healthy..."
+              sleep 5
+            done
+            echo "AgentIC backend failed health checks after deploy"
+            exit 1
