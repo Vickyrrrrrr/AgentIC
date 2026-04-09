@@ -12,6 +12,11 @@ on:
       - 'docker-compose.yml'
       - 'Dockerfile'
       - 'requirements.txt'
+      - '.github/workflows/oracle-deploy.yml'
+
+concurrency:
+  group: oracle-deploy
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -54,7 +59,23 @@ jobs:
 
       - name: Sync files to Oracle VM via rsync
         run: |
-          rsync -avz --exclude '.git' --exclude '.env' --exclude 'node_modules' --exclude '__pycache__' ./ ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:~/AgentIC/
+          rsync -avz --delete \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude 'node_modules' \
+            --exclude '__pycache__' \
+            --exclude '.venv-agentic' \
+            --exclude '.pytest_cache' \
+            --exclude '.mypy_cache' \
+            --exclude '.codex' \
+            --exclude 'artifacts' \
+            --exclude 'designs' \
+            --exclude 'designs_root_owned' \
+            --exclude 'metrics' \
+            --exclude 'notebooks' \
+            --exclude 'agentic_jobs.db' \
+            --exclude 'build.log' \
+            ./ ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:~/AgentIC/
 
       - name: Rebuild & Restart Docker Containers
         uses: appleboy/ssh-action@v1.0.3
@@ -63,16 +84,38 @@ jobs:
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
           script: |
+            set -eu
             cd ~/AgentIC
-            COMPOSE_PROFILES=observability sudo docker-compose down --remove-orphans
-            COMPOSE_PROFILES=observability sudo docker-compose up -d --build
+
+            if [ ! -f .env ]; then
+              echo "Missing ~/AgentIC/.env on Oracle VM"
+              exit 1
+            fi
+
+            required_keys="POSTGRES_PASSWORD REDIS_PASSWORD MINIO_ROOT_USER MINIO_ROOT_PASSWORD ALLOW_BACKEND_LLM_FALLBACK"
+            for key in $required_keys; do
+              if ! grep -Eq "^${key}=.+$" .env; then
+                echo "Missing required env key: ${key}"
+                exit 1
+              fi
+            done
+
+            sudo docker-compose config > /dev/null
+            sudo env COMPOSE_PROFILES=observability docker-compose up -d --build --remove-orphans
+
             for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1 && curl -fsS http://127.0.0.1:7860/readyz >/dev/null 2>&1; then
+              api_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_api 2>/dev/null || true)
+              worker_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_worker 2>/dev/null || true)
+              if [ "$api_health" = "healthy" ] && [ "$worker_health" = "healthy" ] && \
+                 curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1 && \
+                 curl -fsS http://127.0.0.1:7860/readyz >/dev/null 2>&1; then
                 echo "AgentIC backend is healthy"
                 exit 0
               fi
-              echo "Waiting for AgentIC backend to become healthy..."
+              echo "Waiting for AgentIC backend to become healthy... api=${api_health} worker=${worker_health}"
               sleep 5
             done
             echo "AgentIC backend failed health checks after deploy"
+            sudo docker-compose ps
+            sudo docker-compose logs --tail=100 api worker
             exit 1

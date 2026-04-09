@@ -13,7 +13,7 @@ services:
     environment:
       # Pass database and redis URIs to connect
       - DATABASE_URL=postgresql://agentic_user:${POSTGRES_PASSWORD:-password}@db:5432/agentic_db
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-agentic-redis-dev-password}@redis:6379/0
       - RUN_CELERY=true
       - CELERY_TASK_SOFT_TIME_LIMIT=7200
       - CELERY_TASK_TIME_LIMIT=7300
@@ -23,9 +23,12 @@ services:
       - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - S3_BUCKET_NAME=agentic-artifacts
     depends_on:
-      - redis
-      - db
-      - minio
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       - ./artifacts:/app/artifacts
       - ./training:/app/training
@@ -34,7 +37,7 @@ services:
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/volare:/root/.volare
-    command: uvicorn server.api:app --host 0.0.0.0 --port 7860 --reload
+    command: gunicorn server.api:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:7860
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:7860/livez >/dev/null || exit 1"]
       interval: 30s
@@ -42,6 +45,8 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   # The Background Worker (handles heavy LLM & VLSI builds)
   worker:
@@ -55,7 +60,7 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://agentic_user:${POSTGRES_PASSWORD:-password}@db:5432/agentic_db
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-agentic-redis-dev-password}@redis:6379/0
       - RUN_CELERY=true
       - CELERY_TASK_SOFT_TIME_LIMIT=7200
       - CELERY_TASK_TIME_LIMIT=7300
@@ -65,9 +70,12 @@ services:
       - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - S3_BUCKET_NAME=agentic-artifacts
     depends_on:
-      - redis
-      - db
-      - minio
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       - ./artifacts:/app/artifacts
       - ./training:/app/training
@@ -83,22 +91,26 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   # Redis (Message Broker for Celery Queue)
   redis:
-    image: redis:alpine
+    image: redis:7.4-alpine
     container_name: agentic_redis
-    command: redis-server --appendonly yes --save 60 1000
-    ports:
-      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-agentic-redis-dev-password}
+    command: redis-server --appendonly yes --save 60 1000 --requirepass ${REDIS_PASSWORD:-agentic-redis-dev-password}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   # PostgreSQL (Persistent Database for Job Tracking/Status)
   db:
@@ -108,8 +120,6 @@ services:
       - POSTGRES_USER=agentic_user
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_DB=agentic_db
-    ports:
-      - "5432:5432"
     volumes:
       - agentic_db_data:/var/lib/postgresql/data
     healthcheck:
@@ -118,28 +128,39 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   # MinIO (Self-hosted S3 Object Storage)
   minio:
     image: minio/minio
     container_name: agentic_minio
     ports:
-      - "9000:9000" # API Port
-      - "9001:9001" # Web Console Port
+      - "127.0.0.1:9000:9000" # API Port
+      - "127.0.0.1:9001:9001" # Web Console Port
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
     command: server /data --console-address ":9001"
     volumes:
       - agentic_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   # Setup container to automatically create the agentic-artifacts bucket
   minio-setup:
     image: minio/mc
     container_name: agentic_minio_setup
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
     entrypoint: >
       /bin/sh -c "
       sleep 5;
@@ -162,7 +183,8 @@ services:
       - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
   grafana:

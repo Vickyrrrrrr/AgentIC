@@ -94,12 +94,12 @@ endmodule
         try {
             const res = await api.post('/lab/syntax-check', { code, top_module: extractTopModule() });
             if (res.data.success) {
-                setOutput(prev => prev + '\n[PASS] Syntax Pass (Verilator)\n' + res.data.logs);
+                setOutput(prev => prev + '\n✅ Syntax Pass (Verilator)\n' + res.data.logs);
             } else {
-                setOutput(prev => prev + '\n[FAIL] Syntax Failed (Verilator)\n' + res.data.logs);
+                setOutput(prev => prev + '\n❌ Syntax Failed (Verilator)\n' + res.data.logs);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n[FAIL] Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
         }
         setLoading(null);
     };
@@ -110,12 +110,12 @@ endmodule
         try {
             const res = await api.post('/lab/synthesize', { code, top_module: extractTopModule() });
             if (res.data.success) {
-                setOutput(prev => prev + '\n[PASS] Synthesis Pass (Yosys)\n' + res.data.logs);
+                setOutput(prev => prev + '\n✅ Synthesis Pass (Yosys)\n' + res.data.logs);
             } else {
-                setOutput(prev => prev + '\n[FAIL] Synthesis Failed (Yosys)\n' + res.data.logs);
+                setOutput(prev => prev + '\n❌ Synthesis Failed (Yosys)\n' + res.data.logs);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n[FAIL] Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
         }
         setLoading(null);
     };
@@ -128,12 +128,12 @@ endmodule
             if (res.data.success) {
                 // Prepend an extra newline and append the testbench to the existing code
                 setCode(prev => prev + '\n\n// === AgentIC Auto-Generated Testbench ===\n' + res.data.testbench);
-                setOutput(prev => prev + '\n[PASS] Testbench generated and appended successfully!\n');
+                setOutput(prev => prev + '\n✅ Testbench generated and appended successfully!\n');
             } else {
-                setOutput(prev => prev + '\n[FAIL] Failed to generate testbench: ' + res.data.error);
+                setOutput(prev => prev + '\n❌ Failed to generate testbench: ' + res.data.error);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n[FAIL] Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
         }
         setLoading(null);
     };
@@ -145,23 +145,23 @@ endmodule
         try {
             const res = await api.post('/lab/simulate', { code, top_module: extractTbModule() });
             if (res.data.success) {
-                setOutput(prev => prev + '\n[PASS] Simulation Complete\n' + res.data.logs);
+                setOutput(prev => prev + '\n✅ Simulation Complete\n' + res.data.logs);
                 if (res.data.vcd) {
                     setVcdData(res.data.vcd);
-                    setOutput(prev => prev + '\n\n[VCD] VCD Waveform captured! Click the download button above to view locally.');
+                    setOutput(prev => prev + '\n\n🌊 VCD Waveform captured! Click the download button above to view locally.');
                 }
             } else {
-                setOutput(prev => prev + '\n[FAIL] Simulation Failed\n' + res.data.logs);
+                setOutput(prev => prev + '\n❌ Simulation Failed\n' + res.data.logs);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n[FAIL] Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
         }
         setLoading(null);
     };
 
     const askAIAssist = async () => {
         setLoading('ai');
-        setOutput(prev => prev + '\n\n[CHECK] Running syntax check before AI analysis...\n');
+        setOutput(prev => prev + '\n\n🔍 Running syntax check before AI analysis...\n');
         try {
             const res = await api.post('/lab/ai-assist', { 
                 query: "Analyze this Verilog code for ALL issues: syntax errors, logical bugs, and synthesizability problems. Fix everything and produce fully synthesizable, error-free Verilog.",
@@ -174,42 +174,42 @@ endmodule
                 setCode(fixed_code);
                 
                 // Build a clear diff display for the console
-                let diffOutput = '\n[AI] [AI Code Fixer]: Code fixed and updated in editor!\n\n';
+                let diffOutput = '\n🤖 [AI Code Fixer]: Code fixed and updated in editor!\n\n';
                 
                 if (line_changes && line_changes.length > 0) {
                     diffOutput += '━━━ Changes Made ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                     for (const change of line_changes) {
                         if (change.type === 'modified') {
-                            diffOutput += `\n[MOD] Line ${change.line}: Modified\n`;
-                            diffOutput += `  [FAIL] ${change.old}\n`;
-                            diffOutput += `  [PASS] ${change.new}\n`;
+                            diffOutput += `\n📝 Line ${change.line}: Modified\n`;
+                            diffOutput += `  ❌ ${change.old}\n`;
+                            diffOutput += `  ✅ ${change.new}\n`;
                         } else if (change.type === 'removed') {
-                            diffOutput += `\n[DEL]  Line ${change.line}: Removed\n`;
-                            diffOutput += `  [FAIL] ${change.old}\n`;
+                            diffOutput += `\n🗑️  Line ${change.line}: Removed\n`;
+                            diffOutput += `  ❌ ${change.old}\n`;
                         } else if (change.type === 'added') {
-                            diffOutput += `\n[ADD] Line ${change.line}: Added\n`;
-                            diffOutput += `  [PASS] ${change.new}\n`;
+                            diffOutput += `\n➕ Line ${change.line}: Added\n`;
+                            diffOutput += `  ✅ ${change.new}\n`;
                         }
                     }
                     diffOutput += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-                    diffOutput += `\n[SUMMARY] Summary: ${line_changes.filter((c: any) => c.type === 'modified').length} modified, `;
+                    diffOutput += `\n📊 Summary: ${line_changes.filter((c: any) => c.type === 'modified').length} modified, `;
                     diffOutput += `${line_changes.filter((c: any) => c.type === 'added').length} added, `;
                     diffOutput += `${line_changes.filter((c: any) => c.type === 'removed').length} removed\n`;
                 } else {
-                    diffOutput += '[NOTE] No line-level changes detected (code may have been restructured).\n';
+                    diffOutput += '✨ No line-level changes detected (code may have been restructured).\n';
                 }
                 
                 if (explanation) {
-                    diffOutput += '\n[INFO] AI Explanation:\n' + explanation;
+                    diffOutput += '\n📋 AI Explanation:\n' + explanation;
                 }
                 
                 setOutput(prev => prev + diffOutput);
             } else {
                 // Fallback: LLM didn't return structured code
-                setOutput(prev => prev + '\n[AI] [AI Code Fixer]:\n' + (responseText || 'No response received.'));
+                setOutput(prev => prev + '\n🤖 [AI Code Fixer]:\n' + (responseText || 'No response received.'));
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n[FAIL] Error calling AI: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error calling AI: ' + (e.response?.data?.detail || e.message));
         }
         setLoading(null);
     };
@@ -233,12 +233,12 @@ endmodule
         try {
             const res = await api.post('/lab/gtkwave', { vcd_data: vcdData });
             if (res.data.success) {
-                setOutput(prev => prev + `\n[VCD] ${res.data.message}`);
+                setOutput(prev => prev + `\n🌊 ${res.data.message}`);
             } else {
-                setOutput(prev => prev + '\n[FAIL] GTKWave failed to launch... Make sure the AgentIC backend is running on a desktop UI.');
+                setOutput(prev => prev + '\n❌ GTKWave failed to launch... Make sure the AgentIC backend is running on a desktop UI.');
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n[FAIL] API Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ API Error: ' + (e.response?.data?.detail || e.message));
         }
     };
 

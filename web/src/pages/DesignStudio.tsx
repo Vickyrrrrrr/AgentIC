@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Key, Plus, ArrowUp, Cpu, Layers, Clock, Zap } from 'lucide-react';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
 import { BillingModal } from '../components/BillingModal';
@@ -238,16 +237,14 @@ export const DesignStudio = () => {
                         transition={{ duration: 0.5 }}
                     >
                         <div className="prompt-modern-container">
-                            <h1 className="prompt-title-modern">
+                            <h1 className="prompt-title-modern" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
                                 AgentIC Studio
-                                <button className="studio-key-btn" onClick={() => setShowBillingModal(true)}>
-                                    <Key size={12} /> API Keys
-                                </button>
+                                <button onClick={() => setShowBillingModal(true)} style={{ fontSize: '0.4em', background: 'rgba(255,255,255,0.1)', border: 'none', padding: '4px 10px', borderRadius: '15px', color: '#fff', cursor: 'pointer' }}>🔑 Configure API Keys</button>
                             </h1>
                             
                             <div className="prompt-input-wrapper">
                                 <div className="prompt-input-inner">
-                                    <span className="prompt-input-icon"><Plus size={18} /></span>
+                                    <span className="prompt-input-icon">➕</span>
                                     <textarea
                                         className="prompt-textarea-modern"
                                         placeholder="Describe the chip you want to build..."
@@ -269,7 +266,7 @@ export const DesignStudio = () => {
                                         onClick={handleLaunch} 
                                         disabled={!prompt.trim()}
                                     >
-                                        <ArrowUp size={16} />
+                                        <div className="submit-arrow">↑</div>
                                     </button>
                                 </div>
                                 <div className="prompt-input-footer">
@@ -278,13 +275,13 @@ export const DesignStudio = () => {
                                             className={`footer-btn ${aiModel === 'AgentIC' ? 'active' : ''}`}
                                             onClick={() => setAiModel('AgentIC')}
                                         >
-                                            <Cpu size={14} /> AgentIC Neural
+                                            🚀 AgentIC Neural
                                         </button>
                                         <button 
                                             className={`footer-btn ${aiModel === 'BYOK' ? 'active' : ''}`}
                                             onClick={() => setAiModel('BYOK')}
                                         >
-                                            <Key size={14} /> BYOK Model
+                                            🔑 BYOK Model
                                         </button>
                                     </div>
                                     
@@ -294,7 +291,7 @@ export const DesignStudio = () => {
                                             onClick={() => setSkipOpenlane(true)}
                                             title="Stop after verification"
                                         >
-                                            <Layers size={14} /> RTL & Verification
+                                            💻 RTL Generation & Verification
                                         </button>
                                         <button 
                                             className={`footer-btn ${!skipOpenlane ? 'active' : ''}`}
@@ -307,7 +304,7 @@ export const DesignStudio = () => {
                                             }}
                                             title={isHuggingFace ? "Full silicon flow to GDS (Under Cloud Maintenance)" : "Full silicon flow to GDS"}
                                         >
-                                            <Cpu size={14} /> {isHuggingFace ? "Full GDS (Cloud Disabled)" : "Full GDS Signoff"}
+                                            {isHuggingFace ? "🏗️ Full GDS Signoff (Cloud Disabled)" : "🏗️ Full GDS Signoff"}
                                         </button>
                                     </div>
                                 </div>
@@ -315,12 +312,12 @@ export const DesignStudio = () => {
 
                             <div className="prompt-quick-links">
                                 <div className="quick-links-header">
-                                    <Clock size={14} /> Quick Starts
+                                    <span className="icon">⏱️</span> Quick Starts
                                 </div>
                                 <div className="quick-links-grid">
                                     {['8-bit RISC CPU with Harvard architecture', 'AXI4 DMA engine with 4 channels', 'UART controller at 115200 baud'].map(ex => (
                                         <button key={ex} className="quick-link-card" onClick={() => setPrompt(ex)}>
-                                            <Zap size={14} className="card-icon" />
+                                            <span className="card-icon">⚡</span>
                                             <span className="card-text">{ex}</span>
                                         </button>
                                     ))}

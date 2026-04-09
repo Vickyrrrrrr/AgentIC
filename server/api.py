@@ -68,6 +68,14 @@ app = FastAPI(title="AgentIC Backend API", version="3.0.0")
 app.include_router(billing_router)
 app.include_router(lab_router)
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], # Allow your Vercel frontend to proxy requests securely
@@ -77,6 +85,16 @@ app.add_middleware(
 )
 
 logger = logging.getLogger("agentic.api")
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ALLOW_BACKEND_LLM_FALLBACK = _env_flag("ALLOW_BACKEND_LLM_FALLBACK", False)
 
 HTTP_REQUESTS_TOTAL = Counter(
     "agentic_http_requests_total",
@@ -110,18 +128,25 @@ JOBS_BY_STATUS = Gauge(
 
 
 @app.middleware("http")
-async def prometheus_http_middleware(request: Request, call_next):
+async def advanced_request_logging_middleware(request: Request, call_next):
     start = time.perf_counter()
     HTTP_INFLIGHT_REQUESTS.inc()
     response = None
     try:
         response = await call_next(request)
+        duration = time.perf_counter() - start
+        response.headers["X-Process-Time"] = str(duration)
         return response
     finally:
         route = request.scope.get("route")
         path_template = getattr(route, "path", request.url.path)
         status_code = str(getattr(response, "status_code", 500))
         duration = time.perf_counter() - start
+        
+        # Log the request details for Big Tech level observability
+        client_ip = request.client.host if request.client else "unknown"
+        logger.info(f"[{status_code}] {request.method} {request.url.path} - {client_ip} - {duration:.4f}s")
+        
         HTTP_REQUESTS_TOTAL.labels(request.method, path_template, status_code).inc()
         HTTP_REQUEST_LATENCY_SECONDS.labels(request.method, path_template).observe(duration)
         HTTP_INFLIGHT_REQUESTS.dec()
@@ -327,6 +352,20 @@ _KNOWN_MODEL_PREFIXES = (
     "together_ai/",
     "mistral/",
 )
+
+
+def _has_real_api_key(value: str) -> bool:
+    return bool(value and value.strip() and value.strip() not in ("NA", "mock-key"))
+
+
+def _has_any_byok_api_key(byok_config: Optional[dict]) -> bool:
+    if not byok_config:
+        return False
+    for group_name in ("group1", "group2", "group3"):
+        group = byok_config.get(group_name) or {}
+        if _has_real_api_key(group.get("api_key", "")):
+            return True
+    return False
 
 ROLE_GROUP_MAP: Dict[str, str] = {
     "fixer": "group1",
@@ -577,6 +616,7 @@ async def debug_llm_routing(request: Request, profile: dict = Depends(get_curren
 
     return {
         "byok_source": byok_source,
+        "backend_env_fallback_allowed": ALLOW_BACKEND_LLM_FALLBACK,
         "primary_llm": (
             {
                 "group": primary["group"],
@@ -1601,6 +1641,7 @@ def get_doc_content(doc_id: str):
 
 
 @app.post("/build")
+@limiter.limit("5/minute")
 async def trigger_build(req: BuildRequest, request: Request, profile: dict = Depends(get_current_user)):
     """Start a new chip build. Returns job_id immediately.
 
@@ -1625,6 +1666,15 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
                 "group2": {"api_key": req.api_key},
                 "group3": {"api_key": req.api_key}
             }
+
+    if not ALLOW_BACKEND_LLM_FALLBACK and not _has_any_byok_api_key(byok_key):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This deployment requires BYOK for builds. Add an X-LLM-API-Key header "
+                "or configure BYOK in Workspace Settings. Server-side fallback keys are disabled."
+            ),
+        )
 
     # ── LLM pre-flight: fail fast with a clear message ──
     try:

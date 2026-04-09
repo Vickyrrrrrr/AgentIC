@@ -135,10 +135,12 @@ body {
 }
 
 /* ── New App Shell (Notion-style) ───────────────────────────────── */
-.app-shell {
+.app-shell, .workspace-shell {
   display: grid;
-  grid-template-columns: 260px 1fr;
-  min-height: 100vh;
+  grid-template-columns: 260px minmax(0, 1fr);
+  height: 100vh;
+  width: 100%;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
 }
@@ -310,6 +312,9 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .app-topbar {
@@ -3857,11 +3862,7 @@ body {
 }
 
 /* ─── Hero ─── */
-.home-hero {
-  position: relative;
-  z-index: 1;
-  padding: 3rem 0 2rem;
-}
+/* Merged duplicate home-hero. padding restored. */
 
 .home-hero-badge {
   display: inline-flex;
@@ -3893,13 +3894,14 @@ body {
 }
 
 .home-hero-title {
-  font-size: 3rem;
+  font-size: clamp(1.8rem, 4vw, 3rem);
   font-weight: 800;
   letter-spacing: -0.04em;
-  line-height: 1.1;
+  line-height: 1.2;
   margin: 0 0 1.25rem;
   color: var(--text, #FAFAFA);
   min-height: 3.6rem;
+  word-wrap: break-word;
 }
 
 .home-typewriter-text {

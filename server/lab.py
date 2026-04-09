@@ -38,6 +38,16 @@ _KNOWN_MODEL_PREFIXES = (
 )
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ALLOW_BACKEND_LLM_FALLBACK = _env_flag("ALLOW_BACKEND_LLM_FALLBACK", False)
+
+
 def _has_real_api_key(value: str) -> bool:
     return bool(value and value.strip() and value.strip() not in ("NA", "mock-key"))
 
@@ -208,8 +218,8 @@ IMPORTANT:
         resolved = _resolve_byok_group(byok_config, ("group2", "group1", "group3"), cfg)
 
         llm_model = cfg.get("model", "gpt-4o")
-        llm_api_key = cfg.get("api_key", "")
-        llm_api_base = cfg.get("base_url", "")
+        llm_api_key = cfg.get("api_key", "") if ALLOW_BACKEND_LLM_FALLBACK else ""
+        llm_api_base = cfg.get("base_url", "") if ALLOW_BACKEND_LLM_FALLBACK else ""
 
         if resolved:
             llm_model = resolved["model"]
@@ -217,7 +227,13 @@ IMPORTANT:
             llm_api_base = resolved["base_url"]
 
         if not _has_real_api_key(llm_api_key):
-            return {"success": False, "error": "No LLM API key configured for Workspace."}
+            return {
+                "success": False,
+                "error": (
+                    "This deployment requires BYOK for AI lab actions. Configure Workspace BYOK "
+                    "or send X-LLM-API-Key with the request."
+                ),
+            }
 
         response = completion(
             model=llm_model,
@@ -286,14 +302,17 @@ async def ai_assist(req: AIFixPayload, request: Request, profile: dict = Depends
         # Legacy fallback keeps Lab usable for users who filled the old UI group3 bucket.
         resolved = _resolve_byok_group(byok_config, ("group1", "group3", "group2"), cfg)
 
-        api_key = (resolved or {}).get("api_key", cfg.get("api_key", ""))
+        api_key = (resolved or {}).get("api_key", cfg.get("api_key", "") if ALLOW_BACKEND_LLM_FALLBACK else "")
         cfg["model"] = (resolved or {}).get("model", cfg.get("model", ""))
-        cfg["base_url"] = (resolved or {}).get("base_url", cfg.get("base_url", ""))
+        cfg["base_url"] = (resolved or {}).get("base_url", cfg.get("base_url", "") if ALLOW_BACKEND_LLM_FALLBACK else "")
 
         if not _has_real_api_key(api_key):
             return {
                 "success": False,
-                "response": "❌ No fixer LLM key found. Configure Group 1 for Fixer/Debugger in BYOK, or provide a valid local backend key in .env for local-only usage.",
+                "response": (
+                    "BYOK is required on this deployment for AI lab actions. Configure Group 1 "
+                    "for Fixer/Debugger in Workspace BYOK, or enable backend fallback only for private local usage."
+                ),
                 "fixed_code": None,
                 "line_changes": [],
                 "explanation": "",
