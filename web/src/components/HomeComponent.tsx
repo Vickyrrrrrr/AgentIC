@@ -1,158 +1,221 @@
-import { useState, useEffect } from 'react';
-import { Activity, BookOpen, Cpu, Layers, GitMerge, Zap, ArrowRight, Terminal, Shield, Workflow } from 'lucide-react';
+import {
+  Activity,
+  ArrowRight,
+  BookOpen,
+  Bot,
+  BrainCircuit,
+  CheckCircle2,
+  ChevronRight,
+  Cpu,
+  Layers3,
+  Shield,
+  Sparkles,
+  Terminal,
+  Workflow,
+} from 'lucide-react';
 
-/* ── Typewriter ─────────────────────────────────────────────────── */
-const TypewriterText = ({ texts }: { texts: string[] }) => {
-  const [textIndex, setTextIndex] = useState(0);
-  const [text, setText] = useState('');
-  const [isDeleting, setIsDeleting] = useState(false);
+const pipelineSteps = [
+  { label: 'Interpret brief', detail: 'Natural language spec to architecture contract' },
+  { label: 'Generate RTL', detail: 'Synthesis-oriented Verilog with review loop' },
+  { label: 'Prove and verify', detail: 'Simulation, formal checks, and repair passes' },
+  { label: 'Prepare layout', detail: 'Fabrication-ready outputs for Sky130 flow' },
+];
 
-  useEffect(() => {
-    const currentFullText = texts[textIndex];
-    const typingSpeed = isDeleting ? 25 : 65;
+const capabilityCards = [
+  {
+    icon: <BrainCircuit size={18} />,
+    eyebrow: 'Autonomous Build',
+    title: 'Spec to silicon with a tighter loop',
+    description:
+      'A single flow that moves from intent to RTL, verification, formal validation, and physical readiness without the usual handoff chaos.',
+  },
+  {
+    icon: <Shield size={18} />,
+    eyebrow: 'Recovery Logic',
+    title: 'Self-healing when stages fail',
+    description:
+      'Retries are convergence-aware, failure fingerprints are tracked, and the system adapts instead of repeating the same broken attempt.',
+  },
+  {
+    icon: <Workflow size={18} />,
+    eyebrow: 'Control Surface',
+    title: 'Human review only where it matters',
+    description:
+      'Run fully autonomous when speed matters, or stop at key checkpoints for approval, edits, and guided intervention.',
+  },
+];
 
-    if (!isDeleting && text === currentFullText) {
-      const id = setTimeout(() => setIsDeleting(true), 2200);
-      return () => clearTimeout(id);
-    } else if (isDeleting && text === '') {
-      setIsDeleting(false);
-      setTextIndex((prev) => (prev + 1) % texts.length);
-      return;
-    }
+const agentCards = [
+  {
+    icon: <Cpu size={18} />,
+    title: 'Architect',
+    description: 'Turns intent into ports, clocks, state machines, and implementation boundaries.',
+  },
+  {
+    icon: <Terminal size={18} />,
+    title: 'RTL Designer',
+    description: 'Produces synthesizable HDL with review-oriented generation patterns.',
+  },
+  {
+    icon: <Activity size={18} />,
+    title: 'Verifier',
+    description: 'Builds testbenches, simulates behavior, and isolates regressions quickly.',
+  },
+  {
+    icon: <Shield size={18} />,
+    title: 'Formal Prover',
+    description: 'Uses assertions and proof workflows to check correctness beyond simulation.',
+  },
+  {
+    icon: <Bot size={18} />,
+    title: 'Deep Debugger',
+    description: 'Explains failures causally and proposes the next best repair path.',
+  },
+];
 
-    const id = setTimeout(() => {
-      setText(currentFullText.substring(0, text.length + (isDeleting ? -1 : 1)));
-    }, typingSpeed);
-
-    return () => clearTimeout(id);
-  }, [text, isDeleting, textIndex, texts]);
-
-  return (
-    <span className="home-typewriter-text">
-      {text}
-      <span className="home-typewriter-cursor">|</span>
-    </span>
-  );
-};
-
-/* ── Main Component ─────────────────────────────────────────────── */
-export const HomeComponent = ({ designsLength, setSelectedPage }: { designsLength: number; setSelectedPage: (page: string) => void }) => {
+export const HomeComponent = ({
+  designsLength,
+  setSelectedPage,
+}: {
+  designsLength: number;
+  setSelectedPage: (page: string) => void;
+}) => {
   return (
     <div className="home-minimal">
-      {/* Grid background */}
       <div className="home-grid-bg" />
+      <div className="home-orb home-orb-a" />
+      <div className="home-orb home-orb-b" />
 
-      {/* ── Hero ─── */}
       <section className="home-hero">
-        <div className="home-hero-badge">
-          <span className="home-hero-badge-dot" />
-          v3.0 — Autonomous Pipeline
+        <div className="home-hero-copy">
+          <div className="home-hero-badge">
+            <span className="home-hero-badge-dot" />
+            AgentIC v3.0
+          </div>
+
+          <p className="home-kicker">Autonomous chip design, without the noisy interface.</p>
+
+          <h1 className="home-hero-title">
+            Natural language in.
+            <span className="home-title-accent"> fabrication-ready silicon out.</span>
+          </h1>
+
+          <p className="home-hero-desc">
+            Describe a digital circuit in plain English. AgentIC handles RTL generation,
+            verification, formal proof, and layout preparation through a cleaner,
+            production-shaped workflow.
+          </p>
+
+          <div className="home-hero-actions">
+            <button className="home-btn-primary" onClick={() => setSelectedPage('Design Studio')}>
+              <Terminal size={16} />
+              Open Design Studio
+              <ArrowRight size={14} />
+            </button>
+            <button className="home-btn-ghost" onClick={() => setSelectedPage('HITL Build')}>
+              <Workflow size={16} />
+              Review Pipeline
+            </button>
+            <button className="home-btn-ghost" onClick={() => setSelectedPage('Documentation')}>
+              <BookOpen size={16} />
+              Read Docs
+            </button>
+          </div>
         </div>
 
-        <h1 className="home-hero-title">
-          <TypewriterText texts={[
-            "Natural Language to GDSII",
-            "Autonomous Silicon Design",
-            "Multi-Agent EDA Pipeline",
-          ]} />
-        </h1>
+        <aside className="home-hero-panel">
+          <div className="home-panel-topline">
+            <Sparkles size={14} />
+            Pipeline Outline
+          </div>
 
-        <p className="home-hero-desc">
-          Describe any digital circuit in plain English. AgentIC writes synthesizable
-          RTL, verifies logic, runs formal proofs, and generates fabrication-ready
-          GDSII — fully autonomously.
-        </p>
+          <div className="home-panel-list">
+            {pipelineSteps.map((step, index) => (
+              <div key={step.label} className="home-panel-item">
+                <div className="home-panel-index">0{index + 1}</div>
+                <div className="home-panel-body">
+                  <div className="home-panel-label">{step.label}</div>
+                  <div className="home-panel-detail">{step.detail}</div>
+                </div>
+              </div>
+            ))}
+          </div>
 
-        <div className="home-hero-actions">
-          <button className="home-btn-primary" onClick={() => setSelectedPage('Design Studio')}>
-            <Terminal size={16} /> Enter Studio
-            <ArrowRight size={14} />
-          </button>
-          <button className="home-btn-ghost" onClick={() => setSelectedPage('HITL Build')}>
-            <Workflow size={16} /> Human-in-Loop
-          </button>
-          <button className="home-btn-ghost" onClick={() => setSelectedPage('Documentation')}>
-            <BookOpen size={16} /> Docs
-          </button>
-        </div>
+          <div className="home-panel-footer">
+            <div className="home-panel-chip">
+              <CheckCircle2 size={14} />
+              BYOK-first deployment
+            </div>
+            <div className="home-panel-chip">
+              <Layers3 size={14} />
+              Sky130 target flow
+            </div>
+          </div>
+        </aside>
       </section>
 
-      {/* ── Stats ─── */}
       <section className="home-stats">
         <div className="home-stat">
-          <Cpu size={18} className="home-stat-icon" />
+          <span className="home-stat-meta">Workspace</span>
           <span className="home-stat-value">{designsLength || 0}</span>
-          <span className="home-stat-label">Active Designs</span>
+          <span className="home-stat-label">active designs</span>
         </div>
-        <div className="home-stat-sep" />
         <div className="home-stat">
-          <GitMerge size={18} className="home-stat-icon" />
+          <span className="home-stat-meta">Agents</span>
           <span className="home-stat-value">5</span>
-          <span className="home-stat-label">Core Agents</span>
+          <span className="home-stat-label">specialized roles</span>
         </div>
-        <div className="home-stat-sep" />
         <div className="home-stat">
-          <Layers size={18} className="home-stat-icon" />
+          <span className="home-stat-meta">PDK</span>
           <span className="home-stat-value">Sky130</span>
-          <span className="home-stat-label">Target PDK</span>
+          <span className="home-stat-label">open foundry target</span>
         </div>
-        <div className="home-stat-sep" />
         <div className="home-stat">
-          <Zap size={18} className="home-stat-icon" />
+          <span className="home-stat-meta">Access</span>
           <span className="home-stat-value">BYOK</span>
-          <span className="home-stat-label">Any LLM Provider</span>
+          <span className="home-stat-label">user-owned inference</span>
         </div>
       </section>
 
-      {/* ── Capabilities ─── */}
       <section className="home-capabilities">
-        <h2 className="home-section-title">Capabilities</h2>
+        <div className="home-section-heading">
+          <h2 className="home-section-title">Why this feels more serious</h2>
+          <p className="home-section-subtitle">
+            Fewer decorative widgets, tighter hierarchy, and surfaces that explain the system
+            instead of shouting over it.
+          </p>
+        </div>
+
         <div className="home-cap-grid">
-          <div className="home-cap-card">
-            <Activity size={20} className="home-cap-icon" />
-            <h3 className="home-cap-title">Spec to Silicon</h3>
-            <p className="home-cap-desc">
-              From natural language specification to fabrication-ready GDSII layout.
-              No HDL expertise required.
-            </p>
-          </div>
-          <div className="home-cap-card">
-            <Shield size={20} className="home-cap-icon" />
-            <h3 className="home-cap-title">Self-Healing Pipeline</h3>
-            <p className="home-cap-desc">
-              Convergence-aware retry with stagnation detection. The system
-              automatically debugs and fixes failing stages.
-            </p>
-          </div>
-          <div className="home-cap-card">
-            <Workflow size={20} className="home-cap-icon" />
-            <h3 className="home-cap-title">Human-in-the-Loop</h3>
-            <p className="home-cap-desc">
-              Full approval gates at every pipeline stage. Review, reject with
-              feedback, or run fully autonomous.
-            </p>
-          </div>
+          {capabilityCards.map((card) => (
+            <article key={card.title} className="home-cap-card">
+              <div className="home-cap-icon">{card.icon}</div>
+              <p className="home-cap-eyebrow">{card.eyebrow}</p>
+              <h3 className="home-cap-title">{card.title}</h3>
+              <p className="home-cap-desc">{card.description}</p>
+            </article>
+          ))}
         </div>
       </section>
 
-      {/* ── Agents ─── */}
       <section className="home-agents">
-        <h2 className="home-section-title">Agent Architecture</h2>
+        <div className="home-section-heading">
+          <h2 className="home-section-title">Agent architecture</h2>
+          <p className="home-section-subtitle">
+            The stack stays compact, but each role is explicit about what it owns in the flow.
+          </p>
+        </div>
+
         <div className="home-agent-list">
-          {[
-            { icon: <Cpu size={18} />, name: 'Architect', desc: 'Decomposes specs into chip architecture with ports, FSMs, and sub-modules' },
-            { icon: <Terminal size={18} />, name: 'RTL Designer', desc: 'Writes synthesizable Verilog with collaborative design-review pattern' },
-            { icon: <Shield size={18} />, name: 'Verifier', desc: 'Creates testbenches, runs simulation, and diagnoses failures' },
-            { icon: <Activity size={18} />, name: 'Formal Prover', desc: 'Mathematically proves design correctness using SVA assertions' },
-            { icon: <Zap size={18} />, name: 'Deep Debugger', desc: 'Causal failure analysis with multi-perspective reasoning' },
-          ].map((agent) => (
-            <div key={agent.name} className="home-agent-row">
+          {agentCards.map((agent) => (
+            <article key={agent.title} className="home-agent-row">
               <div className="home-agent-icon">{agent.icon}</div>
               <div className="home-agent-info">
-                <span className="home-agent-name">{agent.name}</span>
-                <span className="home-agent-desc">{agent.desc}</span>
+                <span className="home-agent-name">{agent.title}</span>
+                <span className="home-agent-desc">{agent.description}</span>
               </div>
-            </div>
+              <ChevronRight size={16} className="home-agent-arrow" />
+            </article>
           ))}
         </div>
       </section>
