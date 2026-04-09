@@ -80,6 +80,11 @@ type ProfileSummary = {
   auth_enabled: boolean;
   plan?: string;
   successful_builds?: number;
+  workspace_successful_builds?: number;
+  total_builds?: number;
+  running_builds?: number;
+  failed_builds?: number;
+  active_designs?: number;
   has_byok_key?: boolean;
   email?: string;
 };
@@ -250,8 +255,28 @@ const App = () => {
       setSelectedDesign('');
     });
 
+    const refreshInterval = window.setInterval(() => {
+      loadWorkspaceData().catch((err) => {
+        console.error('Failed to refresh workspace context', err);
+      });
+    }, 15000);
+
+    const handleVisibilityRefresh = () => {
+      if (document.visibilityState === 'visible') {
+        loadWorkspaceData().catch((err) => {
+          console.error('Failed to refresh workspace context', err);
+        });
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityRefresh);
+    document.addEventListener('visibilitychange', handleVisibilityRefresh);
+
     return () => {
       cancelled = true;
+      window.clearInterval(refreshInterval);
+      window.removeEventListener('focus', handleVisibilityRefresh);
+      document.removeEventListener('visibilitychange', handleVisibilityRefresh);
     };
   }, [session]);
 
@@ -303,11 +328,28 @@ const App = () => {
 
   const selectedDesignHasGds = designs.find((d) => d.name === selectedDesign)?.has_gds;
   const currentPageMeta = PAGE_META[selectedPage];
+  const derivedRunningBuilds = jobs.filter((job) =>
+    job.status === 'queued' || job.status === 'running' || job.status === 'cancelling'
+  ).length;
+  const derivedSuccessfulBuilds = jobs.filter((job) => job.status === 'done').length;
+  const homeTotalBuilds = profile?.total_builds ?? jobs.length;
+  const homeRunningBuilds = profile?.running_builds ?? derivedRunningBuilds;
+  const homeSuccessfulBuilds =
+    profile?.workspace_successful_builds ?? profile?.successful_builds ?? derivedSuccessfulBuilds;
+  const homeDesignCount = profile?.active_designs ?? designs.length;
 
   const renderPage = () => {
     switch (selectedPage) {
       case 'Home':
-        return <HomeComponent designsLength={designs.length} setSelectedPage={handleHomeNavigation} />;
+        return (
+          <HomeComponent
+            designsLength={homeDesignCount}
+            totalBuilds={homeTotalBuilds}
+            runningBuilds={homeRunningBuilds}
+            successfulBuilds={homeSuccessfulBuilds}
+            setSelectedPage={handleHomeNavigation}
+          />
+        );
       case 'Dashboard':
         return <Dashboard selectedDesign={selectedDesign} />;
       case 'Design Studio':
@@ -344,7 +386,15 @@ const App = () => {
           />
         );
       default:
-        return <HomeComponent designsLength={designs.length} setSelectedPage={handleHomeNavigation} />;
+        return (
+          <HomeComponent
+            designsLength={homeDesignCount}
+            totalBuilds={homeTotalBuilds}
+            runningBuilds={homeRunningBuilds}
+            successfulBuilds={homeSuccessfulBuilds}
+            setSelectedPage={handleHomeNavigation}
+          />
+        );
     }
   };
 

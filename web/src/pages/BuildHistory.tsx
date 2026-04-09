@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { Activity, ArrowRight, CheckCircle2, Clock, Layers3, XCircle } from 'lucide-react';
 
 type JobSummary = {
   job_id: string;
@@ -48,6 +48,27 @@ export const BuildHistory: React.FC<BuildHistoryProps> = ({
 
   return (
     <div className="bh-page">
+      <section className="bh-hero-card">
+        <div className="bh-hero-copy">
+          <span className="bh-hero-kicker">OPERATIONS LOG</span>
+          <h2 className="bh-hero-title">Track active runs, outcomes, and handoff readiness.</h2>
+          <p className="bh-hero-subtitle">
+            Every build is retained as an execution record so you can audit stage flow, revisit design context,
+            and continue from the right workspace surface.
+          </p>
+        </div>
+        <div className="bh-hero-actions">
+          <div className="bh-hero-chip">
+            <Layers3 size={15} />
+            {selectedDesign ? selectedDesign : 'All designs'}
+          </div>
+          <button className="ws-btn-primary bh-primary-cta" onClick={() => onOpenPage('Design Studio')}>
+            Start New Build
+            <ArrowRight size={15} />
+          </button>
+        </div>
+      </section>
+
       <div className="bh-stats-grid">
         <div className="bh-stat-card">
           <Activity size={16} className="bh-stat-icon" />
@@ -85,14 +106,12 @@ export const BuildHistory: React.FC<BuildHistoryProps> = ({
             Build Timeline
             {selectedDesign ? <span className="bh-design-tag">{selectedDesign}</span> : ''}
           </h3>
-          <button className="ws-btn-primary" onClick={() => onOpenPage('Design Studio')}>
-            Start New Build
-          </button>
+          <span className="bh-table-caption">{filteredJobs.length} visible records</span>
         </div>
 
         {filteredJobs.length === 0 ? (
           <div className="bh-empty">
-            No jobs available for this design context yet.
+            No jobs are available for this design context yet. Launch a build to create the first durable record.
           </div>
         ) : (
           <div className="bh-table-wrap">
@@ -114,7 +133,7 @@ export const BuildHistory: React.FC<BuildHistoryProps> = ({
                     <td className="bh-job-id">{job.job_id.slice(0, 8)}...</td>
                     <td>{job.design_name || '-'}</td>
                     <td>
-                      <span className="bh-status" style={{ color: statusColor(job.status) }}>
+                      <span className="bh-status" style={{ color: statusColor(job.status), borderColor: statusColor(job.status) }}>
                         {job.status}
                       </span>
                     </td>
@@ -130,6 +149,7 @@ export const BuildHistory: React.FC<BuildHistoryProps> = ({
                         }}
                       >
                         Open Design
+                        <ArrowRight size={14} />
                       </button>
                     </td>
                   </tr>

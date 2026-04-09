@@ -141,9 +141,14 @@ export const LandingPage = ({ onAuthSuccess }: { onAuthSuccess: () => void }) =>
             </h2>
             <p className="landing-auth-sub">
               {authMode === 'signup'
-                ? 'Create an account to secure early access.'
-                : 'Sign in to your workspace.'}
+                ? 'Create an account to secure early access and save your workspace context.'
+                : 'Sign in to continue to your workspace and BYOK setup.'}
             </p>
+
+            <div className="landing-onboarding-note">
+              <strong>What happens next</strong>
+              <span>After sign-in, add your BYOK key locally in the browser, then launch your first build from Design Studio or HITL.</span>
+            </div>
 
             <form className="landing-auth-form" onSubmit={handleSubmit}>
               <div className="landing-field">

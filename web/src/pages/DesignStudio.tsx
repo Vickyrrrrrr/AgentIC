@@ -1,5 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import {
+    ArrowRight,
+    Bot,
+    Cpu,
+    Fingerprint,
+    KeyRound,
+    Layers3,
+    Rocket,
+    ShieldCheck,
+    Sparkles,
+    Waypoints,
+} from 'lucide-react';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
 import { BillingModal } from '../components/BillingModal';
@@ -35,6 +47,39 @@ function slugify(text: string): string {
         .substring(0, 48);
 }
 
+const QUICK_STARTS = [
+    {
+        title: 'RISC compute core',
+        prompt: '8-bit RISC CPU with Harvard architecture',
+        note: 'Balanced control core with instruction and data separation.',
+    },
+    {
+        title: 'DMA fabric',
+        prompt: 'AXI4 DMA engine with 4 channels',
+        note: 'Throughput-focused transport block for embedded systems.',
+    },
+    {
+        title: 'Peripheral controller',
+        prompt: 'UART controller at 115200 baud',
+        note: 'Fast path for a clean verification-first peripheral bring-up.',
+    },
+];
+
+const DELIVERY_MODES = [
+    {
+        title: 'Verification-first',
+        detail: 'RTL generation, lint, simulation, and coverage-focused validation.',
+    },
+    {
+        title: 'Silicon path',
+        detail: 'Carry the design into physical implementation and signoff artifacts when enabled.',
+    },
+    {
+        title: 'BYOK protected',
+        detail: 'Public deployments require the operator to provide a valid LLM key before launch.',
+    },
+];
+
 export const DesignStudio = () => {
     const [phase, setPhase] = useState<Phase>('prompt');
     const [prompt, setPrompt] = useState('');
@@ -47,7 +92,15 @@ export const DesignStudio = () => {
     error, setError] = useState('');
 
     // Billing / Profile State
-    const [profile, setProfile] = useState<{ auth_enabled: boolean, plan: string, successful_builds: number, has_byok_key: boolean } | null>(null);
+    const [profile, setProfile] = useState<{
+        auth_enabled: boolean,
+        plan?: string,
+        successful_builds?: number,
+        workspace_successful_builds?: number,
+        total_builds?: number,
+        running_builds?: number,
+        has_byok_key?: boolean
+    } | null>(null);
     const [showBillingModal, setShowBillingModal] = useState(false);
 
     // Build Options
@@ -84,6 +137,14 @@ export const DesignStudio = () => {
             .catch(() => setProfile(null)); // Ignored explicitly if no auth
     }, []);
 
+    const byokKey = localStorage.getItem('agentic_byok_key');
+    const launchStatus = byokKey ? 'BYOK configured' : 'BYOK required';
+    const launchModeLabel = skipOpenlane ? 'Verification-first run' : 'Full silicon path';
+    const workspaceSuccessfulBuilds = profile?.workspace_successful_builds ?? profile?.successful_builds ?? 0;
+    const usageLabel = profile
+        ? `${workspaceSuccessfulBuilds} successful · ${profile.total_builds ?? 0} total builds on ${profile.plan ?? 'local'}`
+        : 'Local workspace mode';
+
 
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
@@ -99,7 +160,7 @@ export const DesignStudio = () => {
         // Billing Guard: enforce 2 free successful builds
         if (profile?.auth_enabled) {
             const { plan, successful_builds, has_byok_key } = profile;
-            if (plan === 'free' && successful_builds >= 2 && !has_byok_key) {
+            if (plan === 'free' && (successful_builds ?? 0) >= 2 && !has_byok_key) {
                 setShowBillingModal(true);
                 return;
             }
@@ -236,92 +297,194 @@ export const DesignStudio = () => {
                         exit={{ opacity: 0, y: -40 }}
                         transition={{ duration: 0.5 }}
                     >
-                        <div className="prompt-modern-container">
-                            <h1 className="prompt-title-modern" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
-                                AgentIC Studio
-                                <button onClick={() => setShowBillingModal(true)} style={{ fontSize: '0.4em', background: 'rgba(255,255,255,0.1)', border: 'none', padding: '4px 10px', borderRadius: '15px', color: '#fff', cursor: 'pointer' }}>🔑 Configure API Keys</button>
-                            </h1>
-                            
-                            <div className="prompt-input-wrapper">
-                                <div className="prompt-input-inner">
-                                    <span className="prompt-input-icon">➕</span>
-                                    <textarea
-                                        className="prompt-textarea-modern"
-                                        placeholder="Describe the chip you want to build..."
-                                        value={prompt}
-                                        onChange={e => setPrompt(e.target.value)}
-                                        rows={1}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && !e.shiftKey) {
-                                                e.preventDefault();
-                                                if (prompt.trim()) handleLaunch();
-                                            }
-                                            e.currentTarget.style.height = 'auto';
-                                            e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';
-                                        }}
-                                        autoFocus
-                                    />
-                                    <button 
-                                        className="prompt-submit-btn" 
-                                        onClick={handleLaunch} 
-                                        disabled={!prompt.trim()}
-                                    >
-                                        <div className="submit-arrow">↑</div>
-                                    </button>
+                        <div className="studio-launch-shell">
+                            <section className="studio-launch-header">
+                                <div className="studio-launch-copy">
+                                    <span className="studio-kicker">
+                                        <Sparkles size={14} />
+                                        QUICK BUILD STUDIO
+                                    </span>
+                                    <h1 className="studio-launch-title">Describe the system. Launch a disciplined silicon run.</h1>
+                                    <p className="studio-launch-subtitle">
+                                        AgentIC turns a natural-language specification into a structured build with verification,
+                                        operator-safe BYOK routing, and an optional path to fabrication-ready artifacts.
+                                    </p>
                                 </div>
-                                <div className="prompt-input-footer">
-                                    <div className="model-selector">
-                                        <button 
-                                            className={`footer-btn ${aiModel === 'AgentIC' ? 'active' : ''}`}
-                                            onClick={() => setAiModel('AgentIC')}
-                                        >
-                                            🚀 AgentIC Neural
-                                        </button>
-                                        <button 
-                                            className={`footer-btn ${aiModel === 'BYOK' ? 'active' : ''}`}
-                                            onClick={() => setAiModel('BYOK')}
-                                        >
-                                            🔑 BYOK Model
-                                        </button>
+                                <div className="studio-launch-actions">
+                                    <button className="studio-control-btn studio-control-btn--primary" onClick={() => setShowBillingModal(true)}>
+                                        <KeyRound size={16} />
+                                        Configure BYOK
+                                    </button>
+                                    <div className="studio-status-cluster">
+                                        <span className={`studio-status-pill ${byokKey ? 'is-ready' : 'is-warn'}`}>
+                                            <Fingerprint size={14} />
+                                            {launchStatus}
+                                        </span>
+                                        <span className="studio-status-pill">
+                                            <Cpu size={14} />
+                                            {launchModeLabel}
+                                        </span>
                                     </div>
-                                    
-                                    <div className="stage-selector">
-                                        <button 
-                                            className={`footer-btn ${skipOpenlane ? 'active' : ''}`}
-                                            onClick={() => setSkipOpenlane(true)}
-                                            title="Stop after verification"
-                                        >
-                                            💻 RTL Generation & Verification
-                                        </button>
-                                        <button 
-                                            className={`footer-btn ${!skipOpenlane ? 'active' : ''}`}
-                                            onClick={() => {
-                                                if (isHuggingFace) {
-                                                    alert("GDS Layout is temporarily under maintenance on the cloud platform. It will be available back in a few days. Using RTL & Verification mode for now.");
-                                                } else {
-                                                    setSkipOpenlane(false);
+                                </div>
+                            </section>
+
+                            <div className="studio-launch-grid">
+                                <section className="studio-compose-card">
+                                    <div className="studio-section-heading">
+                                        <div>
+                                            <span className="studio-section-label">Build Brief</span>
+                                            <h2 className="studio-section-title">Specification input</h2>
+                                        </div>
+                                        <span className="studio-muted-chip">{usageLabel}</span>
+                                    </div>
+
+                                    <label className="studio-field-label" htmlFor="design-prompt">
+                                        Describe the circuit in plain English
+                                    </label>
+                                    <div className="studio-textarea-wrap">
+                                        <Bot size={18} className="studio-textarea-icon" />
+                                        <textarea
+                                            id="design-prompt"
+                                            className="studio-textarea"
+                                            placeholder="Example: A low-power UART bridge with FIFO buffering, parity checks, and an APB register interface."
+                                            value={prompt}
+                                            onChange={e => setPrompt(e.target.value)}
+                                            rows={5}
+                                            onInput={(e) => {
+                                                const target = e.currentTarget;
+                                                target.style.height = 'auto';
+                                                target.style.height = `${Math.min(target.scrollHeight, 320)}px`;
+                                            }}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter' && !e.shiftKey) {
+                                                    e.preventDefault();
+                                                    if (prompt.trim()) handleLaunch();
                                                 }
                                             }}
-                                            title={isHuggingFace ? "Full silicon flow to GDS (Under Cloud Maintenance)" : "Full silicon flow to GDS"}
-                                        >
-                                            {isHuggingFace ? "🏗️ Full GDS Signoff (Cloud Disabled)" : "🏗️ Full GDS Signoff"}
-                                        </button>
+                                            autoFocus
+                                        />
                                     </div>
-                                </div>
-                            </div>
 
-                            <div className="prompt-quick-links">
-                                <div className="quick-links-header">
-                                    <span className="icon">⏱️</span> Quick Starts
-                                </div>
-                                <div className="quick-links-grid">
-                                    {['8-bit RISC CPU with Harvard architecture', 'AXI4 DMA engine with 4 channels', 'UART controller at 115200 baud'].map(ex => (
-                                        <button key={ex} className="quick-link-card" onClick={() => setPrompt(ex)}>
-                                            <span className="card-icon">⚡</span>
-                                            <span className="card-text">{ex}</span>
+                                    <div className="studio-design-row">
+                                        <div className="studio-design-card">
+                                            <span className="studio-field-label">Design identifier</span>
+                                            <span className="studio-design-value">
+                                                {designName || 'Generated automatically after you describe the system'}
+                                            </span>
+                                        </div>
+                                        <div className="studio-design-card">
+                                            <span className="studio-field-label">Execution mode</span>
+                                            <span className="studio-design-value">{aiModel === 'BYOK' ? 'Bring your own model key' : 'AgentIC-managed orchestration'}</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="studio-option-groups">
+                                        <div className="studio-option-group">
+                                            <span className="studio-field-label">Routing mode</span>
+                                            <div className="studio-chip-row">
+                                                <button
+                                                    className={`studio-chip-btn ${aiModel === 'AgentIC' ? 'is-active' : ''}`}
+                                                    onClick={() => setAiModel('AgentIC')}
+                                                >
+                                                    <Rocket size={15} />
+                                                    AgentIC orchestration
+                                                </button>
+                                                <button
+                                                    className={`studio-chip-btn ${aiModel === 'BYOK' ? 'is-active' : ''}`}
+                                                    onClick={() => setAiModel('BYOK')}
+                                                >
+                                                    <KeyRound size={15} />
+                                                    Operator BYOK
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="studio-option-group">
+                                            <span className="studio-field-label">Delivery scope</span>
+                                            <div className="studio-chip-row">
+                                                <button
+                                                    className={`studio-chip-btn ${skipOpenlane ? 'is-active' : ''}`}
+                                                    onClick={() => setSkipOpenlane(true)}
+                                                    title="Stop after verification"
+                                                >
+                                                    <ShieldCheck size={15} />
+                                                    Verification-first
+                                                </button>
+                                                <button
+                                                    className={`studio-chip-btn ${!skipOpenlane ? 'is-active' : ''}`}
+                                                    onClick={() => {
+                                                        if (isHuggingFace) {
+                                                            alert("GDS Layout is temporarily under maintenance on the cloud platform. It will be available back in a few days. Using RTL & Verification mode for now.");
+                                                        } else {
+                                                            setSkipOpenlane(false);
+                                                        }
+                                                    }}
+                                                    title={isHuggingFace ? "Full silicon flow to GDS (Under Cloud Maintenance)" : "Full silicon flow to GDS"}
+                                                >
+                                                    <Layers3 size={15} />
+                                                    {isHuggingFace ? 'Full signoff unavailable on cloud' : 'Full silicon path'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {error ? <div className="studio-error-banner">{error}</div> : null}
+
+                                    <div className="studio-launch-row">
+                                        <button
+                                            className="studio-launch-btn"
+                                            onClick={handleLaunch}
+                                            disabled={!prompt.trim()}
+                                        >
+                                            Launch Build
+                                            <ArrowRight size={16} />
                                         </button>
-                                    ))}
-                                </div>
+                                        <p className="studio-launch-note">
+                                            Press <span>Enter</span> to launch, or <span>Shift + Enter</span> for a new line.
+                                        </p>
+                                    </div>
+                                </section>
+
+                                <aside className="studio-briefing-card">
+                                    <div className="studio-section-heading studio-section-heading--stacked">
+                                        <span className="studio-section-label">Execution Brief</span>
+                                        <h2 className="studio-section-title">How this run will behave</h2>
+                                    </div>
+
+                                    <div className="studio-briefing-list">
+                                        {DELIVERY_MODES.map((mode, index) => (
+                                            <div key={mode.title} className="studio-briefing-item">
+                                                <span className="studio-briefing-index">0{index + 1}</span>
+                                                <div>
+                                                    <h3>{mode.title}</h3>
+                                                    <p>{mode.detail}</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <div className="studio-quickstart-block">
+                                        <div className="studio-quickstart-head">
+                                            <Waypoints size={16} />
+                                            <span>Quick starts</span>
+                                        </div>
+                                        <div className="studio-quickstart-list">
+                                            {QUICK_STARTS.map((example) => (
+                                                <button
+                                                    key={example.prompt}
+                                                    className="studio-example-card"
+                                                    onClick={() => setPrompt(example.prompt)}
+                                                >
+                                                    <div className="studio-example-copy">
+                                                        <strong>{example.title}</strong>
+                                                        <span>{example.note}</span>
+                                                    </div>
+                                                    <p>{example.prompt}</p>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </aside>
                             </div>
                         </div>
                     </motion.div>

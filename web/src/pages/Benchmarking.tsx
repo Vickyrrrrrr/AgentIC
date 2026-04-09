@@ -26,60 +26,78 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
 
     return (
         <div className="bench-page">
-            <div className="bench-header">
-                <h2 className="bench-title">
-                    Benchmarking: <span className="bench-design-name">{selectedDesign || 'No Design'}</span>
-                </h2>
-                <p className="bench-subtitle">
-                    Compare AgentIC-generated flows against conventional enterprise chip flows.
-                </p>
-            </div>
-
-            <div className="bench-card">
-                <h3 className="bench-card-title">Cost & Efficiency Analysis</h3>
-                <div className="bench-table-wrap">
-                    <table className="bench-table">
-                        <thead>
-                            <tr>
-                                <th>Metric</th>
-                                <th>AgentIC</th>
-                                <th>Traditional Flow</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {comparisons.map((c) => (
-                                <tr key={c.metric}>
-                                    <td className="bench-metric-name">{c.metric}</td>
-                                    <td className="bench-val-good">{c.agenticVal}</td>
-                                    <td className="bench-val-dim">{c.tradVal}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+            <section className="app-hero-card bench-hero-card">
+                <div className="app-hero-copy">
+                    <span className="app-hero-kicker">BENCHMARKING</span>
+                    <h2 className="app-hero-title">Compare AgentIC against conventional silicon delivery loops.</h2>
+                    <p className="app-hero-subtitle">
+                        Frame the selected design against slower, more manual engineering workflows to show where
+                        automation, recovery, and multi-agent reasoning compress delivery time.
+                    </p>
                 </div>
-            </div>
-
-            <div className="bench-card">
-                <h3 className="bench-card-title">Core Module Architecture</h3>
-                <div className="bench-table-wrap">
-                    <table className="bench-table">
-                        <thead>
-                            <tr>
-                                <th>Module</th>
-                                <th>Capability</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {modules.map((m) => (
-                                <tr key={m.name}>
-                                    <td className="bench-metric-name">{m.name}</td>
-                                    <td>{m.cap}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                <div className="app-hero-meta">
+                    <span className="app-hero-pill">{selectedDesign || 'No design selected'}</span>
+                    <span className="app-hero-pill">{comparisons.length} benchmark dimensions</span>
                 </div>
-            </div>
+            </section>
+
+            {!selectedDesign ? (
+                <div className="app-empty-card">
+                    <h3 className="app-empty-title">Select a design before comparing delivery paths.</h3>
+                    <p className="app-empty-copy">
+                        Benchmarking is most useful once a real design is in context. Open a build from history or launch
+                        one from Design Studio, then return here to frame the result against traditional flows.
+                    </p>
+                </div>
+            ) : (
+                <>
+                    <div className="bench-card">
+                        <h3 className="bench-card-title">Cost & Efficiency Analysis</h3>
+                        <div className="bench-table-wrap">
+                            <table className="bench-table">
+                                <thead>
+                                    <tr>
+                                        <th>Metric</th>
+                                        <th>AgentIC</th>
+                                        <th>Traditional Flow</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {comparisons.map((c) => (
+                                        <tr key={c.metric}>
+                                            <td className="bench-metric-name">{c.metric}</td>
+                                            <td className="bench-val-good">{c.agenticVal}</td>
+                                            <td className="bench-val-dim">{c.tradVal}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div className="bench-card">
+                        <h3 className="bench-card-title">Core Module Architecture</h3>
+                        <div className="bench-table-wrap">
+                            <table className="bench-table">
+                                <thead>
+                                    <tr>
+                                        <th>Module</th>
+                                        <th>Capability</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {modules.map((m) => (
+                                        <tr key={m.name}>
+                                            <td className="bench-metric-name">{m.name}</td>
+                                            <td>{m.cap}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </>
+            )}
         </div>
     );
 };

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check } from 'lucide-react';
+import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles } from 'lucide-react';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
 type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: string }>;
@@ -136,7 +136,14 @@ export const BillingModal = ({
     setError('');
     try {
       const raw = localStorage.getItem('agentic_byok_key');
-      if (!raw) { setGroups(DEFAULT_GROUPS); return; }
+      if (!raw) {
+        setGroups(DEFAULT_GROUPS);
+        setQuickKey('');
+        setQuickModel('');
+        setQuickBaseUrl('');
+        setQuickMode(true);
+        return;
+      }
       const parsed = JSON.parse(raw);
       if (!parsed || typeof parsed !== 'object') return;
 
@@ -157,6 +164,10 @@ export const BillingModal = ({
       }
     } catch {
       setGroups(DEFAULT_GROUPS);
+      setQuickKey('');
+      setQuickModel('');
+      setQuickBaseUrl('');
+      setQuickMode(true);
     }
   }, [isOpen]);
 
@@ -214,12 +225,42 @@ export const BillingModal = ({
             <div>
               <h2 className="byok-title">Configure API Keys</h2>
               <p className="byok-subtitle">
-                Bring your own LLM keys. Works with any OpenAI-compatible provider.
+                Bring your own LLM key so AgentIC can run builds without spending a shared backend credential.
               </p>
             </div>
             <button className="byok-close" onClick={onClose} aria-label="Close">
               <X size={18} />
             </button>
+          </div>
+
+          <div className="byok-onboarding">
+            <div className="byok-onboarding-card">
+              <span className="byok-onboarding-icon">
+                <Fingerprint size={16} />
+              </span>
+              <div>
+                <strong>Required on public deployments</strong>
+                <p>Your browser sends the key with build requests so the system runs on your account, not a shared server key.</p>
+              </div>
+            </div>
+            <div className="byok-onboarding-card">
+              <span className="byok-onboarding-icon">
+                <LockKeyhole size={16} />
+              </span>
+              <div>
+                <strong>Stored locally in this browser</strong>
+                <p>The key is saved in local storage on this device. It is not committed to GitHub or shown to other users.</p>
+              </div>
+            </div>
+            <div className="byok-onboarding-card">
+              <span className="byok-onboarding-icon">
+                <Sparkles size={16} />
+              </span>
+              <div>
+                <strong>Quick setup is enough for most users</strong>
+                <p>Use one model and one key for everything unless you want separate providers for debugging, build, and docs agents.</p>
+              </div>
+            </div>
           </div>
 
           {/* Mode toggle */}
@@ -242,7 +283,7 @@ export const BillingModal = ({
           {quickMode && (
             <div className="byok-quick">
               <p className="byok-quick-hint">
-                One key for all agent groups. Perfect if you're using a single provider.
+                One model and one key for all agent groups. This is the recommended setup if you are using a single provider.
               </p>
               <div className="byok-field-row">
                 <div className="byok-field">
@@ -253,6 +294,7 @@ export const BillingModal = ({
                     value={quickModel}
                     onChange={(e) => setQuickModel(e.target.value)}
                   />
+                  <span className="byok-field-help">Use the exact model id from your provider dashboard.</span>
                 </div>
                 <div className="byok-field">
                   <label className="byok-field-label">Base URL <span className="byok-optional">(optional)</span></label>
@@ -262,6 +304,7 @@ export const BillingModal = ({
                     value={quickBaseUrl}
                     onChange={(e) => setQuickBaseUrl(e.target.value)}
                   />
+                  <span className="byok-field-help">Only set this for OpenAI-compatible gateways, self-hosted proxies, or alternate endpoints.</span>
                 </div>
               </div>
               <div className="byok-field">
@@ -275,6 +318,11 @@ export const BillingModal = ({
                   autoFocus
                 />
                 <MaskedKey value={quickKey} />
+                <span className="byok-field-help">Example formats vary by provider. Paste the key exactly as issued.</span>
+              </div>
+              <div className="byok-guidance-callout">
+                <strong>First run checklist</strong>
+                <p>1. Paste your key. 2. Add a model id. 3. Save. 4. Return to Design Studio or HITL and launch your build.</p>
               </div>
             </div>
           )}
@@ -282,6 +330,9 @@ export const BillingModal = ({
           {/* Advanced mode */}
           {!quickMode && (
             <div className="byok-advanced">
+              <p className="byok-advanced-hint">
+                Advanced mode is for operators who want different providers for specific agent groups.
+              </p>
               {(['group1', 'group2', 'group3'] as GroupKey[]).map((key, index) => (
                 <ByokGroupCard
                   key={key}
@@ -299,6 +350,9 @@ export const BillingModal = ({
 
           {/* Actions */}
           <div className="byok-footer">
+            <span className="byok-footer-note">
+              AgentIC uses these keys only for requests initiated from this browser.
+            </span>
             <button className="byok-cancel-btn" onClick={onClose} disabled={saving}>
               Cancel
             </button>
@@ -312,7 +366,7 @@ export const BillingModal = ({
               ) : saving ? (
                 'Saving…'
               ) : (
-                'Save Keys'
+                'Save Local BYOK'
               )}
             </button>
           </div>

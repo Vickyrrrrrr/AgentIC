@@ -163,6 +163,10 @@ export const Documentation = () => {
             <span className="adoc-hero-dot">·</span>
             <span>{docs.length} reference documents</span>
           </div>
+          <div className="app-hero-meta adoc-hero-meta-row">
+            <span className="app-hero-pill">Overview, pipeline, config, and source docs</span>
+            <span className="app-hero-pill">{selectedDoc}</span>
+          </div>
         </div>
       </header>
 

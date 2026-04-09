@@ -1,5 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
+import {
+    ArrowRight,
+    Bot,
+    Fingerprint,
+    KeyRound,
+    ShieldCheck,
+    Sparkles,
+    Waypoints,
+} from 'lucide-react';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { StageProgressBar } from '../components/StageProgressBar';
 import { ApprovalCard } from '../components/ApprovalCard';
@@ -67,6 +76,24 @@ const BUILD_MODE_SKIPS: Record<BuildMode, string[]> = {
     verified: ['REGRESSION', 'ECO_PATCH', 'CONVERGENCE_REVIEW'],
     full: [],
 };
+
+const HITL_EXAMPLES = [
+    {
+        title: 'Compute core',
+        prompt: '8-bit RISC CPU with Harvard architecture',
+        note: 'A balanced architecture for stepping through review checkpoints.',
+    },
+    {
+        title: 'High-throughput block',
+        prompt: 'AXI4 DMA engine with 4 channels',
+        note: 'Useful when you want to inspect architecture and verification gates closely.',
+    },
+    {
+        title: 'Peripheral path',
+        prompt: 'UART controller at 115200 baud',
+        note: 'A smaller system for validating approval flow and artifact generation.',
+    },
+];
 
 interface BuildEvent {
     type: string;
@@ -170,6 +197,7 @@ export const HumanInLoopBuild = () => {
     // Milestone toast: shown briefly when a key stage completes
     const [milestoneToast, setMilestoneToast] = useState<{ title: string; msg: string } | null>(null);
     const milestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const byokKey = localStorage.getItem('agentic_byok_key');
 
     useEffect(() => {
         if (prompt.length > 8) {
@@ -512,169 +540,235 @@ export const HumanInLoopBuild = () => {
             {/* ── PROMPT PHASE ── */}
             {phase === 'prompt' && (
                 <div className="hitl-prompt-screen">
-                    <div className="hitl-prompt-hero">
-                        <h1 className="hitl-hero-title">
-                            Design Your Chip
-                            <button className="studio-key-btn" onClick={() => setShowBillingModal(true)}>
-                                API Keys
-                            </button>
-                        </h1>
-                        <p className="hitl-hero-sub">
-                            Human-in-the-Loop — review and approve every stage of the autonomous pipeline.
-                        </p>
-                    </div>
-
-                    <div className="hitl-prompt-card">
-                        <div className="hitl-examples">
-                            {[
-                                '8-bit RISC CPU with Harvard architecture',
-                                'AXI4 DMA engine with 4 channels',
-                                'UART controller at 115200 baud',
-                            ].map(ex => (
-                                <button key={ex} className="hitl-example-chip" onClick={() => setPrompt(ex)}>
-                                    {ex}
+                    <div className="hitl-launch-shell">
+                        <section className="hitl-launch-header">
+                            <div className="hitl-launch-copy">
+                                <span className="hitl-launch-kicker">
+                                    <Sparkles size={14} />
+                                    HUMAN-IN-THE-LOOP
+                                </span>
+                                <h1 className="hitl-launch-title">Keep the agent autonomous, but keep every critical decision reviewable.</h1>
+                                <p className="hitl-launch-subtitle">
+                                    This mode pauses at key checkpoints so you can approve stage outputs, redirect the build,
+                                    and inspect artifacts before AgentIC commits more compute.
+                                </p>
+                            </div>
+                            <div className="hitl-launch-meta">
+                                <button className="hitl-control-btn" onClick={() => setShowBillingModal(true)}>
+                                    <KeyRound size={15} />
+                                    Configure BYOK
                                 </button>
-                            ))}
-                        </div>
-
-                        <textarea
-                            className="hitl-prompt-textarea"
-                            placeholder="Describe the chip you want to build in plain English…"
-                            value={prompt}
-                            onChange={e => setPrompt(e.target.value)}
-                            rows={4}
-                            autoFocus
-                        />
-
-                        {designName && (
-                            <div className="hitl-design-name-row">
-                                <span className="hitl-design-label">Design ID:</span>
-                                <input
-                                    className="hitl-design-input"
-                                    value={designName}
-                                    onChange={e => setDesignName(e.target.value.replace(/[^a-z0-9_]/g, ''))}
-                                />
+                                <div className="hitl-meta-pills">
+                                    <span className={`hitl-meta-pill ${byokKey ? 'is-ready' : 'is-warn'}`}>
+                                        <Fingerprint size={14} />
+                                        {byokKey ? 'BYOK configured' : 'BYOK required'}
+                                    </span>
+                                    <span className="hitl-meta-pill">
+                                        <ShieldCheck size={14} />
+                                        {buildMode === 'quick' ? 'Quick review path' : buildMode === 'verified' ? 'Verified review path' : 'Fabrication review path'}
+                                    </span>
+                                </div>
                             </div>
-                        )}
+                        </section>
 
-                        {/* Build mode selector */}
-                        <div className="hitl-mode-row">
-                            <span className="hitl-mode-label">Build Mode</span>
-                            <div className="hitl-mode-pills">
-                                {(['quick', 'verified', 'full'] as BuildMode[]).map(mode => (
-                                    <button
-                                        key={mode}
-                                        className={`hitl-mode-pill${buildMode === mode ? ' hitl-mode-pill--active' : ''}`}
-                                        onClick={() => {
-                                            setBuildMode(mode);
-                                            setSkipStages(new Set(BUILD_MODE_SKIPS[mode]));
-                                            if (mode === 'quick') setSkipOpenlane(true);
-                                        }}
-                                    >
-                                        <span className="hitl-mode-pill-name">
-                                            {mode === 'quick' ? 'Quick RTL' : mode === 'verified' ? 'Verified Design' : 'Fabrication Ready'}
-                                        </span>
-                                        <span className="hitl-mode-pill-desc">
-                                            {mode === 'quick' ? 'RTL + basic verify' : mode === 'verified' ? 'Full verify pipeline' : 'All stages incl. physical'}
-                                        </span>
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
+                        <div className="hitl-launch-grid">
+                            <section className="hitl-prompt-card hitl-prompt-card--premium">
+                                <div className="hitl-section-head">
+                                    <div>
+                                        <span className="hitl-section-label">Build Brief</span>
+                                        <h2 className="hitl-section-title">Operator-guided launch</h2>
+                                    </div>
+                                    <span className="hitl-section-chip">{Array.from(skipStages).length} stages skipped</span>
+                                </div>
 
-                        {/* Customize stages toggle */}
-                        <button
-                            className="hitl-stage-toggle-btn"
-                            onClick={() => setShowStageToggles(!showStageToggles)}
-                        >
-                            {showStageToggles ? '▼ Hide stage details' : '▶ Customize stages'}
-                        </button>
-
-                        {showStageToggles && (
-                            <div className="hitl-stage-toggles">
-                                {PIPELINE_STAGES.map(stage => {
-                                    const mandatory = MANDATORY_STAGES.has(stage);
-                                    const skipped = skipStages.has(stage);
-                                    return (
-                                        <button
-                                            key={stage}
-                                            className={`hitl-stage-chip${skipped ? ' hitl-stage-chip--off' : ' hitl-stage-chip--on'}${mandatory ? ' hitl-stage-chip--locked' : ''}`}
-                                            disabled={mandatory}
-                                            onClick={() => {
-                                                if (mandatory) return;
-                                                setSkipStages(prev => {
-                                                    const next = new Set(prev);
-                                                    next.has(stage) ? next.delete(stage) : next.add(stage);
-                                                    return next;
-                                                });
-                                            }}
-                                        >
-                                            {mandatory && <span className="hitl-stage-lock">&#x1f512;</span>}
-                                            {STAGE_LABELS[stage] || stage}
+                                <div className="hitl-examples hitl-examples--cards">
+                                    {HITL_EXAMPLES.map(example => (
+                                        <button key={example.prompt} className="hitl-example-card" onClick={() => setPrompt(example.prompt)}>
+                                            <strong>{example.title}</strong>
+                                            <span>{example.note}</span>
+                                            <p>{example.prompt}</p>
                                         </button>
-                                    );
-                                })}
-                            </div>
-                        )}
+                                    ))}
+                                </div>
 
-                        <div className="hitl-options-row">
-                            <label className="hitl-toggle">
-                                <input type="checkbox" checked={skipOpenlane} onChange={e => setSkipOpenlane(e.target.checked)} />
-                                <span>Skip OpenLane (RTL + Verify only)</span>
-                            </label>
-                            <label className="hitl-toggle">
-                                <input type="checkbox" checked={skipCoverage} onChange={e => setSkipCoverage(e.target.checked)} />
-                                <span>Skip Coverage</span>
-                            </label>
-                            <button
-                                className="hitl-advanced-toggle"
-                                onClick={() => setShowAdvanced(!showAdvanced)}
-                            >
-                                {showAdvanced ? '▼ Hide Options' : '▶ Advanced Options'}
-                            </button>
+                                <div className="hitl-textarea-wrap">
+                                    <Bot size={18} className="hitl-textarea-icon" />
+                                    <textarea
+                                        className="hitl-prompt-textarea hitl-prompt-textarea--premium"
+                                        placeholder="Describe the chip you want to build in plain English…"
+                                        value={prompt}
+                                        onChange={e => setPrompt(e.target.value)}
+                                        rows={5}
+                                        autoFocus
+                                    />
+                                </div>
+
+                                <div className="hitl-design-name-row">
+                                    <span className="hitl-design-label">Design ID</span>
+                                    <input
+                                        className="hitl-design-input"
+                                        value={designName}
+                                        onChange={e => setDesignName(e.target.value.replace(/[^a-z0-9_]/g, ''))}
+                                        placeholder="Auto-generated when you describe the design"
+                                    />
+                                </div>
+
+                                <div className="hitl-mode-row">
+                                    <span className="hitl-mode-label">Approval depth</span>
+                                    <div className="hitl-mode-pills">
+                                        {(['quick', 'verified', 'full'] as BuildMode[]).map(mode => (
+                                            <button
+                                                key={mode}
+                                                className={`hitl-mode-pill${buildMode === mode ? ' hitl-mode-pill--active' : ''}`}
+                                                onClick={() => {
+                                                    setBuildMode(mode);
+                                                    setSkipStages(new Set(BUILD_MODE_SKIPS[mode]));
+                                                    if (mode === 'quick') setSkipOpenlane(true);
+                                                }}
+                                            >
+                                                <span className="hitl-mode-pill-name">
+                                                    {mode === 'quick' ? 'Quick RTL' : mode === 'verified' ? 'Verified Design' : 'Fabrication Ready'}
+                                                </span>
+                                                <span className="hitl-mode-pill-desc">
+                                                    {mode === 'quick' ? 'RTL + basic verify' : mode === 'verified' ? 'Full verify pipeline' : 'All stages incl. physical'}
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="hitl-options-row hitl-options-row--stacked">
+                                    <div className="hitl-toggle-grid">
+                                        <label className="hitl-toggle">
+                                            <input type="checkbox" checked={skipOpenlane} onChange={e => setSkipOpenlane(e.target.checked)} />
+                                            <span>Skip OpenLane</span>
+                                        </label>
+                                        <label className="hitl-toggle">
+                                            <input type="checkbox" checked={skipCoverage} onChange={e => setSkipCoverage(e.target.checked)} />
+                                            <span>Skip Coverage</span>
+                                        </label>
+                                        <label className="hitl-toggle">
+                                            <input type="checkbox" checked={strictGates} onChange={e => setStrictGates(e.target.checked)} />
+                                            <span>Strict Gates</span>
+                                        </label>
+                                        <label className="hitl-toggle">
+                                            <input type="checkbox" checked={showThinking} onChange={e => setShowThinking(e.target.checked)} />
+                                            <span>Show Thinking</span>
+                                        </label>
+                                    </div>
+                                    <button
+                                        className="hitl-advanced-toggle"
+                                        onClick={() => setShowAdvanced(!showAdvanced)}
+                                    >
+                                        {showAdvanced ? 'Hide advanced controls' : 'Show advanced controls'}
+                                    </button>
+                                </div>
+
+                                {showAdvanced && (
+                                    <div className="hitl-advanced-panel">
+                                        <div className="hitl-opt-grid">
+                                            <label className="hitl-opt">
+                                                <span>Max Retries</span>
+                                                <input type="number" value={maxRetries} onChange={e => setMaxRetries(Number(e.target.value))} />
+                                            </label>
+                                            <label className="hitl-opt">
+                                                <span>Min Coverage %</span>
+                                                <input type="number" step="0.1" value={minCoverage} onChange={e => setMinCoverage(Number(e.target.value))} />
+                                            </label>
+                                            <label className="hitl-opt">
+                                                <span>PDK</span>
+                                                <select value={pdkProfile} onChange={e => setPdkProfile(e.target.value)}>
+                                                    <option value="sky130">sky130</option>
+                                                    <option value="gf180">gf180</option>
+                                                </select>
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
+
+                                <button
+                                    className="hitl-stage-toggle-btn"
+                                    onClick={() => setShowStageToggles(!showStageToggles)}
+                                >
+                                    {showStageToggles ? 'Hide stage customization' : 'Customize skipped stages'}
+                                </button>
+
+                                {showStageToggles && (
+                                    <div className="hitl-stage-toggles">
+                                        {PIPELINE_STAGES.map(stage => {
+                                            const mandatory = MANDATORY_STAGES.has(stage);
+                                            const skipped = skipStages.has(stage);
+                                            return (
+                                                <button
+                                                    key={stage}
+                                                    className={`hitl-stage-chip${skipped ? ' hitl-stage-chip--off' : ' hitl-stage-chip--on'}${mandatory ? ' hitl-stage-chip--locked' : ''}`}
+                                                    disabled={mandatory}
+                                                    onClick={() => {
+                                                        if (mandatory) return;
+                                                        setSkipStages(prev => {
+                                                            const next = new Set(prev);
+                                                            next.has(stage) ? next.delete(stage) : next.add(stage);
+                                                            return next;
+                                                        });
+                                                    }}
+                                                >
+                                                    {mandatory && <span className="hitl-stage-lock">&#x1f512;</span>}
+                                                    {STAGE_LABELS[stage] || stage}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+
+                                {error && <div className="hitl-error">{error}</div>}
+
+                                <button
+                                    className="hitl-launch-btn"
+                                    onClick={handleLaunch}
+                                    disabled={!prompt.trim()}
+                                >
+                                    Launch Build with Approval Gates
+                                    <ArrowRight size={16} />
+                                </button>
+                            </section>
+
+                            <aside className="hitl-briefing-card">
+                                <div className="hitl-section-head">
+                                    <div>
+                                        <span className="hitl-section-label">Execution Brief</span>
+                                        <h2 className="hitl-section-title">Review behavior</h2>
+                                    </div>
+                                </div>
+
+                                <div className="hitl-briefing-list">
+                                    {[
+                                        ['Approval gates', 'Stage-complete outputs wait for your signoff before the pipeline proceeds.'],
+                                        ['Artifact visibility', 'You can inspect summaries, warnings, and generated files at each checkpoint.'],
+                                        ['Operator recovery', 'Reject a stage with feedback to redirect the system without restarting from scratch.'],
+                                    ].map(([title, body], index) => (
+                                        <div key={title} className="hitl-briefing-item">
+                                            <span className="hitl-briefing-index">0{index + 1}</span>
+                                            <div>
+                                                <h3>{title}</h3>
+                                                <p>{body}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                <div className="hitl-quickstart-block">
+                                    <div className="hitl-quickstart-head">
+                                        <Waypoints size={16} />
+                                        <span>Best for</span>
+                                    </div>
+                                    <ul className="hitl-quickstart-list">
+                                        <li>critical architectures that need human checkpoints</li>
+                                        <li>debugging pipeline regressions with explicit approvals</li>
+                                        <li>demonstrating trustworthy agent behavior to collaborators</li>
+                                    </ul>
+                                </div>
+                            </aside>
                         </div>
-
-                        {showAdvanced && (
-                            <div className="hitl-advanced-panel">
-                                <div className="hitl-opt-grid">
-                                    <label className="hitl-opt">
-                                        <span>Max Retries</span>
-                                        <input type="number" value={maxRetries} onChange={e => setMaxRetries(Number(e.target.value))} />
-                                    </label>
-                                    <label className="hitl-opt">
-                                        <span>Min Coverage %</span>
-                                        <input type="number" step="0.1" value={minCoverage} onChange={e => setMinCoverage(Number(e.target.value))} />
-                                    </label>
-                                    <label className="hitl-opt">
-                                        <span>PDK</span>
-                                        <select value={pdkProfile} onChange={e => setPdkProfile(e.target.value)}>
-                                            <option value="sky130">sky130</option>
-                                            <option value="gf180">gf180</option>
-                                        </select>
-                                    </label>
-                                </div>
-                                <div className="hitl-opt-checks">
-                                    <label className="hitl-toggle">
-                                        <input type="checkbox" checked={strictGates} onChange={e => setStrictGates(e.target.checked)} />
-                                        <span>Strict Gates</span>
-                                    </label>
-                                    <label className="hitl-toggle">
-                                        <input type="checkbox" checked={showThinking} onChange={e => setShowThinking(e.target.checked)} />
-                                        <span>Show Thinking</span>
-                                    </label>
-                                </div>
-                            </div>
-                        )}
-
-                        {error && <div className="hitl-error">{error}</div>}
-
-                        <button
-                            className="hitl-launch-btn"
-                            onClick={handleLaunch}
-                            disabled={!prompt.trim()}
-                        >
-                            Launch Build with Approval Gates
-                        </button>
                     </div>
                 </div>
             )}

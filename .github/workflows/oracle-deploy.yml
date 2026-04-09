@@ -16,7 +16,7 @@ on:
 
 concurrency:
   group: oracle-deploy
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   validate:
@@ -38,7 +38,7 @@ jobs:
 
       - name: Compile and config checks
         run: |
-          python -m py_compile server/api.py server/lab.py server/tasks.py src/agentic/orchestrator.py src/agentic/cli.py
+          python -m py_compile server/db.py server/api.py server/lab.py server/tasks.py src/agentic/orchestrator.py src/agentic/cli.py
           python -m json.tool ops/grafana/dashboards/agentic-overview.json > /dev/null
           touch .env
           docker compose config > /dev/null

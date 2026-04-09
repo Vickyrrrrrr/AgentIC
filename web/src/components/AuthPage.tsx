@@ -115,9 +115,14 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
           </h2>
           <p className="auth-form-sub">
             {mode === 'login'
-              ? 'Sign in to your workspace'
-              : 'Create your account to start building'}
+              ? 'Sign in to your workspace and continue to BYOK setup'
+              : 'Create your account, configure BYOK, and start building'}
           </p>
+
+          <div className="auth-onboarding-note">
+            <strong>First-run path</strong>
+            <span>Authenticate, save your BYOK key in the workspace, then launch a build. Public deployments do not use a shared backend LLM key.</span>
+          </div>
 
           <form className="auth-form" onSubmit={handleSubmit}>
             <div className="auth-field">

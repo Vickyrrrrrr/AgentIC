@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api';
-import { Gauge, Zap, Maximize2, Hash, Cpu, Users, RefreshCw, CheckCircle2, XCircle } from 'lucide-react';
+import { Gauge, Zap, Maximize2, Hash, Cpu, Users, RefreshCw, CheckCircle2, XCircle, Layers3, ShieldCheck } from 'lucide-react';
 
 interface DashboardProps {
     selectedDesign: string;
@@ -62,101 +62,126 @@ export const Dashboard = ({ selectedDesign }: DashboardProps) => {
 
     return (
         <div className="dash-page">
-            <div className="dash-header">
-                <h2 className="dash-title">{selectedDesign || 'No Design Selected'}</h2>
-                <p className="dash-subtitle">Silicon metrics, signoff analysis, and build history.</p>
-            </div>
+            <section className="app-hero-card dash-hero-card">
+                <div className="app-hero-copy">
+                    <span className="app-hero-kicker">DESIGN INSIGHTS</span>
+                    <h2 className="app-hero-title">{selectedDesign || 'No design selected yet'}</h2>
+                    <p className="app-hero-subtitle">
+                        Review timing, power, signoff confidence, and the latest execution history in one place.
+                        This is the operator-facing summary of how ready the current design is for the next step.
+                    </p>
+                </div>
+                <div className="app-hero-meta">
+                    <span className="app-hero-pill">
+                        <Layers3 size={15} />
+                        {recentJobs.length} recent runs
+                    </span>
+                    <span className={`app-hero-pill ${signoffData.pass === true ? 'is-success' : signoffData.pass === false ? 'is-warn' : ''}`}>
+                        <ShieldCheck size={15} />
+                        {signoffData.pass === true ? 'Signoff passing' : signoffData.pass === false ? 'Signoff attention needed' : 'Signoff pending'}
+                    </span>
+                </div>
+            </section>
 
-            {loading ? (
-                <div className="dash-loader">
-                    <div className="premium-loader">
-                        <span className="premium-loader-dot" />
-                        <span className="premium-loader-dot" />
-                        <span className="premium-loader-dot" />
-                    </div>
-                    Loading metrics...
+            {!selectedDesign ? (
+                <div className="app-empty-card">
+                    <h3 className="app-empty-title">No design is in focus yet.</h3>
+                    <p className="app-empty-copy">
+                        Start a build or choose a design from Jobs &amp; History to unlock metrics, signoff analysis,
+                        and recent execution detail for a specific project.
+                    </p>
                 </div>
             ) : (
-                <div className="dash-metrics-grid">
-                    {METRICS_CONFIG.map((m) => (
-                        <div className="dash-metric-card" key={m.key}>
-                            <div className="dash-metric-icon">{m.icon}</div>
-                            <div className="dash-metric-body">
-                                <span className="dash-metric-label">{m.label}</span>
-                                <span className="dash-metric-value">{metrics[m.key]}</span>
-                                <span className="dash-metric-tag">{m.tag}</span>
+                <>
+                    {loading ? (
+                        <div className="dash-loader">
+                            <div className="premium-loader">
+                                <span className="premium-loader-dot" />
+                                <span className="premium-loader-dot" />
+                                <span className="premium-loader-dot" />
                             </div>
+                            Loading metrics...
                         </div>
-                    ))}
-                </div>
-            )}
-
-            {/* Agent Architecture */}
-            <div className="dash-card">
-                <h3 className="dash-card-title">Agent Architecture</h3>
-                <div className="dash-insight-grid">
-                    {[
-                        { icon: <Cpu size={16} />, title: 'Spec Decomposition', value: 'SID/JSON Contract', detail: 'ArchitectModule — validated ports, FSMs, sub-modules' },
-                        { icon: <Users size={16} />, title: 'Collaborative RTL', value: 'Designer + Reviewer', detail: '2-agent Crew with syntax_check and read_file tools' },
-                        { icon: <RefreshCw size={16} />, title: 'Self-Healing', value: 'Convergence-Aware', detail: 'SelfReflectPipeline with fingerprinting + stagnation detection' },
-                    ].map((item, i) => (
-                        <div key={i} className="dash-insight-item">
-                            <div className="dash-insight-icon">{item.icon}</div>
-                            <div className="dash-insight-content">
-                                <span className="dash-insight-title">{item.title}</span>
-                                <span className="dash-insight-value">{item.value}</span>
-                                <span className="dash-insight-detail">{item.detail}</span>
-                            </div>
+                    ) : (
+                        <div className="dash-metrics-grid">
+                            {METRICS_CONFIG.map((m) => (
+                                <div className="dash-metric-card" key={m.key}>
+                                    <div className="dash-metric-icon">{m.icon}</div>
+                                    <div className="dash-metric-body">
+                                        <span className="dash-metric-label">{m.label}</span>
+                                        <span className="dash-metric-value">{metrics[m.key]}</span>
+                                        <span className="dash-metric-tag">{m.tag}</span>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                    ))}
-                </div>
-            </div>
-
-            {/* Signoff Report */}
-            <div className="dash-card">
-                <h3 className="dash-card-title">
-                    Signoff Report
-                    {signoffData.pass === true && (
-                        <span className="dash-signoff-pass"><CheckCircle2 size={14} /> Passed</span>
                     )}
-                    {signoffData.pass === false && (
-                        <span className="dash-signoff-fail"><XCircle size={14} /> Failed</span>
-                    )}
-                </h3>
-                <pre className="dash-report-pre">{signoffData.report}</pre>
-            </div>
 
-            {/* Recent Builds */}
-            {recentJobs.length > 0 && (
-                <div className="dash-card">
-                    <h3 className="dash-card-title">Recent Builds</h3>
-                    <div className="dash-table-wrap">
-                        <table className="dash-table">
-                            <thead>
-                                <tr>
-                                    <th>Job ID</th>
-                                    <th>Status</th>
-                                    <th>Stage</th>
-                                    <th>Events</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {recentJobs.map((job: any) => (
-                                    <tr key={job.job_id}>
-                                        <td className="dash-job-id">{job.job_id.substring(0, 8)}…</td>
-                                        <td>
-                                            <span className="dash-status" style={{ color: statusColor(job.status) }}>
-                                                {job.status}
-                                            </span>
-                                        </td>
-                                        <td>{job.current_state}</td>
-                                        <td>{job.event_count}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
+                    <div className="dash-card">
+                        <h3 className="dash-card-title">Agent Architecture</h3>
+                        <div className="dash-insight-grid">
+                            {[
+                                { icon: <Cpu size={16} />, title: 'Spec Decomposition', value: 'SID/JSON Contract', detail: 'ArchitectModule — validated ports, FSMs, sub-modules' },
+                                { icon: <Users size={16} />, title: 'Collaborative RTL', value: 'Designer + Reviewer', detail: '2-agent Crew with syntax_check and read_file tools' },
+                                { icon: <RefreshCw size={16} />, title: 'Self-Healing', value: 'Convergence-Aware', detail: 'SelfReflectPipeline with fingerprinting + stagnation detection' },
+                            ].map((item, i) => (
+                                <div key={i} className="dash-insight-item">
+                                    <div className="dash-insight-icon">{item.icon}</div>
+                                    <div className="dash-insight-content">
+                                        <span className="dash-insight-title">{item.title}</span>
+                                        <span className="dash-insight-value">{item.value}</span>
+                                        <span className="dash-insight-detail">{item.detail}</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
                     </div>
-                </div>
+
+                    <div className="dash-card">
+                        <h3 className="dash-card-title">
+                            Signoff Report
+                            {signoffData.pass === true && (
+                                <span className="dash-signoff-pass"><CheckCircle2 size={14} /> Passed</span>
+                            )}
+                            {signoffData.pass === false && (
+                                <span className="dash-signoff-fail"><XCircle size={14} /> Failed</span>
+                            )}
+                        </h3>
+                        <pre className="dash-report-pre">{signoffData.report}</pre>
+                    </div>
+
+                    {recentJobs.length > 0 && (
+                        <div className="dash-card">
+                            <h3 className="dash-card-title">Recent Builds</h3>
+                            <div className="dash-table-wrap">
+                                <table className="dash-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Job ID</th>
+                                            <th>Status</th>
+                                            <th>Stage</th>
+                                            <th>Events</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {recentJobs.map((job: any) => (
+                                            <tr key={job.job_id}>
+                                                <td className="dash-job-id">{job.job_id.substring(0, 8)}…</td>
+                                                <td>
+                                                    <span className="dash-status" style={{ color: statusColor(job.status) }}>
+                                                        {job.status}
+                                                    </span>
+                                                </td>
+                                                <td>{job.current_state}</td>
+                                                <td>{job.event_count}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </>
             )}
         </div>
     );

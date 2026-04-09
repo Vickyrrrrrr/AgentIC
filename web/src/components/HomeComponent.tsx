@@ -75,9 +75,15 @@ const agentCards = [
 
 export const HomeComponent = ({
   designsLength,
+  totalBuilds,
+  runningBuilds,
+  successfulBuilds,
   setSelectedPage,
 }: {
   designsLength: number;
+  totalBuilds: number;
+  runningBuilds: number;
+  successfulBuilds: number;
   setSelectedPage: (page: string) => void;
 }) => {
   return (
@@ -161,19 +167,19 @@ export const HomeComponent = ({
           <span className="home-stat-label">active designs</span>
         </div>
         <div className="home-stat">
-          <span className="home-stat-meta">Agents</span>
-          <span className="home-stat-value">5</span>
-          <span className="home-stat-label">specialized roles</span>
+          <span className="home-stat-meta">Live</span>
+          <span className="home-stat-value">{runningBuilds}</span>
+          <span className="home-stat-label">running builds</span>
         </div>
         <div className="home-stat">
-          <span className="home-stat-meta">PDK</span>
-          <span className="home-stat-value">Sky130</span>
-          <span className="home-stat-label">open foundry target</span>
+          <span className="home-stat-meta">History</span>
+          <span className="home-stat-value">{totalBuilds}</span>
+          <span className="home-stat-label">total builds stored</span>
         </div>
         <div className="home-stat">
-          <span className="home-stat-meta">Access</span>
-          <span className="home-stat-value">BYOK</span>
-          <span className="home-stat-label">user-owned inference</span>
+          <span className="home-stat-meta">Succeeded</span>
+          <span className="home-stat-value">{successfulBuilds}</span>
+          <span className="home-stat-label">completed successfully</span>
         </div>
       </section>
 

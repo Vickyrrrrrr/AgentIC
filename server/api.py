@@ -20,6 +20,7 @@ import uuid
 import glob
 import io
 import threading
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -27,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from server.approval import approval_manager
 from server.auth import (
@@ -94,7 +95,31 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r; using default %s", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid float for %s=%r; using default %s", name, raw, default)
+        return default
+
+
 ALLOW_BACKEND_LLM_FALLBACK = _env_flag("ALLOW_BACKEND_LLM_FALLBACK", False)
+DB_INIT_ATTEMPTS = max(1, _env_int("DB_INIT_ATTEMPTS", 12))
+DB_INIT_RETRY_SECONDS = max(0.0, _env_float("DB_INIT_RETRY_SECONDS", 5.0))
 
 HTTP_REQUESTS_TOTAL = Counter(
     "agentic_http_requests_total",
@@ -156,15 +181,50 @@ async def advanced_request_logging_middleware(request: Request, call_next):
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
 
 try:
-    from .db import SessionLocal, Job as DBJob, engine as DB_ENGINE
+    from .db import (
+        SessionLocal,
+        Job as DBJob,
+        engine as DB_ENGINE,
+        ensure_database_ready,
+        is_schema_ready,
+    )
 except ImportError:
     SessionLocal = None
+    DBJob = None
     DB_ENGINE = None
-    pass
+    ensure_database_ready = None
+    is_schema_ready = lambda: False
+
+
+def _db_persistence_ready() -> bool:
+    if not SessionLocal or DB_ENGINE is None or DBJob is None:
+        return False
+    if is_schema_ready():
+        return True
+    if ensure_database_ready is None:
+        return False
+    return ensure_database_ready(max_attempts=1, retry_interval=0)
+
+
+@app.on_event("startup")
+def initialize_persistence():
+    if ensure_database_ready is None:
+        logger.warning("Database persistence module unavailable; startup is continuing without DB-backed job history.")
+        return
+
+    if ensure_database_ready(max_attempts=DB_INIT_ATTEMPTS, retry_interval=DB_INIT_RETRY_SECONDS):
+        _hydrate_job_store_from_db()
+        logger.info("Database schema is ready for AgentIC startup.")
+        return
+
+    logger.error(
+        "Database schema could not be initialized during startup. "
+        "The API will stay live, but readiness checks and job persistence will remain degraded."
+    )
 
 def _sync_job_to_db(job_id: str):
     """Safely mirrors JOB_STORE dictionary changes into the persistent Database."""
-    if not SessionLocal:
+    if not _db_persistence_ready():
         return
     try:
         job_data = JOB_STORE.get(job_id)
@@ -177,6 +237,8 @@ def _sync_job_to_db(job_id: str):
                 db_job = DBJob(id=job_id)
                 db.add(db_job)
             
+            db_job.user_id = job_data.get("user_id")
+            db_job.user_email = job_data.get("user_email")
             db_job.design_name = job_data.get("design_name", "")
             db_job.status = job_data.get("status", "pending")
             db_job.build_status = job_data.get("build_status", "pending")
@@ -196,7 +258,7 @@ def _sync_job_to_db(job_id: str):
 
 def _pull_job_from_db(job_id: str):
     """Safely reads the background Worker's Database changes back into the API memory."""
-    if not SessionLocal:
+    if not _db_persistence_ready():
         return
     try:
         with SessionLocal() as db:
@@ -205,6 +267,8 @@ def _pull_job_from_db(job_id: str):
                 if job_id not in JOB_STORE:
                     JOB_STORE[job_id] = {}
                 JOB_STORE[job_id].update({
+                    "user_id": getattr(db_job, "user_id", None),
+                    "user_email": getattr(db_job, "user_email", None),
                     "design_name": db_job.design_name or JOB_STORE[job_id].get("design_name", ""),
                     "status": db_job.status or "pending",
                     "build_status": db_job.build_status or "pending",
@@ -214,10 +278,132 @@ def _pull_job_from_db(job_id: str):
                     "events": db_job.events or [],
                     "stages": db_job.stages or {},
                     "result": db_job.result or {},
+                    "created_at": int(db_job.created_at.timestamp()) if db_job.created_at else JOB_STORE[job_id].get("created_at", int(time.time())),
                     "current_state": db_job.events[-1].get("state", "UNKNOWN") if db_job.events else "INIT",
                 })
     except Exception as e:
         logger.error(f"Failed to pull {job_id} from DB: {e}")
+
+
+def _normalize_epoch_seconds(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, datetime):
+        return int(value.timestamp())
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
+
+
+def _job_current_state(job: Any) -> str:
+    events = getattr(job, "events", None) if not isinstance(job, dict) else job.get("events")
+    if events:
+        try:
+            return events[-1].get("state", "INIT")
+        except (AttributeError, IndexError):
+            return "INIT"
+    if isinstance(job, dict):
+        return job.get("current_state", "INIT")
+    return "INIT"
+
+
+def _serialize_job_record(job_id: str, job: Any) -> Dict[str, Any]:
+    if isinstance(job, dict):
+        events = job.get("events", []) or []
+        return {
+            "job_id": job_id,
+            "design_name": job.get("design_name", ""),
+            "status": job.get("status", "pending"),
+            "current_state": _job_current_state(job),
+            "created_at": _normalize_epoch_seconds(job.get("created_at")),
+            "event_count": len(events),
+            "human_in_loop": bool(job.get("human_in_loop", False)),
+        }
+
+    events = job.events or []
+    return {
+        "job_id": job_id,
+        "design_name": job.design_name or "",
+        "status": job.status or "pending",
+        "current_state": _job_current_state(job),
+        "created_at": _normalize_epoch_seconds(job.created_at),
+        "event_count": len(events),
+        "human_in_loop": bool(getattr(job, "human_in_loop", False)),
+    }
+
+
+def _load_jobs_for_profile(profile: Optional[dict]) -> List[Dict[str, Any]]:
+    if _db_persistence_ready():
+        try:
+            with SessionLocal() as db:
+                query = db.query(DBJob)
+                if AUTH_ENABLED and profile is not None and getattr(DBJob, "user_id", None) is not None:
+                    query = query.filter(DBJob.user_id == profile["id"])
+                rows = query.order_by(DBJob.created_at.desc()).all()
+                return [_serialize_job_record(row.id, row) for row in rows]
+        except Exception as exc:
+            logger.error("Failed to load persisted jobs: %s", exc)
+
+    jobs: List[Dict[str, Any]] = []
+    for jid, job in JOB_STORE.items():
+        if AUTH_ENABLED and profile is not None and job.get("user_id") != profile.get("id"):
+            continue
+        jobs.append(_serialize_job_record(jid, job))
+    jobs.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+    return jobs
+
+
+def _hydrate_job_store_from_db(limit: int = 250) -> None:
+    """Warm memory from persisted jobs so restarts keep recent workspace history available."""
+    if not _db_persistence_ready():
+        return
+    try:
+        with SessionLocal() as db:
+            rows = db.query(DBJob).order_by(DBJob.created_at.desc()).limit(limit).all()
+            for row in rows:
+                _pull_job_from_db(row.id)
+        logger.info("Hydrated %s persisted jobs into memory on startup.", min(len(rows), limit))
+    except Exception as exc:
+        logger.error("Failed to hydrate persisted jobs on startup: %s", exc)
+
+
+def _summarize_jobs(jobs: List[Dict[str, Any]]) -> Dict[str, int]:
+    running_statuses = {"queued", "running", "cancelling"}
+    active_designs = {job["design_name"] for job in jobs if job.get("design_name")}
+    return {
+        "total_builds": len(jobs),
+        "running_builds": sum(1 for job in jobs if job.get("status") in running_statuses),
+        "successful_builds": sum(1 for job in jobs if job.get("status") == "done"),
+        "failed_builds": sum(1 for job in jobs if job.get("status") == "failed"),
+        "active_designs": len(active_designs),
+    }
+
+
+def _recent_job_activity(jobs: List[Dict[str, Any]], limit: int = 8) -> List[Dict[str, Any]]:
+    return sorted(jobs, key=lambda item: item.get("created_at", 0), reverse=True)[:limit]
+
+
+def _design_has_gds(design_name: str) -> bool:
+    if not design_name:
+        return False
+
+    workspace_dir = os.path.join(_repo_root(), "designs", design_name)
+    if os.path.isdir(workspace_dir):
+        for root_dir, _dirs, files in os.walk(workspace_dir):
+            if any(file_name.lower().endswith(".gds") for file_name in files):
+                return True
+
+    try:
+        from agentic.config import OPENLANE_ROOT
+        openlane_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
+        if os.path.isdir(openlane_dir):
+            for root_dir, _dirs, files in os.walk(openlane_dir):
+                if any(file_name.lower().endswith(".gds") for file_name in files):
+                    return True
+    except Exception:
+        return False
+
+    return False
 
 
 def _job_status_counts() -> Dict[str, int]:
@@ -234,6 +420,10 @@ def _check_database() -> Dict[str, Any]:
     try:
         with DB_ENGINE.connect() as conn:
             conn.execute(text("SELECT 1"))
+        if not _db_persistence_ready():
+            return {"ok": False, "detail": "database schema not initialized"}
+        if not inspect(DB_ENGINE).has_table("jobs"):
+            return {"ok": False, "detail": "jobs table missing"}
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "detail": str(exc)}
@@ -1540,6 +1730,49 @@ def ops_metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.get("/ops/summary")
+def ops_summary(profile: dict = Depends(get_current_user)):
+    """Compact operator summary for health, usage, and recent activity."""
+    jobs = _load_jobs_for_profile(profile)
+    summary = _summarize_jobs(jobs)
+    platform = _collect_platform_status(include_llm=False)
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "auth_enabled": AUTH_ENABLED,
+        "workspace_scope": "user" if profile is not None else "local",
+        "version": "3.0.0",
+        "platform": platform,
+        "usage": summary,
+        "recent_jobs": _recent_job_activity(jobs, limit=8),
+    }
+
+
+@app.get("/ops/jobs/export")
+def export_jobs_backup(profile: dict = Depends(get_current_user)):
+    """Download workspace job history as JSON for backup and migration."""
+    jobs = _load_jobs_for_profile(profile)
+    payload = {
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "version": "3.0.0",
+        "auth_enabled": AUTH_ENABLED,
+        "workspace_scope": "user" if profile is not None else "local",
+        "profile": {
+            "id": profile.get("id") if profile else None,
+            "email": profile.get("email") if profile else None,
+            "plan": profile.get("plan") if profile else None,
+        },
+        "usage": _summarize_jobs(jobs),
+        "jobs": jobs,
+    }
+    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    filename = f"agentic-jobs-backup-{stamp}.json"
+    return Response(
+        content=json.dumps(payload, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/pipeline/schema")
 def get_pipeline_schema():
     """Canonical pipeline schema for frontend timeline rendering."""
@@ -1699,6 +1932,8 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
     job_id = str(uuid.uuid4())
     JOB_STORE[job_id] = {
         "status": "queued",
+        "user_id": profile.get("id") if profile else None,
+        "user_email": profile.get("email") if profile else None,
         "design_name": design_name,
         "description": req.description,
         "current_state": "INIT",
@@ -1707,6 +1942,7 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
         "created_at": int(time.time()),
         "user_profile": profile,
         "byok_key": byok_key,
+        "human_in_loop": bool(req.human_in_loop),
         "stages": {},          # stage_name -> stage_complete payload
         "build_status": "running",
     }
@@ -1716,6 +1952,7 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
 
     # Record build start in Supabase
     record_build_start(profile, job_id, design_name)
+    _sync_job_to_db(job_id)
 
     use_celery = os.getenv("RUN_CELERY", "false").lower() == "true"
     if use_celery:
@@ -1885,21 +2122,9 @@ def get_build_result(job_id: str):
 
 
 @app.get("/jobs")
-def list_jobs():
-    """List all jobs (for debugging / history)."""
-    return {
-        "jobs": [
-            {
-                "job_id": jid,
-                "design_name": j["design_name"],
-                "status": j["status"],
-                "current_state": j["current_state"],
-                "created_at": j["created_at"],
-                "event_count": len(j["events"]),
-            }
-            for jid, j in JOB_STORE.items()
-        ]
-    }
+def list_jobs(profile: dict = Depends(get_current_user)):
+    """List persisted jobs for the active workspace or authenticated user."""
+    return {"jobs": _load_jobs_for_profile(profile)}
 
 
 @app.post("/build/cancel/{job_id}")
@@ -1920,14 +2145,33 @@ def cancel_build(job_id: str):
 
 
 @app.get("/designs")
-def list_designs():
-    """List chip designs built in this session (job store only).
+def list_designs(profile: dict = Depends(get_current_user)):
+    """List persisted designs for the active workspace with GDS availability."""
+    jobs = _load_jobs_for_profile(profile)
+    design_map: Dict[str, Dict[str, Any]] = {}
+    for job in jobs:
+        design_name = (job.get("design_name") or "").strip()
+        if not design_name:
+            continue
+        if design_name not in design_map:
+            design_map[design_name] = {
+                "name": design_name,
+                "has_gds": _design_has_gds(design_name),
+                "last_build_at": job.get("created_at", 0),
+                "build_count": 0,
+            }
+        design_map[design_name]["build_count"] += 1
+        design_map[design_name]["last_build_at"] = max(
+            design_map[design_name]["last_build_at"],
+            job.get("created_at", 0),
+        )
 
-    NOTE: Listing raw filesystem paths is disabled unconditionally on the public
-    deployment — the previous Origin/Host-header check was spoofable and leaked
-    internal directory structure. Jobs are tracked via JOB_STORE instead.
-    """
-    return {"designs": []}
+    designs = sorted(
+        design_map.values(),
+        key=lambda item: (item["has_gds"], item["last_build_at"], item["build_count"], item["name"]),
+        reverse=True,
+    )
+    return {"designs": designs}
 
 
 @app.get("/metrics/{design_name}")
@@ -2115,8 +2359,9 @@ class SetApiKeyRequest(BaseModel):
 @app.get("/profile")
 async def get_profile(profile: dict = Depends(get_current_user)):
     """Return the authenticated user's profile (plan, build count, etc.)."""
+    job_summary = _summarize_jobs(_load_jobs_for_profile(profile))
     if profile is None:
-        return {"auth_enabled": False}
+        return {"auth_enabled": False, **job_summary, "has_byok_key": False}
     return {
         "auth_enabled": True,
         "id": profile["id"],
@@ -2124,6 +2369,11 @@ async def get_profile(profile: dict = Depends(get_current_user)):
         "full_name": profile.get("full_name"),
         "plan": profile.get("plan", "free"),
         "successful_builds": profile.get("successful_builds", 0),
+        "workspace_successful_builds": job_summary["successful_builds"],
+        "total_builds": job_summary["total_builds"],
+        "running_builds": job_summary["running_builds"],
+        "failed_builds": job_summary["failed_builds"],
+        "active_designs": job_summary["active_designs"],
         "has_byok_key": bool(profile.get("llm_api_key")),
     }
 
