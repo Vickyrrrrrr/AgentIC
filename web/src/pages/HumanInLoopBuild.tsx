@@ -245,7 +245,7 @@ export const HumanInLoopBuild = () => {
 
                     // Handle stall warning: LLM silent for 5+ minutes
                     if (data.type === 'stall_warning') {
-                        setStallWarning(data.message || '⚠️ No activity for 5 minutes — the LLM may be stuck. You can cancel and retry.');
+                        setStallWarning(data.message || 'No activity for 5 minutes. The LLM may be stuck. You can cancel and retry.');
                         return;
                     }
 
@@ -366,7 +366,7 @@ export const HumanInLoopBuild = () => {
             setEvents(prev => [...prev, {
                 type: 'user_action',
                 state: approvalData.stage_name,
-                message: `👤 Approved: ${approvalData.stage_name}`,
+                message: `[User] Approved: ${approvalData.stage_name}`,
                 step: 0,
                 total_steps: 15,
                 timestamp: new Date().toISOString(),
@@ -407,7 +407,7 @@ export const HumanInLoopBuild = () => {
             setEvents(prev => [...prev, {
                 type: 'user_action',
                 state: approvalData.stage_name,
-                message: `👤 Rejected: ${approvalData.stage_name}${feedbackMsg}`,
+                message: `[User] Rejected: ${approvalData.stage_name}${feedbackMsg}`,
                 step: 0,
                 total_steps: 15,
                 timestamp: new Date().toISOString(),
@@ -445,7 +445,7 @@ export const HumanInLoopBuild = () => {
             setEvents(prev => [...prev, {
                 type: 'user_action',
                 state: 'SPEC_VALIDATE',
-                message: `👤 Selected architectural preference: ${displayChoice}`,
+                message: `[User] Selected architectural preference: ${displayChoice}`,
                 step: 0,
                 total_steps: 1,
                 timestamp: new Date().toISOString(),
@@ -513,9 +513,11 @@ export const HumanInLoopBuild = () => {
             {phase === 'prompt' && (
                 <div className="hitl-prompt-screen">
                     <div className="hitl-prompt-hero">
-                        <h1 className="hitl-hero-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                        <h1 className="hitl-hero-title">
                             Design Your Chip
-                            <button onClick={() => setShowBillingModal(true)} style={{ fontSize: '0.4em', background: 'rgba(255,255,255,0.1)', border: 'none', padding: '4px 10px', borderRadius: '15px', color: '#fff', cursor: 'pointer' }}>🔑 Configure API Keys</button>
+                            <button className="studio-key-btn" onClick={() => setShowBillingModal(true)}>
+                                API Keys
+                            </button>
                         </h1>
                         <p className="hitl-hero-sub">
                             Human-in-the-Loop — review and approve every stage of the autonomous pipeline.
@@ -719,7 +721,7 @@ export const HumanInLoopBuild = () => {
                             {stallWarning && (
                                 <div className="hitl-stall-banner">
                                     <div className="hitl-stall-body">
-                                        <span className="hitl-stall-icon">⚠️</span>
+                                        <span className="hitl-stall-icon">!</span>
                                         <span className="hitl-stall-msg">{stallWarning}</span>
                                     </div>
                                     <div className="hitl-stall-actions">

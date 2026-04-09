@@ -66,6 +66,7 @@ claude_theme = Theme({
     "spinner": "#d97757"
 })
 console = Console(theme=claude_theme)
+# Legacy path for license-based credentials (packaged binary)
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic_credentials.json")
 LICENSE_VERIFY_URL = "https://api.lemonsqueezy.com/v1/licenses/validate"
 LICENSE_TIMEOUT_SECONDS = 20
@@ -351,6 +352,125 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) Lice
         console.print("[success]Compiler environment looks pristine! 🚀[/success]")
         
     console.print("\n[success]You are completely set up! Try running: agentic build --name my_design --desc '...'[/success]")
+
+
+@app.command()
+def configure(
+    single_key: bool = typer.Option(False, "--single-key", "-s", help="Use a single API key for all agent roles"),
+):
+    """Interactive setup wizard — configure LLM API keys for AgentIC.
+
+    Works with any OpenAI-compatible LLM provider (OpenAI, Anthropic, Groq,
+    ZhipuAI, NVIDIA, DeepSeek, Together, Mistral, Ollama, etc.).
+
+    Keys are saved to ~/.agentic/credentials.json and used by all AgentIC
+    commands. Your .env file is never modified.
+    """
+    from .config import save_user_credentials, CREDENTIALS_PATH, _load_user_credentials
+
+    existing = _load_user_credentials()
+
+    console.print(Panel(
+        "[heading]AgentIC LLM Configuration Wizard[/heading]\n\n"
+        "AgentIC uses [accent]three agent groups[/accent], each performing a different role:\n\n"
+        "  [accent]Build[/accent]   Architect, Designer, Verifier, Manager, Physical\n"
+        "  [accent]Fix[/accent]     Fixer, Debugger, Reasoner\n"
+        "  [accent]Doc[/accent]     Documenter, Reporter\n\n"
+        "You can use [success]one key for everything[/success], or configure each group separately.\n"
+        "[info]Any OpenAI-compatible provider works (OpenAI, Groq, Anthropic, ZhipuAI, etc.)[/info]",
+        title="🔧 Configure",
+        border_style="accent"
+    ))
+
+    # Determine mode
+    if not single_key:
+        mode_choice = typer.prompt(
+            "Use a single API key for all groups? [y/n]",
+            default="y" if not existing else "n"
+        ).strip().lower()
+        single_key = mode_choice in ("y", "yes")
+
+    def _prompt_group(group_name: str, group_label: str, existing_group: dict) -> dict:
+        """Prompt user for one credential group."""
+        console.print(f"\n[heading]── {group_label} ──[/heading]")
+
+        ex_model = existing_group.get("model", "")
+        ex_base = existing_group.get("base_url", "")
+        ex_key = existing_group.get("api_key", "")
+
+        model = typer.prompt(
+            "  Model name (e.g. gpt-4o, groq/llama-3.3-70b-versatile, glm-4-plus)",
+            default=ex_model or ""
+        ).strip()
+
+        base_url = typer.prompt(
+            "  Base URL (leave blank for hosted providers like OpenAI/Groq/Anthropic)",
+            default=ex_base or ""
+        ).strip()
+
+        if ex_key:
+            masked = f"{ex_key[:4]}...{ex_key[-4:]}" if len(ex_key) > 8 else "****"
+            keep = typer.confirm(f"  Keep existing API key ({masked})?", default=True)
+            if keep:
+                api_key = ex_key
+            else:
+                api_key = typer.prompt("  API Key", hide_input=True).strip()
+        else:
+            api_key = typer.prompt("  API Key", hide_input=True).strip()
+
+        return {"model": model, "base_url": base_url, "api_key": api_key}
+
+    if single_key:
+        # Single-key mode: one config for everything
+        group = _prompt_group("all", "All Agent Groups (Build + Fix + Doc)", existing.get("build", {}))
+
+        # Validate the key with a test call
+        with console.status("[accent]Testing connection...[/accent]"):
+            try:
+                from crewai import LLM
+                model_name = group["model"]
+                if group["base_url"] and not any(model_name.startswith(p) for p in
+                        ("openai/", "groq/", "ollama/", "anthropic/", "azure/",
+                         "together_ai/", "mistral/", "nvidia_nim/")):
+                    model_name = f"openai/{model_name}"
+                test_kwargs = dict(model=model_name, api_key=group["api_key"], temperature=0.1, max_tokens=32)
+                if group["base_url"]:
+                    test_kwargs["base_url"] = group["base_url"]
+                test_llm = LLM(**test_kwargs)
+                test_llm.call([{"role": "user", "content": "Reply OK"}])
+                console.print("[success]  ✓ Connection successful![/success]")
+            except Exception as e:
+                console.print(f"[warning]  ⚠ Connection test failed: {e}[/warning]")
+                if not typer.confirm("  Save anyway?", default=False):
+                    console.print("[info]Configuration cancelled.[/info]")
+                    raise typer.Exit(0)
+
+        creds = {"build": group.copy(), "fix": group.copy(), "doc": group.copy()}
+    else:
+        # Multi-key mode: separate config per group
+        creds = {}
+        for key, label in [
+            ("build", "Build Agents (Architect, Designer, Verifier, Manager, Physical)"),
+            ("fix", "Fix & Debug Agents (Fixer, Debugger, Reasoner)"),
+            ("doc", "Documentation Agents (Documenter, Reporter)"),
+        ]:
+            creds[key] = _prompt_group(key, label, existing.get(key, {}))
+
+    # Preserve any existing non-group keys (like license_key)
+    merged = {**existing, **creds}
+    save_user_credentials(merged)
+
+    console.print(Panel(
+        f"[success]Configuration saved![/success]\n\n"
+        f"Location: [info]{CREDENTIALS_PATH}[/info]\n\n"
+        f"[heading]Configured Groups:[/heading]\n"
+        f"  Build  → {creds['build']['model']}\n"
+        f"  Fix    → {creds['fix']['model']}\n"
+        f"  Doc    → {creds['doc']['model']}\n\n"
+        "Try running: [accent]agentic build --name counter --desc '8-bit counter with reset'[/accent]",
+        title="✅ Ready",
+        border_style="success"
+    ))
 # Setup Brain
 def get_llm():
     """Returns the LLM instance from the best available provider:
@@ -391,8 +511,7 @@ def get_llm():
                 top_p=0.7,   # Optimized for code output
                 max_tokens=16384,
                 timeout=300,
-                extra_body=extra_t,
-                model_kwargs={"presence_penalty": 0, "repetition_penalty": 1}
+                extra_body=extra_t
             )
             # Make a lightweight API call to validate the endpoint
             llm.call([{"role": "user", "content": "Hi"}])

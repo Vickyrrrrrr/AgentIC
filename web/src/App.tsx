@@ -263,30 +263,13 @@ const App = () => {
 
   if (authLoading) {
     return (
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '100vh',
-          gap: '1rem',
-          background: 'var(--bg)',
-        }}
-      >
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: '50%',
-            border: '3px solid var(--border)',
-            borderTopColor: 'var(--accent)',
-            animation: 'spin-slow 0.8s linear infinite',
-          }}
-        />
-        <span style={{ color: 'var(--text-mid)', fontSize: '0.9rem', fontWeight: 500 }}>
-          Loading AgentIC...
-        </span>
+      <div className="workspace-page-loader">
+        <div className="premium-loader">
+          <span className="premium-loader-dot" />
+          <span className="premium-loader-dot" />
+          <span className="premium-loader-dot" />
+        </div>
+        <span>Loading AgentIC...</span>
       </div>
     );
   }

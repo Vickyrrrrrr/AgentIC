@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../api';
+import { FileText, GitBranch, Settings, BookOpen, Brain, RefreshCw, BarChart3, TrendingUp, HardHat, CheckSquare } from 'lucide-react';
 
 interface DocItem {
   id: string;
@@ -130,11 +131,18 @@ export const Documentation = () => {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
-  const tabs: { key: Tab; label: string; icon: string }[] = [
-    { key: 'overview', label: 'Overview', icon: '📋' },
-    { key: 'pipeline', label: 'Pipeline', icon: '🔬' },
-    { key: 'config', label: 'Configuration', icon: '⚙️' },
-    { key: 'docs', label: 'Documents', icon: '📄' },
+  const TAB_ICONS: Record<Tab, React.ReactNode> = {
+    overview: <FileText size={15} />,
+    pipeline: <GitBranch size={15} />,
+    config: <Settings size={15} />,
+    docs: <BookOpen size={15} />,
+  };
+
+  const tabs: { key: Tab; label: string }[] = [
+    { key: 'overview', label: 'Overview' },
+    { key: 'pipeline', label: 'Pipeline' },
+    { key: 'config', label: 'Configuration' },
+    { key: 'docs', label: 'Documents' },
   ];
 
   return (
@@ -166,7 +174,7 @@ export const Documentation = () => {
             className={`adoc-tab ${tab === t.key ? 'active' : ''}`}
             onClick={() => setTab(t.key)}
           >
-            <span className="adoc-tab-icon">{t.icon}</span>
+            {TAB_ICONS[t.key]}
             {t.label}
           </button>
         ))}
@@ -200,12 +208,12 @@ export const Documentation = () => {
               <h2>Key Capabilities</h2>
               <div className="adoc-cap-grid">
                 {[
-                  { icon: '🧠', title: 'AI‑Driven RTL Generation', desc: 'SystemVerilog or Verilog‑2005 from natural language via multi-agent collaboration.' },
-                  { icon: '🔁', title: 'Self‑Healing Pipeline', desc: 'Per‑stage guards, fingerprint dedup, bounded retries, and deterministic fallbacks.' },
-                  { icon: '📊', title: 'Formal Verification', desc: 'Assertion generation, formal property checking, and clock-domain analysis.' },
-                  { icon: '📈', title: 'Coverage Closure', desc: 'Profile‑based (balanced / aggressive / relaxed) with anti‑regression backup.' },
-                  { icon: '🏗️', title: 'Physical Implementation', desc: 'RTL-to-GDSII flow integration with convergence review and optimization loops.' },
-                  { icon: '✅', title: 'Silicon Signoff', desc: 'DRC/LVS, STA, power/IR‑drop, equivalence checks before tapeout.' },
+                  { icon: <Brain size={18} />, title: 'AI‑Driven RTL Generation', desc: 'SystemVerilog or Verilog‑2005 from natural language via multi-agent collaboration.' },
+                  { icon: <RefreshCw size={18} />, title: 'Self‑Healing Pipeline', desc: 'Per‑stage guards, fingerprint dedup, bounded retries, and deterministic fallbacks.' },
+                  { icon: <BarChart3 size={18} />, title: 'Formal Verification', desc: 'Assertion generation, formal property checking, and clock-domain analysis.' },
+                  { icon: <TrendingUp size={18} />, title: 'Coverage Closure', desc: 'Profile‑based (balanced / aggressive / relaxed) with anti‑regression backup.' },
+                  { icon: <HardHat size={18} />, title: 'Physical Implementation', desc: 'RTL-to-GDSII flow integration with convergence review and optimization loops.' },
+                  { icon: <CheckSquare size={18} />, title: 'Silicon Signoff', desc: 'DRC/LVS, STA, power/IR‑drop, equivalence checks before tapeout.' },
                 ].map((cap) => (
                   <div className="adoc-cap-item" key={cap.title}>
                     <span className="adoc-cap-icon">{cap.icon}</span>
@@ -273,7 +281,7 @@ export const Documentation = () => {
                   <div className="adoc-stage-connector" />
                   <div className="adoc-stage-body">
                     <div className="adoc-stage-header">
-                      <span className="adoc-stage-icon">{stage.icon}</span>
+                      <span className="adoc-stage-num">{String(idx + 1).padStart(2, '0')}</span>
                       <strong>{stage.label}</strong>
                       <code className="adoc-stage-key">{stage.state}</code>
                     </div>
@@ -292,7 +300,7 @@ export const Documentation = () => {
             <div className="adoc-flow-diagram">
               {stages.map((s, i) => (
                 <span key={s.state} className="adoc-flow-node">
-                  <span className="adoc-flow-badge">{s.icon}</span>
+                  <span className="adoc-flow-badge">{String(i + 1).padStart(2, '0')}</span>
                   <span className="adoc-flow-label">{s.state}</span>
                   {i < stages.length - 1 && <span className="adoc-flow-arrow">→</span>}
                 </span>

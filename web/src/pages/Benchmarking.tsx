@@ -1,38 +1,10 @@
 import React from 'react';
-import { useRevealOnScroll } from '../utils/useAnimations';
 
 interface BenchmarkingProps {
     selectedDesign: string;
 }
 
-const ComparisonRow = ({ metric, agenticVal, tradVal, delay }: { metric: string; agenticVal: string; tradVal: string; delay: number }) => {
-    return (
-        <tr style={{ animation: `reveal-up 0.4s var(--ease) ${delay}ms both` }}>
-            <td style={{ fontWeight: 600 }}>{metric}</td>
-            <td>
-                <span style={{ 
-                    color: 'var(--success)', fontWeight: 600,
-                    display: 'inline-flex', alignItems: 'center', gap: '0.4rem'
-                }}>
-                    <span style={{
-                        width: 6, height: 6, borderRadius: '50%',
-                        background: 'var(--success)',
-                        boxShadow: '0 0 6px var(--success)',
-                        display: 'inline-block'
-                    }} />
-                    {agenticVal}
-                </span>
-            </td>
-            <td style={{ color: 'var(--text-dim)' }}>{tradVal}</td>
-        </tr>
-    );
-};
-
 export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) => {
-    const header = useRevealOnScroll(0.1);
-    const section1 = useRevealOnScroll(0.1);
-    const section2 = useRevealOnScroll(0.1);
-
     const comparisons = [
         { metric: 'RTL to GDSII Time', agenticVal: '~15 Minutes', tradVal: 'Days/Weeks' },
         { metric: 'Spec Decomposition', agenticVal: 'Automated specification analysis', tradVal: 'Manual architecture review (weeks)' },
@@ -53,52 +25,60 @@ export const Benchmarking: React.FC<BenchmarkingProps> = ({ selectedDesign }) =>
     ];
 
     return (
-        <div className="page-container" style={{ padding: '1.5rem', maxWidth: '1100px' }}>
-            <div ref={header.ref} className={`reveal ${header.isVisible ? 'visible' : ''}`}>
-                <h2 className="app-title" style={{ fontSize: '1.4rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
-                    📊 Market Benchmarking: <span className="gradient-text">{selectedDesign || 'No Design'}</span>
+        <div className="bench-page">
+            <div className="bench-header">
+                <h2 className="bench-title">
+                    Benchmarking: <span className="bench-design-name">{selectedDesign || 'No Design'}</span>
                 </h2>
-                <p className="app-subtitle" style={{ color: 'var(--text-mid)', fontSize: '0.88rem', marginBottom: '1.5rem' }}>
+                <p className="bench-subtitle">
                     Compare AgentIC-generated flows against conventional enterprise chip flows.
                 </p>
             </div>
 
-            <div ref={section1.ref} className={`sci-fi-card reveal ${section1.isVisible ? 'visible' : ''}`} style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
-                <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Cost & Efficiency Analysis</h3>
-                <table className="enterprise-table" style={{ marginTop: '10px' }}>
-                    <thead>
-                        <tr>
-                            <th>Metric</th>
-                            <th>AgentIC</th>
-                            <th>Traditional Flow</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {comparisons.map((c, i) => (
-                            <ComparisonRow key={c.metric} {...c} delay={i * 60} />
-                        ))}
-                    </tbody>
-                </table>
+            <div className="bench-card">
+                <h3 className="bench-card-title">Cost & Efficiency Analysis</h3>
+                <div className="bench-table-wrap">
+                    <table className="bench-table">
+                        <thead>
+                            <tr>
+                                <th>Metric</th>
+                                <th>AgentIC</th>
+                                <th>Traditional Flow</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {comparisons.map((c) => (
+                                <tr key={c.metric}>
+                                    <td className="bench-metric-name">{c.metric}</td>
+                                    <td className="bench-val-good">{c.agenticVal}</td>
+                                    <td className="bench-val-dim">{c.tradVal}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
-            <div ref={section2.ref} className={`sci-fi-card reveal ${section2.isVisible ? 'visible' : ''}`} style={{ padding: '1.25rem' }}>
-                <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Core Module Architecture</h3>
-                <table className="enterprise-table" style={{ marginTop: '10px' }}>
-                    <thead>
-                        <tr>
-                            <th>Module</th>
-                            <th>Capability</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {modules.map((m, i) => (
-                            <tr key={m.name} style={{ animation: `reveal-up 0.4s var(--ease) ${i * 80}ms both` }}>
-                                <td style={{ fontWeight: 600 }}>{m.name}</td>
-                                <td>{m.cap}</td>
+            <div className="bench-card">
+                <h3 className="bench-card-title">Core Module Architecture</h3>
+                <div className="bench-table-wrap">
+                    <table className="bench-table">
+                        <thead>
+                            <tr>
+                                <th>Module</th>
+                                <th>Capability</th>
                             </tr>
-                        ))}
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody>
+                            {modules.map((m) => (
+                                <tr key={m.name}>
+                                    <td className="bench-metric-name">{m.name}</td>
+                                    <td>{m.cap}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     );
