@@ -101,6 +101,18 @@ jobs:
             done
 
             sudo docker-compose config > /dev/null
+
+            compose_version=$(sudo docker-compose version --short 2>/dev/null || echo unknown)
+            if echo "$compose_version" | grep -Eq '^1\.'; then
+              echo "Legacy docker-compose detected (${compose_version}); using clean container replacement"
+              legacy_containers=$(sudo docker ps -a --format '{{.Names}}' | grep -E '(^agentic_|^[0-9a-f]{12,}_agentic_)' || true)
+              if [ -n "$legacy_containers" ]; then
+                echo "Removing legacy compose containers:"
+                echo "$legacy_containers"
+                echo "$legacy_containers" | xargs -r sudo docker rm -f
+              fi
+            fi
+
             sudo env COMPOSE_PROFILES=observability docker-compose up -d --build --remove-orphans
 
             for i in $(seq 1 30); do

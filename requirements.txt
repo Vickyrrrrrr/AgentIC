@@ -20,6 +20,8 @@ sqlalchemy
 psycopg2-binary
 boto3
 prometheus-client
+slowapi
+gunicorn
 
 # ── Reports ──────────────────────────────────────────────────────────
 PyMuPDF
