@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
 *.py[cod]
 *$py.class
 *.so
@@ -23,6 +26,7 @@ MANIFEST
 
 # Virtual environments
 .venv/
+.venv-agentic/
 venv/
 env/
 ENV/
@@ -31,7 +35,14 @@ ENV/
 .env
 *.env.local
 
-# Databases — never commit these
+# AgentIC specific
+runs/
+work/
+transcript
+temp_*.svg
+designs/*/src/sim
+
+# Databases
 agentic_jobs.db
 *.db
 *.sqlite
@@ -45,9 +56,44 @@ artifacts/
 *.lef
 *.def
 *.spef
+*.vcd
 
-# OSS CAD Suite (local install)
+# OSS CAD Suite (large binary toolchain - download separately)
 oss-cad-suite/
+oss-cad-suite-*.tgz
+
+# PLY parser cache (auto-generated, 2+ MB)
+parser.out
+parsetab.py
+
+# Temporary / test scripts
+*.tmp
+global_reqs.tmp
+venv_reqs.tmp
+nodesource_setup.sh
+test_import.py
+test_signoff.py
+test_signoff2.py
+test_direct_call.py
+test_llm_call.py
+test_tb.v
+benchmark_verieval.py
+fix_recursion.py
+fix_subprocess.py
+fix_*.py
+modify_*.py
+scripts/remote_setup.sh
+
+# Benchmark / leaderboard artifacts
+*.jsonl
+leaderboard.md
+verieval_results.json
+
+# Security build outputs
+secure_build/
+build_secure_ip.py
+update_readme.py
+test.js
 
 # IDE
 .vscode/
@@ -60,14 +106,14 @@ oss-cad-suite/
 Thumbs.db
 
 # PyInstaller
-dist/
-build/
 *.spec
 
 # Logs
 *.log
 harden.log
 
-# Node
+# Node / Frontend
 node_modules/
+web/node_modules/
 web/dist/
+web/.vite/
