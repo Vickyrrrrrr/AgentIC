@@ -2,7 +2,7 @@
 """
 AgentIC - Natural Language to GDSII Pipeline
 =============================================
-Uses CrewAI + LLM (DeepSeek/Llama/Groq) to generate chips from natural language.
+Uses CrewAI + LLM to generate chips from natural language.
 Usage:
     python3 main.py build --name counter --desc "8-bit counter with enable and reset"
 """
@@ -77,26 +77,49 @@ LICENSE_OFFLINE_GRACE_HOURS = max(
 
 
 def check_dependencies(skip_openlane: bool):
+    """
+    Verify all required EDA tools are present before starting a build.
+    Uses resolved binary paths from config (OSS CAD Suite aware) rather than
+    relying solely on PATH, so it correctly finds tools in OSS_CAD_SUITE_HOME.
+    """
     import shutil
-    import typer
-    from rich.panel import Panel
-    
+    from .config import YOSYS_BIN, VERILATOR_BIN, IVERILOG_BIN, VVP_BIN
+
+    def _tool_present(binary: str) -> bool:
+        """Check if binary exists at absolute path or on PATH."""
+        if os.path.isabs(binary):
+            return os.path.exists(binary)
+        return bool(shutil.which(binary))
+
     missing = []
-    
-    # Only block for Docker if the user actually wants physical GDSII layout!
+
+    # Docker is only needed for OpenLane GDSII hardening
     if not skip_openlane and not shutil.which("docker"):
-        missing.append("🐳 [bold red]Docker[/bold red] (required for OpenLane physical GDSII synthesis)")
-        
-    if not shutil.which("yosys"):
-        missing.append("🛠️  [bold red]OSS CAD Suite[/bold red] (required for verifying the logic via Yosys/Verilator)")
-        
+        missing.append(
+            "🐳 [bold red]Docker[/bold red] "
+            "(required for OpenLane GDSII hardening — add --skip-openlane to bypass)"
+        )
+
+    # All four EDA tools must be present for RTL verification
+    for binary, label in [
+        (YOSYS_BIN,     "yosys (OSS CAD Suite)"),
+        (VERILATOR_BIN, "verilator (OSS CAD Suite)"),
+        (IVERILOG_BIN,  "iverilog (OSS CAD Suite)"),
+        (VVP_BIN,       "vvp — Icarus runtime (OSS CAD Suite)"),
+    ]:
+        if not _tool_present(binary):
+            missing.append(f"🛠️  [bold red]{label}[/bold red]")
+
     if missing:
         console.print(Panel(
-            "AgentIC requires standard open-source hardware tools to compile silicon.\n\n"
-            "The following tools are missing from your system PATH:\n" + 
-            "\n".join(["  - " + m for m in missing]) + 
-            "\n\n[info]💡 Note: You can bypass the physical layout phase by adding `--skip-openlane` to your build command (Docker will not be required).[/info]\n\n"
-            "[info]Please refer to the installation guide (README) for setup instructions.[/info]",
+            "AgentIC requires OSS CAD Suite for RTL verification and synthesis.\n\n"
+            "Missing tools:\n" +
+            "\n".join(["  - " + m for m in missing]) +
+            "\n\n[info]Install OSS CAD Suite:[/info] "
+            "https://github.com/YosysHQ/oss-cad-suite-build/releases\n"
+            "[info]After installing, set:[/info] "
+            "export OSS_CAD_SUITE_HOME=/path/to/oss-cad-suite\n\n"
+            "[info]Tip: Add --skip-openlane to skip GDSII hardening (no Docker needed).[/info]",
             title="[bold red]❌ Missing Dependencies[/bold red]",
             border_style="red"
         ))
@@ -528,8 +551,9 @@ def get_llm():
         "[accent]How to fix this:[/accent]\n"
         "1. Create a file named [bold].env[/bold] in your current directory.\n"
         "2. Add your provider's API key to the file. For example:\n"
-        "   [success]NVIDIA_API_KEY=\"nvapi-...\"[/success]\n"
-        "   [success]GROQ_API_KEY=\"gsk_...\"[/success]\n\n"
+        "   [success]LLM_API_KEY=\"your-key-here\"[/success]\n"
+        "   [success]LLM_BASE_URL=\"https://api.openai.com/v1\"[/success]\n"
+        "   [success]LLM_MODEL=\"gpt-4o\"[/success]\n\n"
         "[dim]Alternatively, you can export these as environment variables before running AgentIC.[/dim]",
         title="🔑 Missing API Key Setup",
         border_style="red"
@@ -554,7 +578,7 @@ def simulate(
 ):
     """Run simulation on an existing design with AUTO-FIX loop."""
     verify_license()
-    check_dependencies(skip_openlane)
+    check_dependencies(skip_openlane=True)
     console.print(Panel(
         f"[accent]AgentIC: Manual Simulation + Auto-Fix Mode[/accent]\n"
         f"Design: [warning]{name}[/warning]",
@@ -764,7 +788,7 @@ def harden(
 ):
     """Run OpenLane hardening (RTL -> GDSII) on an existing design."""
     verify_license()
-    check_dependencies(skip_openlane)
+    check_dependencies(skip_openlane=False)
     console.print(Panel(
         f"[accent]AgentIC: Manual Hardening Mode[/accent]\n"
         f"Design: [warning]{name}[/warning]",
