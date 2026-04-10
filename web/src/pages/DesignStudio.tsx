@@ -137,8 +137,9 @@ export const DesignStudio = () => {
             .catch(() => setProfile(null)); // Ignored explicitly if no auth
     }, []);
 
-    const byokKey = localStorage.getItem('agentic_byok_key');
-    const launchStatus = byokKey ? 'BYOK configured' : 'BYOK required';
+    const hasLocalByok = Boolean(localStorage.getItem('agentic_byok_key'));
+    const hasServerByok = Boolean(profile?.has_byok_key);
+    const launchStatus = (hasLocalByok || hasServerByok) ? 'BYOK configured' : 'BYOK required';
     const launchModeLabel = skipOpenlane ? 'Verification-first run' : 'Full silicon path';
     const workspaceSuccessfulBuilds = profile?.workspace_successful_builds ?? profile?.successful_builds ?? 0;
     const usageLabel = profile
@@ -150,8 +151,8 @@ export const DesignStudio = () => {
         if (!prompt.trim()) return;
         setError('');
 
-        const byokKey = localStorage.getItem('agentic_byok_key');
-        if (!byokKey) {
+        const hasAnyByok = Boolean(localStorage.getItem('agentic_byok_key')) || Boolean(profile?.has_byok_key);
+        if (!hasAnyByok) {
             setShowBillingModal(true);
             return;
         }
@@ -316,7 +317,7 @@ export const DesignStudio = () => {
                                         Configure BYOK
                                     </button>
                                     <div className="studio-status-cluster">
-                                        <span className={`studio-status-pill ${byokKey ? 'is-ready' : 'is-warn'}`}>
+                                        <span className={`studio-status-pill ${(hasLocalByok || hasServerByok) ? 'is-ready' : 'is-warn'}`}>
                                             <Fingerprint size={14} />
                                             {launchStatus}
                                         </span>

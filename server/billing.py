@@ -38,6 +38,11 @@ PLAN_PRICES = {
     "pro": 149900,       # ₹1,499
 }
 
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+RAZORPAY_ORDER_RE = re.compile(r"^order_[a-zA-Z0-9]+$")
+RAZORPAY_PAYMENT_RE = re.compile(r"^pay_[a-zA-Z0-9]+$")
+HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 class CreateOrderRequest(BaseModel):
     plan: str    # "starter" or "pro"
@@ -62,23 +67,29 @@ async def create_order(req: CreateOrderRequest, profile: dict = Depends(get_curr
     if req.plan not in PLAN_PRICES:
         raise HTTPException(status_code=400, detail=f"Invalid plan: {req.plan}. Choose 'starter' or 'pro'.")
 
+    if not UUID_RE.fullmatch(req.user_id):
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    if profile is not None and profile.get("id") != req.user_id:
+        raise HTTPException(status_code=403, detail="Cannot create order for another user")
+
     amount = PLAN_PRICES[req.plan]
 
     # Create order via Razorpay API
-    resp = httpx.post(
-        "https://api.razorpay.com/v1/orders",
-        auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
-        json={
-            "amount": amount,
-            "currency": "INR",
-            "receipt": f"agentic_{req.user_id[:8]}_{req.plan}",
-            "notes": {
-                "user_id": req.user_id,
-                "plan": req.plan,
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://api.razorpay.com/v1/orders",
+            auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+            json={
+                "amount": amount,
+                "currency": "INR",
+                "receipt": f"agentic_{req.user_id[:8]}_{req.plan}",
+                "notes": {
+                    "user_id": req.user_id,
+                    "plan": req.plan,
+                },
             },
-        },
-        timeout=15,
-    )
+        )
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail="Failed to create Razorpay order")
 
@@ -86,7 +97,7 @@ async def create_order(req: CreateOrderRequest, profile: dict = Depends(get_curr
 
     # Record pending payment
     if AUTH_ENABLED:
-        _supabase_insert("payments", {
+        await _supabase_insert("payments", {
             "user_id": req.user_id,
             "razorpay_order_id": order["id"],
             "amount_paise": amount,
@@ -115,8 +126,17 @@ async def verify_payment(req: VerifyPaymentRequest, profile: dict = Depends(get_
         raise HTTPException(status_code=400, detail="Invalid plan")
 
     # Validate user_id is a well-formed UUID to prevent PostgREST filter injection
-    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", req.user_id):
+    if not UUID_RE.fullmatch(req.user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    if not RAZORPAY_ORDER_RE.fullmatch(req.razorpay_order_id):
+        raise HTTPException(status_code=400, detail="Invalid razorpay_order_id")
+
+    if not RAZORPAY_PAYMENT_RE.fullmatch(req.razorpay_payment_id):
+        raise HTTPException(status_code=400, detail="Invalid razorpay_payment_id")
+
+    if not HEX_SHA256_RE.fullmatch(req.razorpay_signature):
+        raise HTTPException(status_code=400, detail="Invalid razorpay_signature")
 
     # Enforce that the authenticated user can only upgrade their own account
     if profile is not None and profile.get("id") != req.user_id:
@@ -135,7 +155,7 @@ async def verify_payment(req: VerifyPaymentRequest, profile: dict = Depends(get_
 
     if AUTH_ENABLED:
         # Update payment record
-        _supabase_update(
+        await _supabase_update(
             "payments",
             f"razorpay_order_id=eq.{req.razorpay_order_id}",
             {
@@ -146,7 +166,7 @@ async def verify_payment(req: VerifyPaymentRequest, profile: dict = Depends(get_
         )
 
         # Upgrade user plan
-        _supabase_update(
+        await _supabase_update(
             "profiles",
             f"id=eq.{req.user_id}",
             {"plan": req.plan, "successful_builds": 0},
@@ -190,15 +210,13 @@ async def razorpay_webhook(request: Request):
         plan = notes.get("plan", "")
 
         # Sanitize inputs to prevent PostgREST filter injection
-        _uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-        _order_re = re.compile(r'^order_[a-zA-Z0-9]+$')
-        if not (user_id and _uuid_re.match(user_id)):
+        if not (user_id and UUID_RE.match(user_id)):
             user_id = ""
-        if not (order_id and _order_re.match(order_id)):
+        if not (order_id and RAZORPAY_ORDER_RE.match(order_id)):
             order_id = ""
         if user_id and plan and order_id and AUTH_ENABLED:
             # Update payment status
-            _supabase_update(
+            await _supabase_update(
                 "payments",
                 f"razorpay_order_id=eq.{order_id}",
                 {
@@ -208,7 +226,7 @@ async def razorpay_webhook(request: Request):
             )
 
             # Upgrade user plan and reset build count
-            _supabase_update(
+            await _supabase_update(
                 "profiles",
                 f"id=eq.{user_id}",
                 {"plan": plan, "successful_builds": 0},
@@ -218,7 +236,7 @@ async def razorpay_webhook(request: Request):
         payment = payload.get("payload", {}).get("payment", {}).get("entity", {})
         order_id = payment.get("order_id", "")
         if order_id and AUTH_ENABLED:
-            _supabase_update(
+            await _supabase_update(
                 "payments",
                 f"razorpay_order_id=eq.{order_id}",
                 {"status": "failed"},

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles } from 'lucide-react';
+import { API_BASE } from '../api';
 import { supabase } from '../supabaseClient';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
@@ -35,8 +36,6 @@ const GROUP_META: Record<
     modelHint: 'Fast text generation model',
   },
 };
-
-const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
 const MaskedKey = ({ value }: { value: string }) => {
   const [visible, setVisible] = useState(false);

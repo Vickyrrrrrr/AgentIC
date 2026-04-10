@@ -21,7 +21,7 @@ import glob
 import io
 import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +38,7 @@ from server.auth import (
     get_current_user,
     get_llm_key_for_user,
     get_byok_config_for_user,
+    save_byok_config_for_user,
     record_build_failure,
     record_build_start,
     record_build_success,
@@ -606,7 +607,7 @@ def _load_request_byok_config(request: Request, profile: Optional[dict]) -> tupl
     return None, "backend_env"
 
 
-def _resolve_role_llm_details(role: str, byok_config: dict = None) -> Dict[str, Any]:
+def _resolve_role_llm_details(role: str, byok_config: Optional[dict] = None) -> Dict[str, Any]:
     from agentic.config import get_role_llm_config
 
     cfg = get_role_llm_config(role)
@@ -642,7 +643,7 @@ def _resolve_role_llm_details(role: str, byok_config: dict = None) -> Dict[str, 
     return result
 
 
-def _resolve_primary_llm_details(byok_config: dict = None) -> Optional[Dict[str, Any]]:
+def _resolve_primary_llm_details(byok_config: Optional[dict] = None) -> Optional[Dict[str, Any]]:
     from agentic.config import get_role_llm_config
 
     for group_name in ("group2", "group1", "group3"):
@@ -665,7 +666,7 @@ def _resolve_primary_llm_details(byok_config: dict = None) -> Optional[Dict[str,
     return None
 
 
-def _get_llm(byok_config: dict = None):
+def _get_llm(byok_config: Optional[dict] = None):
     try:
         from crewai import LLM
     except Exception as imp_err:
@@ -723,7 +724,7 @@ def _get_llm(byok_config: dict = None):
                 else:
                     key = byok_api_key
 
-            llm_kwargs: dict = dict(model=model, api_key=key, temperature=0.6)
+            llm_kwargs = dict(model=model, api_key=key, temperature=0.6)
             if cfg.get("base_url"):
                 llm_kwargs["base_url"] = cfg["base_url"]
 
@@ -736,7 +737,7 @@ def _get_llm(byok_config: dict = None):
     raise RuntimeError("No valid LLM backend found. " + " | ".join(backend_errors))
 
 
-def _get_role_llm_map(byok_config: dict = None) -> Dict[str, Any]:
+def _get_role_llm_map(byok_config: Optional[dict] = None) -> Dict[str, Any]:
     from crewai import LLM
     
     roles = [
@@ -827,7 +828,7 @@ async def debug_llm_routing(request: Request, profile: dict = Depends(get_curren
     }
 
 
-def _emit_event(job_id: str, event_type: str, state: str, message: str, step: int = 0, extra: dict = None):
+def _emit_event(job_id: str, event_type: str, state: str, message: str, step: int = 0, extra: Optional[dict] = None):
     """Push a structured event into the job store."""
     if job_id not in JOB_STORE:
         return
@@ -1016,12 +1017,14 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
         "artifacts": [],
     }
 
+    upload_artifact_to_cloud: Optional[Callable[[str, str], str]] = None
+    storage_bucket = ""
     try:
-        from server.storage import S3_BUCKET_NAME, upload_artifact_to_cloud
+        from server.storage import S3_BUCKET_NAME, upload_artifact_to_cloud as upload_to_cloud
         storage_bucket = S3_BUCKET_NAME
+        upload_artifact_to_cloud = upload_to_cloud
     except Exception:
-        upload_artifact_to_cloud = None
-        storage_bucket = ""
+        pass
 
     def _register_artifact(local_path: str) -> None:
         if not os.path.exists(local_path):
@@ -1059,14 +1062,14 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
 
     manifest_path = os.path.join(workspace_dir, f"{design_name}_artifact_manifest.json")
     try:
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
+        with open(manifest_path, "w", encoding="utf-8") as manifest_fp:
+            json.dump(manifest, manifest_fp, indent=2)
         if upload_artifact_to_cloud is not None:
             manifest_cloud_url = upload_artifact_to_cloud(manifest_path, f"{design_name}/{os.path.basename(manifest_path)}")
             if manifest_cloud_url:
                 manifest["manifest_cloud_url"] = manifest_cloud_url
-                with open(manifest_path, "w", encoding="utf-8") as f:
-                    json.dump(manifest, f, indent=2)
+                with open(manifest_path, "w", encoding="utf-8") as manifest_fp:
+                    json.dump(manifest, manifest_fp, indent=2)
     except Exception as e:
         logger.warning("Failed to persist artifact manifest for %s: %s", design_name, e)
 
@@ -1607,8 +1610,9 @@ def _build_result_summary(orchestrator, design_name: str, success: bool) -> dict
         "build_time_s": int(time.time()) - (history[0].timestamp if history else int(time.time())),
     }
 
-    # Try to read OpenLane metrics
-    openlane_root = os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane"))
+    # Try to read OpenLane metrics using the resolved runtime workspace root.
+    from agentic.config import OPENLANE_ROOT
+    openlane_root = OPENLANE_ROOT
     runs_dir = os.path.join(openlane_root, "designs", design_name, "runs")
     if os.path.exists(runs_dir):
         runs = sorted(os.listdir(runs_dir), reverse=True)
@@ -2178,7 +2182,8 @@ def list_designs(profile: dict = Depends(get_current_user)):
 def get_metrics(design_name: str):
     """Return latest OpenLane metrics for a design."""
     _validate_design_name(design_name)
-    des_dir = os.path.join(os.environ.get("OPENLANE_ROOT", os.path.expanduser("~/OpenLane")), "designs", design_name)
+    from agentic.config import OPENLANE_ROOT
+    des_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
     runs_dir = os.path.join(des_dir, "runs")
 
     if not os.path.exists(runs_dir):
@@ -2267,24 +2272,24 @@ def get_partial_artifacts(design_name: str):
     manifest_path = os.path.join(workspace_dir, f"{design_name}_artifact_manifest.json")
     if os.path.isfile(manifest_path):
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
+            with open(manifest_path, "r", encoding="utf-8") as manifest_fp:
+                manifest = json.load(manifest_fp)
             for item in manifest.get("artifacts", []):
                 if item.get("name"):
                     manifest_cloud_urls[item["name"]] = item.get("cloud_url", "")
         except Exception:
             pass
     if os.path.isdir(workspace_dir):
-        for f in os.listdir(workspace_dir):
-            fpath = os.path.join(workspace_dir, f)
+        for file_name in os.listdir(workspace_dir):
+            fpath = os.path.join(workspace_dir, file_name)
             if os.path.isfile(fpath):
                 size = os.path.getsize(fpath)
                 artifacts.append({
-                    "name": f,
+                    "name": file_name,
                     "path": fpath,
                     "size": size,
-                    "type": _classify_artifact(f),
-                    "cloud_url": manifest_cloud_urls.get(f, ""),
+                    "type": _classify_artifact(file_name),
+                    "cloud_url": manifest_cloud_urls.get(file_name, ""),
                 })
     
     # Check OpenLane designs directory
@@ -2292,16 +2297,16 @@ def get_partial_artifacts(design_name: str):
     ol_design_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
     if os.path.isdir(ol_design_dir):
         for root_dir, _dirs, files in os.walk(ol_design_dir):
-            for f in files:
-                if f.endswith(('.v', '.sv', '.vcd', '.gds', '.def', '.sdc', '.json', '.tcl', '.sby', '.log', '.csv')):
-                    fpath = os.path.join(root_dir, f)
+            for file_name in files:
+                if file_name.endswith(('.v', '.sv', '.vcd', '.gds', '.def', '.sdc', '.json', '.tcl', '.sby', '.log', '.csv')):
+                    fpath = os.path.join(root_dir, file_name)
                     size = os.path.getsize(fpath)
                     artifacts.append({
-                        "name": f,
+                        "name": file_name,
                         "path": fpath,
                         "size": size,
-                        "type": _classify_artifact(f),
-                        "cloud_url": manifest_cloud_urls.get(f, ""),
+                        "type": _classify_artifact(file_name),
+                        "cloud_url": manifest_cloud_urls.get(file_name, ""),
                     })
     
     return {"design_name": design_name, "artifacts": artifacts[:50]}  # Cap at 50
@@ -2356,6 +2361,33 @@ class SetApiKeyRequest(BaseModel):
     api_key: str
 
 
+class ByokGroupRequest(BaseModel):
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
+
+
+class SetByokConfigRequest(BaseModel):
+    group1: Optional[ByokGroupRequest] = None
+    group2: Optional[ByokGroupRequest] = None
+    group3: Optional[ByokGroupRequest] = None
+
+
+def _normalize_byok_config(raw: Optional[dict]) -> dict:
+    source = raw if isinstance(raw, dict) else {}
+    normalized: Dict[str, Dict[str, str]] = {}
+    for group_name in ("group1", "group2", "group3"):
+        group = source.get(group_name)
+        if not isinstance(group, dict):
+            group = {}
+        normalized[group_name] = {
+            "model": str(group.get("model", "") or "").strip(),
+            "api_key": str(group.get("api_key", "") or "").strip(),
+            "base_url": str(group.get("base_url", "") or "").strip(),
+        }
+    return normalized
+
+
 @app.get("/profile")
 async def get_profile(profile: dict = Depends(get_current_user)):
     """Return the authenticated user's profile (plan, build count, etc.)."""
@@ -2378,6 +2410,35 @@ async def get_profile(profile: dict = Depends(get_current_user)):
     }
 
 
+@app.get("/profile/byok")
+async def get_profile_byok(profile: dict = Depends(get_current_user)):
+    """Return normalized BYOK config stored in the authenticated profile."""
+    if profile is None:
+        raise HTTPException(status_code=403, detail="Auth not enabled")
+
+    byok_config = get_byok_config_for_user(profile)
+    if not byok_config:
+        return {}
+
+    return _normalize_byok_config(byok_config)
+
+
+@app.post("/profile/byok")
+async def set_profile_byok(req: SetByokConfigRequest, profile: dict = Depends(get_current_user)):
+    """Persist encrypted multi-group BYOK config for cross-device sync."""
+    if profile is None:
+        raise HTTPException(status_code=403, detail="Auth not enabled")
+
+    payload = _normalize_byok_config(req.model_dump())
+
+    try:
+        await save_byok_config_for_user(profile, payload)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {"success": True, "message": "BYOK configuration saved"}
+
+
 @app.post("/profile/api-key")
 async def set_byok_key(req: SetApiKeyRequest, profile: dict = Depends(get_current_user)):
     """Store an encrypted LLM API key for BYOK plan users."""
@@ -2388,7 +2449,7 @@ async def set_byok_key(req: SetApiKeyRequest, profile: dict = Depends(get_curren
 
     from server.auth import _supabase_update
     encrypted = encrypt_api_key(req.api_key)
-    _supabase_update("profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted})
+    await _supabase_update("profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted})
     return {"success": True, "message": "API key stored securely"}
 
 

@@ -192,14 +192,22 @@ export const HumanInLoopBuild = () => {
     const [thinkingData, setThinkingData] = useState<{ agent_name: string; message: string } | null>(null);
     const [stallWarning, setStallWarning] = useState<string | null>(null);
     const [milestoneToast, setMilestoneToast] = useState<{ title: string; msg: string } | null>(null);
+    const [profile, setProfile] = useState<{ has_byok_key?: boolean } | null>(null);
     const milestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const byokKey = localStorage.getItem('agentic_byok_key');
+    const hasByokReady = Boolean(byokKey) || Boolean(profile?.has_byok_key);
 
     useEffect(() => {
         if (prompt.length > 8) {
             setDesignName(slugify(prompt));
         }
     }, [prompt]);
+
+    useEffect(() => {
+        api.get('/profile')
+            .then((res) => setProfile(res.data || null))
+            .catch(() => setProfile(null));
+    }, []);
 
     // Auto-reconnect SSE if returning to page with an active build
     useEffect(() => {
@@ -231,8 +239,8 @@ export const HumanInLoopBuild = () => {
         if (!prompt.trim()) return;
         setError('');
 
-        const byokKey = localStorage.getItem('agentic_byok_key');
-        if (!byokKey) {
+        const hasAnyByok = Boolean(localStorage.getItem('agentic_byok_key')) || Boolean(profile?.has_byok_key);
+        if (!hasAnyByok) {
             setShowBillingModal(true);
             return;
         }
@@ -568,9 +576,9 @@ export const HumanInLoopBuild = () => {
                                     Configure BYOK
                                 </button>
                                 <div className="hitl-meta-pills">
-                                    <span className={`hitl-meta-pill ${byokKey ? 'is-ready' : 'is-warn'}`}>
+                                    <span className={`hitl-meta-pill ${hasByokReady ? 'is-ready' : 'is-warn'}`}>
                                         <Fingerprint size={14} />
-                                        {byokKey ? 'BYOK configured' : 'BYOK required'}
+                                        {hasByokReady ? 'BYOK configured' : 'BYOK required'}
                                     </span>
                                     <span className="hitl-meta-pill">
                                         <ShieldCheck size={14} />
