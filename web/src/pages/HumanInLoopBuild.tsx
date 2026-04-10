@@ -24,7 +24,6 @@ const PIPELINE_STAGES = [
 ];
 const TOTAL = PIPELINE_STAGES.length;
 
-// Contextual messages for the bottom status bar — what the agent is doing right now
 const STAGE_ENCOURAGEMENTS: Record<string, string> = {
     INIT:              'Setting up your build environment…',
     SPEC:              'Translating your description into a chip specification…',
@@ -47,7 +46,6 @@ const STAGE_ENCOURAGEMENTS: Record<string, string> = {
     SIGNOFF:           'Almost there — running final LVS/DRC checks…',
 };
 
-// Milestone stages that deserve a special celebration toast
 const MILESTONE_TOASTS: Record<string, { title: string; msg: string }> = {
     RTL_GEN:   { title: 'RTL Complete', msg: 'Your chip can now run instructions. Verilog is ready.' },
     VERIFICATION: { title: 'Verification Passed', msg: 'All simulation tests passed. Design is logically correct.' },
@@ -55,7 +53,6 @@ const MILESTONE_TOASTS: Record<string, { title: string; msg: string }> = {
     SIGNOFF:   { title: 'Chip Signed Off', msg: 'All checks passed. Ready for tape-out.' },
 };
 
-// Human-readable stage names
 const STAGE_LABELS: Record<string, string> = {
     INIT: 'Initialization', SPEC: 'Specification', SPEC_VALIDATE: 'Spec Validation', HIERARCHY_EXPAND: 'Hierarchy Expansion', FEASIBILITY_CHECK: 'Feasibility Check', CDC_ANALYZE: 'CDC Analysis', VERIFICATION_PLAN: 'Verification Plan', RTL_GEN: 'RTL Generation',
     RTL_FIX: 'RTL Fix', VERIFICATION: 'Verification', FORMAL_VERIFY: 'Formal Verification',
@@ -64,12 +61,10 @@ const STAGE_LABELS: Record<string, string> = {
     ECO_PATCH: 'ECO Patch', SIGNOFF: 'Signoff', FAIL: 'Failed',
 };
 
-// Mandatory stages (cannot be skipped)
 const MANDATORY_STAGES = new Set([
     'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'FEASIBILITY_CHECK', 'CDC_ANALYZE', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'HARDENING', 'SIGNOFF',
 ]);
 
-// Build mode presets
 type BuildMode = 'quick' | 'verified' | 'full';
 const BUILD_MODE_SKIPS: Record<BuildMode, string[]> = {
     quick: ['FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'FLOORPLAN', 'HARDENING', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'SIGNOFF'],
@@ -104,11 +99,9 @@ interface BuildEvent {
     timestamp: number | string;
     status?: string;
     is_live_waiting?: boolean;
-    // agent_thought fields
     agent_name?: string;
     thought_type?: string;
     content?: string;
-    // stage_complete fields
     stage_name?: string;
     summary?: string;
     artifacts?: Array<{ name: string; path: string; description: string }>;
@@ -116,7 +109,6 @@ interface BuildEvent {
     warnings?: string[];
     next_stage_name?: string;
     next_stage_preview?: string;
-    // elaboration fields
     options?: Array<Record<string, string>>;
 }
 
@@ -148,20 +140,32 @@ function slugify(text: string): string {
 
 type Phase = 'prompt' | 'building' | 'done';
 
+// sessionStorage keys for build resume after navigation
+const SS_JOB_ID     = 'hitl_job_id';
+const SS_PHASE      = 'hitl_phase';
+const SS_DESIGN     = 'hitl_design_name';
+const SS_PROMPT     = 'hitl_prompt';
+
 export const HumanInLoopBuild = () => {
-    const [phase, setPhase] = useState<Phase>('prompt');
-    const [prompt, setPrompt] = useState('');
-    const [designName, setDesignName] = useState('');
-    const [jobId, setJobId] = useState('');
+    // Restore from sessionStorage if user navigated away mid-build
+    const savedJobId  = sessionStorage.getItem(SS_JOB_ID)  || '';
+    const savedPhase  = (sessionStorage.getItem(SS_PHASE)  || 'prompt') as Phase;
+    const savedDesign = sessionStorage.getItem(SS_DESIGN)  || '';
+    const savedPrompt = sessionStorage.getItem(SS_PROMPT)  || '';
+
+    const [phase, setPhase] = useState<Phase>(savedPhase);
+    const [prompt, setPrompt] = useState(savedPrompt);
+    const [designName, setDesignName] = useState(savedDesign);
+    const [jobId, setJobId] = useState(savedJobId);
     const [events, setEvents] = useState<BuildEvent[]>([]);
     const [jobStatus, setJobStatus] = useState<string>('queued');
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showBillingModal, setShowBillingModal] = useState(false);
+    // SSE abort controller — only aborted on explicit Cancel, never on unmount
     const abortCtrlRef = useRef<AbortController | null>(null);
 
-    // Build options
     const [skipOpenlane, setSkipOpenlane] = useState(false);
     const [skipCoverage, setSkipCoverage] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
@@ -171,12 +175,10 @@ export const HumanInLoopBuild = () => {
     const [strictGates, setStrictGates] = useState(false);
     const [pdkProfile, setPdkProfile] = useState("sky130");
 
-    // Build mode & stage skipping (Improvement 2)
     const [buildMode, setBuildMode] = useState<BuildMode>('verified');
     const [skipStages, setSkipStages] = useState<Set<string>>(new Set(BUILD_MODE_SKIPS.verified));
     const [showStageToggles, setShowStageToggles] = useState(false);
 
-    // Stage tracking
     const [currentStage, setCurrentStage] = useState('INIT');
     const [completedStages, setCompletedStages] = useState<Set<string>>(new Set());
     const [failedStage, setFailedStage] = useState<string | undefined>();
@@ -184,17 +186,11 @@ export const HumanInLoopBuild = () => {
     const [approvalData, setApprovalData] = useState<StageCompleteData | null>(null);
     const [elaborationData, setElaborationData] = useState<ElaborationData | null>(null);
 
-    // Fetch partial artifacts on build failure
     const [partialArtifacts, setPartialArtifacts] = useState<Array<{name: string; path: string; size: number; type: string}>>([]);
     const [showFullLog, setShowFullLog] = useState(false);
 
-    // Thinking indicator (Improvement 1)
     const [thinkingData, setThinkingData] = useState<{ agent_name: string; message: string } | null>(null);
-
-    // Stall detection — shown when LLM is silent for 5+ minutes
     const [stallWarning, setStallWarning] = useState<string | null>(null);
-
-    // Milestone toast: shown briefly when a key stage completes
     const [milestoneToast, setMilestoneToast] = useState<{ title: string; msg: string } | null>(null);
     const milestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const byokKey = localStorage.getItem('agentic_byok_key');
@@ -205,6 +201,31 @@ export const HumanInLoopBuild = () => {
         }
     }, [prompt]);
 
+    // Auto-reconnect SSE if returning to page with an active build
+    useEffect(() => {
+        if (savedPhase === 'building' && savedJobId) {
+            startStreaming(savedJobId);
+        }
+        // IMPORTANT: do NOT abort on unmount — backend keeps running.
+        // Only explicit Cancel/Reset should abort.
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Persist active build state to sessionStorage so navigation doesn't lose it
+    useEffect(() => {
+        if (phase === 'building' && jobId) {
+            sessionStorage.setItem(SS_JOB_ID,  jobId);
+            sessionStorage.setItem(SS_PHASE,   phase);
+            sessionStorage.setItem(SS_DESIGN,  designName);
+            sessionStorage.setItem(SS_PROMPT,  prompt);
+        }
+    }, [phase, jobId, designName, prompt]);
+
+    const clearSessionStorage = () => {
+        sessionStorage.removeItem(SS_JOB_ID);
+        sessionStorage.removeItem(SS_PHASE);
+        sessionStorage.removeItem(SS_DESIGN);
+        sessionStorage.removeItem(SS_PROMPT);
+    };
 
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
@@ -216,7 +237,6 @@ export const HumanInLoopBuild = () => {
             return;
         }
 
-        // Quick RTL mode implies skip_openlane
         const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
         const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
         try {
@@ -248,6 +268,7 @@ export const HumanInLoopBuild = () => {
     };
 
     const startStreaming = (jid: string) => {
+        // Abort any existing stream before opening a new one
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         const ctrl = new AbortController();
         abortCtrlRef.current = ctrl;
@@ -264,36 +285,31 @@ export const HumanInLoopBuild = () => {
                 try {
                     const data: BuildEvent = JSON.parse(evt.data);
                     if (data.type === 'ping') return;
-                    
+
                     if (data.type === 'stream_end') {
                         ctrl.abort();
                         fetchResult(jid, data.status as any);
                         return;
                     }
 
-                    // Handle stall warning: LLM silent for 5+ minutes
                     if (data.type === 'stall_warning') {
                         setStallWarning(data.message || 'No activity for 5 minutes. The LLM may be stuck. You can cancel and retry.');
                         return;
                     }
 
-                    // Any real event clears the stall warning and thinking indicator
                     if (data.type === 'log' || data.type === 'checkpoint' || data.type === 'transition') {
                         setStallWarning(null);
                     }
 
-                    // Handle agent_thinking: show pulsing indicator
                     if (data.type === 'agent_thinking') {
                         setThinkingData({ agent_name: data.agent_name || '', message: data.message || '' });
-                        return; // Don't add to event feed
+                        return;
                     }
 
-                    // Any real event clears the thinking indicator
                     if (data.type !== 'agent_thinking') {
                         setThinkingData(null);
                     }
 
-                    // Handle stage_complete: show approval card only if backend is currently blocked!
                     if (data.type === 'stage_complete') {
                         if (data.is_live_waiting) {
                             setApprovalData({
@@ -307,13 +323,11 @@ export const HumanInLoopBuild = () => {
                             });
                             setWaitingForApproval(true);
                         } else {
-                            // If it's a historical replay of an ALREADY approved stage, auto-mark it as complete!
                             setCompletedStages(prev => new Set(prev).add(data.stage_name || data.state || ''));
                         }
                         setCurrentStage(data.stage_name || data.state || '');
                     }
 
-                    // Handle elaboration options
                     if (data.type === 'elaboration_waiting') {
                         setElaborationData({
                             options: data.options || [],
@@ -322,7 +336,6 @@ export const HumanInLoopBuild = () => {
                         setWaitingForApproval(true);
                     }
 
-                    // Track stage progression
                     if (data.type === 'transition' || data.state) {
                         const newState = data.state;
                         if (newState && newState !== 'UNKNOWN') {
@@ -342,13 +355,9 @@ export const HumanInLoopBuild = () => {
                         }
                     }
 
-                    // Add event to feed
                     setEvents(prev => {
-                        // Deduplicate: avoid replay loops when reconnecting. 
-                        // The backend replays all events from index 0 on reconnect.
                         const isDuplicate = prev.some(e => e.timestamp === data.timestamp && e.type === data.type && e.message === data.message);
                         if (isDuplicate) return prev;
-                        
                         return [...prev, data];
                     });
 
@@ -367,12 +376,12 @@ export const HumanInLoopBuild = () => {
     };
 
     const fetchResult = async (jid: string, status: string) => {
+        clearSessionStorage();
         setJobStatus(status === 'done' ? 'done' : 'failed');
         try {
             const res = await api.get(`/build/result/${jid}`);
             setResult(res.data.result);
         } catch { /* */ }
-        // On failure, fetch partial artifacts from disk
         if (status !== 'done' && designName) {
             try {
                 const artRes = await api.get(`/build/artifacts/${designName}`);
@@ -390,7 +399,6 @@ export const HumanInLoopBuild = () => {
                 stage: approvalData.stage_name,
                 design_name: designName,
             });
-            // Add user action to feed
             setEvents(prev => [...prev, {
                 type: 'user_action',
                 state: approvalData.stage_name,
@@ -409,7 +417,6 @@ export const HumanInLoopBuild = () => {
                 next.add(approvalData.stage_name);
                 return next;
             });
-            // Fire milestone toast if this is a key stage
             const toast = MILESTONE_TOASTS[approvalData.stage_name];
             if (toast) {
                 if (milestoneTimerRef.current) clearTimeout(milestoneTimerRef.current);
@@ -490,7 +497,9 @@ export const HumanInLoopBuild = () => {
     };
 
     const handleReset = () => {
+        // Abort SSE stream (explicit user reset)
         abortCtrlRef.current?.abort();
+        clearSessionStorage();
         setPhase('prompt');
         setEvents([]);
         setResult(null);
@@ -514,6 +523,7 @@ export const HumanInLoopBuild = () => {
     };
 
     const handleCancel = async () => {
+        // Abort SSE stream + tell backend to cancel the job
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         if (jobId) {
             try { await api.post(`/build/cancel/${jobId}`); } catch { /* */ }
@@ -521,18 +531,17 @@ export const HumanInLoopBuild = () => {
         handleReset();
     };
 
-    // Computed values for bottom bar
     const stepNum = Math.max(1, PIPELINE_STAGES.indexOf(currentStage) + 1);
     const pct = Math.round((completedStages.size / TOTAL) * 100);
     const remaining = Math.max(0, TOTAL - completedStages.size);
     const estMinutes = remaining * 2;
 
-    // Request notification permission
     useEffect(() => {
         if ('Notification' in window && Notification.permission === 'default') {
             Notification.requestPermission();
         }
-        return () => abortCtrlRef.current?.abort();
+        // No cleanup abort here — navigating away should NOT cancel the build.
+        // The backend job runs independently on the server.
     }, []);
 
     return (
@@ -776,7 +785,6 @@ export const HumanInLoopBuild = () => {
             {/* ── BUILDING PHASE ── */}
             {phase === 'building' && (
                 <div className="hitl-build-layout">
-                    {/* Top bar */}
                     <header className="hitl-topbar">
                         <div className="hitl-topbar-left">
                             <span className="hitl-topbar-dot" />
@@ -790,10 +798,9 @@ export const HumanInLoopBuild = () => {
                         </div>
                     </header>
 
-                    {/* Milestone celebration toast */}
                     {milestoneToast && (
                         <div className="hitl-milestone-toast" onClick={() => setMilestoneToast(null)}>
-                            <span className="hitl-milestone-toast-icon">✦</span>
+                            <span className="hitl-milestone-toast-icon">❖</span>
                             <div className="hitl-milestone-toast-body">
                                 <span className="hitl-milestone-toast-title">{milestoneToast.title}</span>
                                 <span className="hitl-milestone-toast-msg">{milestoneToast.msg}</span>
@@ -802,7 +809,6 @@ export const HumanInLoopBuild = () => {
                         </div>
                     )}
 
-                    {/* Body: sidebar + main */}
                     <div className="hitl-build-body">
                         <StageProgressBar
                             currentStage={currentStage}
@@ -846,7 +852,6 @@ export const HumanInLoopBuild = () => {
                         </div>
                     </div>
 
-                    {/* Bottom status bar */}
                     <footer className="hitl-bottombar">
                         <span className="hitl-bottombar-msg">
                             {thinkingData && <span className="hitl-thinking-pulse" />}
@@ -872,7 +877,6 @@ export const HumanInLoopBuild = () => {
             {phase === 'done' && (
                 <div className="hitl-done-screen">
                     <div className={`hitl-done-card ${jobStatus === 'done' ? 'hitl-done-success' : 'hitl-done-fail'}`}>
-                        {/* ---------- SUCCESS ---------- */}
                         {jobStatus === 'done' && (
                             <>
                                 <h2>Chip Build Complete</h2>
@@ -919,11 +923,8 @@ export const HumanInLoopBuild = () => {
                             </>
                         )}
 
-                        {/* ---------- FAILURE (Improvement 3 redesign) ---------- */}
                         {jobStatus !== 'done' && (
                             <div className="hitl-fail-redesign">
-
-                                {/* Heading */}
                                 <div className="hitl-fail-heading">
                                     <span className="hitl-fail-heading-dot" />
                                     <h2 className="hitl-fail-heading-text">
@@ -933,14 +934,12 @@ export const HumanInLoopBuild = () => {
 
                                 <p className="hitl-fail-design-name">{designName}</p>
 
-                                {/* LLM failure explanation */}
                                 {result?.failure_explanation && (
                                     <div className="hitl-fail-explanation">
                                         <p>{result.failure_explanation}</p>
                                     </div>
                                 )}
 
-                                {/* Stage chips */}
                                 <div className="hitl-fail-stages">
                                     <span className="hitl-fail-section-label">Pipeline progress</span>
                                     <div className="hitl-fail-stage-chips">
@@ -963,7 +962,6 @@ export const HumanInLoopBuild = () => {
                                     </div>
                                 </div>
 
-                                {/* Error message (brief) */}
                                 {result?.error && (
                                     <div className="hitl-fail-error-brief">
                                         <span className="hitl-fail-error-label">Error</span>
@@ -971,7 +969,6 @@ export const HumanInLoopBuild = () => {
                                     </div>
                                 )}
 
-                                {/* Grouped partial artifacts */}
                                 {partialArtifacts.length > 0 && (() => {
                                     const groups: Record<string, typeof partialArtifacts> = {};
                                     partialArtifacts.forEach(a => {
@@ -1007,7 +1004,6 @@ export const HumanInLoopBuild = () => {
                                     );
                                 })()}
 
-                                {/* Build stats (compact) */}
                                 {result && (
                                     <div className="hitl-fail-stats">
                                         {result.build_time_s != null && (
@@ -1024,7 +1020,6 @@ export const HumanInLoopBuild = () => {
                                     </div>
                                 )}
 
-                                {/* What to try next callout */}
                                 {result?.failure_suggestion && (
                                     <div className="hitl-fail-suggestion">
                                         <span className="hitl-fail-suggestion-label">What to try next</span>
@@ -1032,7 +1027,6 @@ export const HumanInLoopBuild = () => {
                                     </div>
                                 )}
 
-                                {/* Dual action buttons */}
                                 <div className="hitl-fail-actions">
                                     <button className="hitl-fail-btn-primary" onClick={() => {
                                         setPhase('prompt');
@@ -1049,7 +1043,6 @@ export const HumanInLoopBuild = () => {
                                         setThinkingData(null);
                                         setPartialArtifacts([]);
                                         setShowFullLog(false);
-                                        // Keep prompt + design name + build mode for retry
                                     }}>
                                         Try Again
                                     </button>
@@ -1061,7 +1054,6 @@ export const HumanInLoopBuild = () => {
                         )}
                     </div>
 
-                    {/* Collapsible full log */}
                     <div className="hitl-done-log-section">
                         <button
                             className="hitl-done-log-toggle"
@@ -1077,7 +1069,7 @@ export const HumanInLoopBuild = () => {
                     </div>
                 </div>
             )}
-            <BillingModal 
+            <BillingModal
                 isOpen={showBillingModal}
                 onClose={() => setShowBillingModal(false)}
                 onKeySaved={() => setShowBillingModal(false)}
