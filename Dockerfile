@@ -52,11 +52,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the full OSS CAD Suite from the downloader stage
+# Copy the full OSS CAD Suite from the downloader stage.
+# Binaries are root-owned with 755 permissions from the tarball — no chown needed.
+# appuser only needs read + execute access, which is already set.
 COPY --from=oss-cad-downloader /opt/oss-cad-suite /opt/oss-cad-suite
 
-# OSS CAD Suite is the authoritative source for ALL EDA tools.
-# _resolve_tool_binary() in config.py uses OSS_CAD_SUITE_HOME automatically.
 ENV OSS_CAD_SUITE_HOME=/opt/oss-cad-suite
 ENV PATH="/opt/oss-cad-suite/bin:${PATH}"
 
@@ -80,13 +80,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 COPY --from=frontend-builder /app/web/dist /app/web/dist
 
-# Runtime directories
-RUN mkdir -p /app/designs /app/artifacts /app/pdk
-
-# Oracle Cloud / HuggingFace Spaces: run as non-root uid 1000
+# Runtime directories + non-root user in one layer
+# Only /app needs to be owned by appuser — OSS CAD Suite is read/exec only
 RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app && \
-    chown -R appuser:appuser /opt/oss-cad-suite
+    mkdir -p /app/designs /app/artifacts /app/pdk && \
+    chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 7860
