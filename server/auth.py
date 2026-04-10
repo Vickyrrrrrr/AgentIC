@@ -271,14 +271,9 @@ def check_build_allowed(profile: Optional[dict]) -> None:
 def get_llm_key_for_user(profile: Optional[dict]) -> Optional[str]:
     if profile is None:
         return None
-    if profile.get("plan") != "byok":
-        return None
     encrypted_key = profile.get("llm_api_key")
     if not encrypted_key:
-        raise HTTPException(
-            status_code=400,
-            detail="BYOK plan requires an API key setup. Set it in your profile settings.",
-        )
+        return None
     try:
         return decrypt_api_key(encrypted_key)
     except ValueError:
@@ -297,6 +292,13 @@ def get_byok_config_for_user(profile: Optional[dict]) -> Optional[dict]:
             "group2": {"api_key": val},
             "group3": {"api_key": val},
         }
+
+
+async def save_byok_config_for_user(profile: dict, byok_config: dict) -> None:
+    """Encrypt and persist the full multi-group BYOK config to the user's profile."""
+    payload_str = json.dumps(byok_config)
+    encrypted = encrypt_api_key(payload_str)
+    await _supabase_update("profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted})
 
 
 # ─── Build lifecycle — use sync versions (called from threads) ───────
