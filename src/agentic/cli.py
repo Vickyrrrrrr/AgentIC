@@ -67,7 +67,7 @@ claude_theme = Theme({
 })
 console = Console(theme=claude_theme)
 # Legacy path for license-based credentials (packaged binary)
-CREDENTIALS_FILE = os.path.expanduser("~/.agentic_credentials.json")
+CREDENTIALS_FILE = os.path.expanduser("~/.agentic/credentials.json")
 LICENSE_VERIFY_URL = "https://api.lemonsqueezy.com/v1/licenses/validate"
 LICENSE_TIMEOUT_SECONDS = 20
 LICENSE_OFFLINE_GRACE_HOURS = max(
@@ -350,12 +350,15 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) Lice
         optional=False,
     )
 
-    data = {
+    # Preserve any existing group/provider configuration while refreshing
+    # license-gated credentials collected by login.
+    data = dict(existing)
+    data.update({
         "license_key": key,
         "nvidia_api_key": nvidia_key,
         "groq_api_key": groq_key,
         "glm_api_key": glm_key,
-    }
+    })
     _remember_verified_license(data)
     _apply_runtime_keys(data)
     console.print(f"\n[success]✅ Credentials saved locally in {CREDENTIALS_FILE}[/success]")
@@ -367,10 +370,15 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) Lice
     if not status["ok"]:
         console.print("[warning]Some system compiler dependencies are missing.[/warning]")
         if typer.confirm("Would you like AgentIC to attempt an automatic environment installation now?"):
-            console.print("[dim]Running installation script (this may take a few minutes)...[/dim]")
-            import subprocess
-            os.system("bash scripts/setup_env.sh || bash scripts/setup_desktop.sh")
-            console.print("[success]Dependencies setup attempted! Re-run 'agentic login' or 'source scripts/env.sh' to apply changes.[/success]")
+            console.print(Panel(
+                "Automatic shell installer scripts are not bundled in the pip package.\n\n"
+                "Install prerequisites manually:\n"
+                "1. Install OSS CAD Suite and set OSS_CAD_SUITE_HOME\n"
+                "2. Ensure docker is installed and running\n"
+                "3. Re-run agentic doctor to verify",
+                title="🛠 Manual Setup Required",
+                border_style="warning"
+            ))
     else:
         console.print("[success]Compiler environment looks pristine! 🚀[/success]")
         
@@ -494,6 +502,51 @@ def configure(
         title="✅ Ready",
         border_style="success"
     ))
+
+
+@app.command()
+def doctor():
+    """Validate local runtime, toolchain, and saved credentials for CLI builds."""
+    from .config import CREDENTIALS_PATH, _load_user_credentials
+
+    diag = startup_self_check()
+    creds = _load_user_credentials()
+
+    console.print(Panel("AgentIC CLI health report", title="🩺 Doctor"))
+
+    required_failed = False
+    for check in diag.get("checks", []):
+        tool = check.get("tool", "unknown")
+        resolved = check.get("resolved") or check.get("hint") or "n/a"
+        optional = bool(check.get("optional"))
+        ok = bool(check.get("ok"))
+        if ok:
+            console.print(f"  [success]✓[/success] {tool}: [info]{resolved}[/info]")
+        else:
+            marker = "(optional)" if optional else "(required)"
+            console.print(f"  [error]✗[/error] {tool} {marker}: [info]{resolved}[/info]")
+            if not optional:
+                required_failed = True
+
+    if creds:
+        groups = [g for g in ("build", "fix", "doc") if isinstance(creds.get(g), dict)]
+        if groups:
+            console.print(f"\n[success]✓[/success] Credentials file found: [info]{CREDENTIALS_PATH}[/info]")
+            for group in groups:
+                model = (creds.get(group, {}).get("model") or "").strip() or "(model not set)"
+                has_key = bool((creds.get(group, {}).get("api_key") or "").strip())
+                key_state = "key set" if has_key else "key missing"
+                console.print(f"  - {group}: {model} [{key_state}]")
+        else:
+            console.print(f"\n[warning]Credentials file exists but no build/fix/doc groups found:[/warning] [info]{CREDENTIALS_PATH}[/info]")
+    else:
+        console.print(f"\n[warning]No saved credentials found at[/warning] [info]{CREDENTIALS_PATH}[/info]")
+
+    if required_failed:
+        raise typer.Exit(1)
+
+    console.print("\n[success]Environment checks passed.[/success]")
+
 # Setup Brain
 def get_llm():
     """Returns the LLM instance from the best available provider:

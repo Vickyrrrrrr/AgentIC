@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-ic"
+version = "3.0.1"
+description = "AgentIC — Autonomous AI-Driven Chip Design: Natural Language to GDSII"
+readme = "README.md"
+license = {text = "Proprietary"}
+requires-python = ">=3.10"
+authors = [
+    {name = "AgentIC Team", email = "vickynishad110@gmail.com"},
+]
+keywords = ["chip-design", "vlsi", "eda", "ai", "llm", "gdsii", "verilog", "silicon"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "crewai>=1.9.0",
+    "crewai-tools",
+    "langchain_openai",
+    "litellm>=1.0.0",
+    "openai>=1.0.0",
+    "pydantic",
+    "pyverilog",
+    "typer",
+    "rich",
+    "python-dotenv",
+    "httpx",
+    "requests",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi",
+    "uvicorn",
+    "celery",
+    "redis",
+    "sqlalchemy",
+    "psycopg2-binary",
+    "boto3",
+    "prometheus-client",
+]
+reports = [
+    "PyMuPDF",
+    "python-docx",
+]
+all = ["agentic-ic[server,reports]"]
+
+[project.scripts]
+agentic = "agentic.cli:app"
+
+[project.urls]
+Homepage = "https://www.buildstack.live"
+Repository = "https://github.com/Vickyrrrrrr/AgentIC"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentic"]

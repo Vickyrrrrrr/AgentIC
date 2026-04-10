@@ -25,49 +25,74 @@ AgentIC utilizes a proprietary, highly scalable inference pipeline designed to c
 
 ## 💻 CLI Installation & Quick Start
 
-You can easily run the AgentIC engine locally on your machine using our standalone command-line package.
+AgentIC is installable as a normal Python package.
 
-### Prerequisites
-* **Docker** (Required for the OpenLane physical synthesis flow)
-* **OSS CAD Suite** (Optional but recommended for RTL linting and simulation)
+### What `pip install` does
 
-### 1. Download the Engine
-AgentIC is distributed as a standalone, securely compiled executable. You do not need to install Python or manage source code dependencies.
-1. Download the latest `agentic` executable for your operating system (e.g., `agentic.exe` for Windows, `agentic-linux` for Linux/macOS) from our official release portal.
-2. Place it in an empty folder where you want to construct your chips.
-   * *Linux/macOS users:* Open your terminal and make the binary executable: `chmod +x agentic-linux`
+`pip install agentic-ic` installs the Python package and its Python runtime dependencies automatically.
 
-### 2. Configure Your Environment
-Create a plain text file named `.env` in the EXACT same folder as your executable to securely link your AI credentials. Add your keys like this:
+### What users still need to install manually
 
-```env
-GLM_API_KEY=your_zhipu_api_key_here
-NVIDIA_API_KEY=your_nvidia_api_key_here
-GROQ_API_KEY=your_groq_api_key_here
+AgentIC depends on external EDA tooling that `pip` cannot install for you:
+
+1. **Docker**
+   Required for OpenLane RTL-to-GDSII hardening.
+2. **OSS CAD Suite on PATH**
+   Required binaries: `verilator`, `iverilog`, `vvp`, `yosys`, `sby`
+3. **LLM API credentials**
+   Configure these with `agentic configure` after install.
+
+### Install the package
+
+```bash
+pip install agentic-ic
 ```
 
-### 3. Generate Your First Chip
-Open your terminal (or Command Prompt / PowerShell) in the folder containing the executable and run the build command. 
+### Check your machine before building
 
-*For Linux/macOS:*
 ```bash
-./agentic-linux build --name fast_multiplier \
+agentic doctor
+```
+
+This command tells users:
+- what the package installed automatically
+- which external tools are still missing
+- whether Docker / OSS CAD Suite are available
+- whether API keys are configured
+
+### Configure LLM access
+
+```bash
+agentic configure
+```
+
+This stores credentials in:
+
+```text
+~/.agentic/credentials.json
+```
+
+You can use one provider for everything or separate providers for:
+- Build agents
+- Fix/debug agents
+- Documentation/report agents
+
+### Generate your first chip
+
+```bash
+agentic build \
+  --name fast_multiplier \
   --desc "A high-speed 16-bit pipelined hardware multiplier with an active-low synchronous reset." \
   --pdk-profile sky130 \
   --no-strict-gates
 ```
 
-*For Windows:*
-```cmd
-agentic.exe build --name fast_multiplier ^
-  --desc "A high-speed 16-bit pipelined hardware multiplier with an active-low synchronous reset." ^
-  --pdk-profile sky130 ^
-  --no-strict-gates
-```
+### Notes for users
 
-**Note:** Ensure **Docker** is running in the background on your machine. This prompt uses the `--no-strict-gates` flag to allow the engine to push through to the GDSII physical layout even if AI-generated testbenches encounter edge cases.
-
-The resulting RTL, Testbenches, and GDS layouts will be strictly verified and saved in your configured designs directory.
+- Keep Docker running if you want the physical hardening flow.
+- If you only want RTL generation and verification, use `--skip-openlane`.
+- OpenLane is pulled through Docker on demand; users do not need a separate manual OpenLane install.
+- Build outputs are written under your configured `OPENLANE_ROOT/designs/` workspace.
 
 ---
 

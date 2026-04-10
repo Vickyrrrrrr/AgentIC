@@ -1,5 +1,7 @@
+import json
 import os
 import platform as _platform
+import tempfile
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
@@ -12,11 +14,97 @@ _dotenv_path = os.path.join(WORKSPACE_ROOT, ".env")
 if os.path.isfile(_dotenv_path):
     load_dotenv(_dotenv_path, override=False)
 
+CREDENTIALS_PATH = os.path.expanduser("~/.agentic/credentials.json")
+
+
+def _load_user_credentials() -> Dict[str, Any]:
+    """Load persisted CLI credentials from user home directory."""
+    try:
+        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_user_credentials(credentials: Dict[str, Any]) -> None:
+    """Persist CLI credentials with secure file permissions."""
+    os.makedirs(os.path.dirname(CREDENTIALS_PATH), exist_ok=True)
+    with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
+        json.dump(credentials, f, indent=2)
+    try:
+        os.chmod(CREDENTIALS_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def _normalize_base_url(raw_url: str) -> str:
+    """Ensure provider base URLs include a protocol."""
+    url = (raw_url or "").strip().strip('"').strip("'")
+    if not url:
+        return ""
+    if "://" in url:
+        return url
+    if url.startswith(("localhost", "127.0.0.1", "0.0.0.0")):
+        return f"http://{url}"
+    return f"https://{url}"
+
 # For end-users, we want designs to generate exactly where they run the command.
 # Developers can still override OPENLANE_ROOT with an environment variable.
-OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.getcwd())
+def _ensure_writable_dir(path: str) -> bool:
+    """Best-effort writability check for runtime workspace directories."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe_path = os.path.join(path, ".agentic_write_probe")
+        with open(probe_path, "w", encoding="utf-8") as probe:
+            probe.write("ok")
+        os.remove(probe_path)
+        return True
+    except OSError:
+        return False
+
+
+_requested_openlane_root = os.environ.get("OPENLANE_ROOT", os.getcwd())
+_fallback_openlane_root = os.environ.get(
+    "AGENTIC_WORKSPACE_ROOT",
+    os.path.join(tempfile.gettempdir(), "agentic-workspace"),
+)
+
+if _ensure_writable_dir(os.path.join(_requested_openlane_root, "designs")):
+    OPENLANE_ROOT = _requested_openlane_root
+else:
+    OPENLANE_ROOT = _fallback_openlane_root
+    # Keep downstream modules in sync once fallback is selected.
+    os.environ["OPENLANE_ROOT"] = OPENLANE_ROOT
+    if not _ensure_writable_dir(os.path.join(OPENLANE_ROOT, "designs")):
+        raise RuntimeError(
+            "No writable designs workspace found. "
+            f"Checked OPENLANE_ROOT={_requested_openlane_root!r} and fallback={OPENLANE_ROOT!r}."
+        )
+
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
+
+_SAVED_CREDENTIALS = _load_user_credentials()
+
+
+def _credential_group(group_name: str) -> Dict[str, str]:
+    group = _SAVED_CREDENTIALS.get(group_name)
+    if isinstance(group, dict):
+        return {
+            "model": str(group.get("model", "") or "").strip(),
+            "base_url": _normalize_base_url(str(group.get("base_url", "") or "")),
+            "api_key": str(group.get("api_key", "") or "").strip(),
+        }
+    return {"model": "", "base_url": "", "api_key": ""}
+
+
+def _default_group_credentials() -> Dict[str, str]:
+    for group_name in ("build", "fix", "doc"):
+        group = _credential_group(group_name)
+        if group.get("api_key"):
+            return group
+    return {"model": "", "base_url": "", "api_key": ""}
 
 # =============================================================================
 # Universal LLM Config
@@ -34,10 +122,23 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 # Per-role overrides: set ROLE_{ROLE}_MODEL / ROLE_{ROLE}_BASE_URL / ROLE_{ROLE}_API_KEY
 # e.g. ROLE_DESIGNER_MODEL=gpt-4o  ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
 
+_DEFAULT_GROUP = _default_group_credentials()
+
 DEFAULT_LLM_CONFIG = {
-    "model":    os.environ.get("LLM_MODEL",    "openai/gpt-4o"),
-    "base_url": os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
-    "api_key":  os.environ.get("LLM_API_KEY",  ""),
+    "model": (
+        os.environ.get("LLM_MODEL", "").strip()
+        or _DEFAULT_GROUP.get("model", "")
+        or "openai/gpt-4o"
+    ),
+    "base_url": _normalize_base_url(
+        os.environ.get("LLM_BASE_URL", "").strip()
+        or _DEFAULT_GROUP.get("base_url", "")
+        or "https://api.openai.com/v1"
+    ),
+    "api_key": (
+        os.environ.get("LLM_API_KEY", "").strip()
+        or _DEFAULT_GROUP.get("api_key", "")
+    ),
 }
 
 # Backward-compat aliases — keeps the rest of the codebase unchanged
@@ -51,6 +152,21 @@ DEEPSEEK_CONFIG = DEFAULT_LLM_CONFIG
 LLM_MODEL    = DEFAULT_LLM_CONFIG["model"]
 LLM_BASE_URL = DEFAULT_LLM_CONFIG["base_url"]
 LLM_API_KEY  = DEFAULT_LLM_CONFIG["api_key"]
+
+_ROLE_TO_GROUP = {
+    "architect": "build",
+    "designer": "build",
+    "verifier": "build",
+    "manager": "build",
+    "physical": "build",
+    "testbench_designer": "build",
+    "fixer": "fix",
+    "debugger": "fix",
+    "reasoner": "fix",
+    "documenter": "doc",
+    "reporter": "doc",
+    "doc_gen": "doc",
+}
 
 
 def get_role_llm_config(role: str) -> Dict[str, str]:
@@ -66,10 +182,17 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
         ROLE_DOCUMENTER_BASE_URL=https://api.groq.com/openai/v1
         ROLE_DOCUMENTER_API_KEY=gsk_...
     """
-    role_upper = role.upper().replace("-", "_")
-    model    = os.environ.get(f"ROLE_{role_upper}_MODEL",    "").strip()
-    base_url = os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip()
-    api_key  = os.environ.get(f"ROLE_{role_upper}_API_KEY",  "").strip()
+    role_key = role.lower().replace("-", "_")
+    role_upper = role_key.upper()
+    role_group = _ROLE_TO_GROUP.get(role_key, "build")
+    group_cfg = _credential_group(role_group)
+
+    model    = os.environ.get(f"ROLE_{role_upper}_MODEL", "").strip() or group_cfg.get("model", "")
+    base_url = _normalize_base_url(
+        os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip()
+        or group_cfg.get("base_url", "")
+    )
+    api_key  = os.environ.get(f"ROLE_{role_upper}_API_KEY", "").strip() or group_cfg.get("api_key", "")
 
     return {
         "model":    model    or DEFAULT_LLM_CONFIG["model"],
