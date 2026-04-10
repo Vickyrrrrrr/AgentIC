@@ -8,11 +8,28 @@ from dotenv import load_dotenv
 # Project Paths
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Load .env file ONLY if it exists, and NEVER override environment variables
-# already set by the platform (e.g. HuggingFace Spaces secrets).
-_dotenv_path = os.path.join(WORKSPACE_ROOT, ".env")
-if os.path.isfile(_dotenv_path):
-    load_dotenv(_dotenv_path, override=False)
+# Load .env from explicit env var, current working directory, and package root.
+# Never override already-exported environment variables.
+def _load_dotenv_candidates() -> None:
+    candidates = []
+    explicit = (os.environ.get("AGENTIC_ENV_FILE") or "").strip()
+    if explicit:
+        candidates.append(os.path.expanduser(explicit))
+
+    candidates.append(os.path.join(os.getcwd(), ".env"))
+    candidates.append(os.path.join(WORKSPACE_ROOT, ".env"))
+
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.abspath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.isfile(normalized):
+            load_dotenv(normalized, override=False)
+
+
+_load_dotenv_candidates()
 
 CREDENTIALS_PATH = os.path.expanduser("~/.agentic/credentials.json")
 

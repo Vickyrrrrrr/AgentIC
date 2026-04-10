@@ -137,7 +137,10 @@ def _allow_dev_bypass() -> bool:
 def _should_enforce_license() -> bool:
     if _allow_dev_bypass():
         return False
-    return _is_packaged_runtime() or bool(os.environ.get("AGENTIC_FORCE_LICENSE_CHECK"))
+    if os.environ.get("AGENTIC_DISABLE_LICENSE_CHECK") == "1":
+        return False
+    # Enforce license checks by default for packaged and pip-installed CLI.
+    return True
 
 
 def _mask_secret(value: str) -> str:
@@ -334,20 +337,41 @@ def login(key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) Lice
         title="🔒 Login Complete"
     ))
 
-    glm_key = _prompt_secret(
+    def _env_first(*names: str) -> tuple[str, str]:
+        for name in names:
+            value = (os.environ.get(name) or "").strip()
+            if value:
+                return name, value
+        return "", ""
+
+    def _resolve_key(label: str, stored_value: str, optional: bool, env_names: tuple[str, ...]) -> str:
+        stored_value = (stored_value or "").strip()
+        if stored_value:
+            console.print(f"[info]Using stored key for {label}.[/info]")
+            return stored_value
+        env_name, env_value = _env_first(*env_names)
+        if env_value:
+            console.print(f"[info]Using {env_name} from environment for {label}.[/info]")
+            return env_value
+        return _prompt_secret(label, "", optional=optional)
+
+    glm_key = _resolve_key(
         "GLM / ZhipuAI API key for core build agents",
         existing.get("glm_api_key", ""),
         optional=True,
+        env_names=("GLM_API_KEY", "DEEPSEEK_API_KEY", "LLM_API_KEY"),
     )
-    nvidia_key = _prompt_secret(
+    nvidia_key = _resolve_key(
         "NVIDIA API key for fixer and debugger agents",
         existing.get("nvidia_api_key", ""),
         optional=False,
+        env_names=("NVIDIA_API_KEY", "DEEPSEEK_API_KEY", "LLM_API_KEY"),
     )
-    groq_key = _prompt_secret(
+    groq_key = _resolve_key(
         "Groq API key for report and documentation agents",
         existing.get("groq_api_key", ""),
         optional=False,
+        env_names=("GROQ_API_KEY", "LLM_API_KEY"),
     )
 
     # Preserve any existing group/provider configuration while refreshing
@@ -1013,6 +1037,7 @@ def build(
 @app.command()
 def verify(name: str = typer.Argument(..., help="Design name to verify")):
     """Run verification on an existing design."""
+    verify_license()
     console.print(f"[warning]Running verification for {name}...[/warning]")
     output = run_verification(name)
     console.print(output)
