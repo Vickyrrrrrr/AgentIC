@@ -23,14 +23,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 ARG OSS_CAD_VERSION=2025-04-06
-# TARGETARCH is set automatically by Docker buildx: "amd64" or "arm64"
-ARG TARGETARCH
 
-# Map Docker TARGETARCH -> OSS CAD Suite filename suffix
-#   amd64 -> x64      (NOT x86_64 — that path does not exist in the releases)
-#   arm64 -> arm64
-RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x64") && \
+# Use uname -m to detect the real host architecture at build time.
+# ARG TARGETARCH is only set by `docker buildx` — legacy docker-compose
+# v1.29 never populates it, causing the wrong tarball to be downloaded.
+#
+#   uname -m output -> OSS CAD Suite filename suffix
+#   aarch64         -> arm64
+#   x86_64          -> x64
+RUN ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "x64") && \
     DATESTR=$(echo $OSS_CAD_VERSION | tr -d '-') && \
+    echo "Detected arch: $(uname -m) -> oss-cad-suite-linux-${ARCH}-${DATESTR}.tgz" && \
     curl -fsSL \
     "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_VERSION}/oss-cad-suite-linux-${ARCH}-${DATESTR}.tgz" \
     -o /tmp/oss-cad-suite.tgz && \
@@ -61,7 +64,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy the full OSS CAD Suite from the downloader stage.
 # Binaries are root-owned with 755 permissions from the tarball — no chown needed.
-# appuser only needs read + execute access, which is already set.
 COPY --from=oss-cad-downloader /opt/oss-cad-suite /opt/oss-cad-suite
 
 ENV OSS_CAD_SUITE_HOME=/opt/oss-cad-suite
