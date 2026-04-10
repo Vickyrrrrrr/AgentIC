@@ -42,9 +42,16 @@ RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x64") && \
 # =============================================================================
 FROM python:3.11-slim
 
-# Minimal OS dependencies ONLY.
-# NO apt-get yosys / verilator / iverilog — OSS CAD Suite is the single source.
+# OS runtime dependencies:
+#   perl         — verilator is a Perl wrapper (uses FindBin, File::Basename, etc.)
+#   libgcc-s1    — shared lib required by iverilog / vvp ELF binaries
+#   libstdc++6   — C++ stdlib required by yosys and other OSS CAD tools
+#   curl         — health checks + runtime downloads
+#   docker.io    — OpenLane container execution
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    perl \
+    libgcc-s1 \
+    libstdc++6 \
     curl \
     docker.io \
     ca-certificates \
