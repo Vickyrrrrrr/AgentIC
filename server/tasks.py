@@ -1,6 +1,6 @@
 import os
 from celery import Celery
-import asyncio
+import time
 from typing import Dict, Any
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -28,19 +28,58 @@ celery_app.conf.update(
 @celery_app.task(bind=True, name="tasks.run_agentic_build")
 def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
     """
-    Background Task executed by Celery Workers. 
-    It will run the Heavy API logic for Orhestration.
-    Due to the `_run_agentic_build` function relying on asyncio, 
-    we must wrap it nicely.
+    Background Task executed by Celery Workers.
+    The Celery worker is a SEPARATE PROCESS from the API server — it has its own
+    empty JOB_STORE. We must:
+      1. Bootstrap a JOB_STORE entry for this job (or pull it from DB if available).
+      2. Inject the byok_key from request_data so _run_agentic_build can find it.
     """
+    import json
+    from server.api import JOB_STORE, _pull_job_from_db, _sync_job_to_db
+    from server.api import BuildRequest as APIBuildRequest
+
+    # Reconstruct Pydantic model from the serialised dict Celery received
+    req = APIBuildRequest(**request_data)
+
+    # ── 1. Ensure this worker process has a JOB_STORE entry ──────────────────
+    # Try to pull the existing record that the API server wrote to the DB.
+    _pull_job_from_db(job_id)
+
+    if job_id not in JOB_STORE:
+        # Fallback: create a minimal stub so _run_agentic_build won't KeyError
+        JOB_STORE[job_id] = {
+            "status": "queued",
+            "design_name": req.design_name,
+            "description": req.description,
+            "current_state": "INIT",
+            "events": [],
+            "result": {},
+            "created_at": int(time.time()),
+            "human_in_loop": bool(req.human_in_loop),
+            "stages": {},
+            "build_status": "running",
+            "cancelled": False,
+        }
+
+    # ── 2. Inject byok_key so _run_agentic_build can route LLM calls ─────────
+    # req.api_key already holds the JSON-encoded BYOK config (set by the API
+    # server before enqueuing). Parse it back into the dict that _get_llm() expects.
+    if req.api_key and not JOB_STORE[job_id].get("byok_key"):
+        try:
+            byok_key = json.loads(req.api_key)
+        except (json.JSONDecodeError, TypeError):
+            byok_key = {
+                "group1": {"api_key": req.api_key},
+                "group2": {"api_key": req.api_key},
+                "group3": {"api_key": req.api_key},
+            }
+        JOB_STORE[job_id]["byok_key"] = byok_key
+
+    # Persist the bootstrapped entry so the API server can stream events from DB
+    _sync_job_to_db(job_id)
+
+    # ── 3. Run the actual build pipeline ─────────────────────────────────────
     from server.api import _run_agentic_build
-    from agentic.orchestrator import BuildRequest
-    
-    # Reconstruct request Pydantic Model from Dictionary
-    req = BuildRequest(**request_data)
-    
-    # We will trigger the actual build pipeline 
-    # but the API logic tracks everything safely via DB or events.
     _run_agentic_build(job_id, req)
-    
+
     return {"job_id": job_id, "status": "Finished Execution Sequence"}
