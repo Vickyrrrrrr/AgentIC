@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles } from 'lucide-react';
+import { supabase } from '../lib/supabaseClient';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
 type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: string }>;
@@ -34,6 +35,8 @@ const GROUP_META: Record<
     modelHint: 'Fast text generation model',
   },
 };
+
+const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
 const MaskedKey = ({ value }: { value: string }) => {
   const [visible, setVisible] = useState(false);
@@ -131,44 +134,74 @@ export const BillingModal = ({
   const [quickBaseUrl, setQuickBaseUrl] = useState('');
   const [saved, setSaved] = useState(false);
 
+  // Helper: apply a parsed BYOK payload to component state
+  const applyParsed = (parsed: any) => {
+    const nextGroups: GroupState = {
+      group1: { model: parsed.group1?.model || '', apiKey: parsed.group1?.api_key || '', baseUrl: parsed.group1?.base_url || '' },
+      group2: { model: parsed.group2?.model || '', apiKey: parsed.group2?.api_key || '', baseUrl: parsed.group2?.base_url || '' },
+      group3: { model: parsed.group3?.model || '', apiKey: parsed.group3?.api_key || '', baseUrl: parsed.group3?.base_url || '' },
+    };
+    setGroups(nextGroups);
+    const k1 = nextGroups.group1.apiKey;
+    if (k1 && k1 === nextGroups.group2.apiKey && k1 === nextGroups.group3.apiKey) {
+      setQuickKey(k1);
+      setQuickModel(nextGroups.group1.model);
+      setQuickBaseUrl(nextGroups.group1.baseUrl);
+      setQuickMode(true);
+    } else {
+      setQuickMode(false);
+    }
+  };
+
   useEffect(() => {
     if (!isOpen) { setSaved(false); return; }
     setError('');
-    try {
-      const raw = localStorage.getItem('agentic_byok_key');
-      if (!raw) {
+
+    // Try server-side first (so keys sync across devices), then fall back to localStorage
+    const loadKeys = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) {
+          const resp = await fetch(`${API_BASE}/profile/byok`, {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          });
+          if (resp.ok) {
+            const serverData = await resp.json();
+            if (serverData && serverData.group1) {
+              // Mirror to localStorage for offline use
+              localStorage.setItem('agentic_byok_key', JSON.stringify(serverData));
+              applyParsed(serverData);
+              return;
+            }
+          }
+        }
+      } catch {
+        // Server unavailable — fall back to localStorage silently
+      }
+
+      // Fallback: localStorage
+      try {
+        const raw = localStorage.getItem('agentic_byok_key');
+        if (!raw) {
+          setGroups(DEFAULT_GROUPS);
+          setQuickKey('');
+          setQuickModel('');
+          setQuickBaseUrl('');
+          setQuickMode(true);
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') applyParsed(parsed);
+      } catch {
         setGroups(DEFAULT_GROUPS);
         setQuickKey('');
         setQuickModel('');
         setQuickBaseUrl('');
         setQuickMode(true);
-        return;
       }
-      const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== 'object') return;
+    };
 
-      const nextGroups: GroupState = {
-        group1: { model: parsed.group1?.model || '', apiKey: parsed.group1?.api_key || '', baseUrl: parsed.group1?.base_url || '' },
-        group2: { model: parsed.group2?.model || '', apiKey: parsed.group2?.api_key || '', baseUrl: parsed.group2?.base_url || '' },
-        group3: { model: parsed.group3?.model || '', apiKey: parsed.group3?.api_key || '', baseUrl: parsed.group3?.base_url || '' },
-      };
-      setGroups(nextGroups);
-
-      // If all keys are the same, show quick mode
-      const k1 = nextGroups.group1.apiKey;
-      if (k1 && k1 === nextGroups.group2.apiKey && k1 === nextGroups.group3.apiKey) {
-        setQuickKey(k1);
-        setQuickModel(nextGroups.group1.model);
-        setQuickBaseUrl(nextGroups.group1.baseUrl);
-        setQuickMode(true);
-      }
-    } catch {
-      setGroups(DEFAULT_GROUPS);
-      setQuickKey('');
-      setQuickModel('');
-      setQuickBaseUrl('');
-      setQuickMode(true);
-    }
+    loadKeys();
   }, [isOpen]);
 
   const hasAnyKey = quickMode
@@ -197,7 +230,31 @@ export const BillingModal = ({
     }
 
     try {
+      // 1. Always save to localStorage (works offline / no-auth)
       localStorage.setItem('agentic_byok_key', JSON.stringify(payload));
+
+      // 2. Also save to server so keys sync across all devices
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) {
+          const resp = await fetch(`${API_BASE}/profile/byok`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify(payload),
+          });
+          if (!resp.ok) {
+            const errData = await resp.json().catch(() => ({}));
+            console.warn('BYOK server save failed:', errData);
+            // Don't block the user — localStorage save already worked
+          }
+        }
+      } catch (serverErr) {
+        console.warn('BYOK server save error (non-fatal):', serverErr);
+      }
+
       setSaved(true);
       setTimeout(() => { onKeySaved(); onClose(); }, 600);
     } catch (err: any) {
@@ -248,8 +305,8 @@ export const BillingModal = ({
                 <LockKeyhole size={16} />
               </span>
               <div>
-                <strong>Stored locally in this browser</strong>
-                <p>The key is saved in local storage on this device. It is not committed to GitHub or shown to other users.</p>
+                <strong>Encrypted &amp; synced to your account</strong>
+                <p>Keys are encrypted server-side and synced to your profile so they work on any device you sign in to.</p>
               </div>
             </div>
             <div className="byok-onboarding-card">
@@ -351,7 +408,7 @@ export const BillingModal = ({
           {/* Actions */}
           <div className="byok-footer">
             <span className="byok-footer-note">
-              AgentIC uses these keys only for requests initiated from this browser.
+              Keys are encrypted and synced to your account — available on all your devices.
             </span>
             <button className="byok-cancel-btn" onClick={onClose} disabled={saving}>
               Cancel
@@ -366,7 +423,7 @@ export const BillingModal = ({
               ) : saving ? (
                 'Saving…'
               ) : (
-                'Save Local BYOK'
+                'Save & Sync Keys'
               )}
             </button>
           </div>
