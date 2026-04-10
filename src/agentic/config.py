@@ -1,4 +1,5 @@
 import os
+import platform as _platform
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
@@ -17,98 +18,65 @@ OPENLANE_ROOT = os.environ.get("OPENLANE_ROOT", os.getcwd())
 DESIGNS_DIR = os.path.join(OPENLANE_ROOT, "designs")
 SCRIPTS_DIR = os.path.join(WORKSPACE_ROOT, "scripts")
 
-CLOUD_CONFIG = {
-    "model": os.environ.get("NVIDIA_MODEL", "openai/meta/llama-3.3-70b-instruct"),
-    "base_url": os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("NVIDIA_API_KEY", ""),
+# =============================================================================
+# Universal LLM Config
+# =============================================================================
+# Any OpenAI-compatible endpoint works. Set via environment variables:
+#
+#   OpenAI:      LLM_BASE_URL=https://api.openai.com/v1       LLM_MODEL=gpt-4o
+#   Anthropic:   LLM_MODEL=anthropic/claude-3-5-sonnet        (no base_url needed)
+#   Groq:        LLM_BASE_URL=https://api.groq.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
+#   NVIDIA NIM:  LLM_BASE_URL=https://integrate.api.nvidia.com/v1
+#   Ollama:      LLM_BASE_URL=http://localhost:11434           LLM_MODEL=ollama/qwen2.5-coder:7b
+#   Together AI: LLM_BASE_URL=https://api.together.xyz/v1
+#   OpenRouter:  LLM_BASE_URL=https://openrouter.ai/api/v1
+#
+# Per-role overrides: set ROLE_{ROLE}_MODEL / ROLE_{ROLE}_BASE_URL / ROLE_{ROLE}_API_KEY
+# e.g. ROLE_DESIGNER_MODEL=gpt-4o  ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
+
+DEFAULT_LLM_CONFIG = {
+    "model":    os.environ.get("LLM_MODEL",    "openai/gpt-4o"),
+    "base_url": os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
+    "api_key":  os.environ.get("LLM_API_KEY",  ""),
 }
 
-DEEPSEEK_CONFIG = {
-    "model": os.environ.get("DEEPSEEK_MODEL", "openai/deepseek-ai/deepseek-v3.2"),
-    "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-    "api_key": os.environ.get("DEEPSEEK_API_KEY", ""),
-    "extra_body": {"chat_template_kwargs": {"thinking": True}}
-}
+# Backward-compat aliases — keeps the rest of the codebase unchanged
+CLOUD_CONFIG    = DEFAULT_LLM_CONFIG
+NVIDIA_CONFIG   = DEFAULT_LLM_CONFIG
+LOCAL_CONFIG    = DEFAULT_LLM_CONFIG
+GROQ_CONFIG     = DEFAULT_LLM_CONFIG
+GLM_CONFIG      = DEFAULT_LLM_CONFIG
+DEEPSEEK_CONFIG = DEFAULT_LLM_CONFIG
 
+LLM_MODEL    = DEFAULT_LLM_CONFIG["model"]
+LLM_BASE_URL = DEFAULT_LLM_CONFIG["base_url"]
+LLM_API_KEY  = DEFAULT_LLM_CONFIG["api_key"]
 
-GLM_CONFIG = {
-    "model": os.environ.get("GLM_MODEL", "glm-4-plus"),
-    "base_url": os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
-    "api_key": os.environ.get("GLM_API_KEY", ""),
-}
-
-LOCAL_CONFIG = {
-    "model": os.environ.get(
-        "LLM_MODEL",
-        "ollama/qwen2.5-coder:7b",
-    ),
-    "base_url": os.environ.get("LLM_BASE_URL", "http://localhost:11434"),
-    "api_key": os.environ.get("LLM_API_KEY", "NA"),
-}
-
-GROQ_CONFIG = {
-    "model": os.environ.get("GROQ_MODEL", "groq/llama-3.3-70b-versatile"),
-    "base_url": "",  # litellm resolves groq routing from the model prefix
-    "api_key": os.environ.get("GROQ_API_KEY", ""),
-}
-
-# Backward-compat alias used by parts of the codebase/docs
-NVIDIA_CONFIG = CLOUD_CONFIG
-
-# Expose active defaults (CLI chooses concrete backend)
-LLM_MODEL = LOCAL_CONFIG["model"]
-LLM_BASE_URL = LOCAL_CONFIG["base_url"]
-LLM_API_KEY = LOCAL_CONFIG["api_key"]
 
 def get_role_llm_config(role: str) -> Dict[str, str]:
     """
-    Resolve the LLM config for a specific multi-agent role.
-    Intelligently maps agent roles to preferred backend engines:
-    - Defaulting Heavy Logic (Architect, Designer, Fixer, etc.) to GLM-4-Plus
-    - Physical -> Groq (Blazing fast iterative speed)
-    - Documenter/Reporter -> NVIDIA (Excellent prose generation, lower precision required)
-    - Reasoning parts (Architect, Fixer, Debugger) -> DeepSeek via NVIDIA
+    Resolve the LLM config for a specific agent role.
+    Checks for per-role env var overrides first, then falls back to DEFAULT_LLM_CONFIG.
+    Works transparently with any OpenAI-compatible provider via LiteLLM.
+
+    Override examples:
+        ROLE_DESIGNER_MODEL=gpt-4o
+        ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
+        ROLE_DOCUMENTER_MODEL=llama-3.3-70b-versatile
+        ROLE_DOCUMENTER_BASE_URL=https://api.groq.com/openai/v1
+        ROLE_DOCUMENTER_API_KEY=gsk_...
     """
-    role = role.lower()
-    
-    # 1. Select the preferred engine
-    preferred_engine = GLM_CONFIG
-    if role in ("fixer", "debugger", "reasoner"):
-        preferred_engine = DEEPSEEK_CONFIG
-    elif role in ("architect", "designer", "testbench_designer", "verifier", "manager", "physical"):
-        preferred_engine = GLM_CONFIG
-    elif role in ("documenter", "reporter", "doc_gen"):
-        preferred_engine = GROQ_CONFIG
+    role_upper = role.upper().replace("-", "_")
+    model    = os.environ.get(f"ROLE_{role_upper}_MODEL",    "").strip()
+    base_url = os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip()
+    api_key  = os.environ.get(f"ROLE_{role_upper}_API_KEY",  "").strip()
 
-    # Helper to check if an engine has a valid API key
-    def is_valid(cfg):
-        k = cfg.get("api_key", "")
-        return bool(k and k not in ("mock-key", "NA", ""))
+    return {
+        "model":    model    or DEFAULT_LLM_CONFIG["model"],
+        "base_url": base_url or DEFAULT_LLM_CONFIG["base_url"],
+        "api_key":  api_key  or DEFAULT_LLM_CONFIG["api_key"],
+    }
 
-    # 2. Fallback execution order (Preferred -> DeepSeek -> GLM -> NVIDIA -> Groq -> Local)
-    # If the user's setup lacks a key for the preferred engine, shift to the next best
-    engines = [preferred_engine, DEEPSEEK_CONFIG, GLM_CONFIG, CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG]
-    
-    for cfg in engines:
-        # LOCAL_CONFIG is always considered a valid fallback if we reach the end
-        if cfg is LOCAL_CONFIG or is_valid(cfg):
-            model = cfg.get("model", "")
-            # Ensure proper prefixing: use 'openai/' for custom OpenAI-compatible endpoints like Zhipu
-            if cfg is GLM_CONFIG and not model.startswith("openai/"):
-                model = f"openai/{model}"
-            if cfg is DEEPSEEK_CONFIG and not model.startswith("openai/"):
-                model = f"openai/{model}"
-            
-            result = {
-                "model": model,
-                "api_key": cfg.get("api_key", ""),
-                "base_url": cfg.get("base_url", "")
-            }
-            if "extra_body" in cfg:
-                result["extra_body"] = cfg["extra_body"]
-            return result
-            
-    return LOCAL_CONFIG.copy()
 
 # Portable OSS-PDK profiles (adapter-style)
 PDK_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -131,7 +99,13 @@ if DEFAULT_PDK_PROFILE not in PDK_PROFILES:
 # Tool Settings
 PDK_ROOT = os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel"))
 PDK = os.environ.get("PDK", PDK_PROFILES[DEFAULT_PDK_PROFILE]["pdk"])
-OPENLANE_IMAGE = "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-amd64"
+
+# OpenLane image — auto-detect ARM64 (Oracle A1 Ampere) vs x86_64
+_ARCH = "arm64" if _platform.machine() in ("aarch64", "arm64") else "amd64"
+OPENLANE_IMAGE = os.environ.get(
+    "OPENLANE_IMAGE",
+    f"ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-{_ARCH}"
+)
 
 # Simulation/Coverage adapter defaults
 SIM_BACKEND_DEFAULT = os.environ.get("SIM_BACKEND_DEFAULT", "auto").strip().lower()
@@ -148,14 +122,13 @@ if COVERAGE_PROFILE_DEFAULT not in {"balanced", "aggressive", "relaxed"}:
 
 
 def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
-    """Resolve tool binary using configured roots before PATH.
+    """Resolve EDA tool binary using OSS CAD Suite before falling back to PATH.
 
     Fallback order:
-    1) Explicit env var for that tool (if provided)
-    2) OSS_CAD_SUITE_HOME/bin
-    3) WORKSPACE_ROOT/oss-cad-suite/bin
-    4) /home/vickynishad/oss-cad-suite/bin
-    5) bin_name from PATH
+    1) Explicit env var for that tool (e.g. YOSYS_BIN=/opt/oss-cad-suite/bin/yosys)
+    2) OSS_CAD_SUITE_HOME/bin  (set in Docker ENV or user shell)
+    3) WORKSPACE_ROOT/oss-cad-suite/bin  (bundled local install)
+    4) bin_name from system PATH  (last resort)
     """
     explicit = os.environ.get(env_var, "").strip() if env_var else ""
     if explicit and os.path.exists(explicit):
@@ -172,13 +145,20 @@ def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
         if os.path.exists(candidate):
             return candidate
 
+    # Final fallback: rely on PATH
     return bin_name
 
 
 OSS_CAD_SUITE_ROOT = os.environ.get("OSS_CAD_SUITE_HOME", os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
-SBY_BIN = _resolve_tool_binary("sby", env_var="SBY_BIN")
-YOSYS_BIN = _resolve_tool_binary("yosys", env_var="YOSYS_BIN")
-EQY_BIN = _resolve_tool_binary("eqy", env_var="EQY_BIN")
+
+# All EDA tool binaries resolved via OSS CAD Suite
+SBY_BIN       = _resolve_tool_binary("sby",       env_var="SBY_BIN")
+YOSYS_BIN     = _resolve_tool_binary("yosys",     env_var="YOSYS_BIN")
+EQY_BIN       = _resolve_tool_binary("eqy",       env_var="EQY_BIN")
+VERILATOR_BIN = _resolve_tool_binary("verilator", env_var="VERILATOR_BIN")
+IVERILOG_BIN  = _resolve_tool_binary("iverilog",  env_var="IVERILOG_BIN")
+VVP_BIN       = _resolve_tool_binary("vvp",       env_var="VVP_BIN")
+SV2V_BIN      = _resolve_tool_binary("sv2v",      env_var="SV2V_BIN")
 
 
 def get_pdk_profile(profile: str) -> Dict[str, Any]:
@@ -193,16 +173,22 @@ def get_pdk_profile(profile: str) -> Dict[str, Any]:
 def get_toolchain_diagnostics() -> Dict[str, Any]:
     """Return resolved toolchain paths and existence info for startup checks."""
     bins = {
-        "sby": SBY_BIN,
-        "yosys": YOSYS_BIN,
-        "eqy": EQY_BIN,
+        "sby":       SBY_BIN,
+        "yosys":     YOSYS_BIN,
+        "eqy":       EQY_BIN,
+        "verilator": VERILATOR_BIN,
+        "iverilog":  IVERILOG_BIN,
+        "vvp":       VVP_BIN,
+        "sv2v":      SV2V_BIN,
     }
     return {
-        "workspace_root": WORKSPACE_ROOT,
-        "openlane_root": OPENLANE_ROOT,
-        "pdk_root": PDK_ROOT,
-        "pdk": PDK,
+        "workspace_root":     WORKSPACE_ROOT,
+        "openlane_root":      OPENLANE_ROOT,
+        "pdk_root":           PDK_ROOT,
+        "pdk":                PDK,
         "oss_cad_suite_home": os.environ.get("OSS_CAD_SUITE_HOME", ""),
+        "llm_model":          LLM_MODEL,
+        "llm_base_url":       LLM_BASE_URL,
         "bins": {
             name: {"path": path, "exists": os.path.exists(path) if os.path.isabs(path) else False}
             for name, path in bins.items()

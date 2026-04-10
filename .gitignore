@@ -1,13 +1,9 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 .Python
-env/
-venv/
-.env
-.venv
 build/
 develop-eggs/
 dist/
@@ -23,72 +19,55 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# AgentIC Specific
-# Ignore massive run logs or temporary build artifacts if they end up here
-runs/
-*.log
-*.vcd
-work/
-transcript
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
 
-# OSS CAD Suite (large binary toolchain - download separately)
+# Environment / secrets
+.env
+*.env.local
+
+# Databases — never commit these
+agentic_jobs.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Design outputs
+designs/
+artifacts/
+*.gds
+*.gds2
+*.lef
+*.def
+*.spef
+
+# OSS CAD Suite (local install)
 oss-cad-suite/
-oss-cad-suite-*.tgz
 
-# System
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
 Thumbs.db
 
-# OpenLane outputs (if copied here)
-# Uncomment the line below if you don't want to version control large GDS files
-*.gds
-temp_*.svg
-designs/*/src/sim
-.venv-agentic/
-
-# Node / Frontend
-node_modules/
-web/node_modules/
-web/dist/
-web/.vite/
+# PyInstaller
 dist/
+build/
+*.spec
 
-# Temporary / test scripts
-*.tmp
-global_reqs.tmp
-venv_reqs.tmp
-nodesource_setup.sh
-test_import.py
-test_signoff.py
-test_signoff2.py
-test_direct_call.py
-test_llm_call.py
-fix_recursion.py
-fix_subprocess.py
-test_tb.v
-benchmark_verieval.py
-scripts/remote_setup.sh
-*.jsonl
-leaderboard.md
-verieval_results.json
+# Logs
+*.log
+harden.log
 
-# PLY parser cache (auto-generated, 2+ MB)
-parser.out
-parsetab.py
-
-# Database
-agentic_jobs.db
-*.sqlite3
-
-
-# Temporary fix scripts
-fix_*.py
-
-
-# Security build outputs
-secure_build/
-build_secure_ip.py
-update_readme.py
-test.js
-modify_*.py
+# Node
+node_modules/
+web/dist/
