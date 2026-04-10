@@ -89,6 +89,22 @@ scripts/remote_setup.sh
 leaderboard.md
 verieval_results.json
 
+# PLY parser cache (auto-generated, 2+ MB)
+parser.out
+parsetab.py
+
+# Database
+agentic_jobs.db
+*.sqlite3
+designs/
+archived_dev_scripts/
+docs/
+
+
+# Temporary fix scripts
+fix_*.py
+
+
 # Security build outputs
 secure_build/
 build_secure_ip.py
