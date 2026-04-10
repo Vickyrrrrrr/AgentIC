@@ -1,7 +1,10 @@
 import os
-from celery import Celery
 import time
+import logging
+from celery import Celery
 from typing import Dict, Any
+
+logger = logging.getLogger("agentic.tasks")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agentic_jobs.db")
@@ -25,6 +28,7 @@ celery_app.conf.update(
     task_time_limit=3660,        # 1 hour and 1 min hard kill
 )
 
+
 @celery_app.task(bind=True, name="tasks.run_agentic_build")
 def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
     """
@@ -33,6 +37,8 @@ def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
     empty JOB_STORE. We must:
       1. Bootstrap a JOB_STORE entry for this job (or pull it from DB if available).
       2. Inject the byok_key from request_data so _run_agentic_build can find it.
+      3. Always mark job as failed in DB if any exception occurs (including
+         permission errors) so the job never gets stuck as 'running'.
     """
     import json
     from server.api import JOB_STORE, _pull_job_from_db, _sync_job_to_db
@@ -62,8 +68,6 @@ def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
         }
 
     # ── 2. Inject byok_key so _run_agentic_build can route LLM calls ─────────
-    # req.api_key already holds the JSON-encoded BYOK config (set by the API
-    # server before enqueuing). Parse it back into the dict that _get_llm() expects.
     if req.api_key and not JOB_STORE[job_id].get("byok_key"):
         try:
             byok_key = json.loads(req.api_key)
@@ -79,7 +83,34 @@ def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
     _sync_job_to_db(job_id)
 
     # ── 3. Run the actual build pipeline ─────────────────────────────────────
-    from server.api import _run_agentic_build
-    _run_agentic_build(job_id, req)
+    # Wrapped in try/except/finally so ANY crash (including Errno 13 permission
+    # denied on /app/designs) is caught and the job is always marked as failed
+    # in the DB. This prevents ghost 'running' jobs in the Jobs & History page.
+    try:
+        from server.api import _run_agentic_build
+        _run_agentic_build(job_id, req)
+    except Exception as exc:
+        import traceback
+        err_trace = traceback.format_exc()
+        logger.error(
+            "[task:%s] Unhandled exception in _run_agentic_build: %s\n%s",
+            job_id, exc, err_trace
+        )
+        # Always mark as failed so the job is never stuck as 'running'
+        if job_id in JOB_STORE:
+            JOB_STORE[job_id]["status"] = "failed"
+            JOB_STORE[job_id]["build_status"] = "failed"
+            JOB_STORE[job_id].setdefault("result", {})["error"] = str(exc)
+            JOB_STORE[job_id].setdefault("result", {})["traceback"] = err_trace
+        _sync_job_to_db(job_id)
+        # Re-raise so Celery also marks the task as FAILURE in its backend
+        raise
+    finally:
+        # Always do a final DB sync regardless of success or failure
+        # so the API server sees the terminal state immediately
+        try:
+            _sync_job_to_db(job_id)
+        except Exception as sync_err:
+            logger.warning("[task:%s] Final DB sync failed: %s", job_id, sync_err)
 
     return {"job_id": job_id, "status": "Finished Execution Sequence"}

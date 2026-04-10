@@ -37,6 +37,8 @@ services:
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/volare:/root/.volare
+    # Init script creates missing dirs with correct permissions before gunicorn starts
+    entrypoint: ["/bin/sh", "/app/scripts/init-dirs.sh"]
     command: gunicorn server.api:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:7860
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:7860/livez >/dev/null || exit 1"]
@@ -55,7 +57,6 @@ services:
       dockerfile: Dockerfile
     image: agentic:local
     container_name: agentic_worker
-    command: celery -A server.tasks worker --loglevel=info
     env_file:
       - .env
     environment:
@@ -84,6 +85,9 @@ services:
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/volare:/root/.volare
+    # Init script creates missing dirs with correct permissions before celery starts
+    entrypoint: ["/bin/sh", "/app/scripts/init-dirs.sh"]
+    command: celery -A server.tasks worker --loglevel=info
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import server.tasks' || exit 1"]
       interval: 30s
