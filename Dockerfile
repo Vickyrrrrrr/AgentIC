@@ -90,9 +90,11 @@ COPY . .
 COPY --from=frontend-builder /app/web/dist /app/web/dist
 
 # Runtime directories + non-root user in one layer
-# Only /app needs to be owned by appuser — OSS CAD Suite is read/exec only
+# Pre-create ALL runtime dirs so appuser owns them inside the image.
+# Volume mounts at runtime will overlay these but the ownership is
+# already correct — no chown needed at container startup.
 RUN useradd -m -u 1000 appuser && \
-    mkdir -p /app/designs /app/artifacts /app/pdk && \
+    mkdir -p /app/designs /app/artifacts /app/pdk /app/training && \
     chown -R appuser:appuser /app
 USER appuser
 

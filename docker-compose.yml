@@ -11,13 +11,11 @@ services:
     env_file:
       - .env
     environment:
-      # Pass database and redis URIs to connect
       - DATABASE_URL=postgresql://agentic_user:${POSTGRES_PASSWORD:-password}@db:5432/agentic_db
       - REDIS_URL=redis://:${REDIS_PASSWORD:-agentic-redis-dev-password}@redis:6379/0
       - RUN_CELERY=true
       - CELERY_TASK_SOFT_TIME_LIMIT=7200
       - CELERY_TASK_TIME_LIMIT=7300
-      # MinIO (S3 Compatible) Storage
       - S3_ENDPOINT_URL=http://minio:9000
       - S3_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
       - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -37,15 +35,15 @@ services:
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/volare:/root/.volare
-    # Init script creates missing dirs with correct permissions before gunicorn starts
     entrypoint: ["/bin/sh", "/app/scripts/init-dirs.sh"]
     command: gunicorn server.api:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:7860
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:7860/livez >/dev/null || exit 1"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 5
-      start_period: 20s
+      # Give gunicorn + DB init enough time before first check fires
+      start_period: 60s
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -65,7 +63,6 @@ services:
       - RUN_CELERY=true
       - CELERY_TASK_SOFT_TIME_LIMIT=7200
       - CELERY_TASK_TIME_LIMIT=7300
-      # MinIO (S3 Compatible) Storage
       - S3_ENDPOINT_URL=http://minio:9000
       - S3_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
       - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -85,15 +82,16 @@ services:
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/volare:/root/.volare
-    # Init script creates missing dirs with correct permissions before celery starts
     entrypoint: ["/bin/sh", "/app/scripts/init-dirs.sh"]
     command: celery -A server.tasks worker --loglevel=info
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import server.tasks' || exit 1"]
+      # Use python directly (celery inspect ping can be flaky on startup)
+      test: ["CMD-SHELL", "python -c 'import server.tasks; print(\"ok\")' 2>/dev/null || exit 1"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 5
-      start_period: 20s
+      # Give celery time to connect to Redis + DB before first check
+      start_period: 60s
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -140,8 +138,8 @@ services:
     image: minio/minio
     container_name: agentic_minio
     ports:
-      - "127.0.0.1:9000:9000" # API Port
-      - "127.0.0.1:9001:9001" # Web Console Port
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -190,7 +188,6 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
-    # Give prometheus extra time to start after api becomes healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null || exit 1"]
       interval: 30s
