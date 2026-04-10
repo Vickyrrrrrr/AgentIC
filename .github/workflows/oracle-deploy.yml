@@ -113,7 +113,18 @@ jobs:
               fi
             fi
 
-            sudo env COMPOSE_PROFILES=observability docker-compose up -d --build --remove-orphans
+            # Remove only dangling images (no tag, no container using them).
+            # Does NOT touch the BuildKit layer cache so the OSS CAD Suite
+            # download layer (~550MB) is reused on every subsequent build.
+            sudo docker image prune -f
+
+            # Build with BuildKit enabled so multi-stage cache is preserved.
+            sudo DOCKER_BUILDKIT=1 env COMPOSE_PROFILES=observability \
+              docker-compose up -d --build --remove-orphans
+
+            # Safety valve: cap build cache at 4 GB so disk never fills up.
+            # This keeps the hot OSS CAD Suite layer but evicts old ones.
+            sudo docker builder prune --keep-storage 4GB -f || true
 
             for i in $(seq 1 30); do
               api_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_api 2>/dev/null || true)
