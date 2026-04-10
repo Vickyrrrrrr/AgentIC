@@ -1,70 +1,88 @@
-# Build frontend web UI
-FROM node:20 AS frontend-builder
+# =============================================================================
+# Stage 1: Frontend build
+# =============================================================================
+FROM node:20-alpine AS frontend-builder
 WORKDIR /app/web
 COPY web/package*.json ./
-RUN npm install
+RUN npm ci --prefer-offline
 COPY web/ ./
 RUN npm run build
 
-# Base Python runtime
+# =============================================================================
+# Stage 2: Download OSS CAD Suite (separate cached layer)
+# Update OSS_CAD_VERSION to upgrade ALL EDA tools in one place:
+#   yosys, sby (SymbiYosys), eqy, verilator, iverilog, vvp, sv2v, nextpnr, ...
+# =============================================================================
+FROM ubuntu:22.04 AS oss-cad-downloader
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates xz-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG OSS_CAD_VERSION=2025-04-06
+# TARGETARCH is set automatically by Docker buildx: "amd64" or "arm64"
+ARG TARGETARCH
+
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x86_64") && \
+    DATESTR=$(echo $OSS_CAD_VERSION | tr -d '-') && \
+    curl -fsSL \
+    "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_VERSION}/oss-cad-suite-linux-${ARCH}-${DATESTR}.tgz" \
+    -o /tmp/oss-cad-suite.tgz && \
+    tar -xzf /tmp/oss-cad-suite.tgz -C /opt && \
+    rm /tmp/oss-cad-suite.tgz
+
+# =============================================================================
+# Stage 3: Python application runtime
+# =============================================================================
 FROM python:3.11-slim
 
-# Install system dependencies and EDA tools
+# Minimal OS dependencies ONLY.
+# NO apt-get yosys / verilator / iverilog — OSS CAD Suite is the single source.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    git \
     curl \
-    libboost-dev \
-    zlib1g-dev \
-    libfftw3-dev \
-    libreadline-dev \
-    tcl-dev \
-    pkg-config \
-    verilator \
-    iverilog \
-    gtkwave \
-    yosys \
+    docker.io \
+    ca-certificates \
     fontconfig \
     fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 
-# Install SymbiYosys
-RUN pip install --no-cache-dir symbiyosys 2>/dev/null || \
-    (git clone --depth 1 https://github.com/YosysHQ/sby /tmp/sby \
-     && cd /tmp/sby && make install && rm -rf /tmp/sby) || true
+# Copy the full OSS CAD Suite from the downloader stage
+COPY --from=oss-cad-downloader /opt/oss-cad-suite /opt/oss-cad-suite
 
-WORKDIR /app
+# OSS CAD Suite is the authoritative source for ALL EDA tools.
+# _resolve_tool_binary() in config.py uses OSS_CAD_SUITE_HOME automatically.
+ENV OSS_CAD_SUITE_HOME=/opt/oss-cad-suite
+ENV PATH="/opt/oss-cad-suite/bin:${PATH}"
 
-ENV PYTHONPATH=/app
-
-# Disable CrewAI telemetry
+# Disable telemetry
 ENV CREWAI_TRACING_ENABLED=false
 ENV CREWAI_DISABLE_TELEMETRY=true
 ENV OTEL_SDK_DISABLED=true
 
-# Install Python dependencies
+WORKDIR /app
+ENV PYTHONPATH=/app
+ENV PDK_ROOT=/app/pdk
+
+# Install Python dependencies using system Python.
+# DO NOT use /opt/oss-cad-suite/bin/python3 — it has a broken OpenSSL library.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir uvicorn[standard] fastapi && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir 'apscheduler>=3.10.0'
 
-# Copy application code
+# Copy application source
 COPY . .
-
-# Copy built artifacts from frontend-builder
 COPY --from=frontend-builder /app/web/dist /app/web/dist
 
 # Runtime directories
 RUN mkdir -p /app/designs /app/artifacts /app/pdk
 
-ENV PDK_ROOT=/app/pdk
-
-# HuggingFace Spaces runs as non-root user 1000
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# Oracle Cloud / HuggingFace Spaces: run as non-root uid 1000
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app && \
+    chown -R appuser:appuser /opt/oss-cad-suite
 USER appuser
 
 EXPOSE 7860
 
-CMD ["uvicorn", "server.api:app", "--host", "0.0.0.0", "--port", "7860"]
+# Use gunicorn with uvicorn workers for production stability
+CMD ["gunicorn", "server.api:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:7860"]
