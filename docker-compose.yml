@@ -190,6 +190,13 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    # Give prometheus extra time to start after api becomes healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   grafana:
     image: grafana/grafana-oss:latest

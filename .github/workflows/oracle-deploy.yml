@@ -12,6 +12,7 @@ on:
       - 'docker-compose.yml'
       - 'Dockerfile'
       - 'requirements.txt'
+      - 'scripts/**'
       - '.github/workflows/oracle-deploy.yml'
 
 concurrency:
@@ -83,10 +84,12 @@ jobs:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
+          command_timeout: 60m
           script: |
             set -eu
             cd ~/AgentIC
 
+            # ── Env file checks ──────────────────────────────────────────────
             if [ ! -f .env ]; then
               echo "Missing ~/AgentIC/.env on Oracle VM"
               exit 1
@@ -102,6 +105,7 @@ jobs:
 
             sudo docker-compose config > /dev/null
 
+            # ── Clean up legacy containers if using old docker-compose v1 ────
             compose_version=$(sudo docker-compose version --short 2>/dev/null || echo unknown)
             if echo "$compose_version" | grep -Eq '^1\.'; then
               echo "Legacy docker-compose detected (${compose_version}); using clean container replacement"
@@ -113,25 +117,53 @@ jobs:
               fi
             fi
 
-            # Remove only dangling images to free space without busting the layer cache.
-            # The OSS CAD Suite download layer (~550MB) will be reused on subsequent builds.
+            # ── Cache: reuse the agentic:local image if it exists ────────────
+            # Only remove dangling images (NOT the built agentic:local layer cache)
+            # so the 1.5GB oss-cad-suite ARM64 layer is reused on next build.
             sudo docker image prune -f
 
-            sudo env COMPOSE_PROFILES=observability \
-              docker-compose up -d --build --remove-orphans
+            # ── Phase 1: Bring up CORE services only (no observability) ──────
+            # This prevents prometheus from failing because api isn't ready yet
+            echo "Starting core services..."
+            sudo docker-compose up -d --build --remove-orphans \
+              api worker db redis minio minio-setup
 
-            for i in $(seq 1 30); do
-              api_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_api 2>/dev/null || true)
-              worker_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_worker 2>/dev/null || true)
+            # ── Wait for core services to be healthy ─────────────────────────
+            echo "Waiting for core services to become healthy..."
+            for i in $(seq 1 36); do
+              api_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_api 2>/dev/null || echo unknown)
+              worker_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_worker 2>/dev/null || echo unknown)
+              if [ "$api_health" = "healthy" ] && [ "$worker_health" = "healthy" ] && \
+                 curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1; then
+                echo "Core services are healthy (api=${api_health} worker=${worker_health})"
+                break
+              fi
+              echo "  [${i}/36] api=${api_health} worker=${worker_health} — retrying in 5s..."
+              sleep 5
+            done
+
+            # ── Phase 2: Bring up observability stack AFTER core is healthy ──
+            # Prometheus depends_on api healthy — now it will succeed
+            echo "Starting observability stack (prometheus + grafana)..."
+            sudo env COMPOSE_PROFILES=observability \
+              docker-compose up -d --remove-orphans prometheus grafana || \
+              echo "WARNING: Observability stack failed to start — core services are still running"
+
+            # ── Final health check ────────────────────────────────────────────
+            for i in $(seq 1 12); do
+              api_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_api 2>/dev/null || echo unknown)
+              worker_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_worker 2>/dev/null || echo unknown)
               if [ "$api_health" = "healthy" ] && [ "$worker_health" = "healthy" ] && \
                  curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1 && \
                  curl -fsS http://127.0.0.1:7860/readyz >/dev/null 2>&1; then
-                echo "AgentIC backend is healthy"
+                echo "AgentIC backend is fully healthy — deploy complete!"
+                sudo docker-compose ps
                 exit 0
               fi
-              echo "Waiting for AgentIC backend to become healthy... api=${api_health} worker=${worker_health}"
+              echo "Waiting for final health check... api=${api_health} worker=${worker_health}"
               sleep 5
             done
+
             echo "AgentIC backend failed health checks after deploy"
             sudo docker-compose ps
             sudo docker-compose logs --tail=100 api worker
