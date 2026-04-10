@@ -34,7 +34,9 @@ services:
       - ./server:/app/server
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/volare:/root/.volare
+      - ${HOME}/volare:/home/appuser/.volare
+    group_add:
+      - "${DOCKER_GID:-1001}"
     entrypoint: ["/bin/sh", "/app/scripts/init-dirs.sh"]
     command: gunicorn server.api:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:7860
     healthcheck:
@@ -81,7 +83,9 @@ services:
       - ./server:/app/server
       - ./src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/volare:/root/.volare
+      - ${HOME}/volare:/home/appuser/.volare
+    group_add:
+      - "${DOCKER_GID:-1001}"
     entrypoint: ["/bin/sh", "/app/scripts/init-dirs.sh"]
     command: celery -A server.tasks worker --loglevel=info
     healthcheck:
