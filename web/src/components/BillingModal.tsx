@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles } from 'lucide-react';
-import { supabase } from '../lib/supabaseClient';
+import { supabase } from '../supabaseClient';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
 type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: string }>;
@@ -175,7 +175,7 @@ export const BillingModal = ({
             }
           }
         }
-      } catch {
+      } catch (_e) {
         // Server unavailable — fall back to localStorage silently
       }
 
@@ -192,7 +192,7 @@ export const BillingModal = ({
         }
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') applyParsed(parsed);
-      } catch {
+      } catch (_e) {
         setGroups(DEFAULT_GROUPS);
         setQuickKey('');
         setQuickModel('');
