@@ -12,6 +12,10 @@ RUN npm run build
 # Stage 2: Download OSS CAD Suite (separate cached layer)
 # Update OSS_CAD_VERSION to upgrade ALL EDA tools in one place:
 #   yosys, sby (SymbiYosys), eqy, verilator, iverilog, vvp, sv2v, nextpnr, ...
+#
+# Asset naming convention on GitHub releases:
+#   oss-cad-suite-linux-x64-YYYYMMDD.tgz      (AMD64 / x86_64)
+#   oss-cad-suite-linux-arm64-YYYYMMDD.tgz     (ARM64 / Oracle A1 Ampere)
 # =============================================================================
 FROM ubuntu:22.04 AS oss-cad-downloader
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,7 +26,10 @@ ARG OSS_CAD_VERSION=2025-04-06
 # TARGETARCH is set automatically by Docker buildx: "amd64" or "arm64"
 ARG TARGETARCH
 
-RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x86_64") && \
+# Map Docker TARGETARCH -> OSS CAD Suite filename suffix
+#   amd64 -> x64      (NOT x86_64 — that path does not exist in the releases)
+#   arm64 -> arm64
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x64") && \
     DATESTR=$(echo $OSS_CAD_VERSION | tr -d '-') && \
     curl -fsSL \
     "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_VERSION}/oss-cad-suite-linux-${ARCH}-${DATESTR}.tgz" \
