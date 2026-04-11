@@ -245,6 +245,7 @@ def check_build_allowed(profile: Optional[dict]) -> None:
     """Raise 402 if the user has exhausted their plan's build quota.
 
     Called before every /build request when auth is enabled.
+    Free plan: 2 builds. All other plans: unlimited (BYOK required).
     """
     if profile is None:
         return  # Auth disabled — no restrictions
@@ -261,29 +262,25 @@ def check_build_allowed(profile: Optional[dict]) -> None:
                 "plan": plan,
                 "used": builds,
                 "limit": limit,
-                "message": f"You've used all {limit} builds on the {plan} plan. Upgrade to continue building chips.",
-                "upgrade_url": "/pricing",
+                "message": f"You've used all {limit} builds on the {plan} plan. Please add your own API key (BYOK) in Workspace Settings to continue building.",
+                "upgrade_url": "/settings",
             },
         )
 
 
 def get_llm_key_for_user(profile: Optional[dict]) -> Optional[str]:
-    """Return the user's own LLM API key if they're on the BYOK plan.
+    """Return the user's decrypted LLM API key if they have one saved.
 
-    Returns None for all other plans (server uses global NVIDIA_API_KEY).
+    Works for ALL plans — any user who has saved a BYOK key can use it.
+    Returns None if no key is saved (backend fallback will be used if allowed).
     """
     if profile is None:
         return None
 
-    if profile.get("plan") != "byok":
-        return None
-
+    # FIX: removed plan != 'byok' restriction — BYOK works for all plans
     encrypted_key = profile.get("llm_api_key")
     if not encrypted_key:
-        raise HTTPException(
-            status_code=400,
-            detail="BYOK plan requires an API key. Set it in your profile settings.",
-        )
+        return None
 
     try:
         return decrypt_api_key(encrypted_key)
@@ -292,7 +289,10 @@ def get_llm_key_for_user(profile: Optional[dict]) -> Optional[str]:
 
 
 def get_byok_config_for_user(profile: Optional[dict]) -> Optional[dict]:
-    """Return normalized multi-group BYOK config stored in llm_api_key."""
+    """Return normalized multi-group BYOK config stored in llm_api_key.
+
+    Works for ALL plans — any user who has saved a BYOK key can use it.
+    """
     if profile is None:
         return None
     encrypted_value = profile.get("llm_api_key")
@@ -322,7 +322,11 @@ async def save_byok_config_for_user(profile: dict, byok_config: dict) -> None:
     """Encrypt and persist full multi-group BYOK config in the profile row."""
     payload = json.dumps(byok_config)
     encrypted = encrypt_api_key(payload)
-    await _supabase_update("profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted})
+    await _supabase_update(
+        "profiles",
+        f"id=eq.{profile['id']}",
+        {"llm_api_key": encrypted}
+    )
 
 
 def record_build_start(profile: Optional[dict], job_id: str, design_name: str) -> None:
