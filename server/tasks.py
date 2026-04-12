@@ -49,6 +49,7 @@ def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
 
     # ── 1. Ensure this worker process has a JOB_STORE entry ──────────────────
     # Try to pull the existing record that the API server wrote to the DB.
+    # FIX #1+#3: _pull_job_from_db now also restores byok_key from DB column.
     _pull_job_from_db(job_id)
 
     if job_id not in JOB_STORE:
@@ -68,16 +69,30 @@ def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
         }
 
     # ── 2. Inject byok_key so _run_agentic_build can route LLM calls ─────────
-    if req.api_key and not JOB_STORE[job_id].get("byok_key"):
-        try:
-            byok_key = json.loads(req.api_key)
-        except (json.JSONDecodeError, TypeError):
-            byok_key = {
-                "group1": {"api_key": req.api_key},
-                "group2": {"api_key": req.api_key},
-                "group3": {"api_key": req.api_key},
-            }
-        JOB_STORE[job_id]["byok_key"] = byok_key
+    # FIX #2+#3: Priority order:
+    #   a) byok_key already in JOB_STORE (restored from DB — covers profile BYOK users)
+    #   b) req.api_key passed directly in the task payload (covers header key users)
+    #   c) Nothing — build will fail fast with a clear error via _get_llm()
+    if not JOB_STORE[job_id].get("byok_key"):
+        if req.api_key:
+            try:
+                byok_key = json.loads(req.api_key)
+            except (json.JSONDecodeError, TypeError):
+                byok_key = {
+                    "group1": {"api_key": req.api_key},
+                    "group2": {"api_key": req.api_key},
+                    "group3": {"api_key": req.api_key},
+                }
+            JOB_STORE[job_id]["byok_key"] = byok_key
+            logger.info("[task:%s] byok_key injected from req.api_key", job_id)
+        else:
+            logger.warning(
+                "[task:%s] No byok_key in DB and no req.api_key — build will use "
+                "server-side LLM config only (ALLOW_BACKEND_LLM_FALLBACK must be True)",
+                job_id,
+            )
+    else:
+        logger.info("[task:%s] byok_key restored from DB successfully", job_id)
 
     # Persist the bootstrapped entry so the API server can stream events from DB
     _sync_job_to_db(job_id)

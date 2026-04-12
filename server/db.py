@@ -65,6 +65,10 @@ class Job(Base):
     events = Column(JSON, default=list)
     stages = Column(JSON, default=dict)
     result = Column(JSON, nullable=True)
+    # FIX #1: Persist byok_key so Celery workers can retrieve it after
+    # pulling job state from DB. Previously this was only in-memory and
+    # was silently lost when the task was dispatched to a worker process.
+    byok_key = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -87,6 +91,9 @@ def _apply_runtime_migrations() -> None:
         statements.append("ALTER TABLE jobs ADD COLUMN user_id VARCHAR")
     if "user_email" not in existing_columns:
         statements.append("ALTER TABLE jobs ADD COLUMN user_email VARCHAR")
+    # FIX #1: runtime migration for existing DBs that don't yet have byok_key
+    if "byok_key" not in existing_columns:
+        statements.append("ALTER TABLE jobs ADD COLUMN byok_key JSON")
 
     if not statements:
         return
