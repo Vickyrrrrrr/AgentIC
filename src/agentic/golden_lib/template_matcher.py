@@ -13,20 +13,35 @@ from typing import Optional, Tuple, Dict, List
 # Template registry: maps IP type to metadata
 TEMPLATE_REGISTRY = {
     "counter": {
-        "keywords": ["counter", "count", "increment", "decrement", "up counter", "down counter", "timer count"],
+        "keywords": [
+            "counter",
+            "count",
+            "increment",
+            "decrement",
+            "up counter",
+            "down counter",
+            "timer count",
+        ],
         "file": "counter.v",
         "tb_file": "counter_tb.v",
         "description": "Parameterizable N-bit up/down counter with enable and load",
         "parameters": {"WIDTH": 8},
-        "complexity": "simple"
+        "complexity": "simple",
     },
     "fifo": {
-        "keywords": ["fifo", "queue", "buffer", "first in first out", "circular buffer", "data buffer"],
+        "keywords": [
+            "fifo",
+            "queue",
+            "buffer",
+            "first in first out",
+            "circular buffer",
+            "data buffer",
+        ],
         "file": "fifo.v",
         "tb_file": "fifo_tb.v",
         "description": "Synchronous FIFO with parameterizable width and depth",
         "parameters": {"DATA_WIDTH": 8, "DEPTH": 16},
-        "complexity": "medium"
+        "complexity": "medium",
     },
     "uart_tx": {
         "keywords": ["uart", "serial", "transmitter", "rs232", "tx", "baud"],
@@ -34,7 +49,7 @@ TEMPLATE_REGISTRY = {
         "tb_file": "uart_tx_tb.v",
         "description": "UART Transmitter with configurable baud rate",
         "parameters": {"CLK_FREQ": 50000000, "BAUD_RATE": 115200},
-        "complexity": "medium"
+        "complexity": "medium",
     },
     "spi_master": {
         "keywords": ["spi", "serial peripheral", "master", "mosi", "miso", "sclk"],
@@ -42,23 +57,37 @@ TEMPLATE_REGISTRY = {
         "tb_file": "spi_master_tb.v",
         "description": "SPI Master with configurable clock polarity and phase",
         "parameters": {"CLK_DIV": 4},
-        "complexity": "medium"
+        "complexity": "medium",
     },
     "fsm": {
-        "keywords": ["fsm", "state machine", "finite state", "controller", "sequencer", "control unit"],
+        "keywords": [
+            "fsm",
+            "state machine",
+            "finite state",
+            "controller",
+            "sequencer",
+            "control unit",
+        ],
         "file": "fsm.v",
         "tb_file": "fsm_tb.v",
         "description": "Generic FSM template with configurable states",
         "parameters": {"NUM_STATES": 4},
-        "complexity": "simple"
+        "complexity": "simple",
     },
     "pwm": {
-        "keywords": ["pwm", "pulse width", "modulation", "duty cycle", "motor control", "led dimm"],
+        "keywords": [
+            "pwm",
+            "pulse width",
+            "modulation",
+            "duty cycle",
+            "motor control",
+            "led dimm",
+        ],
         "file": "pwm.v",
         "tb_file": "pwm_tb.v",
         "description": "PWM Generator with configurable resolution and frequency",
         "parameters": {"RESOLUTION": 8},
-        "complexity": "simple"
+        "complexity": "simple",
     },
     "timer": {
         "keywords": ["timer", "watchdog", "timeout", "countdown", "alarm", "periodic"],
@@ -66,15 +95,22 @@ TEMPLATE_REGISTRY = {
         "tb_file": "timer_tb.v",
         "description": "General-purpose timer with prescaler and interrupt",
         "parameters": {"WIDTH": 32},
-        "complexity": "medium"
+        "complexity": "medium",
     },
     "shift_register": {
-        "keywords": ["shift register", "shift", "serial to parallel", "parallel to serial", "lfsr", "shifter"],
+        "keywords": [
+            "shift register",
+            "shift",
+            "serial to parallel",
+            "parallel to serial",
+            "lfsr",
+            "shifter",
+        ],
         "file": "shift_register.v",
         "tb_file": "shift_register_tb.v",
         "description": "Parameterizable shift register with serial/parallel IO",
         "parameters": {"WIDTH": 8},
-        "complexity": "simple"
+        "complexity": "simple",
     },
 }
 
@@ -84,79 +120,109 @@ TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 
 class TemplateMatcher:
     """Matches user design descriptions to golden reference templates."""
-    
+
     def __init__(self):
         self.registry = TEMPLATE_REGISTRY
-    
+
     # Keywords that indicate the design is too complex/specialized for a basic template.
     # When these appear, the LLM should generate from scratch instead of using a template.
     COMPLEXITY_INDICATORS = [
-        "tmr", "triple modular", "redundancy", "radiation", "hardened", "hardening",
-        "fault tolerant", "majority voting", "lockstep", r"\becc\b", "error correct",
-        r"\baxi\b", r"\bahb\b", r"\bapb\b", "wishbone", "avalon",  # bus protocols
-        "pipeline", "pipelined", "superscalar", "out of order",
-        r"\bdma\b", "cache", r"\bmmu\b", "arbiter", "crossbar",
-        "encryption", r"\baes\b", r"\bsha\b", r"\brsa\b", "crypto",
-        "neural", "accelerator", "tensor", "convolution",
-        "multi.?channel", "multi.?port", "dual.?port",
-        "custom protocol", "proprietary",
+        "tmr",
+        "triple modular",
+        "redundancy",
+        "radiation",
+        "hardened",
+        "hardening",
+        "fault tolerant",
+        "majority voting",
+        "lockstep",
+        r"\becc\b",
+        "error correct",
+        r"\baxi\b",
+        r"\bahb\b",
+        r"\bapb\b",
+        "wishbone",
+        "avalon",  # bus protocols
+        "pipeline",
+        "pipelined",
+        "superscalar",
+        "out of order",
+        r"\bdma\b",
+        "cache",
+        r"\bmmu\b",
+        "arbiter",
+        "crossbar",
+        "encryption",
+        r"\baes\b",
+        r"\bsha\b",
+        r"\brsa\b",
+        "crypto",
+        "neural",
+        "accelerator",
+        "tensor",
+        "convolution",
+        "multi.?channel",
+        "multi.?port",
+        "dual.?port",
+        "custom protocol",
+        "proprietary",
     ]
 
     def match(self, description: str, design_name: str = "") -> Optional[Dict]:
         """Find the best matching template for a given description.
-        
+
         Args:
             description: Natural language description of the design
             design_name: Name of the design (also checked for keyword matches)
-        
+
         Returns:
             dict with template info if match found, None otherwise.
-            Keys: 'ip_type', 'score', 'template_code', 'tb_code', 
+            Keys: 'ip_type', 'score', 'template_code', 'tb_code',
                   'description', 'parameters', 'customize_prompt'
         """
         text = f"{design_name} {description}".lower()
-        
+
         # Reject if description has complexity indicators — design is too
         # specialized for any basic template, LLM should generate from scratch.
         for indicator in self.COMPLEXITY_INDICATORS:
             if re.search(indicator, text):
                 return None
-        
+
         best_match = None
         best_score = 0
-        
+
         for ip_type, meta in self.registry.items():
-            score = self._score_match(text, meta['keywords'])
+            score = self._score_match(text, meta["keywords"])
             if score > best_score:
                 best_score = score
                 best_match = ip_type
-        
+
         # Raised threshold to avoid loose matches
         if best_score < 3:
             return None
-        
+
         meta = self.registry[best_match]
-        
+
         # Load template file contents
-        template_code = self._load_template(meta['file'])
-        tb_code = self._load_template(meta.get('tb_file', ''))
-        
+        template_code = self._load_template(meta["file"])
+        tb_code = self._load_template(meta.get("tb_file", ""))
+
         if not template_code:
             return None
-        
+
         return {
-            'ip_type': best_match,
-            'score': best_score,
-            'template_code': template_code,
-            'tb_code': tb_code,
-            'description': meta['description'],
-            'parameters': meta['parameters'],
-            'complexity': meta['complexity'],
-            'customize_prompt': self._build_customize_prompt(
+            "ip_type": best_match,
+            "score": best_score,
+            "template_code": template_code,
+            "tb_code": tb_code,
+            "description": meta["description"],
+            "parameters": meta["parameters"],
+            "complexity": meta["complexity"],
+            "customize_prompt": self._build_customize_prompt(
                 best_match, meta, template_code, design_name, description
-            )
+            ),
         }
-    
+
     def _score_match(self, text: str, keywords: List[str]) -> int:
         """Score how well text matches a set of keywords."""
         score = 0
@@ -165,23 +231,31 @@ class TemplateMatcher:
                 # Longer keyword matches are worth more
                 score += len(kw.split())
         return score
-    
+
     def _load_template(self, filename: str) -> str:
         """Load a template file from the templates directory."""
         if not filename:
             return ""
         filepath = os.path.join(TEMPLATES_DIR, filename)
-        if os.path.exists(filepath):
-            with open(filepath, 'r') as f:
+        try:
+            with open(filepath, "r") as f:
                 return f.read()
-        return ""
-    
-    def _build_customize_prompt(self, ip_type: str, meta: Dict, 
-                                  template_code: str, design_name: str,
-                                  description: str) -> str:
+        except OSError as e:
+            return ""
+
+    def _build_customize_prompt(
+        self,
+        ip_type: str,
+        meta: Dict,
+        template_code: str,
+        design_name: str,
+        description: str,
+    ) -> str:
         """Build the prompt for LLM to customize the template."""
-        params_str = "\n".join([f"  - {k} = {v}" for k, v in meta['parameters'].items()])
-        
+        params_str = "\n".join(
+            [f"  - {k} = {v}" for k, v in meta["parameters"].items()]
+        )
+
         return f"""You are customizing a PRE-VERIFIED {ip_type.upper()} template.
 
 GOLDEN REFERENCE (proven, working RTL):
@@ -211,24 +285,30 @@ RULES:
         """List all available templates."""
         result = []
         for ip_type, meta in self.registry.items():
-            result.append({
-                'type': ip_type,
-                'description': meta['description'],
-                'complexity': meta['complexity'],
-                'parameters': meta['parameters'],
-                'has_template': os.path.exists(os.path.join(TEMPLATES_DIR, meta['file'])),
-                'has_testbench': os.path.exists(os.path.join(TEMPLATES_DIR, meta.get('tb_file', '')))
-            })
+            result.append(
+                {
+                    "ip_type": ip_type,
+                    "description": meta["description"],
+                    "complexity": meta["complexity"],
+                    "parameters": meta["parameters"],
+                    "has_template": os.path.exists(
+                        os.path.join(TEMPLATES_DIR, meta["file"])
+                    ),
+                    "has_testbench": os.path.exists(
+                        os.path.join(TEMPLATES_DIR, meta.get("tb_file", ""))
+                    ),
+                }
+            )
         return result
 
 
 def get_best_template(description: str, design_name: str = "") -> Optional[Dict]:
     """Convenience function to get the best matching template.
-    
+
     Args:
         description: Natural language design description
         design_name: Name of the design
-    
+
     Returns:
         Template dict or None if no match
     """

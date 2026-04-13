@@ -20,6 +20,7 @@ Pipeline Steps:
 
 import json
 import logging
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -48,15 +49,11 @@ HIGH_FREQ_RATIO_THRESHOLD = 4  # use 3-flop sync when ratio > 4:1
 
 # ─── Signal Type Detection Patterns ─────────────────────────────────
 
-_RESET_PATTERNS = re.compile(
-    r"\brst|reset|rstn|rst_n|arst|areset\b", re.IGNORECASE
-)
+_RESET_PATTERNS = re.compile(r"\brst|reset|rstn|rst_n|arst|areset\b", re.IGNORECASE)
 _HANDSHAKE_PATTERNS = re.compile(
     r"\breq|ack|valid|ready|grant|request|acknowledge\b", re.IGNORECASE
 )
-_BUS_WIDTH_PATTERN = re.compile(
-    r"\[(\d+)\s*:\s*(\d+)\]"
-)
+_BUS_WIDTH_PATTERN = re.compile(r"\[(\d+)\s*:\s*(\d+)\]")
 _DATA_BUS_PATTERNS = re.compile(
     r"\bdata|wdata|rdata|din|dout|payload|fifo_data|wr_data|rd_data\b",
     re.IGNORECASE,
@@ -86,15 +83,17 @@ _CLK_GATE_PATTERNS = re.compile(
 
 # ─── Output Dataclasses ─────────────────────────────────────────────
 
+
 @dataclass
 class ClockDomain:
     """A distinct clock domain in the design."""
+
     domain_name: str
     source_clock_signal: str
     nominal_frequency_mhz: float = 0.0
-    is_derived: bool = False          # True if divided/gated from another
-    parent_domain: str = ""           # Name of parent domain if derived
-    derivation_type: str = ""         # "divided" | "gated" | ""
+    is_derived: bool = False  # True if divided/gated from another
+    parent_domain: str = ""  # Name of parent domain if derived
+    derivation_type: str = ""  # "divided" | "gated" | ""
     submodules: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -104,11 +103,12 @@ class ClockDomain:
 @dataclass
 class CrossingSignal:
     """A signal that crosses between two clock domains."""
+
     signal_name: str
     source_domain: str
     destination_domain: str
-    signal_type: str      # "single_bit_control" | "multi_bit_data" | "bus" |
-                          # "handshake" | "reset"
+    signal_type: str  # "single_bit_control" | "multi_bit_data" | "bus" |
+    # "handshake" | "reset"
     bit_width: int = 1
     direction: str = "unidirectional"  # "unidirectional" | "bidirectional"
     sync_strategy: str = ""
@@ -122,6 +122,7 @@ class CrossingSignal:
 @dataclass
 class CDCSubmodule:
     """A synchronization submodule that must be instantiated in the RTL."""
+
     module_name: str
     strategy: str
     ports: List[Dict[str, str]] = field(default_factory=list)
@@ -137,6 +138,7 @@ class CDCSubmodule:
 @dataclass
 class CDCResult:
     """Output of the CDCAnalyzer."""
+
     cdc_status: str  # "SINGLE_DOMAIN" | "MULTI_DOMAIN" | "UNRESOLVED"
     clock_domains: List[ClockDomain] = field(default_factory=list)
     crossing_signals: List[CrossingSignal] = field(default_factory=list)
@@ -161,6 +163,7 @@ class CDCResult:
 
 
 # ─── Main Class ──────────────────────────────────────────────────────
+
 
 class CDCAnalyzer:
     """
@@ -196,7 +199,8 @@ class CDCAnalyzer:
                 clock_domains=domains,
                 domain_count=len(domains),
                 cdc_warnings=["No CDC analysis required — single clock domain."]
-                if domains else [],
+                if domains
+                else [],
             )
 
         # Build domain relationship map
@@ -267,11 +271,13 @@ class CDCAnalyzer:
             pname = port.get("name", "")
             if _CLOCK_PATTERNS.search(pname) and pname.lower() not in seen_clocks:
                 seen_clocks.add(pname.lower())
-                domains.append(ClockDomain(
-                    domain_name=self._clock_to_domain_name(pname),
-                    source_clock_signal=pname,
-                    nominal_frequency_mhz=target_freq,
-                ))
+                domains.append(
+                    ClockDomain(
+                        domain_name=self._clock_to_domain_name(pname),
+                        source_clock_signal=pname,
+                        nominal_frequency_mhz=target_freq,
+                    )
+                )
 
         # 1b. Scan submodule ports for additional clock signals
         all_submodules = self._collect_all_submodules(
@@ -291,13 +297,17 @@ class CDCAnalyzer:
                     derivation = ""
                     freq = target_freq
 
-                    if _CLK_DIVIDER_PATTERNS.search(pname) or \
-                       _CLK_DIVIDER_PATTERNS.search(sm_desc):
+                    if _CLK_DIVIDER_PATTERNS.search(
+                        pname
+                    ) or _CLK_DIVIDER_PATTERNS.search(sm_desc):
                         is_derived = True
                         derivation = "divided"
                         # Try to extract division factor
-                        div_match = re.search(r"div(?:ide)?(?:_by)?_?(\d+)", 
-                                              pname + " " + sm_desc, re.IGNORECASE)
+                        div_match = re.search(
+                            r"div(?:ide)?(?:_by)?_?(\d+)",
+                            pname + " " + sm_desc,
+                            re.IGNORECASE,
+                        )
                         if div_match:
                             divisor = int(div_match.group(1))
                             freq = target_freq / max(divisor, 1)
@@ -305,20 +315,23 @@ class CDCAnalyzer:
                             freq = target_freq / 2  # assume /2 if not specified
                         parent = domains[0].domain_name if domains else ""
 
-                    elif _CLK_GATE_PATTERNS.search(pname) or \
-                         _CLK_GATE_PATTERNS.search(sm_desc):
+                    elif _CLK_GATE_PATTERNS.search(pname) or _CLK_GATE_PATTERNS.search(
+                        sm_desc
+                    ):
                         is_derived = True
                         derivation = "gated"
                         parent = domains[0].domain_name if domains else ""
 
-                    domains.append(ClockDomain(
-                        domain_name=self._clock_to_domain_name(pname),
-                        source_clock_signal=pname,
-                        nominal_frequency_mhz=freq,
-                        is_derived=is_derived,
-                        parent_domain=parent,
-                        derivation_type=derivation,
-                    ))
+                    domains.append(
+                        ClockDomain(
+                            domain_name=self._clock_to_domain_name(pname),
+                            source_clock_signal=pname,
+                            nominal_frequency_mhz=freq,
+                            is_derived=is_derived,
+                            parent_domain=parent,
+                            derivation_type=derivation,
+                        )
+                    )
 
         # 1c. Check spec-level clock_domains field (if the spec generator
         #     explicitly listed them)
@@ -337,11 +350,13 @@ class CDCAnalyzer:
                     continue
                 if cd_clk.lower() not in seen_clocks:
                     seen_clocks.add(cd_clk.lower())
-                    domains.append(ClockDomain(
-                        domain_name=self._clock_to_domain_name(cd_name),
-                        source_clock_signal=cd_clk,
-                        nominal_frequency_mhz=cd_freq,
-                    ))
+                    domains.append(
+                        ClockDomain(
+                            domain_name=self._clock_to_domain_name(cd_name),
+                            source_clock_signal=cd_clk,
+                            nominal_frequency_mhz=cd_freq,
+                        )
+                    )
 
         # 1d. Check mandatory_fields_status for clock_domains info
         mfs = hw_spec_dict.get("mandatory_fields_status", {})
@@ -354,22 +369,26 @@ class CDCAnalyzer:
                 if multi_match and int(multi_match.group(1)) > 1 and len(domains) < 2:
                     # The spec says multiple clocks but we only found one in ports
                     # Add a placeholder second domain
-                    domains.append(ClockDomain(
-                        domain_name="domain_secondary",
-                        source_clock_signal="clk_secondary",
-                        nominal_frequency_mhz=target_freq,
-                    ))
+                    domains.append(
+                        ClockDomain(
+                            domain_name="domain_secondary",
+                            source_clock_signal="clk_secondary",
+                            nominal_frequency_mhz=target_freq,
+                        )
+                    )
 
         # 1e. Assign submodules to domains
         self._assign_submodules_to_domains(domains, all_submodules)
 
         # If no clock was found at all, assume single domain
         if not domains:
-            domains.append(ClockDomain(
-                domain_name="domain_clk",
-                source_clock_signal="clk",
-                nominal_frequency_mhz=target_freq,
-            ))
+            domains.append(
+                ClockDomain(
+                    domain_name="domain_clk",
+                    source_clock_signal="clk",
+                    nominal_frequency_mhz=target_freq,
+                )
+            )
 
         return domains
 
@@ -416,27 +435,31 @@ class CDCAnalyzer:
         async_pairs: Set[Tuple[str, str]] = set()
 
         for i, d1 in enumerate(domains):
-            for d2 in domains[i + 1:]:
+            for d2 in domains[i + 1 :]:
                 # Same source = synchronous
                 if d1.source_clock_signal == d2.source_clock_signal:
                     continue
 
                 # Divided from same parent = synchronous (but flag gated clocks)
-                if (d1.parent_domain and d1.parent_domain == d2.domain_name and
-                        d1.derivation_type == "divided"):
+                if (
+                    d1.parent_domain
+                    and d1.parent_domain == d2.domain_name
+                    and d1.derivation_type == "divided"
+                ):
                     continue
-                if (d2.parent_domain and d2.parent_domain == d1.domain_name and
-                        d2.derivation_type == "divided"):
+                if (
+                    d2.parent_domain
+                    and d2.parent_domain == d1.domain_name
+                    and d2.derivation_type == "divided"
+                ):
                     continue
 
                 # Gated clock from same source: potentially same domain but
                 # may have enable timing issues — flag it
-                if (d1.parent_domain == d2.domain_name and
-                        d1.derivation_type == "gated"):
+                if d1.parent_domain == d2.domain_name and d1.derivation_type == "gated":
                     # Not truly async, but needs care
                     continue
-                if (d2.parent_domain == d1.domain_name and
-                        d2.derivation_type == "gated"):
+                if d2.parent_domain == d1.domain_name and d2.derivation_type == "gated":
                     continue
 
                 # All other pairs are asynchronous
@@ -503,7 +526,7 @@ class CDCAnalyzer:
             # Check each pair of consuming domains
             domain_list = sorted(consumer_domains)
             for i, d1 in enumerate(domain_list):
-                for d2 in domain_list[i + 1:]:
+                for d2 in domain_list[i + 1 :]:
                     if (d1, d2) in async_pairs:
                         key = f"{sig_name}:{d1}->{d2}"
                         if key in seen:
@@ -516,19 +539,19 @@ class CDCAnalyzer:
                             sig_name, port_consumers[sig_name], sm_by_name
                         )
 
-                        crossings.append(CrossingSignal(
-                            signal_name=sig_name,
-                            source_domain=d1,
-                            destination_domain=d2,
-                            signal_type=sig_type,
-                            bit_width=bit_width,
-                            direction="unidirectional",
-                        ))
+                        crossings.append(
+                            CrossingSignal(
+                                signal_name=sig_name,
+                                source_domain=d1,
+                                destination_domain=d2,
+                                signal_type=sig_type,
+                                bit_width=bit_width,
+                                direction="unidirectional",
+                            )
+                        )
 
         # Also check for reset signals crossing domains
-        self._check_reset_crossings(
-            domains, async_pairs, hw_spec_dict, crossings, seen
-        )
+        self._check_reset_crossings(domains, async_pairs, hw_spec_dict, crossings, seen)
 
         # Check for inter-domain handshake pairs
         self._check_handshake_crossings(
@@ -596,7 +619,8 @@ class CDCAnalyzer:
         """Ensure every reset signal crossing a domain boundary is captured."""
         top_ports = hw_spec_dict.get("ports", [])
         reset_signals = [
-            p.get("name", "") for p in top_ports
+            p.get("name", "")
+            for p in top_ports
             if _RESET_PATTERNS.search(p.get("name", ""))
         ]
 
@@ -616,14 +640,16 @@ class CDCAnalyzer:
                 if key in seen:
                     continue
                 seen.add(key)
-                crossings.append(CrossingSignal(
-                    signal_name=rst_sig,
-                    source_domain=primary_domain,
-                    destination_domain=domain.domain_name,
-                    signal_type="reset",
-                    bit_width=1,
-                    direction="unidirectional",
-                ))
+                crossings.append(
+                    CrossingSignal(
+                        signal_name=rst_sig,
+                        source_domain=primary_domain,
+                        destination_domain=domain.domain_name,
+                        signal_type="reset",
+                        bit_width=1,
+                        direction="unidirectional",
+                    )
+                )
 
     def _check_handshake_crossings(
         self,
@@ -666,14 +692,16 @@ class CDCAnalyzer:
                     key = f"{req_sig}:{sm_dom}->{domain.domain_name}"
                     if key not in seen:
                         seen.add(key)
-                        crossings.append(CrossingSignal(
-                            signal_name=f"{req_sig}/{ack_sig}",
-                            source_domain=sm_dom,
-                            destination_domain=domain.domain_name,
-                            signal_type="handshake",
-                            bit_width=1,
-                            direction="bidirectional",
-                        ))
+                        crossings.append(
+                            CrossingSignal(
+                                signal_name=f"{req_sig}/{ack_sig}",
+                                source_domain=sm_dom,
+                                destination_domain=domain.domain_name,
+                                signal_type="handshake",
+                                bit_width=1,
+                                direction="bidirectional",
+                            )
+                        )
 
     # ── Step 3: Assign Synchronization Strategy ──────────────────────
 
@@ -806,9 +834,7 @@ class CDCAnalyzer:
                 crossing.sync_details = {
                     "sync_depth": sync_depth,
                     "dont_touch": True,
-                    "behavior": (
-                        f"{sync_depth}-stage synchronizer with dont_touch"
-                    ),
+                    "behavior": (f"{sync_depth}-stage synchronizer with dont_touch"),
                 }
                 warnings.append(
                     f"CDC: Config signal '{sig_name}' crosses domains. "
@@ -823,9 +849,7 @@ class CDCAnalyzer:
                     "req_signal": f"{sig_name}_cfg_req",
                     "ack_signal": f"{sig_name}_cfg_ack",
                     "data_width": bit_width,
-                    "behavior": (
-                        "4-phase handshake for configuration register update"
-                    ),
+                    "behavior": ("4-phase handshake for configuration register update"),
                 }
                 warnings.append(
                     f"CDC: Multi-bit config signal '{sig_name}' ({bit_width}-bit) "
@@ -848,7 +872,6 @@ class CDCAnalyzer:
 
     def _gray_pointer_width(self, fifo_depth: int) -> int:
         """Calculate Gray code pointer width for a given FIFO depth."""
-        import math
         return max(2, int(math.ceil(math.log2(max(fifo_depth, 2)))) + 1)
 
     # ── Step 4: Generate CDC Submodules ──────────────────────────────
@@ -873,28 +896,46 @@ class CDCAnalyzer:
                     continue
                 seen_modules.add(mod_name)
                 depth = crossing.sync_details.get("sync_depth", 2)
-                submodules.append(CDCSubmodule(
-                    module_name=mod_name,
-                    strategy=strategy,
-                    ports=[
-                        {"name": "clk_dst", "direction": "input",
-                         "data_type": "logic", "description": "Destination clock"},
-                        {"name": "rst_n_dst", "direction": "input",
-                         "data_type": "logic", "description": "Destination reset (active-low)"},
-                        {"name": "sig_src", "direction": "input",
-                         "data_type": "logic", "description": "Source domain signal"},
-                        {"name": "sig_dst_synced", "direction": "output",
-                         "data_type": "logic", "description": "Synchronized signal in destination domain"},
-                    ],
-                    parameters={"SYNC_DEPTH": depth},
-                    behavior=(
-                        f"{depth}-stage synchronizer chain. All flops have "
-                        "(* dont_touch = \"true\" *) attribute to prevent "
-                        "synthesis optimization. Reset clears all stages."
-                    ),
-                    source_domain=crossing.source_domain,
-                    destination_domain=crossing.destination_domain,
-                ))
+                submodules.append(
+                    CDCSubmodule(
+                        module_name=mod_name,
+                        strategy=strategy,
+                        ports=[
+                            {
+                                "name": "clk_dst",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Destination clock",
+                            },
+                            {
+                                "name": "rst_n_dst",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Destination reset (active-low)",
+                            },
+                            {
+                                "name": "sig_src",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Source domain signal",
+                            },
+                            {
+                                "name": "sig_dst_synced",
+                                "direction": "output",
+                                "data_type": "logic",
+                                "description": "Synchronized signal in destination domain",
+                            },
+                        ],
+                        parameters={"SYNC_DEPTH": depth},
+                        behavior=(
+                            f"{depth}-stage synchronizer chain. All flops have "
+                            '(* dont_touch = "true" *) attribute to prevent '
+                            "synthesis optimization. Reset clears all stages."
+                        ),
+                        source_domain=crossing.source_domain,
+                        destination_domain=crossing.destination_domain,
+                    )
+                )
 
             elif strategy == SYNC_PULSE:
                 mod_name = f"cdc_pulse_sync_{sig_name}"
@@ -902,33 +943,59 @@ class CDCAnalyzer:
                     continue
                 seen_modules.add(mod_name)
                 depth = crossing.sync_details.get("sync_depth", 2)
-                submodules.append(CDCSubmodule(
-                    module_name=mod_name,
-                    strategy=strategy,
-                    ports=[
-                        {"name": "clk_src", "direction": "input",
-                         "data_type": "logic", "description": "Source clock"},
-                        {"name": "rst_n_src", "direction": "input",
-                         "data_type": "logic", "description": "Source reset (active-low)"},
-                        {"name": "clk_dst", "direction": "input",
-                         "data_type": "logic", "description": "Destination clock"},
-                        {"name": "rst_n_dst", "direction": "input",
-                         "data_type": "logic", "description": "Destination reset (active-low)"},
-                        {"name": "pulse_src", "direction": "input",
-                         "data_type": "logic", "description": "Single-cycle pulse in source domain"},
-                        {"name": "pulse_dst", "direction": "output",
-                         "data_type": "logic", "description": "Regenerated pulse in destination domain"},
-                    ],
-                    parameters={"SYNC_DEPTH": depth},
-                    behavior=(
-                        "Toggle flip-flop captures pulse in source domain. "
-                        f"{depth}-flop synchronizer transfers toggle to "
-                        "destination domain. XOR edge detector regenerates "
-                        "single-cycle pulse in destination domain."
-                    ),
-                    source_domain=crossing.source_domain,
-                    destination_domain=crossing.destination_domain,
-                ))
+                submodules.append(
+                    CDCSubmodule(
+                        module_name=mod_name,
+                        strategy=strategy,
+                        ports=[
+                            {
+                                "name": "clk_src",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Source clock",
+                            },
+                            {
+                                "name": "rst_n_src",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Source reset (active-low)",
+                            },
+                            {
+                                "name": "clk_dst",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Destination clock",
+                            },
+                            {
+                                "name": "rst_n_dst",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Destination reset (active-low)",
+                            },
+                            {
+                                "name": "pulse_src",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Single-cycle pulse in source domain",
+                            },
+                            {
+                                "name": "pulse_dst",
+                                "direction": "output",
+                                "data_type": "logic",
+                                "description": "Regenerated pulse in destination domain",
+                            },
+                        ],
+                        parameters={"SYNC_DEPTH": depth},
+                        behavior=(
+                            "Toggle flip-flop captures pulse in source domain. "
+                            f"{depth}-flop synchronizer transfers toggle to "
+                            "destination domain. XOR edge detector regenerates "
+                            "single-cycle pulse in destination domain."
+                        ),
+                        source_domain=crossing.source_domain,
+                        destination_domain=crossing.destination_domain,
+                    )
+                )
 
             elif strategy == SYNC_ASYNC_FIFO:
                 data_width = crossing.sync_details.get("data_width", 8)
@@ -938,49 +1005,89 @@ class CDCAnalyzer:
                 if mod_name in seen_modules:
                     continue
                 seen_modules.add(mod_name)
-                submodules.append(CDCSubmodule(
-                    module_name=mod_name,
-                    strategy=strategy,
-                    ports=[
-                        {"name": "wr_clk", "direction": "input",
-                         "data_type": "logic", "description": "Write clock"},
-                        {"name": "wr_rst_n", "direction": "input",
-                         "data_type": "logic", "description": "Write reset (active-low)"},
-                        {"name": "wr_en", "direction": "input",
-                         "data_type": "logic", "description": "Write enable"},
-                        {"name": "wr_data", "direction": "input",
-                         "data_type": f"logic [{data_width - 1}:0]",
-                         "description": "Write data"},
-                        {"name": "wr_full", "direction": "output",
-                         "data_type": "logic", "description": "FIFO full flag"},
-                        {"name": "rd_clk", "direction": "input",
-                         "data_type": "logic", "description": "Read clock"},
-                        {"name": "rd_rst_n", "direction": "input",
-                         "data_type": "logic", "description": "Read reset (active-low)"},
-                        {"name": "rd_en", "direction": "input",
-                         "data_type": "logic", "description": "Read enable"},
-                        {"name": "rd_data", "direction": "output",
-                         "data_type": f"logic [{data_width - 1}:0]",
-                         "description": "Read data"},
-                        {"name": "rd_empty", "direction": "output",
-                         "data_type": "logic", "description": "FIFO empty flag"},
-                    ],
-                    parameters={
-                        "DATA_WIDTH": data_width,
-                        "FIFO_DEPTH": fifo_depth,
-                        "PTR_WIDTH": ptr_width,
-                    },
-                    behavior=(
-                        f"Asynchronous FIFO with {fifo_depth}-deep buffer. "
-                        f"Gray-coded {ptr_width}-bit read and write pointers. "
-                        "Pointer synchronization via 2-flop synchronizers. "
-                        "No combinational paths between write and read clock "
-                        "domains. Full/empty generation from synchronized "
-                        "Gray pointers."
-                    ),
-                    source_domain=crossing.source_domain,
-                    destination_domain=crossing.destination_domain,
-                ))
+                submodules.append(
+                    CDCSubmodule(
+                        module_name=mod_name,
+                        strategy=strategy,
+                        ports=[
+                            {
+                                "name": "wr_clk",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Write clock",
+                            },
+                            {
+                                "name": "wr_rst_n",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Write reset (active-low)",
+                            },
+                            {
+                                "name": "wr_en",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Write enable",
+                            },
+                            {
+                                "name": "wr_data",
+                                "direction": "input",
+                                "data_type": f"logic [{data_width - 1}:0]",
+                                "description": "Write data",
+                            },
+                            {
+                                "name": "wr_full",
+                                "direction": "output",
+                                "data_type": "logic",
+                                "description": "FIFO full flag",
+                            },
+                            {
+                                "name": "rd_clk",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Read clock",
+                            },
+                            {
+                                "name": "rd_rst_n",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Read reset (active-low)",
+                            },
+                            {
+                                "name": "rd_en",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Read enable",
+                            },
+                            {
+                                "name": "rd_data",
+                                "direction": "output",
+                                "data_type": f"logic [{data_width - 1}:0]",
+                                "description": "Read data",
+                            },
+                            {
+                                "name": "rd_empty",
+                                "direction": "output",
+                                "data_type": "logic",
+                                "description": "FIFO empty flag",
+                            },
+                        ],
+                        parameters={
+                            "DATA_WIDTH": data_width,
+                            "FIFO_DEPTH": fifo_depth,
+                            "PTR_WIDTH": ptr_width,
+                        },
+                        behavior=(
+                            f"Asynchronous FIFO with {fifo_depth}-deep buffer. "
+                            f"Gray-coded {ptr_width}-bit read and write pointers. "
+                            "Pointer synchronization via 2-flop synchronizers. "
+                            "No combinational paths between write and read clock "
+                            "domains. Full/empty generation from synchronized "
+                            "Gray pointers."
+                        ),
+                        source_domain=crossing.source_domain,
+                        destination_domain=crossing.destination_domain,
+                    )
+                )
 
             elif strategy == SYNC_HANDSHAKE:
                 data_width = crossing.sync_details.get("data_width", 1)
@@ -991,43 +1098,77 @@ class CDCAnalyzer:
                     continue
                 seen_modules.add(mod_name)
                 ports = [
-                    {"name": "clk_src", "direction": "input",
-                     "data_type": "logic", "description": "Source clock"},
-                    {"name": "rst_n_src", "direction": "input",
-                     "data_type": "logic", "description": "Source reset"},
-                    {"name": "clk_dst", "direction": "input",
-                     "data_type": "logic", "description": "Destination clock"},
-                    {"name": "rst_n_dst", "direction": "input",
-                     "data_type": "logic", "description": "Destination reset"},
-                    {"name": req_sig, "direction": "output",
-                     "data_type": "logic", "description": "Request signal"},
-                    {"name": ack_sig, "direction": "input",
-                     "data_type": "logic", "description": "Acknowledge signal"},
+                    {
+                        "name": "clk_src",
+                        "direction": "input",
+                        "data_type": "logic",
+                        "description": "Source clock",
+                    },
+                    {
+                        "name": "rst_n_src",
+                        "direction": "input",
+                        "data_type": "logic",
+                        "description": "Source reset",
+                    },
+                    {
+                        "name": "clk_dst",
+                        "direction": "input",
+                        "data_type": "logic",
+                        "description": "Destination clock",
+                    },
+                    {
+                        "name": "rst_n_dst",
+                        "direction": "input",
+                        "data_type": "logic",
+                        "description": "Destination reset",
+                    },
+                    {
+                        "name": req_sig,
+                        "direction": "output",
+                        "data_type": "logic",
+                        "description": "Request signal",
+                    },
+                    {
+                        "name": ack_sig,
+                        "direction": "input",
+                        "data_type": "logic",
+                        "description": "Acknowledge signal",
+                    },
                 ]
                 if data_width > 1:
-                    ports.extend([
-                        {"name": "data_src", "direction": "input",
-                         "data_type": f"logic [{data_width - 1}:0]",
-                         "description": "Source data"},
-                        {"name": "data_dst", "direction": "output",
-                         "data_type": f"logic [{data_width - 1}:0]",
-                         "description": "Destination data (valid when ack)"},
-                    ])
-                submodules.append(CDCSubmodule(
-                    module_name=mod_name,
-                    strategy=strategy,
-                    ports=ports,
-                    parameters={"DATA_WIDTH": data_width},
-                    behavior=(
-                        "4-phase handshake protocol: (1) source asserts req "
-                        "with stable data, (2) destination synchronizes req "
-                        "and asserts ack, (3) source deasserts req, "
-                        "(4) destination deasserts ack. Data must remain "
-                        "stable from req assert to ack assert."
-                    ),
-                    source_domain=crossing.source_domain,
-                    destination_domain=crossing.destination_domain,
-                ))
+                    ports.extend(
+                        [
+                            {
+                                "name": "data_src",
+                                "direction": "input",
+                                "data_type": f"logic [{data_width - 1}:0]",
+                                "description": "Source data",
+                            },
+                            {
+                                "name": "data_dst",
+                                "direction": "output",
+                                "data_type": f"logic [{data_width - 1}:0]",
+                                "description": "Destination data (valid when ack)",
+                            },
+                        ]
+                    )
+                submodules.append(
+                    CDCSubmodule(
+                        module_name=mod_name,
+                        strategy=strategy,
+                        ports=ports,
+                        parameters={"DATA_WIDTH": data_width},
+                        behavior=(
+                            "4-phase handshake protocol: (1) source asserts req "
+                            "with stable data, (2) destination synchronizes req "
+                            "and asserts ack, (3) source deasserts req, "
+                            "(4) destination deasserts ack. Data must remain "
+                            "stable from req assert to ack assert."
+                        ),
+                        source_domain=crossing.source_domain,
+                        destination_domain=crossing.destination_domain,
+                    )
+                )
 
             elif strategy == SYNC_RESET:
                 mod_name = f"cdc_reset_sync_{sig_name}"
@@ -1035,30 +1176,42 @@ class CDCAnalyzer:
                     continue
                 seen_modules.add(mod_name)
                 depth = crossing.sync_details.get("sync_depth", 2)
-                submodules.append(CDCSubmodule(
-                    module_name=mod_name,
-                    strategy=strategy,
-                    ports=[
-                        {"name": "clk_dst", "direction": "input",
-                         "data_type": "logic", "description": "Destination clock"},
-                        {"name": "rst_async_n", "direction": "input",
-                         "data_type": "logic",
-                         "description": "Asynchronous reset input (active-low)"},
-                        {"name": "rst_sync_n", "direction": "output",
-                         "data_type": "logic",
-                         "description": "Synchronized reset output (active-low)"},
-                    ],
-                    parameters={"SYNC_DEPTH": depth},
-                    behavior=(
-                        "Asynchronous assert, synchronous deassert reset "
-                        f"synchronizer. {depth}-flop chain clocked by "
-                        "destination clock. Reset assertion is immediate "
-                        "(async), deassertion is synchronized to destination "
-                        "clock to prevent metastability."
-                    ),
-                    source_domain=crossing.source_domain,
-                    destination_domain=crossing.destination_domain,
-                ))
+                submodules.append(
+                    CDCSubmodule(
+                        module_name=mod_name,
+                        strategy=strategy,
+                        ports=[
+                            {
+                                "name": "clk_dst",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Destination clock",
+                            },
+                            {
+                                "name": "rst_async_n",
+                                "direction": "input",
+                                "data_type": "logic",
+                                "description": "Asynchronous reset input (active-low)",
+                            },
+                            {
+                                "name": "rst_sync_n",
+                                "direction": "output",
+                                "data_type": "logic",
+                                "description": "Synchronized reset output (active-low)",
+                            },
+                        ],
+                        parameters={"SYNC_DEPTH": depth},
+                        behavior=(
+                            "Asynchronous assert, synchronous deassert reset "
+                            f"synchronizer. {depth}-flop chain clocked by "
+                            "destination clock. Reset assertion is immediate "
+                            "(async), deassertion is synchronized to destination "
+                            "clock to prevent metastability."
+                        ),
+                        source_domain=crossing.source_domain,
+                        destination_domain=crossing.destination_domain,
+                    )
+                )
 
         return submodules
 

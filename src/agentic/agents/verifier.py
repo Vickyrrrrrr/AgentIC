@@ -1,5 +1,5 @@
 from crewai import Agent
-from ..tools.vlsi_tools import syntax_check_tool, read_file_tool
+from ..tools.vlsi_tools import syntax_check_tool, read_file_tool, write_verilog_tool
 
 def get_verification_agent(llm, verbose=False):
     return Agent(
@@ -15,7 +15,7 @@ IMPORTANT CONSTRAINTS (Verilator compatibility):
 You have tools to read files and check syntax — USE THEM to verify your output compiles.""",
         llm=llm,
         verbose=verbose,
-        tools=[syntax_check_tool, read_file_tool],
+        tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
         allow_delegation=False
     )
 
@@ -47,7 +47,7 @@ Key diagnostic patterns:
 Always recommend Verilator-compatible fixes (no classes, no interfaces inside modules).""",
         llm=llm,
         verbose=verbose,
-        tools=[syntax_check_tool, read_file_tool],
+        tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
         allow_delegation=False
     )
 
@@ -79,6 +79,6 @@ def get_regression_agent(llm, goal, verbose=False):
         Each test must print "TEST PASSED" on success or "TEST FAILED" on failure.""",
         llm=llm,
         verbose=verbose,
-        tools=[syntax_check_tool, read_file_tool],
+        tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
         allow_delegation=False
     )

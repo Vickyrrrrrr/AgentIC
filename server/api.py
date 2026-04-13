@@ -2,19 +2,21 @@
 AgentIC Backend API — Premium Chip Studio
 Real-time SSE streaming, job management, human-in-the-loop approval, and chip result reporting.
 """
+
 import asyncio
 import json
 import logging
 import os
 import re
 import sys
-import os
 
 # Force API server mode globally so orchestrator.py respects HITL loops
 os.environ["AGENTIC_API_SERVER"] = "1"
 
 # Add src to Python path so 'agentic' module can be found when run locally or via docker
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+)
 import time
 import uuid
 import glob
@@ -26,7 +28,13 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 from pydantic import BaseModel
 from sqlalchemy import inspect, text
 
@@ -80,7 +88,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow your Vercel frontend to proxy requests securely
+    allow_origins=["*"],  # Allow your Vercel frontend to proxy requests securely
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -103,7 +111,9 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
-        logger.warning("Invalid integer for %s=%r; using default %s", name, raw, default)
+        logger.warning(
+            "Invalid integer for %s=%r; using default %s", name, raw, default
+        )
         return default
 
 
@@ -168,14 +178,19 @@ async def advanced_request_logging_middleware(request: Request, call_next):
         path_template = getattr(route, "path", request.url.path)
         status_code = str(getattr(response, "status_code", 500))
         duration = time.perf_counter() - start
-        
+
         # Log the request details for Big Tech level observability
         client_ip = request.client.host if request.client else "unknown"
-        logger.info(f"[{status_code}] {request.method} {request.url.path} - {client_ip} - {duration:.4f}s")
-        
+        logger.info(
+            f"[{status_code}] {request.method} {request.url.path} - {client_ip} - {duration:.4f}s"
+        )
+
         HTTP_REQUESTS_TOTAL.labels(request.method, path_template, status_code).inc()
-        HTTP_REQUEST_LATENCY_SECONDS.labels(request.method, path_template).observe(duration)
+        HTTP_REQUEST_LATENCY_SECONDS.labels(request.method, path_template).observe(
+            duration
+        )
         HTTP_INFLIGHT_REQUESTS.dec()
+
 
 # ─── Job Store ───────────────────────────────────────────────────────
 # Structure: { job_id: { status, design_name, events: [], result: {}, cancelled: bool } }
@@ -210,10 +225,14 @@ def _db_persistence_ready() -> bool:
 @app.on_event("startup")
 def initialize_persistence():
     if ensure_database_ready is None:
-        logger.warning("Database persistence module unavailable; startup is continuing without DB-backed job history.")
+        logger.warning(
+            "Database persistence module unavailable; startup is continuing without DB-backed job history."
+        )
         return
 
-    if ensure_database_ready(max_attempts=DB_INIT_ATTEMPTS, retry_interval=DB_INIT_RETRY_SECONDS):
+    if ensure_database_ready(
+        max_attempts=DB_INIT_ATTEMPTS, retry_interval=DB_INIT_RETRY_SECONDS
+    ):
         _hydrate_job_store_from_db()
         logger.info("Database schema is ready for AgentIC startup.")
         return
@@ -223,6 +242,7 @@ def initialize_persistence():
         "The API will stay live, but readiness checks and job persistence will remain degraded."
     )
 
+
 def _sync_job_to_db(job_id: str):
     """Safely mirrors JOB_STORE dictionary changes into the persistent Database."""
     if not _db_persistence_ready():
@@ -231,13 +251,13 @@ def _sync_job_to_db(job_id: str):
         job_data = JOB_STORE.get(job_id)
         if not job_data:
             return
-            
+
         with SessionLocal() as db:
             db_job = db.query(DBJob).filter(DBJob.id == job_id).first()
             if not db_job:
                 db_job = DBJob(id=job_id)
                 db.add(db_job)
-            
+
             db_job.user_id = job_data.get("user_id")
             db_job.user_email = job_data.get("user_email")
             db_job.design_name = job_data.get("design_name", "")
@@ -246,16 +266,17 @@ def _sync_job_to_db(job_id: str):
             db_job.human_in_loop = job_data.get("human_in_loop", False)
             db_job.waiting_approval = job_data.get("waiting_approval", False)
             db_job.waiting_stage = job_data.get("waiting_stage", "")
-            
+
             # Using copy for JSON safely
             db_job.events = job_data.get("events", [])
             db_job.stages = job_data.get("stages", {})
             db_job.request_data = job_data.get("request_data", {})
             db_job.result = job_data.get("result", None)
-            
+
             db.commit()
     except Exception as e:
         logger.error(f"Failed to sync {job_id} to DB: {e}")
+
 
 def _pull_job_from_db(job_id: str):
     """Safely reads the background Worker's Database changes back into the API memory."""
@@ -267,21 +288,28 @@ def _pull_job_from_db(job_id: str):
             if db_job:
                 if job_id not in JOB_STORE:
                     JOB_STORE[job_id] = {}
-                JOB_STORE[job_id].update({
-                    "user_id": getattr(db_job, "user_id", None),
-                    "user_email": getattr(db_job, "user_email", None),
-                    "design_name": db_job.design_name or JOB_STORE[job_id].get("design_name", ""),
-                    "status": db_job.status or "pending",
-                    "build_status": db_job.build_status or "pending",
-                    "human_in_loop": db_job.human_in_loop,
-                    "waiting_approval": db_job.waiting_approval,
-                    "waiting_stage": db_job.waiting_stage,
-                    "events": db_job.events or [],
-                    "stages": db_job.stages or {},
-                    "result": db_job.result or {},
-                    "created_at": int(db_job.created_at.timestamp()) if db_job.created_at else JOB_STORE[job_id].get("created_at", int(time.time())),
-                    "current_state": db_job.events[-1].get("state", "UNKNOWN") if db_job.events else "INIT",
-                })
+                JOB_STORE[job_id].update(
+                    {
+                        "user_id": getattr(db_job, "user_id", None),
+                        "user_email": getattr(db_job, "user_email", None),
+                        "design_name": db_job.design_name
+                        or JOB_STORE[job_id].get("design_name", ""),
+                        "status": db_job.status or "pending",
+                        "build_status": db_job.build_status or "pending",
+                        "human_in_loop": db_job.human_in_loop,
+                        "waiting_approval": db_job.waiting_approval,
+                        "waiting_stage": db_job.waiting_stage,
+                        "events": db_job.events or [],
+                        "stages": db_job.stages or {},
+                        "result": db_job.result or {},
+                        "created_at": int(db_job.created_at.timestamp())
+                        if db_job.created_at
+                        else JOB_STORE[job_id].get("created_at", int(time.time())),
+                        "current_state": db_job.events[-1].get("state", "UNKNOWN")
+                        if db_job.events
+                        else "INIT",
+                    }
+                )
     except Exception as e:
         logger.error(f"Failed to pull {job_id} from DB: {e}")
 
@@ -297,7 +325,9 @@ def _normalize_epoch_seconds(value: Any) -> int:
 
 
 def _job_current_state(job: Any) -> str:
-    events = getattr(job, "events", None) if not isinstance(job, dict) else job.get("events")
+    events = (
+        getattr(job, "events", None) if not isinstance(job, dict) else job.get("events")
+    )
     if events:
         try:
             return events[-1].get("state", "INIT")
@@ -338,7 +368,11 @@ def _load_jobs_for_profile(profile: Optional[dict]) -> List[Dict[str, Any]]:
         try:
             with SessionLocal() as db:
                 query = db.query(DBJob)
-                if AUTH_ENABLED and profile is not None and getattr(DBJob, "user_id", None) is not None:
+                if (
+                    AUTH_ENABLED
+                    and profile is not None
+                    and getattr(DBJob, "user_id", None) is not None
+                ):
                     query = query.filter(DBJob.user_id == profile["id"])
                 rows = query.order_by(DBJob.created_at.desc()).all()
                 return [_serialize_job_record(row.id, row) for row in rows]
@@ -347,7 +381,11 @@ def _load_jobs_for_profile(profile: Optional[dict]) -> List[Dict[str, Any]]:
 
     jobs: List[Dict[str, Any]] = []
     for jid, job in JOB_STORE.items():
-        if AUTH_ENABLED and profile is not None and job.get("user_id") != profile.get("id"):
+        if (
+            AUTH_ENABLED
+            and profile is not None
+            and job.get("user_id") != profile.get("id")
+        ):
             continue
         jobs.append(_serialize_job_record(jid, job))
     jobs.sort(key=lambda item: item.get("created_at", 0), reverse=True)
@@ -363,7 +401,9 @@ def _hydrate_job_store_from_db(limit: int = 250) -> None:
             rows = db.query(DBJob).order_by(DBJob.created_at.desc()).limit(limit).all()
             for row in rows:
                 _pull_job_from_db(row.id)
-        logger.info("Hydrated %s persisted jobs into memory on startup.", min(len(rows), limit))
+        logger.info(
+            "Hydrated %s persisted jobs into memory on startup.", min(len(rows), limit)
+        )
     except Exception as exc:
         logger.error("Failed to hydrate persisted jobs on startup: %s", exc)
 
@@ -373,15 +413,21 @@ def _summarize_jobs(jobs: List[Dict[str, Any]]) -> Dict[str, int]:
     active_designs = {job["design_name"] for job in jobs if job.get("design_name")}
     return {
         "total_builds": len(jobs),
-        "running_builds": sum(1 for job in jobs if job.get("status") in running_statuses),
+        "running_builds": sum(
+            1 for job in jobs if job.get("status") in running_statuses
+        ),
         "successful_builds": sum(1 for job in jobs if job.get("status") == "done"),
         "failed_builds": sum(1 for job in jobs if job.get("status") == "failed"),
         "active_designs": len(active_designs),
     }
 
 
-def _recent_job_activity(jobs: List[Dict[str, Any]], limit: int = 8) -> List[Dict[str, Any]]:
-    return sorted(jobs, key=lambda item: item.get("created_at", 0), reverse=True)[:limit]
+def _recent_job_activity(
+    jobs: List[Dict[str, Any]], limit: int = 8
+) -> List[Dict[str, Any]]:
+    return sorted(jobs, key=lambda item: item.get("created_at", 0), reverse=True)[
+        :limit
+    ]
 
 
 def _design_has_gds(design_name: str) -> bool:
@@ -396,6 +442,7 @@ def _design_has_gds(design_name: str) -> bool:
 
     try:
         from agentic.config import OPENLANE_ROOT
+
         openlane_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
         if os.path.isdir(openlane_dir):
             for root_dir, _dirs, files in os.walk(openlane_dir):
@@ -436,7 +483,10 @@ def _check_redis() -> Dict[str, Any]:
         return {"ok": False, "detail": "REDIS_URL not configured"}
     try:
         import redis as redis_lib
-        client = redis_lib.Redis.from_url(redis_url, socket_timeout=1, socket_connect_timeout=1)
+
+        client = redis_lib.Redis.from_url(
+            redis_url, socket_timeout=1, socket_connect_timeout=1
+        )
         client.ping()
         return {"ok": True}
     except Exception as exc:
@@ -446,6 +496,7 @@ def _check_redis() -> Dict[str, Any]:
 def _check_object_storage() -> Dict[str, Any]:
     try:
         from server.storage import S3_BUCKET_NAME, S3_ENDPOINT_URL, get_s3_client
+
         client = get_s3_client()
         if not client:
             return {"ok": False, "enabled": False, "detail": "object storage disabled"}
@@ -476,7 +527,11 @@ def _collect_platform_status(include_llm: bool = False) -> Dict[str, Any]:
             llm_ok = False
             llm_error = str(exc)
 
-    ready = db_status["ok"] and redis_status["ok"] and (storage_status["ok"] or not storage_status.get("enabled", False))
+    ready = (
+        db_status["ok"]
+        and redis_status["ok"]
+        and (storage_status["ok"] or not storage_status.get("enabled", False))
+    )
     if include_llm and llm_ok is False:
         ready = False
 
@@ -493,18 +548,36 @@ def _collect_platform_status(include_llm: bool = False) -> Dict[str, Any]:
         "version": "3.0.0",
     }
 
+
 # Registry for active orchestrator instances to support HITL interaction
 RUNNING_ORCHESTRATORS: Dict[str, Any] = {}
 
 # Training data output path
-TRAINING_JSONL = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "training", "agentic_sft_data.jsonl"))
+TRAINING_JSONL = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "training", "agentic_sft_data.jsonl")
+)
 
 BUILD_STATES_ORDER = [
-    "INIT", "SPEC", "SPEC_VALIDATE", "HIERARCHY_EXPAND", "FEASIBILITY_CHECK", "CDC_ANALYZE", "VERIFICATION_PLAN", "RTL_GEN", "RTL_FIX", "VERIFICATION",
-    "FORMAL_VERIFY", "COVERAGE_CHECK", "REGRESSION",
+    "INIT",
+    "SPEC",
+    "SPEC_VALIDATE",
+    "HIERARCHY_EXPAND",
+    "FEASIBILITY_CHECK",
+    "CDC_ANALYZE",
+    "VERIFICATION_PLAN",
+    "RTL_GEN",
+    "RTL_FIX",
+    "VERIFICATION",
+    "FORMAL_VERIFY",
+    "COVERAGE_CHECK",
+    "REGRESSION",
     "SDC_GEN",
-    "FLOORPLAN", "HARDENING", "CONVERGENCE_REVIEW",
-    "ECO_PATCH", "SIGNOFF", "SUCCESS",
+    "FLOORPLAN",
+    "HARDENING",
+    "CONVERGENCE_REVIEW",
+    "ECO_PATCH",
+    "SIGNOFF",
+    "SUCCESS",
 ]
 TOTAL_STEPS = len(BUILD_STATES_ORDER)
 
@@ -558,6 +631,7 @@ def _has_any_byok_api_key(byok_config: Optional[dict]) -> bool:
             return True
     return False
 
+
 ROLE_GROUP_MAP: Dict[str, str] = {
     "fixer": "group1",
     "debugger": "group1",
@@ -583,12 +657,18 @@ PRIMARY_GROUP_FALLBACK_ROLE: Dict[str, str] = {
 def _normalize_model_name(model: str, base_url: str) -> str:
     model = (model or "").strip()
     base_url = (base_url or "").strip()
-    if base_url and model and not any(model.startswith(prefix) for prefix in _KNOWN_MODEL_PREFIXES):
+    if (
+        base_url
+        and model
+        and not any(model.startswith(prefix) for prefix in _KNOWN_MODEL_PREFIXES)
+    ):
         return f"openai/{model}"
     return model
 
 
-def _load_request_byok_config(request: Request, profile: Optional[dict]) -> tuple[Optional[dict], str]:
+def _load_request_byok_config(
+    request: Request, profile: Optional[dict]
+) -> tuple[Optional[dict], str]:
     header_key = request.headers.get("X-LLM-API-Key")
     if header_key:
         try:
@@ -607,7 +687,9 @@ def _load_request_byok_config(request: Request, profile: Optional[dict]) -> tupl
     return None, "backend_env"
 
 
-def _resolve_role_llm_details(role: str, byok_config: Optional[dict] = None) -> Dict[str, Any]:
+def _resolve_role_llm_details(
+    role: str, byok_config: Optional[dict] = None
+) -> Dict[str, Any]:
     from agentic.config import get_role_llm_config
 
     cfg = get_role_llm_config(role)
@@ -615,7 +697,10 @@ def _resolve_role_llm_details(role: str, byok_config: Optional[dict] = None) -> 
     group = (byok_config or {}).get(target_group, {}) if byok_config else {}
 
     if group.get("api_key"):
-        model = _normalize_model_name(group.get("model") or cfg.get("model", ""), group.get("base_url") or cfg.get("base_url", ""))
+        model = _normalize_model_name(
+            group.get("model") or cfg.get("model", ""),
+            group.get("base_url") or cfg.get("base_url", ""),
+        )
         result: Dict[str, Any] = {
             "role": role,
             "group": target_group,
@@ -629,21 +714,27 @@ def _resolve_role_llm_details(role: str, byok_config: Optional[dict] = None) -> 
         return result
 
     # Legacy behavior: if only a single BYOK key exists, keep it usable for all roles.
-    legacy_byok_key = (byok_config or {}).get("group1", {}).get("api_key", "") if byok_config else ""
+    legacy_byok_key = (
+        (byok_config or {}).get("group1", {}).get("api_key", "") if byok_config else ""
+    )
     result = {
         "role": role,
         "group": target_group,
         "model": cfg.get("model", ""),
         "api_key": legacy_byok_key if legacy_byok_key else cfg.get("api_key", ""),
         "base_url": cfg.get("base_url", ""),
-        "source": "Stored Profile BYOK fallback" if legacy_byok_key else "Local .env config",
+        "source": "Stored Profile BYOK fallback"
+        if legacy_byok_key
+        else "Local .env config",
     }
     if "extra_body" in cfg:
         result["extra_body"] = cfg["extra_body"]
     return result
 
 
-def _resolve_primary_llm_details(byok_config: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+def _resolve_primary_llm_details(
+    byok_config: Optional[dict] = None,
+) -> Optional[Dict[str, Any]]:
     from agentic.config import get_role_llm_config
 
     for group_name in ("group2", "group1", "group3"):
@@ -652,7 +743,10 @@ def _resolve_primary_llm_details(byok_config: Optional[dict] = None) -> Optional
             continue
         fallback_role = PRIMARY_GROUP_FALLBACK_ROLE[group_name]
         cfg = get_role_llm_config(fallback_role)
-        model = _normalize_model_name(group.get("model") or cfg.get("model", ""), group.get("base_url") or cfg.get("base_url", ""))
+        model = _normalize_model_name(
+            group.get("model") or cfg.get("model", ""),
+            group.get("base_url") or cfg.get("base_url", ""),
+        )
         result: Dict[str, Any] = {
             "group": group_name,
             "model": model or cfg.get("model", ""),
@@ -666,80 +760,127 @@ def _resolve_primary_llm_details(byok_config: Optional[dict] = None) -> Optional
     return None
 
 
-def _get_llm(byok_config: Optional[dict] = None):
+def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
+    """Get an LLM instance for chip builds.
+
+    Two paths:
+    - is_agentic_paid=True + no byok_config → use server's VERILOG_CODEGEN_CONFIG
+    - byok_config provided → use user's BYOK keys (single key for all roles)
+    """
     try:
         from crewai import LLM
     except Exception as imp_err:
         raise RuntimeError(f"Cannot import crewai.LLM: {imp_err}")
 
-    # Prefer the main build group, then fixer, then documentation if BYOK is present.
-    primary_byok = _resolve_primary_llm_details(byok_config)
-    if primary_byok:
-        llm_kwargs = dict(
-            model=primary_byok["model"],
-            api_key=primary_byok["api_key"],
-            temperature=0.6,
-            max_tokens=16384,
-        )
-        if primary_byok.get("base_url"):
-            llm_kwargs["base_url"] = primary_byok["base_url"]
-        if "extra_body" in primary_byok:
-            llm_kwargs["extra_body"] = primary_byok["extra_body"]
+    # Path 1: AgentIC-paid — use server's VERILOG_CODEGEN model
+    if is_agentic_paid and not byok_config:
+        from agentic.config import VERILOG_CODEGEN_CONFIG, VERILOG_CODEGEN_ENABLED
+
+        if not VERILOG_CODEGEN_ENABLED:
+            raise RuntimeError(
+                "AgentIC-paid builds are not enabled on this server. "
+                "Set VERILOG_CODEGEN_ENABLED=1 in your environment."
+            )
+        cfg = VERILOG_CODEGEN_CONFIG
+        model = cfg.get("model", "").strip() or "gpt-4o"
+        api_key = cfg.get("api_key", "").strip()
+        base_url = cfg.get("base_url", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "AgentIC-paid mode requires VERILOG_CODEGEN_API_KEY to be set on the server."
+            )
         try:
-            return LLM(**llm_kwargs), f"{primary_byok['model']} ({primary_byok['source']})"
-        except Exception as e:
-            raise RuntimeError(f"BYOK Compute Engine Failed: {e}")
-
-    # Fallback to existing cloud configs
-    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG, LOCAL_CONFIG, GLM_CONFIG
-
-    configs = [
-        ("ZhipuAI Compute Engine", GLM_CONFIG),
-        ("NVIDIA Compute Engine",  CLOUD_CONFIG),
-        ("Groq Compute Engine",    GROQ_CONFIG),
-        ("Local Compute Engine",   LOCAL_CONFIG),
-    ]
-
-    backend_errors: list = []
-    
-    # If legacy BYOK key acts as fallback string
-    byok_api_key = byok_config.get("group1", {}).get("api_key", "") if byok_config else ""
-    
-    for name, cfg in configs:
-        is_local = "Local" in name
-        key = byok_api_key if (byok_api_key and not is_local) else cfg.get("api_key", "")
-        if not is_local and (not cfg.get("api_key", "") or cfg.get("api_key", "").strip() in ("", "mock-key", "NA")):
-            if not (byok_api_key and ((byok_api_key.startswith("gsk_") and "Groq" in name) or (byok_api_key.startswith("nvapi-") and "NVIDIA" in name) or ("ZhipuAI" in name and not byok_api_key.startswith("gsk_") and not byok_api_key.startswith("nvapi-")))):
-                backend_errors.append(f"{name}: skipped – no API key")
-                continue
-        try:
-            model = cfg["model"]
-            model = _normalize_model_name(model, cfg.get("base_url", ""))
-
-            if byok_api_key and not is_local:
-                if byok_api_key.startswith("gsk_") and "Groq" not in name:
-                    pass
-                elif byok_api_key.startswith("nvapi-") and "NVIDIA" not in name:
-                    pass
-                else:
-                    key = byok_api_key
-
-            llm_kwargs = dict(model=model, api_key=key, temperature=0.6)
-            if cfg.get("base_url"):
-                llm_kwargs["base_url"] = cfg["base_url"]
-
+            llm_kwargs = dict(
+                model=model, api_key=api_key, temperature=0.6, max_tokens=16384
+            )
+            if base_url:
+                llm_kwargs["base_url"] = base_url
             llm = LLM(**llm_kwargs)
-            return llm, name
+            return llm, f"AgentIC ({model})"
         except Exception as e:
-            backend_errors.append(f"{name} ({cfg.get('model','?')}): {type(e).__name__}: {e}")
-            continue
+            raise RuntimeError(f"AgentIC Compute Engine Failed: {e}")
 
-    raise RuntimeError("No valid LLM backend found. " + " | ".join(backend_errors))
+    # Path 2: BYOK — use user's provided keys
+    if not byok_config:
+        raise RuntimeError(
+            "No API key configured. Select 'AgentIC Model' to use the built-in model, "
+            "or configure 'Bring Your Own Key' to use your own API keys."
+        )
+
+    # Find first available BYOK key from any group
+    byok_api_key = ""
+    byok_model = ""
+    byok_base_url = ""
+    for group_name in ("group1", "group2", "group3"):
+        group = byok_config.get(group_name, {})
+        key = group.get("api_key", "").strip()
+        if key and key not in ("NA", "mock-key", ""):
+            byok_api_key = key
+            byok_model = group.get("model", "").strip() or byok_model
+            byok_base_url = group.get("base_url", "").strip() or byok_base_url
+            break
+
+    if not byok_api_key:
+        raise RuntimeError(
+            "No valid BYOK API key found. Please configure your API keys in Workspace Settings."
+        )
+
+    model = byok_model or "gpt-4o"
+    base_url = byok_base_url.strip()
+    model = _normalize_model_name(model, base_url)
+
+    try:
+        llm_kwargs = dict(
+            model=model, api_key=byok_api_key, temperature=0.6, max_tokens=16384
+        )
+        if base_url:
+            llm_kwargs["base_url"] = base_url
+        if "deepseek" in model.lower():
+            llm_kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
+        llm = LLM(**llm_kwargs)
+        return llm, f"BYOK ({model})"
+    except Exception as e:
+        raise RuntimeError(f"BYOK Compute Engine Failed: {e}")
 
 
-def _get_role_llm_map(byok_config: Optional[dict] = None) -> Dict[str, Any]:
+def _get_role_llm_map(
+    byok_config: Optional[dict] = None, is_agentic_paid: bool = False
+) -> Dict[str, Any]:
     from crewai import LLM
-    
+
+    # When agentic-paid, use VERILOG_CODEGEN for all roles
+    if is_agentic_paid:
+        from agentic.config import VERILOG_CODEGEN_CONFIG
+
+        cfg = VERILOG_CODEGEN_CONFIG
+        model = cfg.get("model", "").strip() or "gpt-4o"
+        api_key = cfg.get("api_key", "").strip()
+        base_url = cfg.get("base_url", "").strip()
+        llm_kwargs = dict(
+            model=model, api_key=api_key, temperature=0.6, max_tokens=16384
+        )
+        if base_url:
+            llm_kwargs["base_url"] = base_url
+        shared_llm = LLM(**llm_kwargs)
+        print("\n--- 🤖 AgentIC Compute Routing Map ---", flush=True)
+        print("[Router] ALL ROLES -> AgentIC ({})".format(model), flush=True)
+        print("--------------------------------------\n", flush=True)
+        return {
+            role: shared_llm
+            for role in [
+                "architect",
+                "designer",
+                "testbench_designer",
+                "verifier",
+                "fixer",
+                "debugger",
+                "manager",
+                "physical",
+                "documenter",
+                "reporter",
+            ]
+        }
+
     roles = [
         "architect",
         "designer",
@@ -754,7 +895,7 @@ def _get_role_llm_map(byok_config: Optional[dict] = None) -> Dict[str, Any]:
     ]
     role_map = {}
     debug_log_map = {}
-    
+
     for role in roles:
         resolved = _resolve_role_llm_details(role, byok_config=byok_config)
         llm_kwargs = dict(
@@ -769,18 +910,20 @@ def _get_role_llm_map(byok_config: Optional[dict] = None) -> Dict[str, Any]:
 
         role_map[role] = LLM(**llm_kwargs)
         debug_log_map[role] = f"{resolved['model']} [{resolved['source']}]"
-        
+
     # Print the assignments so they appear in Docker logs
     print("\n--- 🤖 Backend Compute Routing Map ---", flush=True)
     for r, m in debug_log_map.items():
         print(f"[Router] {r.upper():<20} -> {m}", flush=True)
     print("--------------------------------------\n", flush=True)
-        
+
     return role_map
 
 
 @app.get("/debug/llm-routing")
-async def debug_llm_routing(request: Request, profile: dict = Depends(get_current_user)):
+async def debug_llm_routing(
+    request: Request, profile: dict = Depends(get_current_user)
+):
     byok_config, byok_source = _load_request_byok_config(request, profile)
     roles = [
         "architect",
@@ -802,7 +945,10 @@ async def debug_llm_routing(request: Request, profile: dict = Depends(get_curren
             "source": resolved["source"],
             "model": resolved["model"],
             "base_url": resolved.get("base_url", ""),
-            "has_api_key": bool((resolved.get("api_key") or "").strip() and (resolved.get("api_key") or "").strip() not in ("NA", "mock-key")),
+            "has_api_key": bool(
+                (resolved.get("api_key") or "").strip()
+                and (resolved.get("api_key") or "").strip() not in ("NA", "mock-key")
+            ),
         }
 
     return {
@@ -828,7 +974,14 @@ async def debug_llm_routing(request: Request, profile: dict = Depends(get_curren
     }
 
 
-def _emit_event(job_id: str, event_type: str, state: str, message: str, step: int = 0, extra: Optional[dict] = None):
+def _emit_event(
+    job_id: str,
+    event_type: str,
+    state: str,
+    message: str,
+    step: int = 0,
+    extra: Optional[dict] = None,
+):
     """Push a structured event into the job store."""
     if job_id not in JOB_STORE:
         return
@@ -847,7 +1000,9 @@ def _emit_event(job_id: str, event_type: str, state: str, message: str, step: in
     JOB_STORE[job_id]["current_state"] = state
 
 
-def _emit_agent_thought(job_id: str, agent_name: str, thought_type: str, content: str, state: str = ""):
+def _emit_agent_thought(
+    job_id: str, agent_name: str, thought_type: str, content: str, state: str = ""
+):
     """Emit a real-time agent thought event for the activity feed."""
     if job_id not in JOB_STORE:
         return
@@ -868,7 +1023,7 @@ def _emit_agent_thought(job_id: str, agent_name: str, thought_type: str, content
 
 def _emit_agent_thinking(job_id: str, agent_name: str, message: str, state: str = ""):
     """Emit an agent_thinking event to show a pulsing thinking indicator in the frontend.
-    
+
     This is emitted at the start of any long-running LLM call and automatically
     superseded when the next real log entry arrives.
     """
@@ -895,7 +1050,9 @@ def _emit_stage_complete(job_id: str, payload: dict):
     event = {
         **payload,
         "type": "stage_complete",
-        "step": BUILD_STATES_ORDER.index(payload.get("stage_name", "INIT")) + 1 if payload.get("stage_name") in BUILD_STATES_ORDER else 0,
+        "step": BUILD_STATES_ORDER.index(payload.get("stage_name", "INIT")) + 1
+        if payload.get("stage_name") in BUILD_STATES_ORDER
+        else 0,
         "total_steps": TOTAL_STEPS,
         "state": payload.get("stage_name", "UNKNOWN"),
         "message": f"✋ Stage {payload.get('stage_name', '')} complete — awaiting approval",
@@ -930,10 +1087,15 @@ class BuildRequest(BaseModel):
     tb_max_retries: int = 3
     tb_fallback_template: str = "uvm_lite"
     coverage_backend: str = "auto"  # From SIM_BACKEND_DEFAULT
-    coverage_fallback_policy: str = "fail_closed"  # From COVERAGE_FALLBACK_POLICY_DEFAULT
+    coverage_fallback_policy: str = (
+        "fail_closed"  # From COVERAGE_FALLBACK_POLICY_DEFAULT
+    )
     coverage_profile: str = "balanced"  # From COVERAGE_PROFILE_DEFAULT
-    human_in_loop: bool = False  # Enable human-in-the-loop approval (HITL Build page sends True)
+    human_in_loop: bool = (
+        False  # Enable human-in-the-loop approval (HITL Build page sends True)
+    )
     skip_stages: List[str] = []  # Stages to skip (from build mode selector UI)
+    plan_type: str = "byok"  # "agentic_paid" or "byok"
 
 
 class ApproveRequest(BaseModel):
@@ -961,7 +1123,11 @@ _SAFE_DESIGN_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 
 def _validate_design_name(design_name: str) -> None:
     """Raise 400 if design_name contains path-traversal characters or unsafe patterns."""
-    if not design_name or not _SAFE_DESIGN_NAME_RE.match(design_name) or ".." in design_name:
+    if (
+        not design_name
+        or not _SAFE_DESIGN_NAME_RE.match(design_name)
+        or ".." in design_name
+    ):
         raise HTTPException(status_code=400, detail="Invalid design name")
 
 
@@ -994,6 +1160,7 @@ def _docs_index() -> Dict[str, Dict[str, str]]:
         },
     }
 
+
 def _generate_and_save_build_reports(job_id: str, design_name: str):
     """Automatically generate PDF and DOCX reports summarizing the build at the end of the pipeline,
     and save them into the design's workspace directory as artifacts.
@@ -1001,11 +1168,11 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
     job = JOB_STORE.get(job_id)
     if not job:
         return
-    
+
     stages = job.get("stages", {})
     events = job.get("events", [])
     build_status = job.get("build_status", "unknown")
-    
+
     workspace_dir = os.path.join(_repo_root(), "designs", design_name)
     os.makedirs(workspace_dir, exist_ok=True)
     manifest = {
@@ -1020,7 +1187,11 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
     upload_artifact_to_cloud: Optional[Callable[[str, str], str]] = None
     storage_bucket = ""
     try:
-        from server.storage import S3_BUCKET_NAME, upload_artifact_to_cloud as upload_to_cloud
+        from server.storage import (
+            S3_BUCKET_NAME,
+            upload_artifact_to_cloud as upload_to_cloud,
+        )
+
         storage_bucket = S3_BUCKET_NAME
         upload_artifact_to_cloud = upload_to_cloud
     except Exception:
@@ -1037,11 +1208,13 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
             "cloud_url": "",
         }
         if upload_artifact_to_cloud is not None:
-            cloud_url = upload_artifact_to_cloud(local_path, f"{design_name}/{os.path.basename(local_path)}")
+            cloud_url = upload_artifact_to_cloud(
+                local_path, f"{design_name}/{os.path.basename(local_path)}"
+            )
             if cloud_url:
                 entry["cloud_url"] = cloud_url
         manifest["artifacts"].append(entry)
-    
+
     try:
         pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events)
         pdf_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.pdf")
@@ -1050,9 +1223,11 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
         _register_artifact(pdf_path)
     except Exception as e:
         logger.warning("Failed to generate auto PDF report for %s: %s", design_name, e)
-        
+
     try:
-        docx_bytes = generate_full_report_docx(stages, design_name, build_status, events)
+        docx_bytes = generate_full_report_docx(
+            stages, design_name, build_status, events
+        )
         docx_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.docx")
         with open(docx_path, "wb") as f:
             f.write(docx_bytes)
@@ -1065,7 +1240,9 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
         with open(manifest_path, "w", encoding="utf-8") as manifest_fp:
             json.dump(manifest, manifest_fp, indent=2)
         if upload_artifact_to_cloud is not None:
-            manifest_cloud_url = upload_artifact_to_cloud(manifest_path, f"{design_name}/{os.path.basename(manifest_path)}")
+            manifest_cloud_url = upload_artifact_to_cloud(
+                manifest_path, f"{design_name}/{os.path.basename(manifest_path)}"
+            )
             if manifest_cloud_url:
                 manifest["manifest_cloud_url"] = manifest_cloud_url
                 with open(manifest_path, "w", encoding="utf-8") as manifest_fp:
@@ -1083,34 +1260,11 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
 # ─── Build Runner ────────────────────────────────────────────────────
 def _run_agentic_build(job_id: str, req: BuildRequest):
     """Runs the full AgentIC build in a background thread, emitting events.
-    
+
     When human_in_loop is enabled, the orchestrator pauses after each stage
     and waits for user approval via the /approve or /reject endpoints.
     """
     try:
-        import src.agentic.config as _cfg
-        if req.api_key:
-            import json
-            try:
-                byok = json.loads(req.api_key)
-            except:
-                byok = {
-                    "group1": {"api_key": req.api_key},
-                    "group2": {"api_key": req.api_key},
-                    "group3": {"api_key": req.api_key}
-                }
-            
-            def safe_set(config_obj, grp):
-                if grp.get("api_key"): config_obj["api_key"] = grp["api_key"]
-                if grp.get("model"): config_obj["model"] = grp["model"]
-                if grp.get("base_url"): config_obj["base_url"] = grp["base_url"]
-
-            safe_set(_cfg.GLM_CONFIG, byok.get("group1", {}))
-            safe_set(_cfg.CLOUD_CONFIG, byok.get("group2", {}))
-            safe_set(_cfg.NVIDIA_CONFIG, byok.get("group2", {}))
-            safe_set(_cfg.GROQ_CONFIG, byok.get("group3", {}))
-            safe_set(_cfg.LOCAL_CONFIG, byok.get("group1", {}))
-
         from agentic.orchestrator import BuildOrchestrator, BuildState
 
         JOB_STORE[job_id]["status"] = "running"
@@ -1118,7 +1272,13 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         JOB_STORE[job_id]["waiting_approval"] = False
         JOB_STORE[job_id]["waiting_stage"] = ""
         JOB_STORE[job_id]["skip_stages"] = req.skip_stages or []
-        _emit_event(job_id, "checkpoint", "INIT", "🚀 Build started — initializing workspace", step=1)
+        _emit_event(
+            job_id,
+            "checkpoint",
+            "INIT",
+            "🚀 Build started — initializing workspace",
+            step=1,
+        )
 
         # Current agent tracker for thought events
         current_agent_state = {"name": "Orchestrator", "stage": "INIT"}
@@ -1128,7 +1288,11 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             state = event.get("state", "UNKNOWN")
             message = event.get("message", "")
             event_type = event.get("type", "log")
-            step = BUILD_STATES_ORDER.index(state) + 1 if state in BUILD_STATES_ORDER else 0
+            step = (
+                BUILD_STATES_ORDER.index(state) + 1
+                if state in BUILD_STATES_ORDER
+                else 0
+            )
             _emit_event(job_id, event_type, state, message, step=step)
 
             # Also emit as agent_thought for the live activity feed
@@ -1138,10 +1302,13 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
                 thought_type = _infer_thought_type(message)
                 _emit_agent_thought(job_id, agent_name, thought_type, message, state)
 
-        # Use smart LLM selection: Cloud first (NVIDIA → Groq) → Local fallback
+        # Resolve LLM: AgentIC-paid uses server VERILOG_CODEGEN, BYOK uses user's keys
         byok_key = JOB_STORE[job_id].get("byok_key")
-        llm, llm_name = _get_llm(byok_config=byok_key)
-        role_llms = _get_role_llm_map(byok_config=byok_key)
+        is_agentic_paid = JOB_STORE[job_id].get("plan_type") == "agentic_paid"
+        llm, llm_name = _get_llm(byok_config=byok_key, is_agentic_paid=is_agentic_paid)
+        role_llms = _get_role_llm_map(
+            byok_config=byok_key, is_agentic_paid=is_agentic_paid
+        )
         _emit_event(job_id, "checkpoint", "INIT", f"🤖 Compute engine ready", step=1)
 
         IS_HUGGINGFACE = os.environ.get("SPACE_ID") is not None
@@ -1153,7 +1320,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             llm=llm,
             max_retries=req.max_retries,
             verbose=req.show_thinking,
-            skip_openlane=forced_skip_openlane, # TEMPORARY HF MAINTENANCE OVERRIDE
+            skip_openlane=forced_skip_openlane,  # TEMPORARY HF MAINTENANCE OVERRIDE
             skip_coverage=req.skip_coverage,
             full_signoff=req.full_signoff,
             min_coverage=req.min_coverage,
@@ -1193,10 +1360,10 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         # Gather result
         if job_id in RUNNING_ORCHESTRATORS:
             del RUNNING_ORCHESTRATORS[job_id]
-            
+
         success = orchestrator.state.name == "SUCCESS"
         result = _build_result_summary(orchestrator, req.design_name, success)
-        
+
         # Generate LLM failure explanation if build failed
         if not success:
             try:
@@ -1208,15 +1375,19 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
                         last_stage = entry.state
                         break
                 error_log = get_stage_log_summary(orchestrator, last_stage)
-                explanation = generate_failure_explanation(llm, last_stage, req.design_name, error_log)
+                explanation = generate_failure_explanation(
+                    llm, last_stage, req.design_name, error_log
+                )
                 result["failure_explanation"] = explanation.get("explanation", "")
                 result["failure_suggestion"] = explanation.get("suggestion", "")
                 result["failed_stage"] = last_stage
-                result["failed_stage_human"] = STAGE_HUMAN_NAMES.get(last_stage, last_stage.replace("_", " ").title())
+                result["failed_stage_human"] = STAGE_HUMAN_NAMES.get(
+                    last_stage, last_stage.replace("_", " ").title()
+                )
             except Exception:
                 result["failure_explanation"] = ""
                 result["failure_suggestion"] = ""
-        
+
         JOB_STORE[job_id]["result"] = result
         JOB_STORE[job_id]["status"] = "done" if success else "failed"
         JOB_STORE[job_id]["build_status"] = "success" if success else "failed"
@@ -1230,14 +1401,23 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             record_build_failure(job_id)
 
         final_type = "done" if success else "error"
-        final_msg = "✅ Chip build completed successfully!" if success else "❌ Build failed. See logs for details."
-        _emit_event(job_id, final_type, orchestrator.state.name, final_msg, step=TOTAL_STEPS)
+        final_msg = (
+            "✅ Chip build completed successfully!"
+            if success
+            else "❌ Build failed. See logs for details."
+        )
+        _emit_event(
+            job_id, final_type, orchestrator.state.name, final_msg, step=TOTAL_STEPS
+        )
 
         # ── Auto-export to training JSONL ──────────────────────────
-        _export_training_record(job_id, req.design_name, req.description, result, orchestrator)
+        _export_training_record(
+            job_id, req.design_name, req.description, result, orchestrator
+        )
 
     except Exception as e:
         import traceback
+
         err = traceback.format_exc()
         JOB_STORE[job_id]["status"] = "failed"
         JOB_STORE[job_id]["build_status"] = "failed"
@@ -1250,7 +1430,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
         design_name = JOB_STORE.get(job_id, {}).get("design_name", "")
         if design_name:
             approval_manager.cleanup(design_name)
-        
+
         # ── Auto-generate final build reports as artifacts ──
         _generate_and_save_build_reports(job_id, req.design_name)
 
@@ -1258,7 +1438,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
 def _infer_agent_name(state: str, message: str) -> str:
     """Infer which agent is active from the state and message content."""
     msg_lower = message.lower()
-    
+
     if "architect" in msg_lower or "sid" in msg_lower or "decompos" in msg_lower:
         return "ArchitectModule"
     elif "self-reflect" in msg_lower or "selfreflect" in msg_lower:
@@ -1289,7 +1469,7 @@ def _infer_agent_name(state: str, message: str) -> str:
         return "SDC Agent"
     elif "convergence" in msg_lower or "eco" in msg_lower:
         return "Convergence Reviewer"
-    
+
     # Fallback by state
     state_agents = {
         "INIT": "Orchestrator",
@@ -1318,12 +1498,21 @@ def _infer_agent_name(state: str, message: str) -> str:
 def _infer_thought_type(message: str) -> str:
     """Infer the thought type from message content."""
     msg_lower = message.lower()
-    
-    if any(kw in msg_lower for kw in ["running", "executing", "calling", "invoking", "checking"]):
+
+    if any(
+        kw in msg_lower
+        for kw in ["running", "executing", "calling", "invoking", "checking"]
+    ):
         return "tool_call"
-    elif any(kw in msg_lower for kw in ["result:", "output:", "passed", "completed", "success"]):
+    elif any(
+        kw in msg_lower
+        for kw in ["result:", "output:", "passed", "completed", "success"]
+    ):
         return "tool_result"
-    elif any(kw in msg_lower for kw in ["decided", "choosing", "strategy", "pivot", "fallback"]):
+    elif any(
+        kw in msg_lower
+        for kw in ["decided", "choosing", "strategy", "pivot", "fallback"]
+    ):
         return "decision"
     elif any(kw in msg_lower for kw in ["found", "detected", "observed", "noticed"]):
         return "observation"
@@ -1359,59 +1548,81 @@ def _get_thinking_message(state_name: str, design_name: str) -> str:
 
 def _run_with_approval_gates(job_id: str, orchestrator, req, llm):
     """Run the orchestrator with approval gates after every stage.
-    
+
     This replaces orchestrator.run() when human_in_loop is enabled.
     After each stage completes, it generates a summary, emits stage_complete,
     and blocks until the user approves or rejects.
     """
     from agentic.orchestrator import BuildState
-    
+
     design_name = req.design_name
     skip_stages = set(req.skip_stages or [])
     orchestrator.log(f"Build started for '{orchestrator.name}'", refined=True)
-    
+
     try:
-        while orchestrator.state != BuildState.SUCCESS and orchestrator.state != BuildState.FAIL:
+        while (
+            orchestrator.state != BuildState.SUCCESS
+            and orchestrator.state != BuildState.FAIL
+        ):
             orchestrator.global_step_count += 1
             if orchestrator.global_step_count > orchestrator.global_step_budget:
-                orchestrator.log(f"Global step budget exceeded ({orchestrator.global_step_budget}). Failing closed.", refined=True)
+                orchestrator.log(
+                    f"Global step budget exceeded ({orchestrator.global_step_budget}). Failing closed.",
+                    refined=True,
+                )
                 orchestrator.state = BuildState.FAIL
                 break
-            
+
             # Check for cancellation
             if JOB_STORE.get(job_id, {}).get("cancelled"):
                 orchestrator.state = BuildState.FAIL
                 break
-            
+
             current_state_name = orchestrator.state.name
-            
+
             # Auto-skip stages that the user opted out of
             if current_state_name in skip_stages:
-                _emit_event(job_id, "log", current_state_name, 
-                    f"Skipping {current_state_name.replace('_', ' ').title()} (user preference)", 
-                    step=BUILD_STATES_ORDER.index(current_state_name) + 1 if current_state_name in BUILD_STATES_ORDER else 0)
+                _emit_event(
+                    job_id,
+                    "log",
+                    current_state_name,
+                    f"Skipping {current_state_name.replace('_', ' ').title()} (user preference)",
+                    step=BUILD_STATES_ORDER.index(current_state_name) + 1
+                    if current_state_name in BUILD_STATES_ORDER
+                    else 0,
+                )
                 next_st = get_next_stage(current_state_name)
                 if next_st and hasattr(BuildState, next_st):
                     orchestrator.transition(getattr(BuildState, next_st))
                 else:
                     orchestrator.state = BuildState.SUCCESS
                 continue
-            
+
             # Check for user feedback from previous rejection
             feedback = approval_manager.get_pending_feedback(design_name)
             if feedback:
-                _emit_agent_thought(job_id, "Orchestrator", "observation", 
-                    f"User feedback from review: {feedback}. Taking this into account before proceeding.", 
-                    current_state_name)
+                _emit_agent_thought(
+                    job_id,
+                    "Orchestrator",
+                    "observation",
+                    f"User feedback from review: {feedback}. Taking this into account before proceeding.",
+                    current_state_name,
+                )
                 # Inject feedback into the orchestrator's context
-                orchestrator.log(f"User feedback from review: {feedback}. Take this into account before proceeding.", refined=True)
-            
+                orchestrator.log(
+                    f"User feedback from review: {feedback}. Take this into account before proceeding.",
+                    refined=True,
+                )
+
             # Emit thinking indicator before stage execution
             agent_name = _infer_agent_name(current_state_name, "")
-            _emit_agent_thinking(job_id, agent_name, 
-                _get_thinking_message(current_state_name, orchestrator.name), 
-                current_state_name)
-            
+            _emit_agent_thinking(
+                job_id,
+                agent_name,
+                _get_thinking_message(current_state_name, orchestrator.name),
+                current_state_name,
+            )
+
             # Execute the current stage
             prev_state = orchestrator.state
             _execute_stage(orchestrator, current_state_name)
@@ -1429,45 +1640,64 @@ def _run_with_approval_gates(job_id: str, orchestrator, req, llm):
                     message="Your description was brief — here are 3 expert design interpretations:",
                     extra={
                         "options": options,
-                        "auto_selected": orchestrator.artifacts.get("elaborated_desc", ""),
-                    }
+                        "auto_selected": orchestrator.artifacts.get(
+                            "elaborated_desc", ""
+                        ),
+                    },
                 )
                 # Clear the flag so we don't re-emit on the retry
                 orchestrator.artifacts.pop("spec_elaboration_needed", None)
 
             # If the stage transitioned to a new state, the stage completed successfully
             # Generate approval card and wait
-            if new_state != prev_state or new_state in (BuildState.SUCCESS, BuildState.FAIL):
+            if new_state != prev_state or new_state in (
+                BuildState.SUCCESS,
+                BuildState.FAIL,
+            ):
                 completed_stage = current_state_name
-                
+
                 # Don't wait for approval on terminal states
                 if new_state in (BuildState.SUCCESS, BuildState.FAIL):
                     # Still emit stage_complete for the last stage before terminal
                     if completed_stage not in ("SUCCESS", "FAIL"):
-                        _emit_stage_summary(job_id, orchestrator, completed_stage, design_name, llm, wait=False)
+                        _emit_stage_summary(
+                            job_id,
+                            orchestrator,
+                            completed_stage,
+                            design_name,
+                            llm,
+                            wait=False,
+                        )
                     break
-                
+
                 # Generate and emit stage_complete, then wait for approval
-                approved = _emit_stage_summary(job_id, orchestrator, completed_stage, design_name, llm, wait=True)
-                
+                approved = _emit_stage_summary(
+                    job_id, orchestrator, completed_stage, design_name, llm, wait=True
+                )
+
                 if not approved:
                     # User rejected — loop back to retry the CURRENT state
                     # Reset state back to the completed stage so the next loop iteration
                     # actually reruns it with the stored rejection feedback.
-                    _emit_agent_thought(job_id, "Orchestrator", "decision", 
-                        f"Stage {completed_stage} rejected by user. Retrying...", 
-                        new_state.name)
+                    _emit_agent_thought(
+                        job_id,
+                        "Orchestrator",
+                        "decision",
+                        f"Stage {completed_stage} rejected by user. Retrying...",
+                        new_state.name,
+                    )
                     orchestrator.state = prev_state
                     continue
             else:
                 # State didn't change — this can happen for retry loops within a stage
                 # Don't emit approval for internal retries
                 continue
-                
+
     except Exception as e:
         orchestrator.log(f"CRITICAL ERROR: {str(e)}", refined=False)
         import traceback
         from rich.console import Console
+
         Console().print(traceback.format_exc())
         orchestrator.state = BuildState.FAIL
 
@@ -1478,22 +1708,30 @@ def _run_with_approval_gates(job_id: str, orchestrator, req, llm):
             orchestrator.log(f"Benchmark metrics export warning: {e}", refined=True)
         from rich.console import Console
         from rich.panel import Panel
-        summary = {k: v for k, v in orchestrator.artifacts.items() if 'code' not in k and 'spec' not in k}
-        Console().print(Panel(
-            f"[bold green]BUILD SUCCESSFUL[/]\n\n" + 
-            "\n".join([f"[bold]{k.upper()}:[/] {v}" for k, v in summary.items()]),
-            title="Done"
-        ))
+
+        summary = {
+            k: v
+            for k, v in orchestrator.artifacts.items()
+            if "code" not in k and "spec" not in k
+        }
+        Console().print(
+            Panel(
+                f"[bold green]BUILD SUCCESSFUL[/]\n\n"
+                + "\n".join([f"[bold]{k.upper()}:[/] {v}" for k, v in summary.items()]),
+                title="Done",
+            )
+        )
     else:
         from rich.console import Console
         from rich.panel import Panel
+
         Console().print(Panel(f"[bold red]BUILD FAILED[/]", title="Failed"))
 
 
 def _execute_stage(orchestrator, state_name: str):
     """Execute a single orchestrator stage by name."""
     from agentic.orchestrator import BuildState
-    
+
     stage_handlers = {
         "INIT": orchestrator.do_init,
         "SPEC": orchestrator.do_spec,
@@ -1515,7 +1753,7 @@ def _execute_stage(orchestrator, state_name: str):
         "ECO_PATCH": orchestrator.do_eco_patch,
         "SIGNOFF": orchestrator.do_signoff,
     }
-    
+
     handler = stage_handlers.get(state_name)
     if handler:
         handler()
@@ -1524,17 +1762,23 @@ def _execute_stage(orchestrator, state_name: str):
         orchestrator.state = BuildState.FAIL
 
 
-def _emit_stage_summary(job_id: str, orchestrator, stage_name: str, design_name: str, llm, wait: bool = True) -> bool:
+def _emit_stage_summary(
+    job_id: str, orchestrator, stage_name: str, design_name: str, llm, wait: bool = True
+) -> bool:
     """Generate stage summary, emit stage_complete event, and optionally wait for approval.
-    
+
     Returns True if approved (or not waiting), False if rejected.
     """
     # Emit thinking indicator while generating summary
-    _emit_agent_thinking(job_id, "Orchestrator", "Preparing stage summary...", stage_name)
-    
+    _emit_agent_thinking(
+        job_id, "Orchestrator", "Preparing stage summary...", stage_name
+    )
+
     # Build the stage_complete payload with LLM summary
     try:
-        payload = build_stage_complete_payload(orchestrator, stage_name, design_name, llm)
+        payload = build_stage_complete_payload(
+            orchestrator, stage_name, design_name, llm
+        )
     except Exception as e:
         payload = {
             "type": "stage_complete",
@@ -1544,34 +1788,41 @@ def _emit_stage_summary(job_id: str, orchestrator, stage_name: str, design_name:
             "decisions": [],
             "warnings": [],
             "next_stage_name": get_next_stage(stage_name) or "DONE",
-            "next_stage_preview": STAGE_DESCRIPTIONS.get(get_next_stage(stage_name) or "", ""),
+            "next_stage_preview": STAGE_DESCRIPTIONS.get(
+                get_next_stage(stage_name) or "", ""
+            ),
             "timestamp": time.time(),
         }
-    
+
     if wait:
         # Create approval gate FIRST so that stream API `is_live_waiting` evaluates true immediately
         approval_manager.create_gate(design_name, stage_name)
-        
+
     # Emit the stage_complete event
     _emit_stage_complete(job_id, payload)
-    
+
     if not wait:
         return True
-    
+
     # Wait for frontend approval signal via the gate
     gate = approval_manager.wait_for_approval(design_name, stage_name, timeout=7200.0)
-    
+
     JOB_STORE[job_id]["waiting_approval"] = False
     JOB_STORE[job_id]["waiting_stage"] = ""
-    
+
     if gate.approved:
         return True
     elif gate.rejected:
         return False
     else:
         # Timeout — treat as approved to not block indefinitely
-        _emit_agent_thought(job_id, "Orchestrator", "observation", 
-            f"⏰ Approval timeout for {stage_name}. Auto-proceeding.", stage_name)
+        _emit_agent_thought(
+            job_id,
+            "Orchestrator",
+            "observation",
+            f"⏰ Approval timeout for {stage_name}. Auto-proceeding.",
+            stage_name,
+        )
         return True
 
 
@@ -1583,11 +1834,19 @@ def _build_result_summary(orchestrator, design_name: str, success: bool) -> dict
     # Self-healing telemetry (derived from build history + artifacts)
     lower_msgs = [h.message.lower() for h in history]
     self_heal_stats = {
-        "stage_exception_count": sum("stage " in m and "exception" in m for m in lower_msgs),
+        "stage_exception_count": sum(
+            "stage " in m and "exception" in m for m in lower_msgs
+        ),
         "formal_regen_count": int(artifacts.get("formal_regen_count", 0) or 0),
-        "coverage_best_restore_count": sum("restoring best testbench" in m for m in lower_msgs),
-        "coverage_regression_reject_count": sum("tb regressed coverage" in m for m in lower_msgs),
-        "deterministic_tb_fallback_count": sum("deterministic tb fallback" in m for m in lower_msgs),
+        "coverage_best_restore_count": sum(
+            "restoring best testbench" in m for m in lower_msgs
+        ),
+        "coverage_regression_reject_count": sum(
+            "tb regressed coverage" in m for m in lower_msgs
+        ),
+        "deterministic_tb_fallback_count": sum(
+            "deterministic tb fallback" in m for m in lower_msgs
+        ),
     }
 
     summary = {
@@ -1595,29 +1854,42 @@ def _build_result_summary(orchestrator, design_name: str, success: bool) -> dict
         "design_name": design_name,
         "spec": (artifacts.get("spec") or "")[:2000],
         "rtl_snippet": (artifacts.get("rtl_code") or "")[:1500],
-        "paths": {k: v for k, v in artifacts.items() if isinstance(v, str) and os.path.exists(v)},
+        "paths": {
+            k: v
+            for k, v in artifacts.items()
+            if isinstance(v, str) and os.path.exists(v)
+        },
         "coverage": artifacts.get("coverage", {}),
         "formal_result": artifacts.get("formal_result", ""),
         "signoff_result": artifacts.get("signoff_result", ""),
         "convergence_history": [
-            {"iteration": s.iteration, "wns": s.wns, "tns": s.tns,
-             "congestion": s.congestion, "area_um2": s.area_um2, "power_w": s.power_w}
+            {
+                "iteration": s.iteration,
+                "wns": s.wns,
+                "tns": s.tns,
+                "congestion": s.congestion,
+                "area_um2": s.area_um2,
+                "power_w": s.power_w,
+            }
             for s in (orchestrator.convergence_history or [])
         ],
         "self_heal": self_heal_stats,
         "total_steps": len(history),
         "strategy": orchestrator.strategy.value if orchestrator.strategy else "",
-        "build_time_s": int(time.time()) - (history[0].timestamp if history else int(time.time())),
+        "build_time_s": int(time.time())
+        - (history[0].timestamp if history else int(time.time())),
     }
 
     # Try to read OpenLane metrics using the resolved runtime workspace root.
     from agentic.config import OPENLANE_ROOT
+
     openlane_root = OPENLANE_ROOT
     runs_dir = os.path.join(openlane_root, "designs", design_name, "runs")
     if os.path.exists(runs_dir):
         runs = sorted(os.listdir(runs_dir), reverse=True)
         if runs:
             import csv
+
             metrics_file = os.path.join(runs_dir, runs[0], "reports", "metrics.csv")
             if os.path.exists(metrics_file):
                 try:
@@ -1639,15 +1911,19 @@ def _build_result_summary(orchestrator, design_name: str, success: bool) -> dict
 
 def _calc_power(row: dict) -> str:
     try:
-        pw = (float(row.get("power_typical_internal_uW", 0)) +
-              float(row.get("power_typical_switching_uW", 0)) +
-              float(row.get("power_typical_leakage_uW", 0)))
+        pw = (
+            float(row.get("power_typical_internal_uW", 0))
+            + float(row.get("power_typical_switching_uW", 0))
+            + float(row.get("power_typical_leakage_uW", 0))
+        )
         return f"{pw / 1000:.3f} mW"
     except Exception:
         return "N/A"
 
 
-def _export_training_record(job_id: str, design_name: str, description: str, result: dict, orchestrator):
+def _export_training_record(
+    job_id: str, design_name: str, description: str, result: dict, orchestrator
+):
     """Append a completed build as a JSONL record for local model training.
 
     Format is SFT-compatible: one JSON object per line with
@@ -1657,9 +1933,7 @@ def _export_training_record(job_id: str, design_name: str, description: str, res
     try:
         os.makedirs(os.path.dirname(TRAINING_JSONL), exist_ok=True)
         history = orchestrator.build_history or []
-        log_text = "\n".join(
-            f"[{h.state}] {h.message}" for h in history
-        )[:8000]
+        log_text = "\n".join(f"[{h.state}] {h.message}" for h in history)[:8000]
 
         record = {
             "job_id": job_id,
@@ -1681,9 +1955,8 @@ def _export_training_record(job_id: str, design_name: str, description: str, res
         pass  # Never let export errors affect the build result
 
 
-
-
 # ─── Routes ──────────────────────────────────────────────────────────
+
 
 @app.get("/")
 def read_root():
@@ -1712,15 +1985,19 @@ def readyz():
 @app.get("/health")
 def health_check():
     """Deep health probe including infrastructure and LLM reachability."""
-    from agentic.config import CLOUD_CONFIG, GROQ_CONFIG
+    from agentic.config import VERILOG_CODEGEN_CONFIG, VERILOG_CODEGEN_ENABLED
 
     status = _collect_platform_status(include_llm=True)
-    status.update({
-        "cloud_key_set": bool(CLOUD_CONFIG.get("api_key", "").strip()),
-        "cloud_model": CLOUD_CONFIG.get("model", ""),
-        "groq_key_set": bool(GROQ_CONFIG.get("api_key", "").strip()),
-        "groq_model": GROQ_CONFIG.get("model", ""),
-    })
+    status.update(
+        {
+            "verilog_codegen_enabled": VERILOG_CODEGEN_ENABLED,
+            "verilog_codegen_key_set": bool(
+                VERILOG_CODEGEN_CONFIG.get("api_key", "").strip()
+            ),
+            "verilog_codegen_model": VERILOG_CODEGEN_CONFIG.get("model", ""),
+            "verilog_codegen_base_url": VERILOG_CODEGEN_CONFIG.get("base_url", ""),
+        }
+    )
     return status
 
 
@@ -1780,7 +2057,10 @@ def export_jobs_backup(profile: dict = Depends(get_current_user)):
 @app.get("/pipeline/schema")
 def get_pipeline_schema():
     """Canonical pipeline schema for frontend timeline rendering."""
-    stages = [{"state": s, **STAGE_META.get(s, {"label": s, "icon": "•"})} for s in BUILD_STATES_ORDER]
+    stages = [
+        {"state": s, **STAGE_META.get(s, {"label": s, "icon": "•"})}
+        for s in BUILD_STATES_ORDER
+    ]
     return {
         "stages": stages,
         "terminal_states": ["SUCCESS", "FAIL"],
@@ -1797,37 +2077,134 @@ def get_build_options_contract():
             {
                 "name": "Core",
                 "options": [
-                    {"key": "strict_gates", "type": "boolean", "default": True, "description": "Enable strict gate enforcement with bounded self-healing."},
-                    {"key": "full_signoff", "type": "boolean", "default": False, "description": "Run full physical signoff checks when available."},
-                    {"key": "skip_openlane", "type": "boolean", "default": False, "description": "Skip physical implementation stages for faster RTL-only iteration."},
-                    {"key": "skip_coverage", "type": "boolean", "default": False, "description": "Skip the coverage stage and continue from formal verification to regression."},
-                    {"key": "max_retries", "type": "int", "default": 5, "min": 1, "max": 12, "description": "Max repair retries per stage."},
+                    {
+                        "key": "strict_gates",
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Enable strict gate enforcement with bounded self-healing.",
+                    },
+                    {
+                        "key": "full_signoff",
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Run full physical signoff checks when available.",
+                    },
+                    {
+                        "key": "skip_openlane",
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Skip physical implementation stages for faster RTL-only iteration.",
+                    },
+                    {
+                        "key": "skip_coverage",
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Skip the coverage stage and continue from formal verification to regression.",
+                    },
+                    {
+                        "key": "max_retries",
+                        "type": "int",
+                        "default": 5,
+                        "min": 1,
+                        "max": 12,
+                        "description": "Max repair retries per stage.",
+                    },
                 ],
             },
             {
                 "name": "Coverage",
                 "options": [
-                    {"key": "min_coverage", "type": "float", "default": 80.0, "min": 0.0, "max": 100.0, "description": "Minimum line coverage threshold."},
-                    {"key": "coverage_profile", "type": "enum", "default": "balanced", "values": ["balanced", "aggressive", "relaxed"], "description": "Profile-based line/branch/toggle/function thresholds."},
-                    {"key": "coverage_backend", "type": "enum", "default": "auto", "values": ["auto", "verilator", "iverilog"], "description": "Coverage simulator backend selection."},
-                    {"key": "coverage_fallback_policy", "type": "enum", "default": "fail_closed", "values": ["fail_closed", "fallback_oss", "skip"], "description": "Behavior when coverage infra fails."},
+                    {
+                        "key": "min_coverage",
+                        "type": "float",
+                        "default": 80.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "description": "Minimum line coverage threshold.",
+                    },
+                    {
+                        "key": "coverage_profile",
+                        "type": "enum",
+                        "default": "balanced",
+                        "values": ["balanced", "aggressive", "relaxed"],
+                        "description": "Profile-based line/branch/toggle/function thresholds.",
+                    },
+                    {
+                        "key": "coverage_backend",
+                        "type": "enum",
+                        "default": "auto",
+                        "values": ["auto", "verilator", "iverilog"],
+                        "description": "Coverage simulator backend selection.",
+                    },
+                    {
+                        "key": "coverage_fallback_policy",
+                        "type": "enum",
+                        "default": "fail_closed",
+                        "values": ["fail_closed", "fallback_oss", "skip"],
+                        "description": "Behavior when coverage infra fails.",
+                    },
                 ],
             },
             {
                 "name": "Verification",
                 "options": [
-                    {"key": "tb_gate_mode", "type": "enum", "default": "strict", "values": ["strict", "relaxed"], "description": "TB compile/static gate mode."},
-                    {"key": "tb_max_retries", "type": "int", "default": 3, "min": 1, "max": 10, "description": "TB-specific retry budget."},
-                    {"key": "tb_fallback_template", "type": "enum", "default": "uvm_lite", "values": ["uvm_lite", "classic"], "description": "Deterministic fallback testbench template."},
+                    {
+                        "key": "tb_gate_mode",
+                        "type": "enum",
+                        "default": "strict",
+                        "values": ["strict", "relaxed"],
+                        "description": "TB compile/static gate mode.",
+                    },
+                    {
+                        "key": "tb_max_retries",
+                        "type": "int",
+                        "default": 3,
+                        "min": 1,
+                        "max": 10,
+                        "description": "TB-specific retry budget.",
+                    },
+                    {
+                        "key": "tb_fallback_template",
+                        "type": "enum",
+                        "default": "uvm_lite",
+                        "values": ["uvm_lite", "classic"],
+                        "description": "Deterministic fallback testbench template.",
+                    },
                 ],
             },
             {
                 "name": "Physical",
                 "options": [
-                    {"key": "pdk_profile", "type": "enum", "default": "sky130", "values": ["sky130", "gf180"], "description": "OSS PDK profile."},
-                    {"key": "max_pivots", "type": "int", "default": 2, "min": 0, "max": 6, "description": "Convergence strategy pivot budget."},
-                    {"key": "congestion_threshold", "type": "float", "default": 10.0, "min": 0.0, "max": 100.0, "description": "Congestion threshold for convergence review."},
-                    {"key": "hierarchical", "type": "enum", "default": "auto", "values": ["auto", "on", "off"], "description": "Hierarchy planner mode."},
+                    {
+                        "key": "pdk_profile",
+                        "type": "enum",
+                        "default": "sky130",
+                        "values": ["sky130", "gf180"],
+                        "description": "OSS PDK profile.",
+                    },
+                    {
+                        "key": "max_pivots",
+                        "type": "int",
+                        "default": 2,
+                        "min": 0,
+                        "max": 6,
+                        "description": "Convergence strategy pivot budget.",
+                    },
+                    {
+                        "key": "congestion_threshold",
+                        "type": "float",
+                        "default": 10.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "description": "Congestion threshold for convergence review.",
+                    },
+                    {
+                        "key": "hierarchical",
+                        "type": "enum",
+                        "default": "auto",
+                        "values": ["auto", "on", "off"],
+                        "description": "Hierarchy planner mode.",
+                    },
                 ],
             },
         ]
@@ -1842,12 +2219,14 @@ def get_docs_index():
     for doc_id, meta in docs.items():
         path = meta.get("path", "")
         if os.path.exists(path):
-            items.append({
-                "id": doc_id,
-                "title": meta.get("title", doc_id),
-                "section": meta.get("section", "General"),
-                "summary": meta.get("summary", ""),
-            })
+            items.append(
+                {
+                    "id": doc_id,
+                    "title": meta.get("title", doc_id),
+                    "section": meta.get("section", "General"),
+                    "summary": meta.get("summary", ""),
+                }
+            )
     return {"docs": items}
 
 
@@ -1879,10 +2258,14 @@ def get_doc_content(doc_id: str):
 
 @app.post("/build")
 @limiter.limit("5/minute")
-async def trigger_build(req: BuildRequest, request: Request, profile: dict = Depends(get_current_user)):
+async def trigger_build(
+    req: BuildRequest, request: Request, profile: dict = Depends(get_current_user)
+):
     """Start a new chip build. Returns job_id immediately.
 
-    When auth is enabled, checks plan quota and uses BYOK key if applicable.
+    Routing:
+    - plan_type="agentic_paid" → use server's VERILOG_CODEGEN model
+    - plan_type="byok" → use user's BYOK keys from request body or Supabase profile
     """
     header_key = request.headers.get("X-LLM-API-Key")
     if header_key:
@@ -1890,32 +2273,28 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
 
     # ── Auth guard: check plan + build count ──
     check_build_allowed(profile)
-    byok_key = get_byok_config_for_user(profile)
 
-    # Allow header explicitly over backend profile key for public clouds mapped correctly
+    # ── Resolve BYOK key and plan type ──
+    byok_key = None
+    is_agentic_paid = req.plan_type == "agentic_paid"
+
+    # Priority: req.api_key (JSON or plain string) > Supabase stored BYOK > None
     if req.api_key:
         try:
-            import json
             byok_key = json.loads(req.api_key)
         except json.JSONDecodeError:
             byok_key = {
                 "group1": {"api_key": req.api_key},
                 "group2": {"api_key": req.api_key},
-                "group3": {"api_key": req.api_key}
+                "group3": {"api_key": req.api_key},
             }
-
-    if not ALLOW_BACKEND_LLM_FALLBACK and not _has_any_byok_api_key(byok_key):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This deployment requires BYOK for builds. Add an X-LLM-API-Key header "
-                "or configure BYOK in Workspace Settings. Server-side fallback keys are disabled."
-            ),
-        )
+    elif not is_agentic_paid:
+        # Fall back to Supabase-stored BYOK for BYOK plan users
+        byok_key = get_byok_config_for_user(profile)
 
     # ── LLM pre-flight: fail fast with a clear message ──
     try:
-        _get_llm(byok_config=byok_key)
+        _get_llm(byok_config=byok_key, is_agentic_paid=is_agentic_paid)
     except RuntimeError as e:
         raise HTTPException(
             status_code=503,
@@ -1924,13 +2303,14 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
 
     # Sanitize design name — Verilog identifiers cannot start with a digit
     import re as _re
+
     design_name = req.design_name.strip().lower()
-    design_name = _re.sub(r'[^a-z0-9_]', '_', design_name)  # keep only safe chars
-    design_name = design_name.strip('_')
-    design_name = _re.sub(r'_+', '_', design_name)           # collapse doubles
+    design_name = _re.sub(r"[^a-z0-9_]", "_", design_name)  # keep only safe chars
+    design_name = design_name.strip("_")
+    design_name = _re.sub(r"_+", "_", design_name)  # collapse doubles
     if design_name and design_name[0].isdigit():
-        design_name = 'chip_' + design_name                  # e.g. chip_8bit_risc_cpu
-    if not design_name or '..' in design_name or '/' in design_name:
+        design_name = "chip_" + design_name  # e.g. chip_8bit_risc_cpu
+    if not design_name or ".." in design_name or "/" in design_name:
         raise HTTPException(status_code=400, detail="Invalid design name")
 
     job_id = str(uuid.uuid4())
@@ -1946,8 +2326,9 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
         "created_at": int(time.time()),
         "user_profile": profile,
         "byok_key": byok_key,
+        "plan_type": req.plan_type,
         "human_in_loop": bool(req.human_in_loop),
-        "stages": {},          # stage_name -> stage_complete payload
+        "stages": {},  # stage_name -> stage_complete payload
         "build_status": "running",
     }
     BUILDS_STARTED_TOTAL.inc()
@@ -1962,12 +2343,13 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
     if use_celery:
         try:
             from .tasks import run_agentic_build_task
+
             logger.info(f"Sending job {job_id} to distributed Celery worker queue.")
             # We dump the pydantic model to a dict so Celery/Redis can serialize it
             run_agentic_build_task.apply_async(args=[job_id, req.dict()])
         except ImportError:
             use_celery = False
-            
+
     if not use_celery:
         thread = threading.Thread(
             target=_run_agentic_build,
@@ -1980,22 +2362,26 @@ async def trigger_build(req: BuildRequest, request: Request, profile: dict = Dep
 
 
 @app.post("/build/elaborate")
-async def elaborate_build(req: BuildElaborateRequest, user: dict = Depends(get_current_user)):
+async def elaborate_build(
+    req: BuildElaborateRequest, user: dict = Depends(get_current_user)
+):
     """Inject a user choice into a waiting orchestrator (HITL Elaboration)."""
     job_id = req.job_id
     if job_id not in RUNNING_ORCHESTRATORS:
-        raise HTTPException(status_code=404, detail="Active build not found or not in elaboration state")
-    
+        raise HTTPException(
+            status_code=404, detail="Active build not found or not in elaboration state"
+        )
+
     orch = RUNNING_ORCHESTRATORS[job_id]
-    orch.artifacts['spec_elaboration_choice'] = req.choice
-    
+    orch.artifacts["spec_elaboration_choice"] = req.choice
+
     return {"status": "success", "message": f"Choice '{req.choice}' injected"}
 
 
 @app.get("/build/status/{job_id}")
 def get_build_status(job_id: str):
     """Poll current build status and all events so far."""
-    _pull_job_from_db(job_id) # Ensure API stays synced with Worker
+    _pull_job_from_db(job_id)  # Ensure API stays synced with Worker
     if job_id not in JOB_STORE:
         raise HTTPException(status_code=404, detail="Job not found")
     job = JOB_STORE[job_id]
@@ -2007,21 +2393,24 @@ def get_build_status(job_id: str):
         "events": job["events"],
         "event_count": len(job["events"]),
     }
-    
+
     # If the build is actively waiting for an elaboration choice, attach the options
     if job_id in RUNNING_ORCHESTRATORS:
         orch = RUNNING_ORCHESTRATORS[job_id]
-        if orch.artifacts.get('waiting_for_elaboration') and 'spec_elaboration_options' in orch.artifacts:
+        if (
+            orch.artifacts.get("waiting_for_elaboration")
+            and "spec_elaboration_options" in orch.artifacts
+        ):
             resp["waiting_for_elaboration"] = True
-            resp["elaboration_options"] = orch.artifacts['spec_elaboration_options']
-            
+            resp["elaboration_options"] = orch.artifacts["spec_elaboration_options"]
+
     return resp
 
 
 @app.get("/build/stream/{job_id}")
 async def stream_build_events(job_id: str):
     """SSE endpoint — streams live build events as they are emitted."""
-    _pull_job_from_db(job_id) # Prime memory
+    _pull_job_from_db(job_id)  # Prime memory
     if job_id not in JOB_STORE:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -2032,7 +2421,7 @@ async def stream_build_events(job_id: str):
         elaboration_sent = False
         STALL_TIMEOUT = 300  # 5 minutes of silence → stall warning
         # Send a ping immediately so the browser knows the connection is alive
-        yield "data: {\"type\": \"ping\", \"message\": \"connected\"}\n\n"
+        yield 'data: {"type": "ping", "message": "connected"}\n\n'
 
         while True:
             _pull_job_from_db(job_id)
@@ -2045,12 +2434,13 @@ async def stream_build_events(job_id: str):
             while sent_index < len(events):
                 event = events[sent_index]
                 event_copy = dict(event)
-                
-                # If this stage_complete event happens to be the one we are CURRENTLY waiting on, 
+
+                # If this stage_complete event happens to be the one we are CURRENTLY waiting on,
                 # flag it so the frontend doesn't pop up ghost approvals for past stages.
                 if event_copy.get("type") == "stage_complete":
                     is_live_waiting = any(
-                        w["design_name"] == job["design_name"] and w["stage"] == event_copy.get("state") 
+                        w["design_name"] == job["design_name"]
+                        and w["stage"] == event_copy.get("state")
                         for w in waiting_stages
                     )
                     event_copy["is_live_waiting"] = is_live_waiting
@@ -2061,7 +2451,9 @@ async def stream_build_events(job_id: str):
                 stall_warned = False  # new event arrived — reset warning
 
             # Stop streaming when done, failed, or cancelled
-            if job["status"] in ("done", "failed", "cancelled") and sent_index >= len(events):
+            if job["status"] in ("done", "failed", "cancelled") and sent_index >= len(
+                events
+            ):
                 yield f"data: {json.dumps({'type': 'stream_end', 'status': job['status']})}\n\n"
                 break
 
@@ -2069,11 +2461,14 @@ async def stream_build_events(job_id: str):
             # We track this locally so we don't spam the stream every 0.4s
             if job_id in RUNNING_ORCHESTRATORS:
                 orch = RUNNING_ORCHESTRATORS[job_id]
-                if orch.artifacts.get('waiting_for_elaboration') and 'spec_elaboration_options' in orch.artifacts:
+                if (
+                    orch.artifacts.get("waiting_for_elaboration")
+                    and "spec_elaboration_options" in orch.artifacts
+                ):
                     if not elaboration_sent:
                         waiting_event = {
                             "type": "elaboration_waiting",
-                            "options": orch.artifacts['spec_elaboration_options'],
+                            "options": orch.artifacts["spec_elaboration_options"],
                             "message": "Waiting for architectural choice...",
                             "timestamp": int(time.time()),
                         }
@@ -2141,10 +2536,19 @@ def cancel_build(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     job = JOB_STORE[job_id]
     if job["status"] not in ("queued", "running"):
-        return {"ok": False, "message": f"Job already in terminal state: {job['status']}"}
+        return {
+            "ok": False,
+            "message": f"Job already in terminal state: {job['status']}",
+        }
     JOB_STORE[job_id]["cancelled"] = True
     JOB_STORE[job_id]["status"] = "cancelling"
-    _emit_event(job_id, "log", job["current_state"], "🛑 Cancellation requested — stopping after current step…", step=0)
+    _emit_event(
+        job_id,
+        "log",
+        job["current_state"],
+        "🛑 Cancellation requested — stopping after current step…",
+        step=0,
+    )
     return {"ok": True, "message": "Cancellation requested"}
 
 
@@ -2172,7 +2576,12 @@ def list_designs(profile: dict = Depends(get_current_user)):
 
     designs = sorted(
         design_map.values(),
-        key=lambda item: (item["has_gds"], item["last_build_at"], item["build_count"], item["name"]),
+        key=lambda item: (
+            item["has_gds"],
+            item["last_build_at"],
+            item["build_count"],
+            item["name"],
+        ),
         reverse=True,
     )
     return {"designs": designs}
@@ -2183,6 +2592,7 @@ def get_metrics(design_name: str):
     """Return latest OpenLane metrics for a design."""
     _validate_design_name(design_name)
     from agentic.config import OPENLANE_ROOT
+
     des_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
     runs_dir = os.path.join(des_dir, "runs")
 
@@ -2199,6 +2609,7 @@ def get_metrics(design_name: str):
 
     try:
         import csv
+
         with open(metrics_file) as f:
             rows = list(csv.DictReader(f))
         if not rows:
@@ -2221,6 +2632,7 @@ def get_signoff_report(design_name: str):
     _validate_design_name(design_name)
     try:
         from agentic.tools.vlsi_tools import check_physical_metrics
+
         metrics, report = check_physical_metrics(design_name)
         return {"success": metrics is not None, "report": report}
     except Exception as e:
@@ -2229,13 +2641,20 @@ def get_signoff_report(design_name: str):
 
 # ─── Human-in-the-Loop Approval Endpoints ───────────────────────────
 
+
 @app.post("/approve")
 def approve_stage(req: ApproveRequest):
     """Approve the current stage and allow the pipeline to proceed."""
     ok = approval_manager.approve(req.design_name, req.stage)
     if not ok:
-        raise HTTPException(status_code=404, detail=f"No pending approval for design '{req.design_name}' at stage '{req.stage}'")
-    return {"ok": True, "message": f"Stage '{req.stage}' approved for '{req.design_name}'"}
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pending approval for design '{req.design_name}' at stage '{req.stage}'",
+        )
+    return {
+        "ok": True,
+        "message": f"Stage '{req.stage}' approved for '{req.design_name}'",
+    }
 
 
 @app.post("/reject")
@@ -2243,11 +2662,15 @@ def reject_stage(req: RejectRequest):
     """Reject the current stage, optionally providing feedback for retry."""
     ok = approval_manager.reject(req.design_name, req.stage, req.feedback)
     if not ok:
-        raise HTTPException(status_code=404, detail=f"No pending approval for design '{req.design_name}' at stage '{req.stage}'")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pending approval for design '{req.design_name}' at stage '{req.stage}'",
+        )
     return {
         "ok": True,
-        "message": f"Stage '{req.stage}' rejected for '{req.design_name}'" + (f" with feedback" if req.feedback else ""),
-        "will_retry": True
+        "message": f"Stage '{req.stage}' rejected for '{req.design_name}'"
+        + (f" with feedback" if req.feedback else ""),
+        "will_retry": True,
     }
 
 
@@ -2266,7 +2689,7 @@ def get_partial_artifacts(design_name: str):
     _validate_design_name(design_name)
     artifacts = []
     manifest_cloud_urls: Dict[str, str] = {}
-    
+
     # Check designs/ workspace directory
     workspace_dir = os.path.join(_repo_root(), "designs", design_name)
     manifest_path = os.path.join(workspace_dir, f"{design_name}_artifact_manifest.json")
@@ -2284,31 +2707,50 @@ def get_partial_artifacts(design_name: str):
             fpath = os.path.join(workspace_dir, file_name)
             if os.path.isfile(fpath):
                 size = os.path.getsize(fpath)
-                artifacts.append({
-                    "name": file_name,
-                    "path": fpath,
-                    "size": size,
-                    "type": _classify_artifact(file_name),
-                    "cloud_url": manifest_cloud_urls.get(file_name, ""),
-                })
-    
-    # Check OpenLane designs directory
-    from agentic.config import OPENLANE_ROOT
-    ol_design_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
-    if os.path.isdir(ol_design_dir):
-        for root_dir, _dirs, files in os.walk(ol_design_dir):
-            for file_name in files:
-                if file_name.endswith(('.v', '.sv', '.vcd', '.gds', '.def', '.sdc', '.json', '.tcl', '.sby', '.log', '.csv')):
-                    fpath = os.path.join(root_dir, file_name)
-                    size = os.path.getsize(fpath)
-                    artifacts.append({
+                artifacts.append(
+                    {
                         "name": file_name,
                         "path": fpath,
                         "size": size,
                         "type": _classify_artifact(file_name),
                         "cloud_url": manifest_cloud_urls.get(file_name, ""),
-                    })
-    
+                    }
+                )
+
+    # Check OpenLane designs directory
+    from agentic.config import OPENLANE_ROOT
+
+    ol_design_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
+    if os.path.isdir(ol_design_dir):
+        for root_dir, _dirs, files in os.walk(ol_design_dir):
+            for file_name in files:
+                if file_name.endswith(
+                    (
+                        ".v",
+                        ".sv",
+                        ".vcd",
+                        ".gds",
+                        ".def",
+                        ".sdc",
+                        ".json",
+                        ".tcl",
+                        ".sby",
+                        ".log",
+                        ".csv",
+                    )
+                ):
+                    fpath = os.path.join(root_dir, file_name)
+                    size = os.path.getsize(fpath)
+                    artifacts.append(
+                        {
+                            "name": file_name,
+                            "path": fpath,
+                            "size": size,
+                            "type": _classify_artifact(file_name),
+                            "cloud_url": manifest_cloud_urls.get(file_name, ""),
+                        }
+                    )
+
     return {"design_name": design_name, "artifacts": artifacts[:50]}  # Cap at 50
 
 
@@ -2323,6 +2765,7 @@ def download_artifact(design_name: str, filename: str):
 
     # Search workspace designs/ first, then OpenLane designs/
     from agentic.config import OPENLANE_ROOT
+
     search_dirs = [os.path.join(_repo_root(), "designs", design_name)]
     search_dirs.append(os.path.join(OPENLANE_ROOT, "designs", design_name))
 
@@ -2341,19 +2784,21 @@ def _classify_artifact(filename: str) -> str:
     """Classify a file by its extension."""
     ext = os.path.splitext(filename)[1].lower()
     classifications = {
-        '.v': 'rtl', '.sv': 'rtl',
-        '.vcd': 'waveform',
-        '.gds': 'layout', '.def': 'layout',
-        '.sdc': 'constraints',
-        '.json': 'config',
-        '.tcl': 'script',
-        '.sby': 'formal',
-        '.log': 'log',
-        '.csv': 'report',
-        '.pdf': 'report',
-        '.docx': 'report',
+        ".v": "rtl",
+        ".sv": "rtl",
+        ".vcd": "waveform",
+        ".gds": "layout",
+        ".def": "layout",
+        ".sdc": "constraints",
+        ".json": "config",
+        ".tcl": "script",
+        ".sby": "formal",
+        ".log": "log",
+        ".csv": "report",
+        ".pdf": "report",
+        ".docx": "report",
     }
-    return classifications.get(ext, 'other')
+    return classifications.get(ext, "other")
 
 
 # ─── Auth & Profile Routes ──────────────────────────────────────────
@@ -2424,7 +2869,9 @@ async def get_profile_byok(profile: dict = Depends(get_current_user)):
 
 
 @app.post("/profile/byok")
-async def set_profile_byok(req: SetByokConfigRequest, profile: dict = Depends(get_current_user)):
+async def set_profile_byok(
+    req: SetByokConfigRequest, profile: dict = Depends(get_current_user)
+):
     """Persist encrypted multi-group BYOK config for cross-device sync."""
     if profile is None:
         raise HTTPException(status_code=403, detail="Auth not enabled")
@@ -2440,21 +2887,29 @@ async def set_profile_byok(req: SetByokConfigRequest, profile: dict = Depends(ge
 
 
 @app.post("/profile/api-key")
-async def set_byok_key(req: SetApiKeyRequest, profile: dict = Depends(get_current_user)):
+async def set_byok_key(
+    req: SetApiKeyRequest, profile: dict = Depends(get_current_user)
+):
     """Store an encrypted LLM API key for BYOK plan users."""
     if profile is None:
         raise HTTPException(status_code=403, detail="Auth not enabled")
     if profile.get("plan") != "byok":
-        raise HTTPException(status_code=400, detail="Only BYOK plan users can set an API key")
+        raise HTTPException(
+            status_code=400, detail="Only BYOK plan users can set an API key"
+        )
 
     from server.auth import _supabase_update
+
     encrypted = encrypt_api_key(req.api_key)
-    await _supabase_update("profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted})
+    await _supabase_update(
+        "profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted}
+    )
     return {"success": True, "message": "API key stored securely"}
 
 
 # ─── Report Download Endpoints ────────────────────────────────────────
 # Single-stage reports (HITL flow) and full-build reports (both flows).
+
 
 def _get_job_or_404(job_id: str) -> dict:
     if not re.match(r"^[0-9a-f-]{36}$", job_id):
@@ -2465,81 +2920,89 @@ def _get_job_or_404(job_id: str) -> dict:
     return job
 
 
-@app.get("/report/{job_id}/full.pdf",
-         summary="Download full build report as PDF")
+@app.get("/report/{job_id}/full.pdf", summary="Download full build report as PDF")
 def download_full_report_pdf(job_id: str):
     job = _get_job_or_404(job_id)
-    design_name  = job.get("design_name", "design")
+    design_name = job.get("design_name", "design")
     build_status = job.get("build_status", "unknown")
-    stages       = job.get("stages", {})
-    events       = job.get("events", [])
+    stages = job.get("stages", {})
+    events = job.get("events", [])
     pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events)
     safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
-        headers={"Content-Disposition":
-                 f'attachment; filename="{safe_name}_full_report.pdf"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}_full_report.pdf"'
+        },
     )
 
 
-@app.get("/report/{job_id}/full.docx",
-         summary="Download full build report as DOCX")
+@app.get("/report/{job_id}/full.docx", summary="Download full build report as DOCX")
 def download_full_report_docx(job_id: str):
     job = _get_job_or_404(job_id)
-    design_name  = job.get("design_name", "design")
+    design_name = job.get("design_name", "design")
     build_status = job.get("build_status", "unknown")
-    stages       = job.get("stages", {})
-    events       = job.get("events", [])
+    stages = job.get("stages", {})
+    events = job.get("events", [])
     docx_bytes = generate_full_report_docx(stages, design_name, build_status, events)
     safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
     return StreamingResponse(
         io.BytesIO(docx_bytes),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition":
-                 f'attachment; filename="{safe_name}_full_report.docx"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}_full_report.docx"'
+        },
     )
 
 
-@app.get("/report/{job_id}/stage/{stage_name}.pdf",
-         summary="Download a single-stage report as PDF")
+@app.get(
+    "/report/{job_id}/stage/{stage_name}.pdf",
+    summary="Download a single-stage report as PDF",
+)
 def download_stage_report_pdf(job_id: str, stage_name: str):
     if not re.match(r"^[A-Z_]{2,30}$", stage_name):
         raise HTTPException(status_code=400, detail="Invalid stage name")
     job = _get_job_or_404(job_id)
     stages = job.get("stages", {})
     if stage_name not in stages:
-        raise HTTPException(status_code=404,
-                            detail=f"Stage '{stage_name}' not found in this job")
+        raise HTTPException(
+            status_code=404, detail=f"Stage '{stage_name}' not found in this job"
+        )
     design_name = job.get("design_name", "design")
     pdf_bytes = generate_stage_report_pdf(stages[stage_name], design_name)
     safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
-        headers={"Content-Disposition":
-                 f'attachment; filename="{safe_name}_{stage_name}_report.pdf"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}_{stage_name}_report.pdf"'
+        },
     )
 
 
-@app.get("/report/{job_id}/stage/{stage_name}.docx",
-         summary="Download a single-stage report as DOCX")
+@app.get(
+    "/report/{job_id}/stage/{stage_name}.docx",
+    summary="Download a single-stage report as DOCX",
+)
 def download_stage_report_docx(job_id: str, stage_name: str):
     if not re.match(r"^[A-Z_]{2,30}$", stage_name):
         raise HTTPException(status_code=400, detail="Invalid stage name")
     job = _get_job_or_404(job_id)
     stages = job.get("stages", {})
     if stage_name not in stages:
-        raise HTTPException(status_code=404,
-                            detail=f"Stage '{stage_name}' not found in this job")
+        raise HTTPException(
+            status_code=404, detail=f"Stage '{stage_name}' not found in this job"
+        )
     design_name = job.get("design_name", "design")
     docx_bytes = generate_stage_report_docx(stages[stage_name], design_name)
     safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
     return StreamingResponse(
         io.BytesIO(docx_bytes),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition":
-                 f'attachment; filename="{safe_name}_{stage_name}_report.docx"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}_{stage_name}_report.docx"'
+        },
     )
 
 
@@ -2550,8 +3013,17 @@ from fastapi.responses import FileResponse
 # Mount the static Vite React app (for HuggingFace Spaces/Docker)
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "web", "dist")
 if os.path.exists(frontend_dist):
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
-    app.mount("/vcdrom", StaticFiles(directory=os.path.join(frontend_dist, "vcdrom")), name="vcdrom")
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(frontend_dist, "assets")),
+        name="assets",
+    )
+    app.mount(
+        "/vcdrom",
+        StaticFiles(directory=os.path.join(frontend_dist, "vcdrom")),
+        name="vcdrom",
+    )
+
     @app.get("/{catchall:path}")
     def serve_frontend_app(catchall: str):
         full_path = os.path.join(frontend_dist, catchall)

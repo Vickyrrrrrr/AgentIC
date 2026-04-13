@@ -32,8 +32,9 @@ AUTH_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY and SUPABASE_JWT_SECRE
 # Plan limits: max successful builds allowed (None = unlimited)
 PLAN_LIMITS = {
     "free": 2,
-    "starter": 25,
-    "pro": None,   # unlimited
+    "starter": 10,
+    "unlimited": None,
+    "pro": None,
     "byok": None,  # unlimited, uses own key
 }
 
@@ -187,16 +188,23 @@ def encrypt_api_key(plaintext: str) -> str:
             "Set a secret 32+ character value in HuggingFace Spaces secrets before storing BYOK keys."
         )
     key_bytes = hashlib.sha256(ENCRYPTION_KEY.encode()).digest()
-    ct = bytes(a ^ b for a, b in zip(plaintext.encode(), (key_bytes * ((len(plaintext) // 32) + 1))))
+    ct = bytes(
+        a ^ b
+        for a, b in zip(plaintext.encode(), (key_bytes * ((len(plaintext) // 32) + 1)))
+    )
     mac = hmac.new(key_bytes, ct, hashlib.sha256).hexdigest()
     import base64
+
     return base64.urlsafe_b64encode(ct).decode() + "." + mac
 
 
 def decrypt_api_key(ciphertext: str) -> str:
     import base64
+
     if not ENCRYPTION_KEY:
-        raise RuntimeError("ENCRYPTION_KEY env var is not set — cannot decrypt stored API key.")
+        raise RuntimeError(
+            "ENCRYPTION_KEY env var is not set — cannot decrypt stored API key."
+        )
     parts = ciphertext.split(".", 1)
     if len(parts) != 2:
         raise ValueError("Malformed encrypted key")
@@ -245,27 +253,39 @@ def check_build_allowed(profile: Optional[dict]) -> None:
     """Raise 402 if the user has exhausted their plan's build quota.
 
     Called before every /build request when auth is enabled.
-    Free plan: 2 builds. All other plans: unlimited (BYOK required).
+    Uses build_limit from profile (set by billing flow).
+    Falls back to PLAN_LIMITS lookup for legacy profiles.
     """
     if profile is None:
         return  # Auth disabled — no restrictions
 
-    plan = profile.get("plan", "free")
-    builds = profile.get("successful_builds", 0)
-    limit = PLAN_LIMITS.get(plan)
+    plan_type = profile.get("plan_type", "byok")
 
-    if limit is not None and builds >= limit:
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": "build_limit_reached",
-                "plan": plan,
-                "used": builds,
-                "limit": limit,
-                "message": f"You've used all {limit} builds on the {plan} plan. Please add your own API key (BYOK) in Workspace Settings to continue building.",
-                "upgrade_url": "/settings",
-            },
-        )
+    # BYOK users have unlimited builds
+    if plan_type == "byok":
+        return
+
+    # AgentIC-paid users: check build_limit (set by billing)
+    # Falling back to PLAN_LIMITS for legacy users without build_limit set
+    build_limit = profile.get("build_limit")
+    if build_limit is None:
+        build_limit = PLAN_LIMITS.get(plan_type)
+
+    if build_limit is not None:
+        builds = profile.get("successful_builds", 0)
+        if builds >= build_limit:
+            plan_name = profile.get("plan", plan_type)
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "build_limit_reached",
+                    "plan": plan_name,
+                    "used": builds,
+                    "limit": build_limit,
+                    "message": f"You've used all {build_limit} builds on your {plan_name} plan. Upgrade to continue building chips.",
+                    "upgrade_url": "/pricing",
+                },
+            )
 
 
 def get_llm_key_for_user(profile: Optional[dict]) -> Optional[str]:
@@ -323,9 +343,7 @@ async def save_byok_config_for_user(profile: dict, byok_config: dict) -> None:
     payload = json.dumps(byok_config)
     encrypted = encrypt_api_key(payload)
     await _supabase_update(
-        "profiles",
-        f"id=eq.{profile['id']}",
-        {"llm_api_key": encrypted}
+        "profiles", f"id=eq.{profile['id']}", {"llm_api_key": encrypted}
     )
 
 
@@ -333,12 +351,15 @@ def record_build_start(profile: Optional[dict], job_id: str, design_name: str) -
     """Insert a build record into the builds table."""
     if profile is None or not AUTH_ENABLED:
         return
-    _supabase_insert_sync("builds", {
-        "user_id": profile["id"],
-        "job_id": job_id,
-        "design_name": design_name,
-        "status": "queued",
-    })
+    _supabase_insert_sync(
+        "builds",
+        {
+            "user_id": profile["id"],
+            "job_id": job_id,
+            "design_name": design_name,
+            "status": "queued",
+        },
+    )
 
 
 def record_build_success(profile: Optional[dict], job_id: str) -> None:
@@ -347,10 +368,14 @@ def record_build_success(profile: Optional[dict], job_id: str) -> None:
         return
     uid = profile["id"]
     # Update build row
-    _supabase_update_sync("builds", f"job_id=eq.{job_id}", {
-        "status": "done",
-        "finished_at": "now()",
-    })
+    _supabase_update_sync(
+        "builds",
+        f"job_id=eq.{job_id}",
+        {
+            "status": "done",
+            "finished_at": "now()",
+        },
+    )
     # Increment counter
     _supabase_rpc_sync("increment_successful_builds", {"uid": uid})
 
@@ -359,7 +384,11 @@ def record_build_failure(job_id: str) -> None:
     """Mark build as failed."""
     if not AUTH_ENABLED:
         return
-    _supabase_update_sync("builds", f"job_id=eq.{job_id}", {
-        "status": "failed",
-        "finished_at": "now()",
-    })
+    _supabase_update_sync(
+        "builds",
+        f"job_id=eq.{job_id}",
+        {
+            "status": "failed",
+            "finished_at": "now()",
+        },
+    )

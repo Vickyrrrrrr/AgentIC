@@ -34,6 +34,9 @@ const DesignStudio = lazy(() =>
 const HumanInLoopBuild = lazy(() =>
   import('./pages/HumanInLoopBuild').then((m) => ({ default: m.HumanInLoopBuild }))
 );
+const Pricing = lazy(() =>
+  import('./pages/Pricing').then((m) => ({ default: m.Pricing }))
+);
 const Benchmarking = lazy(() =>
   import('./pages/Benchmarking').then((m) => ({ default: m.Benchmarking }))
 );
@@ -169,6 +172,9 @@ const App = () => {
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [selectedPage, setSelectedPage] = useState<PageKey>('Home');
+  const [showPricing, setShowPricing] = useState(() =>
+    typeof window !== 'undefined' && window.location.pathname === '/pricing'
+  );
   const [designs, setDesigns] = useState<DesignOption[]>([]);
   const [selectedDesign, setSelectedDesign] = useState<string>('');
   const [jobs, setJobs] = useState<JobSummary[]>([]);
@@ -198,6 +204,41 @@ const App = () => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('agentic-theme', theme);
   }, [theme]);
+
+  // Handle browser back/forward navigation for pricing page
+  useEffect(() => {
+    const handlePop = () => {
+      setShowPricing(window.location.pathname === '/pricing');
+    };
+    window.addEventListener('popstate', handlePop);
+    return () => window.removeEventListener('popstate', handlePop);
+  }, []);
+
+  // Override pushState/replaceState to track pricing page in history
+  useEffect(() => {
+    const originalPush = window.history.pushState.bind(window.history);
+    const originalReplace = window.history.replaceState.bind(window.history);
+
+    window.history.pushState = (...args) => {
+      originalPush(...args);
+      const path = args[2] || '';
+      if (typeof path === 'string') {
+        setShowPricing(path === '/pricing');
+      }
+    };
+    window.history.replaceState = (...args) => {
+      originalReplace(...args);
+      const path = args[2] || '';
+      if (typeof path === 'string') {
+        setShowPricing(path === '/pricing');
+      }
+    };
+
+    return () => {
+      window.history.pushState = originalPush;
+      window.history.replaceState = originalReplace;
+    };
+  }, []);
 
   useEffect(() => {
     if (AUTH_ENABLED && !session) return;
@@ -511,6 +552,25 @@ const App = () => {
           setProfile((prev) => (prev ? { ...prev, has_byok_key: true } : prev));
         }}
       />
+
+      {showPricing && (
+        <div className="pricing-standalone">
+          <Suspense
+            fallback={
+              <div className="workspace-page-loader">
+                <div className="premium-loader">
+                  <span className="premium-loader-dot" />
+                  <span className="premium-loader-dot" />
+                  <span className="premium-loader-dot" />
+                </div>
+                <span>Loading...</span>
+              </div>
+            }
+          >
+            <Pricing />
+          </Suspense>
+        </div>
+      )}
     </div>
   );
 };

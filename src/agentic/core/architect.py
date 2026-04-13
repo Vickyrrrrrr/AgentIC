@@ -146,8 +146,9 @@ The JSON MUST follow this EXACT schema:
 MANDATORY RULES:
 1. Every module (including top-level) MUST appear in "sub_modules" with ALL fields populated.
 2. Every sub-module MUST have at minimum: name, ports (with direction and width), functional_logic.
-3. For sequential designs, clk and rst_n ports are MANDATORY.
-4. FSM modules MUST list ALL states with transitions and outputs.
+3. For sequential designs, the global clock and reset ports are MANDATORY for the top module and EVERY sub-module that contains logic (FSM, registers, etc.).
+4. Do not forget to include the global clock/reset in the port list of sub-modules like 'ctrl_fsm', 'alu', 'pe', etc.
+5. FSM modules MUST list ALL states with transitions and outputs.
 5. Use "parameters" for configurable widths/depths — NEVER hardcode magic numbers.
 6. "functional_logic" must be a CONCISE (under 100 words) specification of the behavior. DO NOT generate Verilog skeletons in this JSON.
 7. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces. Ensure all objects and arrays are properly closed.

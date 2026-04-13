@@ -8235,3 +8235,529 @@ body {
 @media (max-width: 900px) {
   .bh-stats-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ─── Pricing Page ─────────────────────────────────────────────────────────── */
+
+.pricing-page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+.pricing-test-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem;
+  background: rgba(201, 100, 62, 0.12);
+  border: 1px solid rgba(201, 100, 62, 0.3);
+  border-radius: 8px;
+  margin-bottom: 2rem;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+.pricing-test-banner code {
+  background: rgba(201, 100, 62, 0.15);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+
+.pricing-header {
+  margin-bottom: 2.5rem;
+}
+
+.pricing-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 1rem;
+  transition: color 0.15s;
+}
+.pricing-back:hover { color: var(--accent); }
+
+.pricing-title {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 0.4rem;
+  letter-spacing: -0.02em;
+}
+
+.pricing-subtitle {
+  font-size: 1rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.pricing-current {
+  margin-bottom: 1.5rem;
+}
+
+.pricing-current-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--success-bg);
+  border: 1px solid var(--success-bdr);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: var(--success);
+}
+
+.pricing-current-badge--byok {
+  background: var(--accent-soft);
+  border-color: rgba(201, 100, 62, 0.3);
+  color: var(--accent);
+}
+
+.pricing-message {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.pricing-message--success {
+  background: var(--success-bg);
+  border: 1px solid var(--success-bdr);
+  color: var(--success);
+}
+
+.pricing-message--error {
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.2);
+  color: #dc2626;
+}
+
+.pricing-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 3rem;
+}
+
+.pricing-card {
+  position: relative;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.pricing-card--popular {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 24px rgba(201, 100, 62, 0.15);
+}
+
+.pricing-popular-badge {
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.8rem;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.pricing-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.pricing-plan-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  margin-bottom: 0.25rem;
+}
+
+.pricing-plan-name {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0;
+}
+
+.pricing-plan-desc {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.pricing-price-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.pricing-price {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.03em;
+}
+
+.pricing-price-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.pricing-features {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+.pricing-feature {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.pricing-check {
+  color: var(--success);
+  flex-shrink: 0;
+}
+
+.pricing-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.pricing-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  border: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--accent);
+  color: #fff;
+  transition: background 0.15s, opacity 0.15s;
+  width: 100%;
+}
+
+.pricing-btn:hover:not(:disabled) {
+  background: var(--accent-light);
+}
+
+.pricing-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pricing-btn--active {
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid var(--success-bdr);
+}
+
+.pricing-btn--test {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+}
+
+.pricing-btn--test:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Compare */
+.pricing-compare {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  margin-bottom: 3rem;
+  padding: 1.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.pricing-compare-card {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.pricing-compare-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.pricing-compare-card strong {
+  display: block;
+  font-size: 0.9rem;
+  margin-bottom: 0.2rem;
+}
+
+.pricing-compare-card p {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.pricing-compare-vs {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* FAQ */
+.pricing-faq {
+  margin-top: 2rem;
+}
+
+.pricing-faq-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 1.25rem;
+}
+
+.pricing-faq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.pricing-faq-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pricing-faq-item summary {
+  padding: 1rem 1.25rem;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text);
+}
+
+.pricing-faq-item summary::-webkit-details-marker { display: none; }
+
+.pricing-faq-item summary::after {
+  content: '+';
+  font-size: 1.2rem;
+  color: var(--text-muted);
+}
+
+details[open] .pricing-faq-item summary::after {
+  content: '−';
+}
+
+.pricing-faq-item p {
+  padding: 0 1.25rem 1rem;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ─── Billing Modal Enhancements ─────────────────────────────────────────── */
+
+.byok-mode-tabs {
+  display: flex;
+  gap: 0;
+  background: var(--bg-inset);
+  border-radius: 8px;
+  padding: 4px;
+  margin-bottom: 1.25rem;
+}
+
+.byok-mode-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.55rem;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.byok-mode-tab:hover {
+  color: var(--text);
+  background: var(--bg-card);
+}
+
+.byok-mode-tab.active {
+  background: var(--bg-card);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+
+.byok-agentic-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.byok-agentic-active {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background: var(--success-bg);
+  border: 1px solid var(--success-bdr);
+  border-radius: 8px;
+}
+
+.byok-agentic-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--success);
+  font-size: 0.875rem;
+}
+
+.byok-agentic-badge strong {
+  display: block;
+  font-size: 0.875rem;
+}
+
+.byok-agentic-badge span {
+  display: block;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.byok-upgrade-btn {
+  padding: 0.4rem 1rem;
+  background: none;
+  border: 1px solid var(--success-bdr);
+  border-radius: 6px;
+  color: var(--success);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.byok-upgrade-btn:hover {
+  background: rgba(58, 120, 86, 0.1);
+}
+
+.byok-agentic-cta {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.byok-agentic-hint {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.byok-agentic-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.65rem 1.25rem;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.byok-agentic-btn:hover {
+  background: var(--accent-light);
+}
+
+.byok-byok-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* ─── Pricing Standalone Overlay ─────────────────────────────────────────── */
+.pricing-standalone {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+@media (min-width: 768px) {
+  .pricing-cards {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .pricing-cards {
+    grid-template-columns: 1fr;
+  }
+  .pricing-compare {
+    flex-direction: column;
+  }
+  .pricing-compare-vs {
+    align-self: center;
+  }
+}

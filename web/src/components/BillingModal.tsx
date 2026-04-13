@@ -1,40 +1,18 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles } from 'lucide-react';
+import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles, Cpu, KeyRound } from 'lucide-react';
 import { API_BASE } from '../api';
 import { supabase } from '../supabaseClient';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
 type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: string }>;
 
+type ModalMode = 'agentic' | 'byok';
+
 const DEFAULT_GROUPS: GroupState = {
   group1: { model: '', apiKey: '', baseUrl: '' },
   group2: { model: '', apiKey: '', baseUrl: '' },
   group3: { model: '', apiKey: '', baseUrl: '' },
-};
-
-const GROUP_META: Record<
-  GroupKey,
-  { title: string; roles: string; example: string; modelHint: string }
-> = {
-  group1: {
-    title: 'Fix & Debug Agents',
-    roles: 'Fixer · Debugger · Reasoner',
-    example: 'openai/deepseek-ai/deepseek-v3.2',
-    modelHint: 'Strong reasoning model',
-  },
-  group2: {
-    title: 'Core Build Agents',
-    roles: 'Architect · Designer · Testbench · Verifier · Manager · Physical',
-    example: 'glm-4-plus',
-    modelHint: 'Strong coding/planning model',
-  },
-  group3: {
-    title: 'Documentation Agents',
-    roles: 'Documenter · Reporter',
-    example: 'groq/llama-3.3-70b-versatile',
-    modelHint: 'Fast text generation model',
-  },
 };
 
 const MaskedKey = ({ value }: { value: string }) => {
@@ -55,35 +33,43 @@ const MaskedKey = ({ value }: { value: string }) => {
 };
 
 const ByokGroupCard = ({
-  groupKey, index, meta, group, onUpdate,
+  groupKey, index, group, onUpdate,
 }: {
   groupKey: GroupKey;
   index: number;
-  meta: { title: string; roles: string; example: string; modelHint: string };
   group: { model: string; apiKey: string; baseUrl: string };
   onUpdate: (key: GroupKey, field: 'model' | 'apiKey' | 'baseUrl', value: string) => void;
 }) => {
   const [open, setOpen] = useState(index === 0 || !!group.apiKey);
+  const titles: Record<GroupKey, string> = {
+    group1: 'Fix & Debug Agents',
+    group2: 'Core Build Agents',
+    group3: 'Documentation Agents',
+  };
+  const roles: Record<GroupKey, string> = {
+    group1: 'Fixer · Debugger · Reasoner',
+    group2: 'Architect · Designer · Testbench · Verifier · Manager',
+    group3: 'Documenter · Reporter',
+  };
 
   return (
     <div className={`byok-group${open ? ' byok-group--open' : ''}`}>
       <button className="byok-group-header" onClick={() => setOpen(!open)} type="button">
         <div>
           <span className="byok-group-index">{index + 1}</span>
-          <span className="byok-group-title">{meta.title}</span>
-          <span className="byok-group-roles">{meta.roles}</span>
+          <span className="byok-group-title">{titles[groupKey]}</span>
+          <span className="byok-group-roles">{roles[groupKey]}</span>
         </div>
         {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
       </button>
       {open && (
         <div className="byok-group-body">
-          <p className="byok-group-hint">Recommended: {meta.example}</p>
           <div className="byok-field-row">
             <div className="byok-field">
               <label className="byok-field-label">Model</label>
               <input
                 className="byok-field-input"
-                placeholder={meta.modelHint}
+                placeholder="e.g. gpt-4o, deepseek-chat, claude-3-5-sonnet"
                 value={group.model}
                 onChange={(e) => onUpdate(groupKey, 'model', e.target.value)}
               />
@@ -92,7 +78,7 @@ const ByokGroupCard = ({
               <label className="byok-field-label">Base URL <span className="byok-optional">(optional)</span></label>
               <input
                 className="byok-field-input"
-                placeholder="Leave blank for hosted"
+                placeholder="Leave blank for OpenAI-compatible endpoints"
                 value={group.baseUrl}
                 onChange={(e) => onUpdate(groupKey, 'baseUrl', e.target.value)}
               />
@@ -103,7 +89,7 @@ const ByokGroupCard = ({
             <input
               className="byok-field-input"
               type="password"
-              placeholder="API Key"
+              placeholder="sk-... or provider-specific key"
               value={group.apiKey}
               onChange={(e) => onUpdate(groupKey, 'apiKey', e.target.value)}
             />
@@ -124,6 +110,7 @@ export const BillingModal = ({
   onClose: () => void;
   onKeySaved: () => void;
 }) => {
+  const [mode, setMode] = useState<ModalMode>('agentic');
   const [groups, setGroups] = useState<GroupState>(DEFAULT_GROUPS);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -132,8 +119,8 @@ export const BillingModal = ({
   const [quickModel, setQuickModel] = useState('');
   const [quickBaseUrl, setQuickBaseUrl] = useState('');
   const [saved, setSaved] = useState(false);
+  const [agenticPlan, setAgenticPlan] = useState<{ plan_type: string; plan: string; build_limit: number | null } | null>(null);
 
-  // Helper: apply a parsed BYOK payload to component state
   const applyParsed = (parsed: any) => {
     const nextGroups: GroupState = {
       group1: { model: parsed.group1?.model || '', apiKey: parsed.group1?.api_key || '', baseUrl: parsed.group1?.base_url || '' },
@@ -156,8 +143,25 @@ export const BillingModal = ({
     if (!isOpen) { setSaved(false); return; }
     setError('');
 
-    // Try server-side first (so keys sync across devices), then fall back to localStorage
+    // Load current plan/billing status
+    const loadBillingStatus = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/billing/status`);
+        if (resp.ok) {
+          const data = await resp.json();
+          setAgenticPlan({
+            plan_type: data.plan_type,
+            plan: data.plan,
+            build_limit: data.build_limit,
+          });
+        }
+      } catch (_e) {
+        // ignore
+      }
+    };
+
     const loadKeys = async () => {
+      // Try server-side first
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.access_token) {
@@ -167,7 +171,6 @@ export const BillingModal = ({
           if (resp.ok) {
             const serverData = await resp.json();
             if (serverData && serverData.group1) {
-              // Mirror to localStorage for offline use
               localStorage.setItem('agentic_byok_key', JSON.stringify(serverData));
               applyParsed(serverData);
               return;
@@ -175,10 +178,10 @@ export const BillingModal = ({
           }
         }
       } catch (_e) {
-        // Server unavailable — fall back to localStorage silently
+        // fall through
       }
 
-      // Fallback: localStorage
+      // localStorage fallback
       try {
         const raw = localStorage.getItem('agentic_byok_key');
         if (!raw) {
@@ -200,6 +203,7 @@ export const BillingModal = ({
       }
     };
 
+    loadBillingStatus();
     loadKeys();
   }, [isOpen]);
 
@@ -211,7 +215,7 @@ export const BillingModal = ({
     setGroups((prev) => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
   };
 
-  const handleSave = async () => {
+  const handleSaveByok = async () => {
     if (!hasAnyKey) return;
     setSaving(true);
     setError('');
@@ -229,10 +233,8 @@ export const BillingModal = ({
     }
 
     try {
-      // 1. Always save to localStorage (works offline / no-auth)
       localStorage.setItem('agentic_byok_key', JSON.stringify(payload));
 
-      // 2. Also save to server so keys sync across all devices
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.access_token) {
@@ -247,7 +249,6 @@ export const BillingModal = ({
           if (!resp.ok) {
             const errData = await resp.json().catch(() => ({}));
             console.warn('BYOK server save failed:', errData);
-            // Don't block the user — localStorage save already worked
           }
         }
       } catch (serverErr) {
@@ -279,9 +280,9 @@ export const BillingModal = ({
           {/* Header */}
           <div className="byok-header">
             <div>
-              <h2 className="byok-title">Configure API Keys</h2>
+              <h2 className="byok-title">Configure Build</h2>
               <p className="byok-subtitle">
-                Bring your own LLM key so AgentIC can run builds without spending a shared backend credential.
+                Choose how you want to run your chip builds.
               </p>
             </div>
             <button className="byok-close" onClick={onClose} aria-label="Close">
@@ -289,143 +290,203 @@ export const BillingModal = ({
             </button>
           </div>
 
-          <div className="byok-onboarding">
-            <div className="byok-onboarding-card">
-              <span className="byok-onboarding-icon">
-                <Fingerprint size={16} />
-              </span>
-              <div>
-                <strong>Required on public deployments</strong>
-                <p>Your browser sends the key with build requests so the system runs on your account, not a shared server key.</p>
-              </div>
-            </div>
-            <div className="byok-onboarding-card">
-              <span className="byok-onboarding-icon">
-                <LockKeyhole size={16} />
-              </span>
-              <div>
-                <strong>Encrypted &amp; synced to your account</strong>
-                <p>Keys are encrypted server-side and synced to your profile so they work on any device you sign in to.</p>
-              </div>
-            </div>
-            <div className="byok-onboarding-card">
-              <span className="byok-onboarding-icon">
-                <Sparkles size={16} />
-              </span>
-              <div>
-                <strong>Quick setup is enough for most users</strong>
-                <p>Use one model and one key for everything unless you want separate providers for debugging, build, and docs agents.</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Mode toggle */}
-          <div className="byok-mode-toggle">
+          {/* Mode Selector Tabs */}
+          <div className="byok-mode-tabs">
             <button
-              className={`byok-mode-btn${quickMode ? ' byok-mode-btn--active' : ''}`}
-              onClick={() => setQuickMode(true)}
+              className={`byok-mode-tab${mode === 'agentic' ? ' active' : ''}`}
+              onClick={() => setMode('agentic')}
             >
-              Quick Setup
+              <Cpu size={15} />
+              AgentIC Model
             </button>
             <button
-              className={`byok-mode-btn${!quickMode ? ' byok-mode-btn--active' : ''}`}
-              onClick={() => setQuickMode(false)}
+              className={`byok-mode-tab${mode === 'byok' ? ' active' : ''}`}
+              onClick={() => setMode('byok')}
             >
-              Advanced
+              <KeyRound size={15} />
+              Bring Your Own Key
             </button>
           </div>
 
-          {/* Quick mode */}
-          {quickMode && (
-            <div className="byok-quick">
-              <p className="byok-quick-hint">
-                One model and one key for all agent groups. This is the recommended setup if you are using a single provider.
-              </p>
-              <div className="byok-field-row">
-                <div className="byok-field">
-                  <label className="byok-field-label">Model</label>
-                  <input
-                    className="byok-field-input"
-                    placeholder="e.g. gpt-4o, glm-4-plus, groq/llama-3.3-70b"
-                    value={quickModel}
-                    onChange={(e) => setQuickModel(e.target.value)}
-                  />
-                  <span className="byok-field-help">Use the exact model id from your provider dashboard.</span>
+          {/* ── AgentIC Model Panel ── */}
+          {mode === 'agentic' && (
+            <div className="byok-agentic-panel">
+              <div className="byok-onboarding">
+                <div className="byok-onboarding-card">
+                  <span className="byok-onboarding-icon"><Fingerprint size={16} /></span>
+                  <div>
+                    <strong>Powered by AgentIC's RTL generation model</strong>
+                    <p>Uses AgentIC's optimized code generation model — no API key needed.</p>
+                  </div>
                 </div>
-                <div className="byok-field">
-                  <label className="byok-field-label">Base URL <span className="byok-optional">(optional)</span></label>
-                  <input
-                    className="byok-field-input"
-                    placeholder="Leave blank for hosted providers"
-                    value={quickBaseUrl}
-                    onChange={(e) => setQuickBaseUrl(e.target.value)}
-                  />
-                  <span className="byok-field-help">Only set this for OpenAI-compatible gateways, self-hosted proxies, or alternate endpoints.</span>
+                <div className="byok-onboarding-card">
+                  <span className="byok-onboarding-icon"><Sparkles size={16} /></span>
+                  <div>
+                    <strong>Pay per successful chip build</strong>
+                    <p>Choose a plan that fits your needs — 10 builds or unlimited.</p>
+                  </div>
                 </div>
               </div>
-              <div className="byok-field">
-                <label className="byok-field-label">API Key</label>
-                <input
-                  className="byok-field-input"
-                  type="password"
-                  placeholder="sk-... or provider-specific key"
-                  value={quickKey}
-                  onChange={(e) => setQuickKey(e.target.value)}
-                  autoFocus
-                />
-                <MaskedKey value={quickKey} />
-                <span className="byok-field-help">Example formats vary by provider. Paste the key exactly as issued.</span>
-              </div>
-              <div className="byok-guidance-callout">
-                <strong>First run checklist</strong>
-                <p>1. Paste your key. 2. Add a model id. 3. Save. 4. Return to Design Studio or HITL and launch your build.</p>
-              </div>
-            </div>
-          )}
 
-          {/* Advanced mode */}
-          {!quickMode && (
-            <div className="byok-advanced">
-              <p className="byok-advanced-hint">
-                Advanced mode is for operators who want different providers for specific agent groups.
-              </p>
-              {(['group1', 'group2', 'group3'] as GroupKey[]).map((key, index) => (
-                <ByokGroupCard
-                  key={key}
-                  groupKey={key}
-                  index={index}
-                  meta={GROUP_META[key]}
-                  group={groups[key]}
-                  onUpdate={updateGroup}
-                />
-              ))}
-            </div>
-          )}
-
-          {error && <div className="byok-error">{error}</div>}
-
-          {/* Actions */}
-          <div className="byok-footer">
-            <span className="byok-footer-note">
-              Keys are encrypted and synced to your account — available on all your devices.
-            </span>
-            <button className="byok-cancel-btn" onClick={onClose} disabled={saving}>
-              Cancel
-            </button>
-            <button
-              className={`byok-save-btn${saved ? ' byok-save-btn--done' : ''}`}
-              onClick={handleSave}
-              disabled={saving || !hasAnyKey}
-            >
-              {saved ? (
-                <><Check size={16} /> Saved</>
-              ) : saving ? (
-                'Saving…'
+              {agenticPlan && agenticPlan.plan_type === 'agentic_paid' ? (
+                <div className="byok-agentic-active">
+                  <div className="byok-agentic-badge">
+                    <Check size={16} />
+                    <div>
+                      <strong>{agenticPlan.plan === 'unlimited' ? 'Unlimited' : 'Starter'} Plan Active</strong>
+                      <span>
+                        {agenticPlan.build_limit !== null
+                          ? `${agenticPlan.build_limit} successful builds included`
+                          : 'Unlimited successful builds'}
+                      </span>
+                    </div>
+                  </div>
+                  <button className="byok-upgrade-btn" onClick={() => window.location.href = '/pricing'}>
+                    Change Plan
+                  </button>
+                </div>
               ) : (
-                'Save & Sync Keys'
+                <div className="byok-agentic-cta">
+                  <p className="byok-agentic-hint">
+                    Select a plan to use AgentIC's built-in RTL generation model. No API key required.
+                  </p>
+                  <button
+                    className="byok-agentic-btn"
+                    onClick={() => window.location.href = '/pricing'}
+                  >
+                    View Plans & Pricing
+                    <Sparkles size={15} />
+                  </button>
+                </div>
               )}
-            </button>
-          </div>
+            </div>
+          )}
+
+          {/* ── BYOK Panel ── */}
+          {mode === 'byok' && (
+            <div className="byok-byok-panel">
+              <div className="byok-onboarding">
+                <div className="byok-onboarding-card">
+                  <span className="byok-onboarding-icon"><LockKeyhole size={16} /></span>
+                  <div>
+                    <strong>Encrypted &amp; synced to your account</strong>
+                    <p>Keys are encrypted server-side and synced to your profile so they work on any device.</p>
+                  </div>
+                </div>
+                <div className="byok-onboarding-card">
+                  <span className="byok-onboarding-icon"><KeyRound size={16} /></span>
+                  <div>
+                    <strong>Bring your own LLM provider</strong>
+                    <p>Use any OpenAI-compatible API — OpenAI, Anthropic, Groq, DeepSeek, Together, Ollama, etc.</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Mode toggle */}
+              <div className="byok-mode-toggle">
+                <button
+                  className={`byok-mode-btn${quickMode ? ' byok-mode-btn--active' : ''}`}
+                  onClick={() => setQuickMode(true)}
+                >
+                  One Model
+                </button>
+                <button
+                  className={`byok-mode-btn${!quickMode ? ' byok-mode-btn--active' : ''}`}
+                  onClick={() => setQuickMode(false)}
+                >
+                  3 Role Groups
+                </button>
+              </div>
+
+              {/* Quick mode */}
+              {quickMode && (
+                <div className="byok-quick">
+                  <p className="byok-quick-hint">
+                    One model and one API key for all agent roles. Recommended for most users.
+                  </p>
+                  <div className="byok-field-row">
+                    <div className="byok-field">
+                      <label className="byok-field-label">Model</label>
+                      <input
+                        className="byok-field-input"
+                        placeholder="e.g. gpt-4o, deepseek-chat, claude-3-5-sonnet, llama-3.3-70b"
+                        value={quickModel}
+                        onChange={(e) => setQuickModel(e.target.value)}
+                      />
+                    </div>
+                    <div className="byok-field">
+                      <label className="byok-field-label">Base URL <span className="byok-optional">(optional)</span></label>
+                      <input
+                        className="byok-field-input"
+                        placeholder="Leave blank for OpenAI-compatible endpoints"
+                        value={quickBaseUrl}
+                        onChange={(e) => setQuickBaseUrl(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div className="byok-field">
+                    <label className="byok-field-label">API Key</label>
+                    <input
+                      className="byok-field-input"
+                      type="password"
+                      placeholder="sk-... or provider-specific key"
+                      value={quickKey}
+                      onChange={(e) => setQuickKey(e.target.value)}
+                      autoFocus
+                    />
+                    <MaskedKey value={quickKey} />
+                  </div>
+                  <div className="byok-guidance-callout">
+                    <strong>Quick Setup</strong>
+                    <p>1. Paste your key. 2. Enter model name. 3. Save. 4. Start building.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Advanced mode */}
+              {!quickMode && (
+                <div className="byok-advanced">
+                  <p className="byok-advanced-hint">
+                    Assign different models/keys to each agent group for cost optimization.
+                  </p>
+                  {(['group1', 'group2', 'group3'] as GroupKey[]).map((key, index) => (
+                    <ByokGroupCard
+                      key={key}
+                      groupKey={key}
+                      index={index}
+                      group={groups[key]}
+                      onUpdate={updateGroup}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {error && <div className="byok-error">{error}</div>}
+
+              {/* Actions */}
+              <div className="byok-footer">
+                <span className="byok-footer-note">
+                  Keys are encrypted and synced to your account.
+                </span>
+                <button className="byok-cancel-btn" onClick={onClose} disabled={saving}>
+                  Cancel
+                </button>
+                <button
+                  className={`byok-save-btn${saved ? ' byok-save-btn--done' : ''}`}
+                  onClick={handleSaveByok}
+                  disabled={saving || !hasAnyKey}
+                >
+                  {saved ? (
+                    <><Check size={16} /> Saved</>
+                  ) : saving ? (
+                    'Saving…'
+                  ) : (
+                    'Save & Continue'
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
         </motion.div>
       </div>
     </AnimatePresence>

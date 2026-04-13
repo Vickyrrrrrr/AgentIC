@@ -64,3 +64,15 @@ Repository = "https://github.com/Vickyrrrrrr/AgentIC"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentic"]
+packages-dirs = ["src"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "src/agentic/designs/",
+    "secure_build/",
+    "agentic_npu_tapeout/",
+    "scripts/",
+    "docs/",
+    "tests/",
+    "test/",
+]

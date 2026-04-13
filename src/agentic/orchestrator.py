@@ -31,11 +31,28 @@ from .config import (
 )
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
-from .agents.verifier import get_verification_agent, get_error_analyst_agent, get_regression_agent
+from .agents.verifier import (
+    get_verification_agent,
+    get_error_analyst_agent,
+    get_regression_agent,
+)
 from .agents.doc_agent import get_doc_agent
 from .agents.sdc_agent import get_sdc_agent
-from .core import ArchitectModule, SelfReflectPipeline, ReActAgent, WaveformExpertModule, DeepDebuggerModule
-from .core import HardwareSpecGenerator, HardwareSpec, HierarchyExpander, FeasibilityChecker, CDCAnalyzer, VerificationPlanner
+from .core import (
+    ArchitectModule,
+    SelfReflectPipeline,
+    ReActAgent,
+    WaveformExpertModule,
+    DeepDebuggerModule,
+)
+from .core import (
+    HardwareSpecGenerator,
+    HardwareSpec,
+    HierarchyExpander,
+    FeasibilityChecker,
+    CDCAnalyzer,
+    VerificationPlanner,
+)
 from .contracts import (
     AgentResult,
     ArtifactRef,
@@ -50,10 +67,11 @@ from .contracts import (
 )
 from .tools.vlsi_tools import (
     write_verilog,
+    write_verilog_tool,
     run_syntax_check,
     syntax_check_tool,
     read_file_tool,
-    run_simulation, 
+    run_simulation,
     run_openlane,
     SecurityCheck,
     write_sby_config,
@@ -81,21 +99,196 @@ from .tools.vlsi_tools import (
     run_tb_compile_gate,
     repair_tb_for_verilator,
     get_coverage_thresholds,
+    run_gls_simulation,
+)
+
+from .tools.rate_limiter import (
+    rate_limited_crew_kickoff,
+    rate_limited_call,
+    RateLimitResult,
 )
 
 from rich.theme import Theme
-claude_theme = Theme({
-    "info": "dim white",
-    "accent": "#d97757",
-    "success": "#32997b",
-    "warning": "#e0b04a",
-    "error": "#d45851",
-    "heading": "bold #e5e1d8",
-    "border": "#8f8a80",
-    "spinner": "#d97757"
-})
+
+claude_theme = Theme(
+    {
+        "info": "dim white",
+        "accent": "#d97757",
+        "success": "#32997b",
+        "warning": "#e0b04a",
+        "error": "#d45851",
+        "heading": "bold #e5e1d8",
+        "border": "#8f8a80",
+        "spinner": "#d97757",
+    }
+)
 console = Console(theme=claude_theme)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ThinkingDisplay — Minimal, Sophisticated LLM Activity Display
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ThinkingDisplay:
+    """
+    Provides minimal, sophisticated display of AgentIC's thinking and activity.
+
+    Three levels:
+      minimal  — state transitions only (→ SPEC → ARCHITECT → ...), elapsed time
+      normal   — + brief activity indicators per stage, tool summaries
+      verbose  — + raw LLM output (current behavior)
+
+    Always shows AgentIC is alive/working without iterating details.
+    Thread-safe for concurrent operations.
+    """
+
+    LEVELS = ("minimal", "normal", "verbose")
+
+    def __init__(self, level: str = "minimal", _console: Optional["Console"] = None):
+        import sys as _sys
+        import threading
+
+        self.level = level if level in self.LEVELS else "minimal"
+        _mod_console = _sys.modules["src.agentic.orchestrator"].__dict__.get("console")
+        self._console = _console if _console is not None else _mod_console
+        self._lock = threading.RLock()  # RLock: reentrant, allows nested calls
+        self._state = ""
+        self._activity = ""
+        self._started_at: Optional[float] = None
+        self._state_started_at: Optional[float] = None
+        self._line_handle = None
+        self._elapsed_since_start = 0.0
+        self._spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠿"]
+        self._spinner_idx = 0
+
+    def set_level(self, level: str) -> None:
+        with self._lock:
+            self.level = level if level in self.LEVELS else "minimal"
+
+    def _elapsed(self) -> str:
+        import time
+
+        if self._state_started_at is None:
+            return ""
+        elapsed = time.time() - self._state_started_at
+        if elapsed < 60:
+            return f"{elapsed:.0f}s"
+        elif elapsed < 3600:
+            return f"{elapsed / 60:.0f}m"
+        else:
+            return f"{elapsed / 3600:.1f}h"
+
+    def _spin(self) -> str:
+        frame = self._spinner_frames[self._spinner_idx % len(self._spinner_frames)]
+        self._spinner_idx += 1
+        return frame
+
+    def clear(self) -> None:
+        with self._lock:
+            if self._line_handle:
+                try:
+                    self._line_handle.cleanup()
+                except Exception:
+                    pass
+                self._line_handle = None
+
+    def show_state(self, state: str, subtitle: str = "") -> None:
+        """Show a state transition: → STATE [subtitle]"""
+        import sys
+
+        with self._lock:
+            self._state = state
+            import time as _time
+
+            self._state_started_at = _time.time()
+            self.clear()
+
+            if self.level == "minimal":
+                arrow = "→"
+                elapsed = self._elapsed()
+                subtitle_part = f" [{subtitle}]" if subtitle else ""
+                line = f"  {arrow} {state}{subtitle_part}"
+                if elapsed:
+                    line += f"  ({elapsed})"
+                sys.stdout.write(line + "\n")
+                sys.stdout.flush()
+            elif self.level == "normal":
+                self._console.print(f"  → {state}  [{subtitle}]")
+
+    def show_activity(self, activity: str, spinning: bool = False) -> None:
+        """Show brief activity within a state."""
+        import sys
+
+        with self._lock:
+            if self.level == "minimal":
+                spinner = self._spin() if spinning else "·"
+                elapsed = self._elapsed()
+                elapsed_part = f"  ({elapsed})" if elapsed else ""
+                sys.stdout.write(
+                    f"\r  → {self._state}  {spinner} {activity[:40]}{elapsed_part}"
+                )
+                sys.stdout.flush()
+            elif self.level == "normal":
+                self._console.print(f"    {activity}", style="dim")
+
+    def show_result(self, result: str, ok: bool = True) -> None:
+        """Show stage completion result."""
+        with self._lock:
+            self.clear()
+            if self.level == "minimal":
+                elapsed = self._elapsed()
+                status = "✓" if ok else "✗"
+                self._console.print(f"  {status} {self._state}  ({elapsed})")
+            elif self.level == "normal":
+                status = "[success]✓[/success]" if ok else "[error]✗[/error]"
+                self._console.print(f"  {status} {result}")
+            self._activity = ""
+
+    def show_agent(self, role: str, action: str) -> None:
+        """Show a brief LLM agent action (minimal: just the role)."""
+        with self._lock:
+            if self.level == "minimal":
+                pass  # Don't show agent-level detail in minimal mode
+            elif self.level == "normal":
+                self._console.print(f"    {role}: {action}", style="dim")
+
+    def show_thinking_summary(self, summary: str) -> None:
+        """Show a 1-2 line LLM thinking summary (minimal mode)."""
+        with self._lock:
+            if self.level in ("minimal", "normal"):
+                # Clean up the thinking block markers
+                clean = summary.strip()
+                if clean.startswith("<"):
+                    return  # Skip raw thinking blocks
+                # Truncate to first meaningful line
+                first_line = clean.split("\n")[0][:80]
+                if first_line:
+                    self._console.print(f"  · {first_line}", style="dim")
+
+    def summary(self) -> str:
+        """Return a compact single-line summary."""
+        with self._lock:
+            elapsed = ""
+            if self._state_started_at:
+                import time
+
+                total = time.time() - (self._started_at or self._state_started_at)
+                if total < 60:
+                    elapsed = f"{total:.0f}s"
+                elif total < 3600:
+                    elapsed = f"{total / 60:.0f}m"
+                else:
+                    elapsed = f"{total / 3600:.1f}h"
+            return f"{self._state}  {elapsed}"
+
+
+# Thinking levels for CLI
+THINKING_LEVEL_DEFAULT = (
+    os.environ.get("AGENTIC_THINKING_LEVEL", "minimal").strip().lower()
+)
+if THINKING_LEVEL_DEFAULT not in ThinkingDisplay.LEVELS:
+    THINKING_LEVEL_DEFAULT = "minimal"
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +332,7 @@ class BuildStrategy(enum.Enum):
     SV_MODULAR = "SystemVerilog Modular (Modern)"
     VERILOG_CLASSIC = "Verilog-2005 (Legacy/Robust)"
 
+
 class BuildState(enum.Enum):
     INIT = "Initializing"
     SPEC = "Architectural Planning"
@@ -154,11 +348,20 @@ class BuildState(enum.Enum):
     COVERAGE_CHECK = "Coverage Analysis"
     REGRESSION = "Regression Testing"
     SDC_GEN = "Timing Constraints Generation"
+    SYNTHESIS = "RTL Synthesis"
+    DFT_SCAN = "DFT Scan Insertion"
+    DFT_ATPG = "DFT ATPG Patterns"
+    MBIST = "Memory BIST Insertion"
+    GLS_SIM = "Gate-Level Simulation"
     FLOORPLAN = "Floorplanning"
     HARDENING = "GDSII Hardening"
     CONVERGENCE_REVIEW = "Convergence Review"
     ECO_PATCH = "ECO Patch"
+    POWER_ANALYSIS = "Power Analysis"
+    TIMING_ANALYSIS = "Static Timing Analysis"
+    PHYSICAL_VERIFY = "Physical Verification"
     SIGNOFF = "DRC/LVS Signoff"
+    IP_PACKAGE = "IP Packaging"
     SUCCESS = "Build Complete"
     FAIL = "Build Failed"
 
@@ -178,6 +381,7 @@ class BuildHistory:
     state: str
     message: str
     timestamp: float
+
 
 class BuildOrchestrator:
     def __init__(
@@ -206,7 +410,8 @@ class BuildOrchestrator:
         event_sink=None,  # Optional callable(dict) for live event streaming (web API)
         no_golden_templates: bool = False,  # Bypass golden template matching in RTL_GEN
         role_llms: Optional[Dict[str, Any]] = None,  # role -> LLM mapping
-        human_in_loop: bool = False,       # For web API HITL
+        human_in_loop: bool = False,  # For web API HITL
+        thinking_level: str = "minimal",  # Display: minimal, normal, verbose
     ):
         self.name = name
         self.desc = desc
@@ -237,14 +442,20 @@ class BuildOrchestrator:
         self.coverage_backend = (coverage_backend or SIM_BACKEND_DEFAULT).lower()
         if self.coverage_backend not in {"auto", "verilator", "iverilog"}:
             self.coverage_backend = SIM_BACKEND_DEFAULT
-        self.coverage_fallback_policy = (coverage_fallback_policy or COVERAGE_FALLBACK_POLICY_DEFAULT).lower()
+        self.coverage_fallback_policy = (
+            coverage_fallback_policy or COVERAGE_FALLBACK_POLICY_DEFAULT
+        ).lower()
         if self.coverage_fallback_policy not in {"fail_closed", "fallback_oss", "skip"}:
             self.coverage_fallback_policy = COVERAGE_FALLBACK_POLICY_DEFAULT
         self.coverage_profile = (coverage_profile or COVERAGE_PROFILE_DEFAULT).lower()
         if self.coverage_profile not in {"balanced", "aggressive", "relaxed"}:
             self.coverage_profile = COVERAGE_PROFILE_DEFAULT
         self.coverage_thresholds = get_coverage_thresholds(self.coverage_profile)
-        
+        self.thinking_level = (
+            thinking_level if thinking_level in ThinkingDisplay.LEVELS else "minimal"
+        )
+        self._thinking = ThinkingDisplay(level=self.thinking_level)
+
         self.state = BuildState.INIT
         self.strategy = BuildStrategy.SV_MODULAR
         self.retry_count = 0
@@ -275,82 +486,139 @@ class BuildOrchestrator:
             "format_retry": 0,
             "infrastructure_retry": 0,
         }
-        self.history: List[Dict[str, Any]] = []    # Log of state transitions and errors
-        self.errors: List[str] = []     # List of error messages
+        self.history: List[Dict[str, Any]] = []  # Log of state transitions and errors
+        self.errors: List[str] = []  # List of error messages
 
     def get_llm_for_role(self, role: str) -> "LLM":
         """Get the specific LLM override for a role, or fallback to the primary LLM."""
         return self.role_llms.get(role, self.llm)
 
+    def _crew_kickoff(
+        self,
+        crew: "Crew",
+        role_hint: str = "build",
+        task_overrides: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Run a CrewAI crew with automatic rate-limit retry.
+
+        Detects the provider from the first agent's LLM config and applies
+        per-provider exponential-backoff retry on 429/503 responses.
+        """
+        # Extract model/base_url from the first agent's LLM
+        model = ""
+        base_url = ""
+        agents = getattr(crew, "agents", [])
+        if agents:
+            llm_obj = getattr(agents[0], "llm", None)
+            if llm_obj:
+                model = getattr(llm_obj, "model", "") or ""
+                base_url = getattr(llm_obj, "base_url", "") or ""
+
+        def _on_retry(attempt: int, provider: str, exc: Exception) -> None:
+            self.log(
+                f"Rate-limit hit ({provider}) — retry {attempt}, "
+                f"waiting... ({type(exc).__name__})",
+                refined=True,
+            )
+
+        result = rate_limited_crew_kickoff(
+            crew,
+            task_overrides=task_overrides,
+            model=model,
+            base_url=base_url,
+        )
+
+        if not result.ok and result.rate_limited:
+            err = (
+                f"Rate-limit exhausted after {result.attempts} attempts "
+                f"(waited {result.total_wait_s:.1f}s total)"
+            )
+            self.log(err, refined=True)
+            self.logger.error(err)
+
+        return result.result  # raw CrewOutput; caller does str() conversion
+
     def setup_logger(self):
         """Sets up a file logger for the build process."""
         import shutil
         import datetime
-        
-        log_file = os.path.join(self.artifacts['root'], f"{self.name}.log")
-        
+
+        log_file = os.path.join(self.artifacts["root"], f"{self.name}.log")
+
         # Ensure directory exists
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
-        
+
         # If a previous log exists, rotate it so we don't lose the old run's terminal output/errors
         if os.path.exists(log_file):
-            timestamp = datetime.datetime.fromtimestamp(os.path.getmtime(log_file)).strftime('%Y%m%d_%H%M%S')
-            backup_log = os.path.join(self.artifacts['root'], f"{self.name}_{timestamp}_previous.log")
+            timestamp = datetime.datetime.fromtimestamp(
+                os.path.getmtime(log_file)
+            ).strftime("%Y%m%d_%H%M%S")
+            backup_log = os.path.join(
+                self.artifacts["root"], f"{self.name}_{timestamp}_previous.log"
+            )
             shutil.copy2(log_file, backup_log)
-        
+
         self.logger = logging.getLogger(self.name)
         self.logger.setLevel(logging.DEBUG)
-        
+
         # File Handler
-        fh = logging.FileHandler(log_file, mode='w')
-        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        fh = logging.FileHandler(log_file, mode="w")
+        fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         self.logger.addHandler(fh)
-        
+
         self.log(f"Logging initialized to {log_file}", refined=True)
 
     def log(self, message: str, refined: bool = False):
         """Logs a message to the console (if refined) and file (always)."""
         now = time.time()
         self.history.append({"state": self.state.name, "msg": message, "time": now})
-        self.build_history.append(BuildHistory(state=self.state.name, message=message, timestamp=now))
-        
+        self.build_history.append(
+            BuildHistory(state=self.state.name, message=message, timestamp=now)
+        )
+
         # File Log
-        if hasattr(self, 'logger'):
+        if hasattr(self, "logger"):
             self.logger.info(f"[{self.state.name}] {message}")
 
         # Web API event sink — emit every log entry for live streaming
         if self.event_sink is not None:
             try:
-                self.event_sink({
-                    "type": "checkpoint" if refined else "log",
-                    "state": self.state.name,
-                    "message": message,
-                })
+                self.event_sink(
+                    {
+                        "type": "checkpoint" if refined else "log",
+                        "state": self.state.name,
+                        "message": message,
+                    }
+                )
             except Exception:
                 pass  # Never let sink errors crash the build
-            
+
+        # ThinkingDisplay — always show activity (minimal mode)
+        if hasattr(self, "_thinking"):
+            self._thinking.show_activity(message, spinning=False)
+
         # Console Log - Only if refined/important
-        if refined or self.verbose: 
-             # We actually want to reduce verbosity based on User Request.
-             # Only print if 'refined' is True (High level updates)
-             if refined:
+        if refined or self.verbose:
+            if refined:
                 style = "bold green"
                 console.print(f"[{style}][{self.state.name}][/] {message}")
 
     def transition(self, new_state: BuildState, preserve_retries: bool = False):
         self.log(f"Transitioning: {self.state.name} -> {new_state.name}", refined=True)
+        self._thinking.show_state(new_state.name, subtitle=new_state.value)
         self.state = new_state
         if not preserve_retries:
             self.retry_count = 0
             self.state_retry_counts[new_state.name] = 0
-        # Emit a dedicated transition event for the web UI checkpoint timeline
         if self.event_sink is not None:
             try:
-                self.event_sink({
-                    "type": "transition",
-                    "state": new_state.name,
-                    "message": f"▶ {new_state.value}",
-                })
+                self.event_sink(
+                    {
+                        "type": "transition",
+                        "state": new_state.name,
+                        "message": f"▶ {new_state.value}",
+                    }
+                )
             except Exception:
                 pass
 
@@ -369,7 +637,9 @@ class BuildOrchestrator:
                     tb = f.read()
             except OSError:
                 tb = ""
-        digest = hashlib.sha256((rtl + "\n" + tb).encode("utf-8", errors="ignore")).hexdigest()
+        digest = hashlib.sha256(
+            (rtl + "\n" + tb).encode("utf-8", errors="ignore")
+        ).hexdigest()
         return digest[:16]
 
     def _record_failure_fingerprint(self, error_text: str) -> bool:
@@ -377,7 +647,7 @@ class BuildOrchestrator:
         fp = hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
         count = self.failure_fingerprint_history.get(fp, 0) + 1
         self.failure_fingerprint_history[fp] = count
-        
+
         # Bug 1: Track the exact code that produced this error
         rtl = self.artifacts.get("rtl_code", "")
         tb = ""
@@ -388,15 +658,15 @@ class BuildOrchestrator:
                     tb = f.read()
             except OSError:
                 pass
-        
+
         code_context = ""
         if rtl:
             code_context += f"// --- RTL CODE ---\n{rtl}\n"
         if tb:
             code_context += f"// --- TESTBENCH CODE ---\n{tb}\n"
-            
+
         self.failed_code_by_fingerprint[fp] = code_context
-        
+
         return count >= 2
 
     def _clear_last_fingerprint(self, error_text: str) -> None:
@@ -448,7 +718,9 @@ class BuildOrchestrator:
         )
         raise RuntimeError(message)
 
-    def _consume_handoff(self, key: str, *, consumer: str, required: bool = False) -> Any:
+    def _consume_handoff(
+        self, key: str, *, consumer: str, required: bool = False
+    ) -> Any:
         value = self.artifacts.get(key)
         if value in (None, "", {}):
             if required:
@@ -475,7 +747,9 @@ class BuildOrchestrator:
         self.stage_contract_history.append(payload)
         self.artifacts["last_stage_result"] = payload
         if hasattr(self, "logger"):
-            self.logger.info(f"STAGE RESULT:\n{json.dumps(payload, indent=2, default=str)}")
+            self.logger.info(
+                f"STAGE RESULT:\n{json.dumps(payload, indent=2, default=str)}"
+            )
 
     def _record_retry(self, bucket: str, *, consume_global: bool = False) -> int:
         count = int(self.retry_metadata.get(bucket, 0)) + 1
@@ -485,7 +759,9 @@ class BuildOrchestrator:
             self.global_retry_count += 1
         return count
 
-    def _record_non_consumable_output(self, producer: str, raw_output: str, diagnostics: List[str]) -> None:
+    def _record_non_consumable_output(
+        self, producer: str, raw_output: str, diagnostics: List[str]
+    ) -> None:
         self._record_retry("format_retry", consume_global=False)
         self._record_stage_contract(
             StageResult(
@@ -517,10 +793,14 @@ class BuildOrchestrator:
     def _is_hierarchical_design(self, code: str) -> bool:
         return len(self._extract_module_names(code)) > 1
 
-    def _validate_rtl_candidate(self, candidate_code: str, previous_code: str) -> List[str]:
+    def _validate_rtl_candidate(
+        self, candidate_code: str, previous_code: str
+    ) -> List[str]:
         issues: List[str] = []
         if not validate_llm_code_output(candidate_code):
-            issues.append("RTL candidate is not valid Verilog/SystemVerilog code output.")
+            issues.append(
+                "RTL candidate is not valid Verilog/SystemVerilog code output."
+            )
             return issues
         modules = self._extract_module_names(candidate_code)
         if self.name not in modules:
@@ -540,7 +820,9 @@ class BuildOrchestrator:
     def _validate_tb_candidate(self, tb_code: str) -> List[str]:
         issues: List[str] = []
         if not validate_llm_code_output(tb_code):
-            issues.append("TB candidate is not valid Verilog/SystemVerilog code output.")
+            issues.append(
+                "TB candidate is not valid Verilog/SystemVerilog code output."
+            )
             return issues
         module_match = re.search(r"\bmodule\s+([A-Za-z_]\w*)", tb_code)
         if not module_match or module_match.group(1) != f"{self.name}_tb":
@@ -550,7 +832,9 @@ class BuildOrchestrator:
         if "$dumpvars(0," not in tb_code:
             issues.append("TB candidate is missing the required dumpvars block.")
         if "TEST PASSED" not in tb_code or "TEST FAILED" not in tb_code:
-            issues.append("TB candidate must include TEST PASSED and TEST FAILED markers.")
+            issues.append(
+                "TB candidate must include TEST PASSED and TEST FAILED markers."
+            )
         return issues
 
     def _validate_sva_candidate(self, sva_code: str, rtl_code: str) -> List[str]:
@@ -562,12 +846,16 @@ class BuildOrchestrator:
             issues.append(f"SVA candidate is missing module '{self.name}_sva'.")
         yosys_code = convert_sva_to_yosys(sva_code, self.name)
         if not yosys_code:
-            issues.append("SVA candidate could not be translated to Yosys-compatible assertions.")
+            issues.append(
+                "SVA candidate could not be translated to Yosys-compatible assertions."
+            )
             return issues
         ok, report = validate_yosys_sby_check(yosys_code)
         if not ok:
             for issue in report.get("issues", []):
-                issues.append(issue.get("message", "Invalid Yosys preflight assertion output."))
+                issues.append(
+                    issue.get("message", "Invalid Yosys preflight assertion output.")
+                )
         signal_inventory = self._format_signal_inventory_for_prompt(rtl_code)
         if "No signal inventory could be extracted" in signal_inventory:
             issues.append("RTL signal inventory is unavailable for SVA validation.")
@@ -576,7 +864,9 @@ class BuildOrchestrator:
     @staticmethod
     def _simulation_capabilities(sim_output: str, vcd_path: str) -> Dict[str, Any]:
         trace_enabled = "without --trace" not in (sim_output or "")
-        waveform_generated = bool(vcd_path and os.path.exists(vcd_path) and os.path.getsize(vcd_path) > 200)
+        waveform_generated = bool(
+            vcd_path and os.path.exists(vcd_path) and os.path.getsize(vcd_path) > 200
+        )
         return {
             "trace_enabled": trace_enabled,
             "waveform_generated": waveform_generated,
@@ -584,27 +874,45 @@ class BuildOrchestrator:
 
     def _normalize_react_result(self, trace: Any) -> AgentResult:
         final_answer = getattr(trace, "final_answer", "") or ""
-        code_match = re.search(r"```(?:verilog|systemverilog|sv|v)?\s*(.*?)```", final_answer, re.DOTALL | re.IGNORECASE)
+        code_match = re.search(
+            r"```(?:verilog|systemverilog|sv|v)?\s*(.*?)```",
+            final_answer,
+            re.DOTALL | re.IGNORECASE,
+        )
         code_str = code_match.group(1).strip() if code_match else final_answer.strip()
-        has_code = bool(code_match) or ("module " in code_str and "endmodule" in code_str)
+        has_code = bool(code_match) or (
+            "module " in code_str and "endmodule" in code_str
+        )
         payload = {
             "code": code_str if has_code else "",
-            "self_check_status": "verified" if getattr(trace, "success", False) else "unverified",
-            "tool_observations": [getattr(step, "observation", "") for step in getattr(trace, "steps", []) if getattr(step, "observation", "")],
+            "self_check_status": "verified"
+            if getattr(trace, "success", False)
+            else "unverified",
+            "tool_observations": [
+                getattr(step, "observation", "")
+                for step in getattr(trace, "steps", [])
+                if getattr(step, "observation", "")
+            ],
             "final_decision": "accept" if has_code else "fallback",
         }
-        failure_class = FailureClass.UNKNOWN if has_code else FailureClass.LLM_FORMAT_ERROR
+        failure_class = (
+            FailureClass.UNKNOWN if has_code else FailureClass.LLM_FORMAT_ERROR
+        )
         return AgentResult(
             agent="ReAct",
             ok=has_code,
             producer="agent_react",
             payload=payload,
-            diagnostics=[] if has_code else ["ReAct did not return valid Verilog code."],
+            diagnostics=[]
+            if has_code
+            else ["ReAct did not return valid Verilog code."],
             failure_class=failure_class,
             raw_output=final_answer,
         )
 
-    def _normalize_waveform_result(self, diagnosis: Any, raw_output: str = "") -> AgentResult:
+    def _normalize_waveform_result(
+        self, diagnosis: Any, raw_output: str = ""
+    ) -> AgentResult:
         if diagnosis is None:
             return AgentResult(
                 agent="WaveformExpert",
@@ -630,7 +938,9 @@ class BuildOrchestrator:
                 for trace in diagnosis.root_cause_traces
             ],
             "suggested_fix_area": diagnosis.suggested_fix_area,
-            "fallback_reason": "" if diagnosis.root_cause_traces else "No AST trace roots found.",
+            "fallback_reason": ""
+            if diagnosis.root_cause_traces
+            else "No AST trace roots found.",
         }
         return AgentResult(
             agent="WaveformExpert",
@@ -642,7 +952,9 @@ class BuildOrchestrator:
             raw_output=raw_output,
         )
 
-    def _normalize_deepdebug_result(self, verdict: Any, raw_output: str = "") -> AgentResult:
+    def _normalize_deepdebug_result(
+        self, verdict: Any, raw_output: str = ""
+    ) -> AgentResult:
         if verdict is None:
             return AgentResult(
                 agent="DeepDebugger",
@@ -660,7 +972,9 @@ class BuildOrchestrator:
             "fix_description": verdict.fix_description,
             "confidence": verdict.confidence,
             "balanced_analysis_log": verdict.balanced_analysis_log,
-            "usable_for_regeneration": bool(verdict.root_cause_signal and verdict.fix_description),
+            "usable_for_regeneration": bool(
+                verdict.root_cause_signal and verdict.fix_description
+            ),
         }
         return AgentResult(
             agent="DeepDebugger",
@@ -711,7 +1025,9 @@ class BuildOrchestrator:
             raw_output=raw_output,
         )
 
-    def _build_llm_context(self, include_rtl: bool = True, max_rtl_chars: int = 15000) -> str:
+    def _build_llm_context(
+        self, include_rtl: bool = True, max_rtl_chars: int = 15000
+    ) -> str:
         """Build cumulative context string for LLM calls.
 
         Aggregates build state so the LLM can reason across the full pipeline
@@ -728,7 +1044,9 @@ class BuildOrchestrator:
         if include_rtl:
             rtl = self.artifacts.get("rtl_code", "")
             if rtl:
-                sections.append(f"CURRENT RTL ({len(rtl)} chars, truncated):\n```verilog\n{rtl[:max_rtl_chars]}\n```")
+                sections.append(
+                    f"CURRENT RTL ({len(rtl)} chars, truncated):\n```verilog\n{rtl[:max_rtl_chars]}\n```"
+                )
 
         # 3. Build strategy & state
         sections.append(
@@ -808,14 +1126,20 @@ class BuildOrchestrator:
                     f"  gate={evt.get('gate')} ok={evt.get('ok')} "
                     f"action={evt.get('action')} categories={evt.get('issue_categories', [])}"
                 )
-                fp_hash = evt.get('fingerprint')
+                fp_hash = evt.get("fingerprint")
                 if fp_hash:
                     failed_tb_code = self.tb_failed_code_by_fingerprint.get(fp_hash)
                     if failed_tb_code:
-                        lines.append(f"  REJECTED TESTBENCH CODE FOR THIS EVENT:\n{failed_tb_code}")
+                        lines.append(
+                            f"  REJECTED TESTBENCH CODE FOR THIS EVENT:\n{failed_tb_code}"
+                        )
 
         # Build history (last 5 state transitions with errors)
-        error_entries = [h for h in self.build_history if "error" in h.message.lower() or "fail" in h.message.lower()]
+        error_entries = [
+            h
+            for h in self.build_history
+            if "error" in h.message.lower() or "fail" in h.message.lower()
+        ]
         if error_entries:
             recent_errors = error_entries[-5:]
             lines.append("RECENT ERROR LOG:")
@@ -828,18 +1152,27 @@ class BuildOrchestrator:
 
     def run(self):
         """Main execution loop."""
-        self.log(f"Starting Build Process for '{self.name}' using {self.strategy.value}", refined=True)
-        
+        self.log(
+            f"Starting Build Process for '{self.name}' using {self.strategy.value}",
+            refined=True,
+        )
+
         try:
             while self.state != BuildState.SUCCESS and self.state != BuildState.FAIL:
                 if self.global_retry_count >= 15:
-                    self.log(f"Global retry budget exceeded ({self.global_retry_count}/15). Failing closed.", refined=True)
+                    self.log(
+                        f"Global retry budget exceeded ({self.global_retry_count}/15). Failing closed.",
+                        refined=True,
+                    )
                     self.state = BuildState.FAIL
                     break
-                    
+
                 self.global_step_count += 1
                 if self.global_step_count > self.global_step_budget:
-                    self.log(f"Global step budget exceeded ({self.global_step_budget}). Failing closed.", refined=True)
+                    self.log(
+                        f"Global step budget exceeded ({self.global_step_budget}). Failing closed.",
+                        refined=True,
+                    )
                     self.state = BuildState.FAIL
                     break
                 if self.state == BuildState.INIT:
@@ -870,6 +1203,24 @@ class BuildOrchestrator:
                     self.do_regression()
                 elif self.state == BuildState.SDC_GEN:
                     self.do_sdc_gen()
+                elif self.state == BuildState.SYNTHESIS:
+                    self.do_synthesis()
+                elif self.state == BuildState.DFT_SCAN:
+                    self.do_dft_scan()
+                elif self.state == BuildState.DFT_ATPG:
+                    self.do_dft_atpg()
+                elif self.state == BuildState.MBIST:
+                    self.do_mbist()
+                elif self.state == BuildState.GLS_SIM:
+                    self.do_gls_simulation()
+                elif self.state == BuildState.POWER_ANALYSIS:
+                    self.do_power_analysis()
+                elif self.state == BuildState.TIMING_ANALYSIS:
+                    self.do_timing_analysis()
+                elif self.state == BuildState.PHYSICAL_VERIFY:
+                    self.do_physical_verify()
+                elif self.state == BuildState.IP_PACKAGE:
+                    self.do_ip_package()
                 elif self.state == BuildState.FLOORPLAN:
                     self.do_floorplan()
                 elif self.state == BuildState.HARDENING:
@@ -883,10 +1234,11 @@ class BuildOrchestrator:
                 else:
                     self.log(f"Unknown state {self.state}", refined=False)
                     self.state = BuildState.FAIL
-                    
+
         except Exception as e:
             self.log(f"CRITICAL ERROR: {str(e)}", refined=False)
             import traceback
+
             console.print(traceback.format_exc())
             self.state = BuildState.FAIL
 
@@ -896,23 +1248,35 @@ class BuildOrchestrator:
             except Exception as e:
                 self.log(f"Benchmark metrics export warning: {e}", refined=True)
             # Create a clean summary of just the paths
-            summary = {k: v for k, v in self.artifacts.items() if 'code' not in k and 'spec' not in k}
-            
-            console.print(Panel(
-                f"[success]BUILD SUCCESSFUL[/]\n\n" + 
-                "\n".join([f"[bold]{k.upper()}:[/] {v}" for k, v in summary.items()]),
-                title="Done"
-            ))
+            summary = {
+                k: v
+                for k, v in self.artifacts.items()
+                if "code" not in k and "spec" not in k
+            }
+
+            console.print(
+                Panel(
+                    f"[success]BUILD SUCCESSFUL[/]\n\n"
+                    + "\n".join(
+                        [f"[bold]{k.upper()}:[/] {v}" for k, v in summary.items()]
+                    ),
+                    title="Done",
+                )
+            )
         else:
             console.print(Panel(f"[error]BUILD FAILED[/]", title="Failed"))
 
     # --- ACTION HANDLERS ---
 
     def do_init(self):
-        with console.status("[success]Initializing Workspace...[/success]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[success]Initializing Workspace...[/success]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             # Setup directories, check tools
-            self.artifacts['root'] = f"{OPENLANE_ROOT}/designs/{self.name}"
-            self.setup_logger() # Setup logging to file
+            self.artifacts["root"] = f"{OPENLANE_ROOT}/designs/{self.name}"
+            self.setup_logger()  # Setup logging to file
             self.artifacts["pdk_profile"] = self.pdk_profile
             self.log(
                 f"PDK profile: {self.pdk_profile.get('profile')} "
@@ -926,7 +1290,7 @@ class BuildOrchestrator:
                 self.log("Startup self-check failed in strict mode.", refined=True)
                 self.state = BuildState.FAIL
                 return
-            time.sleep(1) # Visual pause
+            time.sleep(1)  # Visual pause
             self.transition(BuildState.SPEC)
 
     def do_spec(self):
@@ -941,29 +1305,40 @@ class BuildOrchestrator:
         # Produces a validated JSON contract (SID) that defines every port,
         # parameter, FSM state, and sub-module BEFORE any Verilog is written.
         try:
-            architect = ArchitectModule(llm=self.get_llm_for_role("architect"), max_retries=3)
+            architect = ArchitectModule(
+                llm=self.get_llm_for_role("architect"), max_retries=3
+            )
             sid = architect.decompose(
                 design_name=self.name,
                 spec_text=self.desc,
             )
-            self.artifacts['sid'] = sid.to_json()
+            self.artifacts["sid"] = sid.to_json()
             # Convert SID → detailed RTL prompt for the coder agent
-            self.artifacts['spec'] = architect.sid_to_rtl_prompt(sid)
-            self.log(f"Structured Spec: {len(sid.sub_modules)} sub-modules decomposed", refined=True)
+            self.artifacts["spec"] = architect.sid_to_rtl_prompt(sid)
+            self.log(
+                f"Structured Spec: {len(sid.sub_modules)} sub-modules decomposed",
+                refined=True,
+            )
         except Exception as e:
-            self.logger.warning(f"ArchitectModule failed ({e}), falling back to Crew-based spec")
+            self.logger.warning(
+                f"ArchitectModule failed ({e}), falling back to Crew-based spec"
+            )
             # Fallback: original Crew-based spec generation
             self._do_spec_fallback()
             return
 
         self.log("Architecture Plan Generated (SID validated)", refined=True)
+        # Persistent Checkpoint
+        sid_path = os.path.join(self.artifacts["root"], "sid_checkpoint.json")
+        with open(sid_path, "w") as f:
+            f.write(sid.to_json())
         self.transition(BuildState.SPEC_VALIDATE)
 
     def _do_spec_fallback(self):
         """Fallback spec generation using a single CrewAI agent."""
         arch_agent = Agent(
-            role='Chief System Architect',
-            goal=f'Define a robust micro-architecture for {self.name}',
+            role="Chief System Architect",
+            goal=f"Define a robust micro-architecture for {self.name}",
             backstory=(
                 "Veteran Silicon Architect with 20+ years spanning CPUs, DSPs, FIFOs, "
                 "crypto cores, interface bridges, and SoC peripherals. "
@@ -971,9 +1346,9 @@ class BuildOrchestrator:
                 "Never uses placeholders or simplified approximations."
             ),
             llm=self.get_llm_for_role("designer"),
-            verbose=self.verbose
+            verbose=self.verbose,
         )
-        
+
         spec_task = Task(
             description=(
                 f"""Create a DETAILED Micro-Architecture Specification (MAS) for the chip below.
@@ -1000,14 +1375,20 @@ SPECIFICATION SECTIONS (Markdown):
 ## Timing & Reset
 """
             ),
-            expected_output='Complete Markdown Specification with all sections filled in',
-            agent=arch_agent
+            expected_output="Complete Markdown Specification with all sections filled in",
+            agent=arch_agent,
         )
 
-        with console.status("[accent]Architecting Chip Specification...[/accent]", spinner="dots12", spinner_style="spinner"):
-            result = Crew(verbose=False, agents=[arch_agent], tasks=[spec_task]).kickoff()
+        with console.status(
+            "[accent]Architecting Chip Specification...[/accent]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
+            result = self._crew_kickoff(
+                Crew(verbose=False, agents=[arch_agent], tasks=[spec_task])
+            )
 
-        self.artifacts['spec'] = str(result)
+        self.artifacts["spec"] = str(result)
         self.log("Architecture Plan Generated (fallback)", refined=True)
         self.transition(BuildState.SPEC_VALIDATE)
 
@@ -1015,7 +1396,10 @@ SPECIFICATION SECTIONS (Markdown):
 
     def do_spec_validate(self):
         """Stage: Validate and enrich the spec via HardwareSpecGenerator (6-stage pipeline)."""
-        self.log("Running HardwareSpecGenerator (classify → complete → decompose → interface → contract → output)...", refined=True)
+        self.log(
+            "Running HardwareSpecGenerator (classify → complete → decompose → interface → contract → output)...",
+            refined=True,
+        )
 
         try:
             spec_gen = HardwareSpecGenerator(llm=self.get_llm_for_role("architect"))
@@ -1023,17 +1407,21 @@ SPECIFICATION SECTIONS (Markdown):
                 design_name=self.name,
                 description=self.desc,
                 target_pdk=self.pdk_profile.get("profile", "sky130"),
+                base_sid=self.artifacts.get("sid"),
             )
 
             # Store the spec as structured JSON
-            self.artifacts['hw_spec'] = hw_spec.to_dict()
-            self.artifacts['hw_spec_json'] = hw_spec.to_json()
-            self.artifacts['hw_spec_object'] = hw_spec
+            self.artifacts["hw_spec"] = hw_spec.to_dict()
+            self.artifacts["hw_spec_json"] = hw_spec.to_json()
+            self.artifacts["hw_spec_object"] = hw_spec
 
             # Log classification and stats
             self.log(f"Design classified as: {hw_spec.design_category}", refined=True)
-            self.log(f"Ports: {len(hw_spec.ports)} | Submodules: {len(hw_spec.submodules)} | "
-                     f"Contract statements: {len(hw_spec.behavioral_contract)}", refined=True)
+            self.log(
+                f"Ports: {len(hw_spec.ports)} | Submodules: {len(hw_spec.submodules)} | "
+                f"Contract statements: {len(hw_spec.behavioral_contract)}",
+                refined=True,
+            )
 
             if issues:
                 for issue in issues[:5]:
@@ -1042,25 +1430,33 @@ SPECIFICATION SECTIONS (Markdown):
             # Handle ELABORATION_NEEDED — present 3 options to user
             if hw_spec.design_category == "ELABORATION_NEEDED":
                 options = [w for w in hw_spec.warnings if w.startswith("OPTION_")]
-                self.log(f"📋 Description is brief — generated {len(options)} design options.", refined=True)
+                self.log(
+                    f"📋 Description is brief — generated {len(options)} design options.",
+                    refined=True,
+                )
 
                 # Store options in artifact bus for the web API to surface
                 parsed_options = []
                 for opt_str in options:
                     # Format: OPTION_1: title | Category: X | Freq: Y MHz | Ports: ... | Details: ...
-                    parts = {p.split(":")[0].strip(): ":".join(p.split(":")[1:]).strip()
-                             for p in opt_str.split(" | ") if ":" in p}
+                    parts = {
+                        p.split(":")[0].strip(): ":".join(p.split(":")[1:]).strip()
+                        for p in opt_str.split(" | ")
+                        if ":" in p
+                    }
                     parsed_options.append(parts)
-                self.artifacts['spec_elaboration_options'] = parsed_options
-                self.artifacts['spec_elaboration_needed'] = True
+                self.artifacts["spec_elaboration_options"] = parsed_options
+                self.artifacts["spec_elaboration_needed"] = True
 
                 # ── CLI: Rich interactive display ──
                 try:
                     import typer
                     from rich.table import Table
 
-                    table = Table(title=f"💡 AgentIC VLSI Design Advisor — 3 Options for '{self.name}'",
-                                  show_lines=True)
+                    table = Table(
+                        title=f"💡 AgentIC VLSI Design Advisor — 3 Options for '{self.name}'",
+                        show_lines=True,
+                    )
                     table.add_column("#", style="bold cyan", width=3)
                     table.add_column("Design Variant", style="bold white", width=30)
                     table.add_column("Category", style="yellow", width=12)
@@ -1069,13 +1465,19 @@ SPECIFICATION SECTIONS (Markdown):
 
                     for i, opt in enumerate(parsed_options, 1):
                         opt_id = str(opt.get("OPTION_1".replace("1", str(i)), i))
-                        title = (opt.get("OPTION_1", opt.get(f"OPTION_{i}", f"Option {i}")))
+                        title = opt.get(
+                            "OPTION_1", opt.get(f"OPTION_{i}", f"Option {i}")
+                        )
                         # Get key from dynamic OPTION_N key
                         option_key = [k for k in opt if k.startswith("OPTION_")]
                         title = opt[option_key[0]] if option_key else f"Option {i}"
                         category = opt.get("Category", "")
                         freq = opt.get("Freq", "")
-                        details = opt.get("Details", "")[:80] + "…" if len(opt.get("Details", "")) > 80 else opt.get("Details", "")
+                        details = (
+                            opt.get("Details", "")[:80] + "…"
+                            if len(opt.get("Details", "")) > 80
+                            else opt.get("Details", "")
+                        )
                         table.add_row(str(i), title, category, freq, details)
 
                     console.print(table)
@@ -1085,55 +1487,79 @@ SPECIFICATION SECTIONS (Markdown):
                     import sys
                     import os
                     import time
+
                     choice_str = None
-                    is_api_server = os.environ.get("AGENTIC_API_SERVER") == "1" or (sys.argv and "uvicorn" in sys.argv[0])
-                    
+                    is_api_server = os.environ.get("AGENTIC_API_SERVER") == "1" or (
+                        sys.argv and "uvicorn" in sys.argv[0]
+                    )
+
                     if is_api_server and self.human_in_loop:
                         # Web API HITL Mode: Signal that we are waiting for a choice
-                        self.log("EVENT:SPEC_ELABORATION_WAIT | WAITING_FOR_USER_CHOICE", refined=True)
-                        self.artifacts['waiting_for_elaboration'] = True
-                        
+                        self.log(
+                            "EVENT:SPEC_ELABORATION_WAIT | WAITING_FOR_USER_CHOICE",
+                            refined=True,
+                        )
+                        self.artifacts["waiting_for_elaboration"] = True
+
                         # Loop until the choice is injected via API (artifacts['spec_elaboration_choice'])
                         # Or until timeout (e.g. 10 minutes)
                         wait_start = time.time()
-                        while 'spec_elaboration_choice' not in self.artifacts:
-                            if time.time() - wait_start > 600: # 10 min timeout
-                                self.log("HITL Timeout: Auto-selecting Option 1.", refined=True)
+                        while "spec_elaboration_choice" not in self.artifacts:
+                            if time.time() - wait_start > 600:  # 10 min timeout
+                                self.log(
+                                    "HITL Timeout: Auto-selecting Option 1.",
+                                    refined=True,
+                                )
                                 choice_str = "1"
                                 break
                             time.sleep(2)
-                        
+
                         if not choice_str:
-                            choice_str = self.artifacts.get('spec_elaboration_choice', "1")
-                            self.log(f"Received user choice: {choice_str}", refined=True)
-                        
-                        self.artifacts.pop('waiting_for_elaboration', None)
+                            choice_str = self.artifacts.get(
+                                "spec_elaboration_choice", "1"
+                            )
+                            self.log(
+                                f"Received user choice: {choice_str}", refined=True
+                            )
+
+                        self.artifacts.pop("waiting_for_elaboration", None)
                     elif is_api_server and not self.human_in_loop:
                         # Non-interactive API -> Auto-select first option
-                        self.log("Non-interactive API mode: auto-selecting Option 1.", refined=True)
+                        self.log(
+                            "Non-interactive API mode: auto-selecting Option 1.",
+                            refined=True,
+                        )
                         choice_str = "1"
                     elif sys.stdin.isatty():
                         choice_str = typer.prompt(
                             f"Choose an option (1-{len(parsed_options)}) or type a custom description",
-                            default="1"
+                            default="1",
                         )
                     elif self.human_in_loop:
                         # Fallback HITL
-                        self.log("EVENT:SPEC_ELABORATION_WAIT | WAITING_FOR_USER_CHOICE", refined=True)
-                        self.artifacts['waiting_for_elaboration'] = True
+                        self.log(
+                            "EVENT:SPEC_ELABORATION_WAIT | WAITING_FOR_USER_CHOICE",
+                            refined=True,
+                        )
+                        self.artifacts["waiting_for_elaboration"] = True
                         wait_start = time.time()
-                        while 'spec_elaboration_choice' not in self.artifacts:
+                        while "spec_elaboration_choice" not in self.artifacts:
                             if time.time() - wait_start > 600:
                                 choice_str = "1"
                                 break
                             time.sleep(2)
-                        
+
                         if not choice_str:
-                            choice_str = self.artifacts.get('spec_elaboration_choice', "1")
-                        self.artifacts.pop('waiting_for_elaboration', None)
+                            choice_str = self.artifacts.get(
+                                "spec_elaboration_choice", "1"
+                            )
+                        self.artifacts.pop("waiting_for_elaboration", None)
                     else:
                         # Non-interactive (Background/CI) -> Auto-select first option
-                        self.log("Non-interactive mode: auto-selecting Option 1.", refined=True)
+                        self.log(
+                            "Non-interactive mode: auto-selecting Option 1.",
+                            refined=True,
+                        )
                         choice_str = "1"
 
                     chosen_desc = None
@@ -1142,7 +1568,11 @@ SPECIFICATION SECTIONS (Markdown):
                         if 0 <= idx < len(parsed_options):
                             opt = parsed_options[idx]
                             option_key = [k for k in opt if k.startswith("OPTION_")]
-                            title = opt[option_key[0]] if option_key else f"Option {idx+1}"
+                            title = (
+                                opt[option_key[0]]
+                                if option_key
+                                else f"Option {idx + 1}"
+                            )
                             details = opt.get("Details", "")
                             ports = opt.get("Ports", "")
                             category = opt.get("Category", "")
@@ -1152,25 +1582,36 @@ SPECIFICATION SECTIONS (Markdown):
                                 f"Category: {category}. Target frequency: {freq}. "
                                 f"Key ports: {ports}. Module name: {self.name}."
                             )
-                            self.log(f"✅ Selected option {idx+1}: {title}", refined=True)
+                            self.log(
+                                f"✅ Selected option {idx + 1}: {title}", refined=True
+                            )
                     else:
                         # Custom description entered directly
                         chosen_desc = choice_str.strip()
-                        self.log(f"✅ Using custom description: {chosen_desc[:80]}…", refined=True)
+                        self.log(
+                            f"✅ Using custom description: {chosen_desc[:80]}…",
+                            refined=True,
+                        )
 
                     if chosen_desc:
                         # Store the enriched description and retry spec validation
                         self.desc = chosen_desc
-                        self.artifacts['original_desc'] = hw_spec.design_description
-                        self.artifacts['elaborated_desc'] = chosen_desc
-                        self.log("🔄 Re-running spec generation with elaborated description…", refined=True)
+                        self.artifacts["original_desc"] = hw_spec.design_description
+                        self.artifacts["elaborated_desc"] = chosen_desc
+                        self.log(
+                            "🔄 Re-running spec generation with elaborated description…",
+                            refined=True,
+                        )
                         # Re-enter this stage to regenerate with the full description
                         self.state = BuildState.SPEC_VALIDATE
                         return
 
                 except Exception as prompt_err:
                     # If running non-interactively (e.g. web API), use the first option automatically
-                    self.log(f"Non-interactive mode — auto-selecting option 1 ({prompt_err})", refined=True)
+                    self.log(
+                        f"Non-interactive mode — auto-selecting option 1 ({prompt_err})",
+                        refined=True,
+                    )
                     if parsed_options:
                         opt = parsed_options[0]
                         option_key = [k for k in opt if k.startswith("OPTION_")]
@@ -1182,7 +1623,7 @@ SPECIFICATION SECTIONS (Markdown):
                             f"{self.name}: {title}. {details} "
                             f"Target frequency: {freq}. Key ports: {ports}. Module name: {self.name}."
                         )
-                        self.artifacts['elaborated_desc'] = self.desc
+                        self.artifacts["elaborated_desc"] = self.desc
                         self.state = BuildState.SPEC_VALIDATE
                         return
 
@@ -1193,60 +1634,78 @@ SPECIFICATION SECTIONS (Markdown):
 
             # Check for hard rejection
             if hw_spec.design_category == "REJECTED":
-                rejection_reason = hw_spec.warnings[0] if hw_spec.warnings else "Specification rejected"
+                rejection_reason = (
+                    hw_spec.warnings[0]
+                    if hw_spec.warnings
+                    else "Specification rejected"
+                )
                 self.log(f"❌ SPEC REJECTED: {rejection_reason}", refined=True)
                 self.errors.append(f"Specification rejected: {rejection_reason}")
-                self.artifacts['spec_rejection_reason'] = rejection_reason
+                self.artifacts["spec_rejection_reason"] = rejection_reason
                 self.state = BuildState.FAIL
                 return
 
             # Enrich the existing spec artifact with structured data
             enrichment = spec_gen.to_sid_enrichment(hw_spec)
-            self.artifacts['spec_enrichment'] = enrichment
+            self.artifacts["spec_enrichment"] = enrichment
 
             # Append behavioral verification hints to spec for downstream RTL gen
-            if enrichment.get('verification_hints_from_spec'):
-                existing_spec = self.artifacts.get('spec', '')
-                hints = "\n".join(enrichment['verification_hints_from_spec'])
-                self.artifacts['spec'] = (
-                    existing_spec +
-                    f"\n\n## Behavioral Contract (Auto-Generated Assertions)\n{hints}\n"
+            if enrichment.get("verification_hints_from_spec"):
+                existing_spec = self.artifacts.get("spec", "")
+                hints = "\n".join(enrichment["verification_hints_from_spec"])
+                self.artifacts["spec"] = (
+                    existing_spec
+                    + f"\n\n## Behavioral Contract (Auto-Generated Assertions)\n{hints}\n"
                 )
 
-            self.log(f"Spec validation complete: {hw_spec.design_category} "
-                     f"({len(hw_spec.inferred_fields)} fields inferred, "
-                     f"{len(hw_spec.warnings)} warnings)", refined=True)
+            self.log(
+                f"Spec validation complete: {hw_spec.design_category} "
+                f"({len(hw_spec.inferred_fields)} fields inferred, "
+                f"{len(hw_spec.warnings)} warnings)",
+                refined=True,
+            )
             self.transition(BuildState.HIERARCHY_EXPAND)
 
         except Exception as e:
-            self.log(f"HardwareSpecGenerator failed ({e}); skipping to HIERARCHY_EXPAND with basic spec.", refined=True)
+            self.log(
+                f"HardwareSpecGenerator failed ({e}); skipping to HIERARCHY_EXPAND with basic spec.",
+                refined=True,
+            )
             self.logger.warning(f"HardwareSpecGenerator error: {e}")
             # Create a minimal hw_spec so downstream stages can still run
-            self.artifacts['hw_spec'] = {
-                'design_category': 'CONTROL',
-                'top_module_name': self.name,
-                'target_pdk': self.pdk_profile.get("profile", "sky130"),
-                'target_frequency_mhz': 50,
-                'ports': [], 'submodules': [],
-                'behavioral_contract': [], 'warnings': ['Spec validation was skipped due to error'],
+            self.artifacts["hw_spec"] = {
+                "design_category": "CONTROL",
+                "top_module_name": self.name,
+                "target_pdk": self.pdk_profile.get("profile", "sky130"),
+                "target_frequency_mhz": 50,
+                "ports": [],
+                "submodules": [],
+                "behavioral_contract": [],
+                "warnings": ["Spec validation was skipped due to error"],
             }
             self.transition(BuildState.HIERARCHY_EXPAND)
 
     def do_hierarchy_expand(self):
         """Stage: Evaluate submodule complexity and recursively expand complex ones."""
-        self.log("Running HierarchyExpander (evaluate → expand → consistency check)...", refined=True)
+        self.log(
+            "Running HierarchyExpander (evaluate → expand → consistency check)...",
+            refined=True,
+        )
 
-        hw_spec_dict = self.artifacts.get('hw_spec', {})
+        hw_spec_dict = self.artifacts.get("hw_spec", {})
 
         # If we have a full HardwareSpec object, use it directly
-        hw_spec_obj = self.artifacts.get('hw_spec_object')
+        hw_spec_obj = self.artifacts.get("hw_spec_object")
         if hw_spec_obj is None:
             # Reconstruct from dict
             try:
                 hw_spec_obj = HardwareSpec.from_json(json.dumps(hw_spec_dict))
             except Exception:
-                self.log("No valid HardwareSpec for hierarchy expansion; skipping.", refined=True)
-                self.artifacts['hierarchy_result'] = {}
+                self.log(
+                    "No valid HardwareSpec for hierarchy expansion; skipping.",
+                    refined=True,
+                )
+                self.artifacts["hierarchy_result"] = {}
                 self.transition(BuildState.FEASIBILITY_CHECK)
                 return
 
@@ -1254,47 +1713,61 @@ SPECIFICATION SECTIONS (Markdown):
             expander = HierarchyExpander(llm=self.get_llm_for_role("architect"))
             result = expander.expand(hw_spec_obj)
 
-            self.artifacts['hierarchy_result'] = result.to_dict()
-            self.artifacts['hierarchy_result_json'] = result.to_json()
+            self.artifacts["hierarchy_result"] = result.to_dict()
+            self.artifacts["hierarchy_result_json"] = result.to_json()
 
-            self.log(f"Hierarchy: depth={result.hierarchy_depth}, "
-                     f"expansions={result.expansion_count}, "
-                     f"submodules={len(result.submodules)}", refined=True)
+            self.log(
+                f"Hierarchy: depth={result.hierarchy_depth}, "
+                f"expansions={result.expansion_count}, "
+                f"submodules={len(result.submodules)}",
+                refined=True,
+            )
 
             # Log any consistency fixes
-            consistency_fixes = [w for w in result.warnings if w.startswith("CONSISTENCY_FIX")]
+            consistency_fixes = [
+                w for w in result.warnings if w.startswith("CONSISTENCY_FIX")
+            ]
             for fix in consistency_fixes[:3]:
                 self.log(f"  🔧 {fix}", refined=True)
 
             # Store enrichment for downstream
             enrichment = expander.to_hierarchy_enrichment(result)
-            self.artifacts['hierarchy_enrichment'] = enrichment
+            self.artifacts["hierarchy_enrichment"] = enrichment
 
             self.transition(BuildState.FEASIBILITY_CHECK)
 
         except Exception as e:
-            self.log(f"HierarchyExpander failed ({e}); skipping to FEASIBILITY_CHECK.", refined=True)
+            self.log(
+                f"HierarchyExpander failed ({e}); skipping to FEASIBILITY_CHECK.",
+                refined=True,
+            )
             self.logger.warning(f"HierarchyExpander error: {e}")
-            self.artifacts['hierarchy_result'] = {}
+            self.artifacts["hierarchy_result"] = {}
             self.transition(BuildState.FEASIBILITY_CHECK)
 
     def do_feasibility_check(self):
         """Stage: Check physical realizability on Sky130 before RTL generation."""
-        self.log(f"Running FeasibilityChecker (frequency → memory → arithmetic → area → {self.pdk_profile.get('profile', 'sky130').upper()} rules)...", refined=True)
+        self.log(
+            f"Running FeasibilityChecker (frequency → memory → arithmetic → area → {self.pdk_profile.get('profile', 'sky130').upper()} rules)...",
+            refined=True,
+        )
 
-        hw_spec_dict = self.artifacts.get('hw_spec', {})
-        hierarchy_result_dict = self.artifacts.get('hierarchy_result', None)
+        hw_spec_dict = self.artifacts.get("hw_spec", {})
+        hierarchy_result_dict = self.artifacts.get("hierarchy_result", None)
 
         try:
             checker = FeasibilityChecker(pdk=self.pdk_profile.get("profile", "sky130"))
             result = checker.check(hw_spec_dict, hierarchy_result_dict)
 
-            self.artifacts['feasibility_result'] = result.to_dict()
-            self.artifacts['feasibility_result_json'] = result.to_json()
+            self.artifacts["feasibility_result"] = result.to_dict()
+            self.artifacts["feasibility_result_json"] = result.to_json()
 
-            self.log(f"Feasibility: {result.feasibility_status} | "
-                     f"~{result.estimated_gate_equivalents} GE | "
-                     f"Floorplan: {result.recommended_floorplan_size_um}", refined=True)
+            self.log(
+                f"Feasibility: {result.feasibility_status} | "
+                f"~{result.estimated_gate_equivalents} GE | "
+                f"Floorplan: {result.recommended_floorplan_size_um}",
+                refined=True,
+            )
 
             if result.feasibility_warnings:
                 for w in result.feasibility_warnings[:5]:
@@ -1303,53 +1776,81 @@ SPECIFICATION SECTIONS (Markdown):
             if result.feasibility_status == "REJECT":
                 for r in result.feasibility_rejections:
                     self.log(f"  ❌ {r}", refined=True)
-                self.log("❌ FEASIBILITY REJECTED — pipeline halted before RTL generation.", refined=True)
-                self.errors.append(f"Feasibility rejected: {'; '.join(result.feasibility_rejections[:3])}")
-                self.artifacts['feasibility_rejection_reasons'] = result.feasibility_rejections
+                self.log(
+                    "❌ FEASIBILITY REJECTED — pipeline halted before RTL generation.",
+                    refined=True,
+                )
+                self.errors.append(
+                    f"Feasibility rejected: {'; '.join(result.feasibility_rejections[:3])}"
+                )
+                self.artifacts["feasibility_rejection_reasons"] = (
+                    result.feasibility_rejections
+                )
                 self.state = BuildState.FAIL
                 return
 
             if result.memory_macros_required:
                 for macro in result.memory_macros_required:
-                    self.log(f"  📦 OpenRAM macro needed: {macro.submodule_name} "
-                             f"({macro.width_bits}×{macro.depth_words})", refined=True)
+                    self.log(
+                        f"  📦 OpenRAM macro needed: {macro.submodule_name} "
+                        f"({macro.width_bits}×{macro.depth_words})",
+                        refined=True,
+                    )
 
             # Store enrichment
             enrichment = checker.to_feasibility_enrichment(result)
-            self.artifacts['feasibility_enrichment'] = enrichment
+            self.artifacts["feasibility_enrichment"] = enrichment
 
             self.transition(BuildState.CDC_ANALYZE)
 
         except Exception as e:
-            self.log(f"FeasibilityChecker failed ({e}); skipping to CDC_ANALYZE.", refined=True)
+            self.log(
+                f"FeasibilityChecker failed ({e}); skipping to CDC_ANALYZE.",
+                refined=True,
+            )
             self.logger.warning(f"FeasibilityChecker error: {e}")
-            self.artifacts['feasibility_result'] = {'feasibility_status': 'WARN', 'feasibility_warnings': [f'Check skipped: {e}']}
+            self.artifacts["feasibility_result"] = {
+                "feasibility_status": "WARN",
+                "feasibility_warnings": [f"Check skipped: {e}"],
+            }
             self.transition(BuildState.CDC_ANALYZE)
 
     def do_cdc_analyze(self):
         """Stage: Identify clock domain crossings and assign synchronization strategies."""
-        self.log("Running CDCAnalyzer (identify domains → crossings → sync strategies → submodules)...", refined=True)
+        self.log(
+            "Running CDCAnalyzer (identify domains → crossings → sync strategies → submodules)...",
+            refined=True,
+        )
 
-        hw_spec_dict = self.artifacts.get('hw_spec', {})
-        hierarchy_result_dict = self.artifacts.get('hierarchy_result', None)
+        hw_spec_dict = self.artifacts.get("hw_spec", {})
+        hierarchy_result_dict = self.artifacts.get("hierarchy_result", None)
 
         try:
             analyzer = CDCAnalyzer()
             result = analyzer.analyze(hw_spec_dict, hierarchy_result_dict)
 
-            self.artifacts['cdc_result'] = result.to_dict()
-            self.artifacts['cdc_result_json'] = result.to_json()
+            self.artifacts["cdc_result"] = result.to_dict()
+            self.artifacts["cdc_result_json"] = result.to_json()
 
             if result.cdc_status == "SINGLE_DOMAIN":
-                self.log("CDC: Single clock domain detected — no CDC analysis required.", refined=True)
+                self.log(
+                    "CDC: Single clock domain detected — no CDC analysis required.",
+                    refined=True,
+                )
             else:
-                self.log(f"CDC: {result.domain_count} clock domains, "
-                         f"{len(result.crossing_signals)} crossing signals, "
-                         f"{len(result.cdc_submodules_added)} sync submodules generated.", refined=True)
+                self.log(
+                    f"CDC: {result.domain_count} clock domains, "
+                    f"{len(result.crossing_signals)} crossing signals, "
+                    f"{len(result.cdc_submodules_added)} sync submodules generated.",
+                    refined=True,
+                )
 
                 for crossing in result.crossing_signals[:5]:
-                    self.log(f"  🔀 {crossing.signal_name}: {crossing.source_domain} → "
-                             f"{crossing.destination_domain} [{crossing.sync_strategy}]", refined=True)
+                    self.log(
+                        f"  🔀 {crossing.signal_name}: {crossing.source_domain} → "
+                        f"{crossing.destination_domain} [{crossing.sync_strategy}]",
+                        refined=True,
+                    )
 
                 if result.cdc_unresolved:
                     for u in result.cdc_unresolved:
@@ -1357,7 +1858,9 @@ SPECIFICATION SECTIONS (Markdown):
 
                 # Inject CDC submodule specs into the spec artifact for RTL gen
                 if result.cdc_submodules_added:
-                    cdc_section = "\n\n## CDC Synchronization Submodules (Auto-Generated)\n"
+                    cdc_section = (
+                        "\n\n## CDC Synchronization Submodules (Auto-Generated)\n"
+                    )
                     for sub in result.cdc_submodules_added:
                         cdc_section += (
                             f"\n### {sub.module_name} ({sub.strategy})\n"
@@ -1365,51 +1868,71 @@ SPECIFICATION SECTIONS (Markdown):
                             f"- Behavior: {sub.behavior}\n"
                             f"- Ports: {json.dumps(sub.ports, indent=2)}\n"
                         )
-                    existing_spec = self.artifacts.get('spec', '')
-                    self.artifacts['spec'] = existing_spec + cdc_section
+                    existing_spec = self.artifacts.get("spec", "")
+                    self.artifacts["spec"] = existing_spec + cdc_section
 
             self.transition(BuildState.VERIFICATION_PLAN)
 
         except Exception as e:
-            self.log(f"CDCAnalyzer failed ({e}); skipping to VERIFICATION_PLAN.", refined=True)
+            self.log(
+                f"CDCAnalyzer failed ({e}); skipping to VERIFICATION_PLAN.",
+                refined=True,
+            )
             self.logger.warning(f"CDCAnalyzer error: {e}")
-            self.artifacts['cdc_result'] = {'cdc_status': 'SINGLE_DOMAIN', 'cdc_warnings': [f'Analysis skipped: {e}']}
+            self.artifacts["cdc_result"] = {
+                "cdc_status": "SINGLE_DOMAIN",
+                "cdc_warnings": [f"Analysis skipped: {e}"],
+            }
             self.transition(BuildState.VERIFICATION_PLAN)
 
     def do_verification_plan(self):
         """Stage: Generate structured verification plan with test cases, SVA, and coverage."""
-        self.log("Running VerificationPlanner (behaviors → mandatory tests → SVA → coverage → finalize)...", refined=True)
+        self.log(
+            "Running VerificationPlanner (behaviors → mandatory tests → SVA → coverage → finalize)...",
+            refined=True,
+        )
 
-        hw_spec_obj = self.artifacts.get('hw_spec_object')
+        hw_spec_obj = self.artifacts.get("hw_spec_object")
         if hw_spec_obj is None:
             # Try to reconstruct
-            hw_spec_dict = self.artifacts.get('hw_spec', {})
+            hw_spec_dict = self.artifacts.get("hw_spec", {})
             try:
                 hw_spec_obj = HardwareSpec.from_json(json.dumps(hw_spec_dict))
             except Exception:
-                self.log("No valid HardwareSpec for verification planning; skipping.", refined=True)
+                self.log(
+                    "No valid HardwareSpec for verification planning; skipping.",
+                    refined=True,
+                )
                 self.transition(BuildState.RTL_GEN)
                 return
 
         # Get optional CDC and hierarchy results for coverage planning
-        cdc_result_dict = self.artifacts.get('cdc_result', {})
-        hierarchy_result_dict = self.artifacts.get('hierarchy_result', {})
+        cdc_result_dict = self.artifacts.get("cdc_result", {})
+        hierarchy_result_dict = self.artifacts.get("hierarchy_result", {})
 
         try:
             planner = VerificationPlanner()
             plan = planner.plan(
                 hardware_spec=hw_spec_obj,
                 cdc_result=cdc_result_dict if cdc_result_dict else None,
-                hierarchy_result=hierarchy_result_dict if hierarchy_result_dict else None,
+                hierarchy_result=hierarchy_result_dict
+                if hierarchy_result_dict
+                else None,
             )
 
-            self.artifacts['verification_plan'] = plan.to_dict()
-            self.artifacts['verification_plan_json'] = plan.to_json()
+            self.artifacts["verification_plan"] = plan.to_dict()
+            self.artifacts["verification_plan_json"] = plan.to_json()
 
-            self.log(f"Verification Plan: {plan.total_tests} tests "
-                     f"(P0={plan.p0_count}, P1={plan.p1_count}, P2={plan.p2_count})", refined=True)
-            self.log(f"SVA properties: {len(plan.sva_properties)} | "
-                     f"Coverage points: {len(plan.coverage_points)}", refined=True)
+            self.log(
+                f"Verification Plan: {plan.total_tests} tests "
+                f"(P0={plan.p0_count}, P1={plan.p1_count}, P2={plan.p2_count})",
+                refined=True,
+            )
+            self.log(
+                f"SVA properties: {len(plan.sva_properties)} | "
+                f"Coverage points: {len(plan.coverage_points)}",
+                refined=True,
+            )
 
             if plan.warnings:
                 for w in plan.warnings[:3]:
@@ -1429,15 +1952,17 @@ SPECIFICATION SECTIONS (Markdown):
                     vplan_section += f"// {sva.description}\n{sva.sva_code}\n\n"
                 vplan_section += "```\n"
 
-            existing_spec = self.artifacts.get('spec', '')
-            self.artifacts['spec'] = existing_spec + vplan_section
+            existing_spec = self.artifacts.get("spec", "")
+            self.artifacts["spec"] = existing_spec + vplan_section
 
             self.transition(BuildState.RTL_GEN)
 
         except Exception as e:
-            self.log(f"VerificationPlanner failed ({e}); skipping to RTL_GEN.", refined=True)
+            self.log(
+                f"VerificationPlanner failed ({e}); skipping to RTL_GEN.", refined=True
+            )
             self.logger.warning(f"VerificationPlanner error: {e}")
-            self.artifacts['verification_plan'] = {}
+            self.artifacts["verification_plan"] = {}
             self.transition(BuildState.RTL_GEN)
 
     # ─── END NEW PIPELINE STAGES ─────────────────────────────────────
@@ -1512,52 +2037,59 @@ SPECIFICATION SECTIONS (Markdown):
     @staticmethod
     def _extract_module_interface(rtl_code: str) -> str:
         """Extract module port signature from RTL for testbench generation.
-        
+
         Returns a clean, structured port list like:
             Parameters: WIDTH = 8
             Inputs:  clk, rst_n, enable, data_in [7:0]
             Outputs: data_out [7:0], valid, ready
         """
         import re
+
         lines = []
-        
+
         # Extract parameters
-        params = re.findall(r'parameter\s+(\w+)\s*=\s*([^,;\)]+)', rtl_code)
+        params = re.findall(r"parameter\s+(\w+)\s*=\s*([^,;\)]+)", rtl_code)
         if params:
-            lines.append("Parameters: " + ", ".join(f"{n} = {v.strip()}" for n, v in params))
-        
+            lines.append(
+                "Parameters: " + ", ".join(f"{n} = {v.strip()}" for n, v in params)
+            )
+
         # Extract ports — match input/output/inout declarations
         # Support parameterized widths like [DATA_W-1:0] in addition to [7:0]
         inputs = []
         outputs = []
         inouts = []
-        
+
         for match in re.finditer(
-            r'\b(input|output|inout)\s+(?:reg|wire|logic)?\s*(?:signed\s*)?(?:(\[[^\]]+\]))?\s*(\w+)',
-            rtl_code
+            r"\b(input|output|inout)\s+(?:reg|wire|logic)?\s*(?:signed\s*)?(?:(\[[^\]]+\]))?\s*(\w+)",
+            rtl_code,
         ):
             direction, width, name = match.groups()
             port_str = name + (f" {width}" if width else "")
-            if direction == 'input':
+            if direction == "input":
                 inputs.append(port_str)
-            elif direction == 'output':
+            elif direction == "output":
                 outputs.append(port_str)
             else:
                 inouts.append(port_str)
-        
+
         if inputs:
             lines.append("Inputs:  " + ", ".join(inputs))
         if outputs:
             lines.append("Outputs: " + ", ".join(outputs))
         if inouts:
             lines.append("Inouts:  " + ", ".join(inouts))
-        
+
         if lines:
             return "\n".join(lines)
-        
+
         # Fallback: return the module header as-is
-        header_match = re.search(r'(module\s+\w+[\s\S]*?;)', rtl_code)
-        return header_match.group(1) if header_match else "Could not extract ports — see full RTL below."
+        header_match = re.search(r"(module\s+\w+[\s\S]*?;)", rtl_code)
+        return (
+            header_match.group(1)
+            if header_match
+            else "Could not extract ports — see full RTL below."
+        )
 
     @staticmethod
     def _tb_meets_strict_contract(tb_code: str, strategy: BuildStrategy) -> tuple:
@@ -1570,7 +2102,10 @@ SPECIFICATION SECTIONS (Markdown):
         if strategy == BuildStrategy.SV_MODULAR:
             if "class Transaction" not in text:
                 missing.append("Missing class Transaction")
-            if all(token not in text for token in ["class Driver", "class Monitor", "class Scoreboard"]):
+            if all(
+                token not in text
+                for token in ["class Driver", "class Monitor", "class Scoreboard"]
+            ):
                 missing.append("Missing transaction flow classes")
         return len(missing) == 0, missing
 
@@ -1588,7 +2123,9 @@ SPECIFICATION SECTIONS (Markdown):
         for pname, pval in param_pattern.findall(text):
             param_defaults[pname.strip()] = pval.strip()
 
-        header_match = re.search(r"\bmodule\b[\s\S]*?\(([\s\S]*?)\)\s*;", text, re.IGNORECASE)
+        header_match = re.search(
+            r"\bmodule\b[\s\S]*?\(([\s\S]*?)\)\s*;", text, re.IGNORECASE
+        )
         header = header_match.group(1) if header_match else text
         header = re.sub(r"//.*", "", header)
         header = re.sub(r"/\*[\s\S]*?\*/", "", header)
@@ -1611,7 +2148,7 @@ SPECIFICATION SECTIONS (Markdown):
                             for part in parts:
                                 part = part.strip()
                                 # Safe eval: only digits and arithmetic
-                                if re.match(r'^[\d\s\+\-\*\/\(\)]+$', part):
+                                if re.match(r"^[\d\s\+\-\*\/\(\)]+$", part):
                                     evaluated_parts.append(str(int(eval(part))))  # noqa: S307
                                 else:
                                     evaluated_parts.append(part)
@@ -1655,7 +2192,7 @@ SPECIFICATION SECTIONS (Markdown):
                     evaluated = []
                     for part in parts:
                         part = part.strip()
-                        if re.match(r'^[\d\s\+\-\*\/\(\)]+$', part):
+                        if re.match(r"^[\d\s\+\-\*\/\(\)]+$", part):
                             evaluated.append(str(int(eval(part))))  # noqa: S307
                         else:
                             evaluated.append(part)
@@ -1736,14 +2273,18 @@ SPECIFICATION SECTIONS (Markdown):
         self.artifacts[f"{stem}_latest"] = latest_path
         return attempt_path
 
-    def _record_tb_gate_history(self, gate: str, ok: bool, action: str, report: Dict[str, Any]):
+    def _record_tb_gate_history(
+        self, gate: str, ok: bool, action: str, report: Dict[str, Any]
+    ):
         history = self.artifacts.setdefault("tb_gate_history", [])
         event = {
             "timestamp": int(time.time()),
             "gate": gate,
             "ok": bool(ok),
             "action": action,
-            "issue_categories": report.get("issue_categories", report.get("issue_codes", [])),
+            "issue_categories": report.get(
+                "issue_categories", report.get("issue_codes", [])
+            ),
             "fingerprint": report.get("fingerprint", ""),
         }
         history.append(event)
@@ -1757,7 +2298,7 @@ SPECIFICATION SECTIONS (Markdown):
         fp = hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
         count = self.tb_failure_fingerprint_history.get(fp, 0) + 1
         self.tb_failure_fingerprint_history[fp] = count
-        
+
         # Bug 1: Track generated TB code that produced this error
         tb_path = self.artifacts.get("tb_path", "")
         if tb_path and os.path.exists(tb_path):
@@ -1766,7 +2307,7 @@ SPECIFICATION SECTIONS (Markdown):
                     self.tb_failed_code_by_fingerprint[fp] = f.read()
             except OSError:
                 pass
-                
+
         return count >= 2
 
     def _clear_tb_fingerprints(self) -> None:
@@ -1777,7 +2318,9 @@ SPECIFICATION SECTIONS (Markdown):
         self.tb_compile_fail_count = 0
         self.tb_repair_fail_count = 0
 
-    def generate_uvm_lite_tb_from_rtl_ports(self, design_name: str, rtl_code: str) -> str:
+    def generate_uvm_lite_tb_from_rtl_ports(
+        self, design_name: str, rtl_code: str
+    ) -> str:
         """Deterministic Verilator-safe testbench generated from RTL ports.
 
         Generates a flat procedural TB — no interfaces, no classes, no virtual
@@ -1798,21 +2341,28 @@ SPECIFICATION SECTIONS (Markdown):
             if p["direction"] == "input":
                 input_ports.append(p)
                 if clock_name is None and re.search(
-                    r'(?:^|_)(?:clk|clock|sclk|aclk)(?:_|$)|^i_clk', pname, re.IGNORECASE
+                    r"(?:^|_)(?:clk|clock|sclk|aclk)(?:_|$)|^i_clk",
+                    pname,
+                    re.IGNORECASE,
                 ):
                     clock_name = pname
                 if reset_name is None and re.search(
-                    r'(?:^|_)(?:rst|reset|nrst|areset)(?:_|$)|^i_rst', pname, re.IGNORECASE
+                    r"(?:^|_)(?:rst|reset|nrst|areset)(?:_|$)|^i_rst",
+                    pname,
+                    re.IGNORECASE,
                 ):
                     reset_name = pname
             elif p["direction"] == "output":
                 output_ports.append(p)
 
         non_clk_rst_inputs = [
-            p for p in input_ports
+            p
+            for p in input_ports
             if p["name"] != clock_name and p["name"] != reset_name
         ]
-        reset_active_low = reset_name and reset_name.lower().endswith("_n") if reset_name else False
+        reset_active_low = (
+            reset_name and reset_name.lower().endswith("_n") if reset_name else False
+        )
 
         lines: List[str] = ["`timescale 1ns/1ps", ""]
         lines.append(f"module {design_name}_tb;")
@@ -1861,16 +2411,16 @@ SPECIFICATION SECTIONS (Markdown):
 
         # Dump waveforms
         lines.append(f'    $dumpfile("{design_name}_wave.vcd");')
-        lines.append(f'    $dumpvars(0, {design_name}_tb);')
+        lines.append(f"    $dumpvars(0, {design_name}_tb);")
         lines.append("")
 
         # Initialize all inputs
         for p in non_clk_rst_inputs:
             width = p.get("width", "")
             if width:
-                bits = re.search(r'\[(\d+):', width)
+                bits = re.search(r"\[(\d+):", width)
                 if bits:
-                    lines.append(f"    {p['name']} = {int(bits.group(1))+1}'d0;")
+                    lines.append(f"    {p['name']} = {int(bits.group(1)) + 1}'d0;")
                 else:
                     lines.append(f"    {p['name']} = 0;")
             else:
@@ -1940,17 +2490,22 @@ SPECIFICATION SECTIONS (Markdown):
             return self._generate_fallback_testbench(rtl_code)
         return self.generate_uvm_lite_tb_from_rtl_ports(self.name, rtl_code)
 
-    def _handle_tb_gate_failure(self, gate: str, report: Dict[str, Any], tb_code: str) -> None:
+    def _handle_tb_gate_failure(
+        self, gate: str, report: Dict[str, Any], tb_code: str
+    ) -> None:
         if self._record_tb_failure_fingerprint(gate, report):
-            self.log(f"Repeated TB {gate} fingerprint detected. Failing closed.", refined=True)
+            self.log(
+                f"Repeated TB {gate} fingerprint detected. Failing closed.",
+                refined=True,
+            )
             self.state = BuildState.FAIL
             return
 
         cycle = int(self.tb_recovery_counts.get(gate, 0)) + 1
         self.tb_recovery_counts[gate] = cycle
         self.artifacts[f"tb_recovery_cycle_{gate}"] = cycle
-        
-        self.global_retry_count += 1 # Bug 2: increment global budget
+
+        self.global_retry_count += 1  # Bug 2: increment global budget
 
         if cycle > self.tb_max_retries:
             self.log(
@@ -1977,7 +2532,10 @@ SPECIFICATION SECTIONS (Markdown):
                 else:
                     self.artifacts["tb_path"] = path
                     self._record_tb_gate_history(gate, False, "auto_repair", report)
-                    self.log("TB gate failed; applied deterministic auto-repair.", refined=True)
+                    self.log(
+                        "TB gate failed; applied deterministic auto-repair.",
+                        refined=True,
+                    )
                     return
             self.tb_repair_fail_count += 1
             self._record_tb_gate_history(gate, False, "auto_repair_nochange", report)
@@ -2003,10 +2561,15 @@ SPECIFICATION SECTIONS (Markdown):
                     pass
             self.artifacts.pop("tb_path", None)
             self._record_tb_gate_history(gate, False, "llm_regenerate", report)
-            self.log("TB gate failed; forcing LLM TB regeneration with structured diagnostics.", refined=True)
+            self.log(
+                "TB gate failed; forcing LLM TB regeneration with structured diagnostics.",
+                refined=True,
+            )
             return
 
-        fallback_tb = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
+        fallback_tb = self._deterministic_tb_fallback(
+            self.artifacts.get("rtl_code", "")
+        )
         path = write_verilog(self.name, fallback_tb, is_testbench=True)
         if isinstance(path, str) and path.startswith("Error:"):
             self.log(f"Deterministic TB fallback write failed: {path}", refined=True)
@@ -2015,11 +2578,13 @@ SPECIFICATION SECTIONS (Markdown):
         self.artifacts["tb_path"] = path
         # Fallback generation completed; allow compile/static gate to run a fresh
         # bounded recovery loop against this new artifact.
-        
+
         # Bug 2: Removing explicit counter reset: self.tb_recovery_counts[gate] = 0
         # self.artifacts[f"tb_recovery_cycle_{gate}"] = 0
         self._record_tb_gate_history(gate, False, "deterministic_fallback", report)
-        self.log("TB gate failed; switched to deterministic fallback template.", refined=True)
+        self.log(
+            "TB gate failed; switched to deterministic fallback template.", refined=True
+        )
 
     def _generate_fallback_testbench(self, rtl_code: str) -> str:
         ports = self._extract_module_ports(rtl_code)
@@ -2051,7 +2616,9 @@ endmodule
                 input_ports.append(name)
                 if clock_name is None and "clk" in name.lower():
                     clock_name = name
-                if reset_name is None and ("rst" in name.lower() or "reset" in name.lower()):
+                if reset_name is None and (
+                    "rst" in name.lower() or "reset" in name.lower()
+                ):
                     reset_name = name
             elif direction == "output":
                 output_ports.append(name)
@@ -2133,7 +2700,9 @@ endclass
                 for outp in output_ports:
                     body.append(f"      if (^({outp}) === 1'bx) begin")
                     body.append("        tb_fail = 1;")
-                    body.append(f"        $display(\"TEST FAILED: X detected on {outp}\");")
+                    body.append(
+                        f'        $display("TEST FAILED: X detected on {outp}");'
+                    )
                     body.append("      end")
             else:
                 body.append("      #10;")
@@ -2150,7 +2719,9 @@ endclass
         body.append("endmodule")
         return "\n".join([line for line in body if line is not None])
 
-    def _kickoff_with_timeout(self, agents: List[Agent], tasks: List[Task], timeout_s: int) -> str:
+    def _kickoff_with_timeout(
+        self, agents: List[Agent], tasks: List[Task], timeout_s: int
+    ) -> str:
         """Run CrewAI kickoff with a timeout.
 
         Uses threading instead of signal.SIGALRM so it works from any thread
@@ -2163,7 +2734,13 @@ endclass
 
         def _run():
             try:
-                result_box.append(str(Crew(verbose=False, agents=agents, tasks=tasks).kickoff()))
+                result_box.append(
+                    str(
+                        self._crew_kickoff(
+                            Crew(verbose=False, agents=agents, tasks=tasks)
+                        )
+                    )
+                )
             except Exception as exc:
                 error_box.append(exc)
 
@@ -2191,8 +2768,10 @@ endclass
 
         # Port shadowing — already structured
         for sig in sem_report.get("port_shadowing", []):
-            lines.append(f"PORT SHADOWING: Signal '{sig}' is declared as both a port and an internal signal. "
-                         f"Remove the redundant internal declaration.")
+            lines.append(
+                f"PORT SHADOWING: Signal '{sig}' is declared as both a port and an internal signal. "
+                f"Remove the redundant internal declaration."
+            )
 
         # Width issues — parse raw Verilator warning strings into structured records
         for raw in sem_report.get("width_issues", []):
@@ -2218,12 +2797,15 @@ endclass
           %Warning-WIDTHEXPAND: src/foo.v:43:22: Operator EQ expects 32 or 5 bits on the LHS, but LHS's VARREF 'cnt' generates 4 bits.
         """
         import re
+
         # Extract line number from file:line:col pattern
         line_match = re.search(r":(\d+):\d+:", warning)
         line_no = int(line_match.group(1)) if line_match else 0
 
         # Extract signal/variable name — Verilator uses VARREF, Var, SELBIT, etc.
-        sig_match = re.search(r"(?:VARREF|Var|of|SEL|SELBIT|ARRAYSEL)\s+'(\w+)'", warning)
+        sig_match = re.search(
+            r"(?:VARREF|Var|of|SEL|SELBIT|ARRAYSEL)\s+'(\w+)'", warning
+        )
         signal = sig_match.group(1) if sig_match else ""
 
         # Extract expected width.
@@ -2254,7 +2836,12 @@ endclass
             id_match = re.search(r"'(\w+)'", warning)
             signal = id_match.group(1) if id_match else "unknown"
 
-        return {"signal": signal, "line": line_no, "expected": expected, "actual": actual}
+        return {
+            "signal": signal,
+            "line": line_no,
+            "expected": expected,
+            "actual": actual,
+        }
 
     @staticmethod
     def _format_unfixable_width_errors(unfixable: list) -> str:
@@ -2263,9 +2850,11 @@ endclass
         Each entry in *unfixable* has: line_number, source_line, kind, signal,
         expected_width, actual_width, verilator_message.
         """
-        parts = ["SEMANTIC_RIGOR_FAILURE — Width mismatches the mechanical post-processor could not resolve.\n"
-                 "Fix every issue listed below. Use whatever approach is correct for each specific expression "
-                 "(cast, explicit sizing, localparam, bit-select, zero-extension, etc.).\n"]
+        parts = [
+            "SEMANTIC_RIGOR_FAILURE — Width mismatches the mechanical post-processor could not resolve.\n"
+            "Fix every issue listed below. Use whatever approach is correct for each specific expression "
+            "(cast, explicit sizing, localparam, bit-select, zero-extension, etc.).\n"
+        ]
         for ctx in unfixable:
             parts.append(
                 f"LINE {ctx['line_number']}: {ctx['source_line']}\n"
@@ -2356,7 +2945,9 @@ endclass
         regression_results = self.artifacts.get("regression_results", []) or []
         tb_gate_history = self.artifacts.get("tb_gate_history", []) or []
 
-        regression_pass = sum(1 for x in regression_results if x.get("status") == "PASS")
+        regression_pass = sum(
+            1 for x in regression_results if x.get("status") == "PASS"
+        )
         regression_total = len(regression_results)
 
         snapshot = {
@@ -2384,10 +2975,17 @@ endclass
                 "coverage_error_kind": coverage.get("error_kind", ""),
                 "coverage_diag_path": coverage.get("raw_diag_path", ""),
                 "coverage_threshold_pass": {
-                    "line": float(coverage.get("line_pct", 0.0)) >= max(float(self.coverage_thresholds.get("line", 85.0)), float(self.min_coverage)),
-                    "branch": float(coverage.get("branch_pct", 0.0)) >= float(self.coverage_thresholds.get("branch", 80.0)),
-                    "toggle": float(coverage.get("toggle_pct", 0.0)) >= float(self.coverage_thresholds.get("toggle", 75.0)),
-                    "functional": float(coverage.get("functional_pct", 0.0)) >= float(self.coverage_thresholds.get("functional", 80.0)),
+                    "line": float(coverage.get("line_pct", 0.0))
+                    >= max(
+                        float(self.coverage_thresholds.get("line", 85.0)),
+                        float(self.min_coverage),
+                    ),
+                    "branch": float(coverage.get("branch_pct", 0.0))
+                    >= float(self.coverage_thresholds.get("branch", 80.0)),
+                    "toggle": float(coverage.get("toggle_pct", 0.0))
+                    >= float(self.coverage_thresholds.get("toggle", 75.0)),
+                    "functional": float(coverage.get("functional_pct", 0.0))
+                    >= float(self.coverage_thresholds.get("functional", 80.0)),
                 },
             },
             "industry_benchmark": {
@@ -2402,7 +3000,8 @@ endclass
                 "antenna_violations": signoff.get("antenna_violations", -1),
                 "total_power_mw": float(power.get("total_power_w", 0.0)) * 1000.0,
                 "internal_power_mw": float(power.get("internal_power_w", 0.0)) * 1000.0,
-                "switching_power_mw": float(power.get("switching_power_w", 0.0)) * 1000.0,
+                "switching_power_mw": float(power.get("switching_power_w", 0.0))
+                * 1000.0,
                 "leakage_power_uw": float(power.get("leakage_power_w", 0.0)) * 1e6,
                 "irdrop_vpwr_mv": float(power.get("irdrop_max_vpwr", 0.0)) * 1000.0,
                 "irdrop_vgnd_mv": float(power.get("irdrop_max_vgnd", 0.0)) * 1000.0,
@@ -2418,7 +3017,10 @@ endclass
                 "lec_result": self.artifacts.get("lec_result", "UNKNOWN"),
                 "regression_passed": regression_pass,
                 "regression_total": regression_total,
-                "clock_period_ns": self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period")),
+                "clock_period_ns": self.artifacts.get(
+                    "clock_period_override",
+                    self.pdk_profile.get("default_clock_period"),
+                ),
                 "pivots_used": self.pivot_count,
                 "global_steps": self.global_step_count,
             },
@@ -2433,7 +3035,9 @@ endclass
         os.makedirs(design_dir, exist_ok=True)
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        json_path = os.path.join(design_dir, f"{self.name}_industry_benchmark_{stamp}.json")
+        json_path = os.path.join(
+            design_dir, f"{self.name}_industry_benchmark_{stamp}.json"
+        )
         md_path = os.path.join(design_dir, f"{self.name}_industry_benchmark_{stamp}.md")
         latest_json = os.path.join(design_dir, "latest.json")
         latest_md = os.path.join(design_dir, "latest.md")
@@ -2490,75 +3094,118 @@ endclass
         self.artifacts["hierarchy_blocks"] = block_files
 
     def do_rtl_gen(self):
-
-        sid_raw = self.artifacts.get('sid')
+        sid_raw = self.artifacts.get("sid")
         if sid_raw:
             try:
                 sid_dict = json.loads(sid_raw)
                 graph = DependencyGraph(sid_dict)
-                self.log(f"Recursive Graph Execution Enabled! Found {len(graph.nodes)} node(s).", refined=True)
-                
+                self.log(
+                    f"Recursive Graph Execution Enabled! Found {len(graph.nodes)} node(s).",
+                    refined=True,
+                )
+
                 ordered_nodes = []
                 # Simple topological sort
                 unprocessed = list(graph.nodes.keys())
-                
+
                 while unprocessed:
                     progress = False
                     for node_name in list(unprocessed):
                         node = graph.nodes[node_name]
                         # If all dependencies are already in ordered_nodes
-                        if all(dep in [n.name for n in ordered_nodes] for dep in node.dependencies):
+                        if all(
+                            dep in [n.name for n in ordered_nodes]
+                            for dep in node.dependencies
+                        ):
                             ordered_nodes.append(node)
                             unprocessed.remove(node_name)
                             progress = True
-                            
+
                     if not progress:
-                        self.log("Warning: Circular dependency detected in Graph Builder, continuing mostly sequential.", refined=True)
+                        self.log(
+                            "Warning: Circular dependency detected in Graph Builder, continuing mostly sequential.",
+                            refined=True,
+                        )
                         for node_name in unprocessed:
                             ordered_nodes.append(graph.nodes[node_name])
                         break
-                        
+
                 for node in ordered_nodes:
-                    self.log(f"Proceeding to generate Sub-Module: {node.name}", refined=True)
-                    # For MVP graph implementation, we will append sub_module requirements into the prompt 
+                    self.log(
+                        f"Proceeding to generate Sub-Module: {node.name}", refined=True
+                    )
+                    # For MVP graph implementation, we will append sub_module requirements into the prompt
                     # instead of fully isolating state transitions, avoiding disruption of standard Verification pipes.
-                    
+
             except Exception as e:
                 self.log(f"Graph Builder parsing warning: {e}", refined=True)
         # Check Golden Reference Library for a matching template
         from .golden_lib import get_best_template
-        
+
         if self.no_golden_templates:
-            self.log("Golden template matching DISABLED (--no-golden-templates). Generating from scratch.", refined=True)
+            self.log(
+                "Golden template matching DISABLED (--no-golden-templates). Generating from scratch.",
+                refined=True,
+            )
             template = None
         else:
             template = get_best_template(self.desc, self.name)
-        
+
         if template:
-            self.log(f"Golden Reference MATCH: {template['ip_type']} (score={template['score']})", refined=True)
-            self.artifacts['golden_template'] = template['ip_type']
-            
+            self.log(
+                f"Golden Reference MATCH: {template['ip_type']} (score={template['score']})",
+                refined=True,
+            )
+            self.artifacts["golden_template"] = template["ip_type"]
+
             # Use the golden RTL DIRECTLY — just rename the module.
             # This guarantees RTL ↔ TB compatibility (both are pre-verified together).
-            rtl_code = template['template_code']
-            original_name = template['ip_type']  # e.g. 'counter', 'fifo', 'uart_tx'
-            rtl_code = rtl_code.replace(f'module {original_name}', f'module {self.name}')
-            self.log(f"Using golden {original_name} template with module renamed to {self.name}.", refined=True)
+            original_name = template["ip_type"]  # e.g. 'counter', 'fifo', 'uart_tx'
+
+            # Rename RTL module (use word boundary to avoid over-matching comments/strings)
+            rtl_code = re.sub(
+                rf"\bmodule\s+{re.escape(original_name)}\b",
+                f"module {self.name}",
+                template["template_code"],
+            )
+            self.log(
+                f"Using golden {original_name} template with module renamed to {self.name}.",
+                refined=True,
+            )
             self.logger.info(f"GOLDEN RTL ({original_name}):\n{rtl_code}")
-            
-            # Also save the golden testbench if available
-            if template.get('tb_code'):
-                self.artifacts['golden_tb'] = template['tb_code']
+
+            # Also rename the golden testbench module + DUT instantiation to match.
+            # Both RTL and TB were pre-verified together under the original names.
+            if template.get("tb_code"):
+                tb_original_name = f"{original_name}_tb"
+                tb_code = template["tb_code"]
+                # Rename testbench module name
+                tb_code = re.sub(
+                    rf"\bmodule\s+{re.escape(tb_original_name)}\b",
+                    f"module {self.name}_tb",
+                    tb_code,
+                )
+                # Rename DUT instantiation from e.g. "counter dut (...)" -> "my_counter dut (...)"
+                tb_code = re.sub(
+                    rf"\b({re.escape(original_name)})\s+dut\b",
+                    rf"{self.name} dut",
+                    tb_code,
+                )
+                # Rename parameter/port connections referencing original module name
+                tb_code = re.sub(
+                    rf"\b({re.escape(original_name)})\s*#", rf"{self.name} #", tb_code
+                )
+                self.artifacts["golden_tb"] = tb_code
         else:
             # No template match — pure LLM generation
             self.log("No golden template match. Generating from scratch.", refined=True)
             strategy_prompt = self._get_strategy_prompt()
-            
+
             rtl_agent = get_designer_agent(
-                self.get_llm_for_role("designer"), 
-                goal=f"Create {self.strategy.name} RTL for {self.name}", 
+                self.get_llm_for_role("designer"),
+                goal=f"Create {self.strategy.name} RTL for {self.name}",
                 verbose=self.verbose,
-                strategy=self.strategy.name
+                strategy=self.strategy.name,
             )
 
             # Reviewer agent — checks the designer's output for common issues
@@ -2575,21 +3222,21 @@ undriven outputs, and Verilator-incompatible constructs. You verify that:
 You return the FINAL corrected code in ```verilog``` fences.""",
                 llm=self.get_llm_for_role("designer"),
                 verbose=False,
-                tools=[syntax_check_tool, read_file_tool],
-                allow_delegation=False
+                tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
+                allow_delegation=False,
             )
-            
+
             rtl_task = Task(
                 description=f"""Design module "{self.name}" based on SPEC.
             
 SPECIFICATION:
-{self.artifacts.get('spec', '')}
+{self.artifacts.get("spec", "")}
 
 STRATEGY GUIDELINES:
 {strategy_prompt}
 
 LOGIC DECOUPLING HINT:
-{self.artifacts.get('logic_decoupling_hint', 'N/A')}
+{self.artifacts.get("logic_decoupling_hint", "N/A")}
 
 CRITICAL RULES:
 1. Top-level module name MUST be "{self.name}"
@@ -2599,8 +3246,8 @@ CRITICAL RULES:
 5. **MODULAR HIERARCHY**: For complex designs, break them into smaller sub-modules. Output ALL modules in your response.
 6. Return code in ```verilog fence.
 """,
-                expected_output='Complete Verilog RTL Code',
-                agent=rtl_agent
+                expected_output="Complete Verilog RTL Code",
+                agent=rtl_agent,
             )
 
             review_task = Task(
@@ -2618,38 +3265,63 @@ If you find issues, FIX them and output the corrected code.
 If the code is correct, output it unchanged.
 ALWAYS return the COMPLETE code in ```verilog``` fences.
 """,
-                expected_output='Reviewed and corrected Verilog RTL Code in ```verilog``` fences',
-                agent=reviewer
+                expected_output="Reviewed and corrected Verilog RTL Code in ```verilog``` fences",
+                agent=reviewer,
             )
-            
-            with console.status(f"[warning]Generating RTL ({self.strategy.name})...[/warning]"):
+
+            with console.status(
+                f"[warning]Generating RTL ({self.strategy.name})...[/warning]"
+            ):
                 try:
-                    result = Crew(verbose=False, agents=[rtl_agent, reviewer],
-                        tasks=[rtl_task, review_task],
-                    ).kickoff()
+                    result = self._crew_kickoff(
+                        Crew(
+                            verbose=False,
+                            agents=[rtl_agent, reviewer],
+                            tasks=[rtl_task, review_task],
+                        )
+                    )
                     rtl_code = str(result)
                     # --- Universal code output validation (RTL gen) ---
                     if not validate_llm_code_output(rtl_code):
-                        self.log("RTL generation returned prose instead of code. Retrying once.", refined=True)
-                        self.logger.warning(f"RTL VALIDATION FAIL (prose detected):\n{rtl_code[:500]}")
-                        rtl_code = str(Crew(verbose=False, agents=[rtl_agent, reviewer],
-                            tasks=[rtl_task, review_task],
-                        ).kickoff())
+                        self.log(
+                            "RTL generation returned prose instead of code. Retrying once.",
+                            refined=True,
+                        )
+                        self.logger.warning(
+                            f"RTL VALIDATION FAIL (prose detected):\n{rtl_code[:500]}"
+                        )
+                        rtl_code = str(
+                            self._crew_kickoff(
+                                Crew(
+                                    verbose=False,
+                                    agents=[rtl_agent, reviewer],
+                                    tasks=[rtl_task, review_task],
+                                )
+                            )
+                        )
                 except Exception as crew_exc:
                     self.log(f"CrewAI RTL generation error: {crew_exc}", refined=True)
-                    self.logger.warning(f"CrewAI kickoff exception in do_rtl_gen: {crew_exc}")
+                    self.logger.warning(
+                        f"CrewAI kickoff exception in do_rtl_gen: {crew_exc}"
+                    )
                     # Strategy pivot: allow recovery instead of hard crash
                     if self.strategy == BuildStrategy.SV_MODULAR:
-                        self.log("Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
+                        self.log(
+                            "Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC",
+                            refined=True,
+                        )
                         self.strategy = BuildStrategy.VERILOG_CLASSIC
                         self.transition(BuildState.RTL_GEN)
                     else:
-                        self.log("CrewAI error on fallback strategy. Build Failed.", refined=True)
+                        self.log(
+                            "CrewAI error on fallback strategy. Build Failed.",
+                            refined=True,
+                        )
                         self.state = BuildState.FAIL
                     return
 
             self.logger.info(f"GENERATED RTL ({self.strategy.name}):\n{rtl_code}")
-        
+
         # Save file (write_verilog cleans LLM output: strips markdown, think tags, etc.)
         path = write_verilog(self.name, rtl_code)
         if "Error" in path:
@@ -2657,41 +3329,46 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             self.state = BuildState.FAIL
             return
 
-        self.artifacts['rtl_path'] = path
+        self.artifacts["rtl_path"] = path
         # Store the CLEANED code (read back from file), not raw LLM output
-        with open(path, 'r') as f:
-            self.artifacts['rtl_code'] = f.read()
-        self._evaluate_hierarchy(self.artifacts['rtl_code'])
+        with open(path, "r") as f:
+            self.artifacts["rtl_code"] = f.read()
+        self._evaluate_hierarchy(self.artifacts["rtl_code"])
         self._emit_hierarchical_block_artifacts()
         self.transition(BuildState.RTL_FIX)
 
     def do_rtl_fix(self):
         # Check syntax
-        path = self.artifacts['rtl_path']
+        path = self.artifacts["rtl_path"]
         success, errors = run_syntax_check(path)
-        
+
         if success:
             self.log("Syntax Check Passed (Verilator)", refined=True)
-            
+
             # --- START VERILATOR LINT CHECK ---
-            with console.status("[warning]Running Verilator Lint...[/warning]", spinner="dots12", spinner_style="spinner"):
-                 lint_success, lint_report = run_lint_check(path)
-            
+            with console.status(
+                "[warning]Running Verilator Lint...[/warning]",
+                spinner="dots12",
+                spinner_style="spinner",
+            ):
+                lint_success, lint_report = run_lint_check(path)
+
             self.logger.info(f"LINT REPORT:\n{lint_report}")
 
             if lint_success:
                 self.log("Lint Check Passed (Verilator)", refined=True)
-                
+
                 # --- PRE-SYNTHESIS VALIDATION ---
                 # Catch undriven signals that would fail Yosys synthesis
                 from .tools.vlsi_tools import validate_rtl_for_synthesis
+
                 was_fixed, synth_report = validate_rtl_for_synthesis(path)
                 self.logger.info(f"PRE-SYNTH VALIDATION: {synth_report}")
                 if was_fixed:
                     self.log(f"Pre-synthesis auto-fix applied.", refined=True)
                     # Re-read fixed code into artifacts
-                    with open(path, 'r') as f:
-                        self.artifacts['rtl_code'] = f.read()
+                    with open(path, "r") as f:
+                        self.artifacts["rtl_code"] = f.read()
                     # Re-check syntax after fix (stay in RTL_FIX)
                     return
 
@@ -2699,7 +3376,11 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 self.logger.info(f"SEMANTIC RIGOR: {sem_report}")
                 if not sem_ok:
                     if self.strict_gates:
-                        width_issues = sem_report.get("width_issues", []) if isinstance(sem_report, dict) else []
+                        width_issues = (
+                            sem_report.get("width_issues", [])
+                            if isinstance(sem_report, dict)
+                            else []
+                        )
                         if not width_issues:
                             self.log(
                                 "Semantic rigor failed on non-width issues. Routing directly to LLM fixer.",
@@ -2708,26 +3389,40 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                             errors = self._format_semantic_rigor_errors(sem_report)
                         else:
                             # --- Mechanical width auto-fix (no LLM) ---
-                            self.log("Semantic rigor gate failed. Attempting mechanical width auto-fix.", refined=True)
+                            self.log(
+                                "Semantic rigor gate failed. Attempting mechanical width auto-fix.",
+                                refined=True,
+                            )
                             fix_ok, fix_report = auto_fix_width_warnings(path)
-                            self.logger.info(f"WIDTH AUTO-FIX: fixed={fix_report.get('fixed_count', 0)}, "
-                                             f"remaining={fix_report.get('remaining_count', 0)}")
+                            self.logger.info(
+                                f"WIDTH AUTO-FIX: fixed={fix_report.get('fixed_count', 0)}, "
+                                f"remaining={fix_report.get('remaining_count', 0)}"
+                            )
                             if fix_ok:
-                                self.log(f"Width auto-fix resolved all {fix_report['fixed_count']} warnings.", refined=True)
+                                self.log(
+                                    f"Width auto-fix resolved all {fix_report['fixed_count']} warnings.",
+                                    refined=True,
+                                )
                                 # Re-read the patched RTL into artifacts
-                                with open(path, 'r') as f:
-                                    self.artifacts['rtl_code'] = f.read()
+                                with open(path, "r") as f:
+                                    self.artifacts["rtl_code"] = f.read()
                                 # Loop back to re-check syntax/lint on the patched file
                                 return
                             elif fix_report.get("fixed_count", 0) > 0:
-                                self.log(f"Width auto-fix resolved {fix_report['fixed_count']} warnings; "
-                                         f"{fix_report['remaining_count']} remain. Re-checking.", refined=True)
-                                with open(path, 'r') as f:
-                                    self.artifacts['rtl_code'] = f.read()
+                                self.log(
+                                    f"Width auto-fix resolved {fix_report['fixed_count']} warnings; "
+                                    f"{fix_report['remaining_count']} remain. Re-checking.",
+                                    refined=True,
+                                )
+                                with open(path, "r") as f:
+                                    self.artifacts["rtl_code"] = f.read()
                                 # Loop back — the remaining warnings may resolve after re-lint
                                 return
                             # Post-processor couldn't fix anything — fall through to LLM
-                            self.log("Mechanical auto-fix could not resolve width warnings. Routing to LLM fixer.", refined=True)
+                            self.log(
+                                "Mechanical auto-fix could not resolve width warnings. Routing to LLM fixer.",
+                                refined=True,
+                            )
                             # If the post-processor gathered rich context for unfixable warnings,
                             # build a detailed prompt giving the LLM everything it needs.
                             unfixable = fix_report.get("unfixable_context", [])
@@ -2736,14 +3431,19 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                             else:
                                 errors = self._format_semantic_rigor_errors(sem_report)
                     else:
-                        self.log("Semantic rigor warnings detected (non-blocking).", refined=True)
+                        self.log(
+                            "Semantic rigor warnings detected (non-blocking).",
+                            refined=True,
+                        )
                         self.artifacts["semantic_report"] = sem_report
                         self._record_stage_contract(
                             StageResult(
                                 stage=self.state.name,
                                 status=StageStatus.PASS,
                                 producer="orchestrator_rtl_fix",
-                                consumable_payload={"semantic_report": bool(sem_report)},
+                                consumable_payload={
+                                    "semantic_report": bool(sem_report)
+                                },
                                 artifacts_written=["semantic_report"],
                                 next_action=BuildState.VERIFICATION.name,
                             )
@@ -2776,25 +3476,35 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         # Handle Syntax/Lint Errors that need LLM
         self.logger.info(f"SYNTAX/LINT ERRORS:\n{errors}")
         if self._record_failure_fingerprint(str(errors)):
-            self.log("Detected repeated syntax/lint failure fingerprint. Failing closed.", refined=True)
+            self.log(
+                "Detected repeated syntax/lint failure fingerprint. Failing closed.",
+                refined=True,
+            )
             self.state = BuildState.FAIL
             return
         self.retry_count += 1
         if self.retry_count > self.max_retries:
             self.log("Max Retries Exceeded for Syntax/Lint Fix.", refined=True)
-            
+
             # STATE CROSSING / BACKTRACKING
             if self.strategy == BuildStrategy.SV_MODULAR:
-                self.log("Attempting Strategy Pivot: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
+                self.log(
+                    "Attempting Strategy Pivot: SV_MODULAR -> VERILOG_CLASSIC",
+                    refined=True,
+                )
                 self.strategy = BuildStrategy.VERILOG_CLASSIC
-                self.transition(BuildState.RTL_GEN, preserve_retries=True) # Restart RTL Gen with new strategy
+                self.transition(
+                    BuildState.RTL_GEN, preserve_retries=True
+                )  # Restart RTL Gen with new strategy
                 return
             else:
                 self.log("Already on fallback strategy. Build Failed.", refined=True)
                 self.state = BuildState.FAIL
                 return
 
-        self.log(f"Fixing Code (Attempt {self.retry_count}/{self.max_retries})", refined=True)
+        self.log(
+            f"Fixing Code (Attempt {self.retry_count}/{self.max_retries})", refined=True
+        )
         errors_for_llm = self._condense_failure_log(str(errors), kind="timing")
 
         # ── ReAct iterative RTL fix (runs before single-shot CrewAI) ──
@@ -2817,7 +3527,9 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             _react_agent.register_tool(
                 "read_file",
                 "Read contents of an absolute file path.",
-                lambda p: open(p.strip()).read() if os.path.exists(p.strip()) else f"Not found: {p}",
+                lambda p: open(p.strip()).read()
+                if os.path.exists(p.strip())
+                else f"Not found: {p}",
             )
             _react_context = (
                 f"RTL file path: {path}\n\n"
@@ -2894,7 +3606,7 @@ IMPORTANT: The compiler is Verilator 5.0+ (SystemVerilog 2017+).
 
 Code:
 ```verilog
-{self.artifacts['rtl_code']}
+{self.artifacts["rtl_code"]}
 ```
 """
 
@@ -2908,18 +3620,24 @@ You review PREVIOUS FIX ATTEMPTS to avoid repeating ineffective patches.
 You explain what you changed and why.""",
                 llm=self.get_llm_for_role("fixer"),
                 verbose=self.verbose,
-                tools=[syntax_check_tool, read_file_tool]
+                tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
             )
 
             task = Task(
-                 description=fix_prompt,
-                 expected_output="Fixed Verilog Code",
-                 agent=fixer
+                description=fix_prompt,
+                expected_output="Fixed Verilog Code",
+                agent=fixer,
             )
 
-            with console.status("[error]AI fixing Syntax/Lint Errors...[/error]", spinner="dots12", spinner_style="spinner"):
+            with console.status(
+                "[error]AI fixing Syntax/Lint Errors...[/error]",
+                spinner="dots12",
+                spinner_style="spinner",
+            ):
                 try:
-                    result = Crew(verbose=False, agents=[fixer], tasks=[task]).kickoff()
+                    result = self._crew_kickoff(
+                        Crew(verbose=False, agents=[fixer], tasks=[task])
+                    )
                     new_code = str(result)
                     # --- Universal code output validation (RTL fix) ---
                     if not validate_llm_code_output(new_code):
@@ -2928,24 +3646,43 @@ You explain what you changed and why.""",
                             new_code,
                             ["RTL fix returned prose instead of code."],
                         )
-                        self.log("RTL fix returned prose instead of code. Retrying once.", refined=True)
-                        self.logger.warning(f"RTL FIX VALIDATION FAIL (prose detected):\n{new_code[:500]}")
-                        new_code = str(Crew(verbose=False, agents=[fixer], tasks=[task]).kickoff())
+                        self.log(
+                            "RTL fix returned prose instead of code. Retrying once.",
+                            refined=True,
+                        )
+                        self.logger.warning(
+                            f"RTL FIX VALIDATION FAIL (prose detected):\n{new_code[:500]}"
+                        )
+                        new_code = str(
+                            self._crew_kickoff(
+                                Crew(verbose=False, agents=[fixer], tasks=[task])
+                            )
+                        )
                 except Exception as crew_exc:
                     self.log(f"CrewAI fix error: {crew_exc}", refined=True)
-                    self.logger.warning(f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}")
+                    self.logger.warning(
+                        f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}"
+                    )
                     # Return last known RTL — allow the retry loop / strategy pivot to handle it
                     if self.strategy == BuildStrategy.SV_MODULAR:
-                        self.log("Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC", refined=True)
+                        self.log(
+                            "Strategy Pivot after CrewAI error: SV_MODULAR -> VERILOG_CLASSIC",
+                            refined=True,
+                        )
                         self.strategy = BuildStrategy.VERILOG_CLASSIC
                         self.transition(BuildState.RTL_GEN, preserve_retries=True)
                     else:
-                        self.log("CrewAI error on fallback strategy. Build Failed.", refined=True)
+                        self.log(
+                            "CrewAI error on fallback strategy. Build Failed.",
+                            refined=True,
+                        )
                         self.state = BuildState.FAIL
                     return
 
         self.logger.info(f"FIXED RTL:\n{new_code}")
-        rtl_validation_issues = self._validate_rtl_candidate(new_code, self.artifacts.get("rtl_code", ""))
+        rtl_validation_issues = self._validate_rtl_candidate(
+            new_code, self.artifacts.get("rtl_code", "")
+        )
         if rtl_validation_issues:
             self._record_stage_contract(
                 StageResult(
@@ -2957,9 +3694,11 @@ You explain what you changed and why.""",
                     next_action="retry_rtl_fix",
                 )
             )
-            self.log(f"RTL candidate rejected: {rtl_validation_issues[0]}", refined=True)
+            self.log(
+                f"RTL candidate rejected: {rtl_validation_issues[0]}", refined=True
+            )
             return
-        
+
         # --- Inner retry loop for LLM parse errors ---
         # If write_verilog fails (LLM didn't output valid code), re-prompt immediately
         # instead of returning to the main loop (which would re-check the stale file
@@ -2970,7 +3709,10 @@ You explain what you changed and why.""",
             if not (isinstance(new_path, str) and new_path.startswith("Error:")):
                 break  # write succeeded
 
-            self.log(f"File Write Error in FIX stage (parse retry {_parse_retry + 1}/3): {new_path}", refined=True)
+            self.log(
+                f"File Write Error in FIX stage (parse retry {_parse_retry + 1}/3): {new_path}",
+                refined=True,
+            )
 
             if _parse_retry >= 2:
                 # Exhausted parse retries — clear fingerprint and fall back to main retry
@@ -2978,10 +3720,16 @@ You explain what you changed and why.""",
                 self._clear_last_fingerprint(str(errors))
                 retry_count = self._bump_state_retry()
                 if retry_count >= self.max_retries:
-                    self.log("Write error persisted after max retries. Failing.", refined=True)
+                    self.log(
+                        "Write error persisted after max retries. Failing.",
+                        refined=True,
+                    )
                     self.state = BuildState.FAIL
                 else:
-                    self.log(f"Retrying fix via main loop (attempt {retry_count}).", refined=True)
+                    self.log(
+                        f"Retrying fix via main loop (attempt {retry_count}).",
+                        refined=True,
+                    )
                 return
 
             # Re-prompt the LLM immediately with explicit format instructions
@@ -2989,7 +3737,7 @@ You explain what you changed and why.""",
 
 Here is the current code that needs the lint fixes applied:
 ```verilog
-{self.artifacts['rtl_code']}
+{self.artifacts["rtl_code"]}
 ```
 
 Original errors to fix:
@@ -2998,20 +3746,28 @@ Original errors to fix:
             reformat_task = Task(
                 description=reformat_prompt,
                 expected_output="Complete fixed Verilog code inside ```verilog``` fences",
-                agent=fixer
+                agent=fixer,
             )
-            with console.status("[warning]Re-prompting LLM for valid Verilog output...[/warning]", spinner="dots12", spinner_style="spinner"):
-                reformat_result = Crew(verbose=False, agents=[fixer], tasks=[reformat_task]).kickoff()
+            with console.status(
+                "[warning]Re-prompting LLM for valid Verilog output...[/warning]",
+                spinner="dots12",
+                spinner_style="spinner",
+            ):
+                reformat_result = self._crew_kickoff(
+                    Crew(verbose=False, agents=[fixer], tasks=[reformat_task])
+                )
             _inner_code = str(reformat_result)
-            self.logger.info(f"REFORMATTED RTL (parse retry {_parse_retry + 1}):\n{_inner_code}")
+            self.logger.info(
+                f"REFORMATTED RTL (parse retry {_parse_retry + 1}):\n{_inner_code}"
+            )
 
         if isinstance(new_path, str) and new_path.startswith("Error:"):
             return  # already handled above
-            
-        self.artifacts['rtl_path'] = new_path
+
+        self.artifacts["rtl_path"] = new_path
         # Read back the CLEANED version, not raw LLM output
-        with open(new_path, 'r') as f:
-            self.artifacts['rtl_code'] = f.read()
+        with open(new_path, "r") as f:
+            self.artifacts["rtl_code"] = f.read()
         # Loop stays in RTL_FIX to re-check syntax
 
     # _try_autonomous_sv_fix removed (Verilator supports SV natively)
@@ -3020,36 +3776,49 @@ Original errors to fix:
         # 1. Generate Testbench (Only on first run or if missing)
         # 2. Run Sim
         # 3. Analyze Results
-        
+
         # 1. Generate Testbench (Only if missing)
         # We reuse existing TB to ensure consistent verification targets
-        tb_exists = 'tb_path' in self.artifacts and os.path.exists(self.artifacts['tb_path'])
-        regen_context = self._consume_handoff("tb_regen_context", consumer="VERIFICATION", required=False) or ""
-        
+        tb_exists = "tb_path" in self.artifacts and os.path.exists(
+            self.artifacts["tb_path"]
+        )
+        regen_context = (
+            self._consume_handoff(
+                "tb_regen_context", consumer="VERIFICATION", required=False
+            )
+            or ""
+        )
+
         if not tb_exists:
             # Check if we have a golden testbench from template matching
-            if self.artifacts.get('golden_tb') and not regen_context:
-                self.log("Using Golden Reference Testbench (pre-verified).", refined=True)
-                tb_code = self.artifacts['golden_tb']
+            if self.artifacts.get("golden_tb") and not regen_context:
+                self.log(
+                    "Using Golden Reference Testbench (pre-verified).", refined=True
+                )
+                tb_code = self.artifacts["golden_tb"]
                 # Replace template module name with actual design name
-                template_name = self.artifacts.get('golden_template', 'counter')
-                tb_code = tb_code.replace(f'{template_name}_tb', f'{self.name}_tb')
+                template_name = self.artifacts.get("golden_template", "counter")
+                tb_code = tb_code.replace(f"{template_name}_tb", f"{self.name}_tb")
                 tb_code = tb_code.replace(template_name, self.name)
                 self.logger.info(f"GOLDEN TESTBENCH:\n{tb_code}")
                 tb_path = write_verilog(self.name, tb_code, is_testbench=True)
-                self.artifacts['tb_path'] = tb_path
+                self.artifacts["tb_path"] = tb_path
                 self._clear_tb_fingerprints()  # New TB → fresh gate attempts
             else:
                 self.log("Generating Testbench...", refined=True)
-                tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Verify {self.name}", strategy=self.strategy.name)
-                
+                tb_agent = get_testbench_agent(
+                    self.get_llm_for_role("testbench_designer"),
+                    f"Verify {self.name}",
+                    strategy=self.strategy.name,
+                )
+
                 tb_strategy_prompt = self._get_tb_strategy_prompt()
-                
+
                 # --- Extract module port signature from RTL ---
                 # This prevents the most common TB failure: port name mismatches
-                rtl_code = self.artifacts['rtl_code']
+                rtl_code = self.artifacts["rtl_code"]
                 port_info = self._extract_module_interface(rtl_code)
-                
+
                 tb_task = Task(
                     description=f"""Create a self-checking Testbench for module `{self.name}`.
 
@@ -3107,10 +3876,14 @@ COMPILATION SELF-CHECK (do this before returning code):
 Before returning any testbench code, mentally compile it with strict SystemVerilog rules. Every construct you use must be valid in the Verilator strict mode environment. If you are unsure whether a construct is valid, use a simpler equivalent that you are certain is valid.
 """,
                     expected_output="SystemVerilog Testbench",
-                    agent=tb_agent
+                    agent=tb_agent,
                 )
-                
-                with console.status("[accent]Generating Testbench...[/accent]", spinner="dots12", spinner_style="spinner"):
+
+                with console.status(
+                    "[accent]Generating Testbench...[/accent]",
+                    spinner="dots12",
+                    spinner_style="spinner",
+                ):
                     try:
                         tb_code = self._kickoff_with_timeout(
                             agents=[tb_agent],
@@ -3124,21 +3897,36 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                                 tb_code,
                                 ["TB generation returned prose instead of code."],
                             )
-                            self.log("TB generation returned prose instead of code. Retrying once.", refined=True)
-                            self.logger.warning(f"TB VALIDATION FAIL (prose detected):\n{tb_code[:500]}")
+                            self.log(
+                                "TB generation returned prose instead of code. Retrying once.",
+                                refined=True,
+                            )
+                            self.logger.warning(
+                                f"TB VALIDATION FAIL (prose detected):\n{tb_code[:500]}"
+                            )
                             tb_code = self._kickoff_with_timeout(
                                 agents=[tb_agent],
                                 tasks=[tb_task],
                                 timeout_s=self.tb_generation_timeout_s,
                             )
                     except Exception as e:
-                        self.log(f"TB generation stalled/failed ({e}). Using deterministic fallback TB.", refined=True)
+                        self.log(
+                            f"TB generation stalled/failed ({e}). Using deterministic fallback TB.",
+                            refined=True,
+                        )
                         self.logger.info(f"TB GENERATION FALLBACK: {e}")
-                        tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
+                        tb_code = self._deterministic_tb_fallback(
+                            self.artifacts.get("rtl_code", "")
+                        )
 
                 if "module" not in tb_code or "endmodule" not in tb_code:
-                    self.log("TB generation returned invalid code. Using deterministic fallback TB.", refined=True)
-                    tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
+                    self.log(
+                        "TB generation returned invalid code. Using deterministic fallback TB.",
+                        refined=True,
+                    )
+                    tb_code = self._deterministic_tb_fallback(
+                        self.artifacts.get("rtl_code", "")
+                    )
                 tb_validation_issues = self._validate_tb_candidate(tb_code)
                 if tb_validation_issues:
                     self._record_stage_contract(
@@ -3151,20 +3939,30 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                             next_action="deterministic_tb_fallback",
                         )
                     )
-                    self.log(f"TB candidate rejected: {tb_validation_issues[0]}. Using deterministic fallback TB.", refined=True)
-                    tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
+                    self.log(
+                        f"TB candidate rejected: {tb_validation_issues[0]}. Using deterministic fallback TB.",
+                        refined=True,
+                    )
+                    tb_code = self._deterministic_tb_fallback(
+                        self.artifacts.get("rtl_code", "")
+                    )
                 self.logger.info(f"GENERATED TESTBENCH:\n{tb_code}")
-                
+
                 tb_path = write_verilog(self.name, tb_code, is_testbench=True)
                 if isinstance(tb_path, str) and tb_path.startswith("Error:"):
-                    self.log(f"TB write failed ({tb_path}). Regenerating deterministic fallback TB.", refined=True)
-                    tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
+                    self.log(
+                        f"TB write failed ({tb_path}). Regenerating deterministic fallback TB.",
+                        refined=True,
+                    )
+                    tb_code = self._deterministic_tb_fallback(
+                        self.artifacts.get("rtl_code", "")
+                    )
                     tb_path = write_verilog(self.name, tb_code, is_testbench=True)
                     if isinstance(tb_path, str) and tb_path.startswith("Error:"):
                         self.log(f"Fallback TB write failed: {tb_path}", refined=True)
                         self.state = BuildState.FAIL
                         return
-                self.artifacts['tb_path'] = tb_path
+                self.artifacts["tb_path"] = tb_path
                 self._set_artifact(
                     "tb_candidate",
                     {
@@ -3176,40 +3974,54 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 )
                 self._clear_tb_fingerprints()  # New TB → fresh gate attempts
         else:
-            self.log(f"Verifying with existing Testbench (Attempt {self.retry_count}).", refined=True)
+            self.log(
+                f"Verifying with existing Testbench (Attempt {self.retry_count}).",
+                refined=True,
+            )
             # Verify file exists
-            if not os.path.exists(self.artifacts['tb_path']):
-                 self.log("Testbench file missing! Forcing regeneration.", refined=True)
-                 del self.artifacts['tb_path']  # Remove stale path to trigger regen
-                 return  # State machine loop will re-enter do_verification()
-            
+            if not os.path.exists(self.artifacts["tb_path"]):
+                self.log("Testbench file missing! Forcing regeneration.", refined=True)
+                del self.artifacts["tb_path"]  # Remove stale path to trigger regen
+                return  # State machine loop will re-enter do_verification()
+
             # Read current TB for context in case of next error
-            with open(self.artifacts['tb_path'], 'r') as f:
+            with open(self.artifacts["tb_path"], "r") as f:
                 tb_code = f.read()
 
         # Ensure tb_code is available for error analysis context
-        if 'tb_code' not in locals():
-             # It should be there from generation or reading above
-             with open(self.artifacts['tb_path'], 'r') as f:
+        if "tb_code" not in locals():
+            # It should be there from generation or reading above
+            with open(self.artifacts["tb_path"], "r") as f:
                 tb_code = f.read()
 
         # -----------------------------
         # TB gate stack: static -> compile
         # -----------------------------
-        static_ok, static_report = run_tb_static_contract_check(tb_code, self.strategy.name)
+        static_ok, static_report = run_tb_static_contract_check(
+            tb_code, self.strategy.name
+        )
         if self.artifacts.get("golden_template"):
             # Golden reference TBs may be procedural; ignore SV-class-only requirements.
             filtered = []
             for issue in static_report.get("issues", []):
-                if issue.get("code") in {"missing_transaction_class", "missing_flow_classes"}:
+                if issue.get("code") in {
+                    "missing_transaction_class",
+                    "missing_flow_classes",
+                }:
                     continue
                 filtered.append(issue)
             static_report["issues"] = filtered
-            static_report["issue_codes"] = sorted({x.get("code", "") for x in filtered if x.get("code")})
+            static_report["issue_codes"] = sorted(
+                {x.get("code", "") for x in filtered if x.get("code")}
+            )
             static_report["ok"] = len(filtered) == 0
             static_ok = static_report["ok"]
-        static_path = self._write_tb_diagnostic_artifact("tb_static_gate", static_report)
-        self.logger.info(f"TB STATIC GATE ({'PASS' if static_ok else 'FAIL'}): {static_report}")
+        static_path = self._write_tb_diagnostic_artifact(
+            "tb_static_gate", static_report
+        )
+        self.logger.info(
+            f"TB STATIC GATE ({'PASS' if static_ok else 'FAIL'}): {static_report}"
+        )
         self.log(
             f"TB static gate: {'PASS' if static_ok else 'FAIL'} (diag: {os.path.basename(static_path)})",
             refined=True,
@@ -3220,15 +4032,24 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
             if self._tb_gate_strict_enforced():
                 self._handle_tb_gate_failure("static", static_report, tb_code)
                 return
-            self.log("TB static gate warnings in relaxed mode; continuing to compile gate.", refined=True)
+            self.log(
+                "TB static gate warnings in relaxed mode; continuing to compile gate.",
+                refined=True,
+            )
 
         compile_ok, compile_report = run_tb_compile_gate(
             self.name,
             self.artifacts.get("tb_path", ""),
-            self.artifacts.get("rtl_path", f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}.v"),
+            self.artifacts.get(
+                "rtl_path", f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}.v"
+            ),
         )
-        compile_path = self._write_tb_diagnostic_artifact("tb_compile_gate", compile_report)
-        self.logger.info(f"TB COMPILE GATE ({'PASS' if compile_ok else 'FAIL'}): {compile_report}")
+        compile_path = self._write_tb_diagnostic_artifact(
+            "tb_compile_gate", compile_report
+        )
+        self.logger.info(
+            f"TB COMPILE GATE ({'PASS' if compile_ok else 'FAIL'}): {compile_report}"
+        )
         self.log(
             f"TB compile gate: {'PASS' if compile_ok else 'FAIL'} (diag: {os.path.basename(compile_path)})",
             refined=True,
@@ -3238,10 +4059,15 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
             # If RTL was structurally changed from the sim-failure repair path,
             # the old testbench's port connections are likely incompatible.
             # Immediately regenerate the TB instead of retrying the stale one.
-            if self.artifacts.pop('rtl_changed_from_sim_fix', False):
-                self.log("TB compile gate failed after RTL sim-fix. "
-                         "Regenerating testbench against updated RTL.", refined=True)
-                self._record_tb_gate_history("compile", False, "regen_after_rtl_fix", compile_report)
+            if self.artifacts.pop("rtl_changed_from_sim_fix", False):
+                self.log(
+                    "TB compile gate failed after RTL sim-fix. "
+                    "Regenerating testbench against updated RTL.",
+                    refined=True,
+                )
+                self._record_tb_gate_history(
+                    "compile", False, "regen_after_rtl_fix", compile_report
+                )
                 tb_path = self.artifacts.get("tb_path")
                 if tb_path and os.path.exists(tb_path):
                     try:
@@ -3262,47 +4088,66 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
         self.artifacts["tb_recovery_cycle_static"] = 0
         self.artifacts["tb_recovery_cycle_compile"] = 0
         self._record_tb_gate_history("compile", True, "gate_pass", compile_report)
-        
+
         # Run Sim
-        with console.status("[accent]Running Simulation...[/accent]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[accent]Running Simulation...[/accent]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             success, output = run_simulation(self.name)
-        
+
         self.logger.info(f"SIMULATION OUTPUT:\n{output}")
-        
+
         if success:
             self.log("Simulation Passed!", refined=True)
             if self.skip_openlane:
-                 self.log("Skipping Hardening (--skip-openlane).", refined=True)
-                 self.transition(BuildState.FORMAL_VERIFY)
+                self.log("Skipping Hardening (--skip-openlane).", refined=True)
+                self.transition(BuildState.FORMAL_VERIFY)
             else:
                 # Interactive Prompt for Hardening
-                 import typer
-                 import sys
-                 if not sys.stdin.isatty():
-                     self.log("Non-interactive session: auto-proceeding after simulation pass.", refined=True)
-                     self.transition(BuildState.FORMAL_VERIFY)
-                 else:
-                     console.print()
-                     if typer.confirm("Simulation Passed. Proceed to OpenLane Hardening (takes 10-30 mins)?", default=True):
-                         self.transition(BuildState.FORMAL_VERIFY)
-                     else:
-                         self.log("Skipping Hardening (User Cancelled).", refined=True)
-                         self.transition(BuildState.FORMAL_VERIFY)
+                import typer
+                import sys
+
+                if not sys.stdin.isatty():
+                    self.log(
+                        "Non-interactive session: auto-proceeding after simulation pass.",
+                        refined=True,
+                    )
+                    self.transition(BuildState.FORMAL_VERIFY)
+                else:
+                    console.print()
+                    if typer.confirm(
+                        "Simulation Passed. Proceed to OpenLane Hardening (takes 10-30 mins)?",
+                        default=True,
+                    ):
+                        self.transition(BuildState.FORMAL_VERIFY)
+                    else:
+                        self.log("Skipping Hardening (User Cancelled).", refined=True)
+                        self.transition(BuildState.FORMAL_VERIFY)
         else:
             output_for_llm = self._condense_failure_log(output, kind="simulation")
             if self._record_failure_fingerprint(output_for_llm):
-                self.log("Detected repeated simulation failure fingerprint. Failing closed.", refined=True)
+                self.log(
+                    "Detected repeated simulation failure fingerprint. Failing closed.",
+                    refined=True,
+                )
                 self.state = BuildState.FAIL
                 return
             self.retry_count += 1
-            self.global_retry_count += 1 # Bug 2: Increment global retry
+            self.global_retry_count += 1  # Bug 2: Increment global retry
             if self.retry_count > self.max_retries:
-                 self.log(f"Max Sim Retries ({self.max_retries}) Exceeded. Simulation Failed.", refined=True)
-                 self.state = BuildState.FAIL
-                 return
-            
-            self.log(f"Sim Failed (Attempt {self.retry_count}). Check log.", refined=True)
-            
+                self.log(
+                    f"Max Sim Retries ({self.max_retries}) Exceeded. Simulation Failed.",
+                    refined=True,
+                )
+                self.state = BuildState.FAIL
+                return
+
+            self.log(
+                f"Sim Failed (Attempt {self.retry_count}). Check log.", refined=True
+            )
+
             # --- AUTONOMOUS FIX: Try to fix compilation errors without LLM ---
             # Auto-fixes removed (Verilator supports SV natively)
 
@@ -3313,15 +4158,21 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
             )
             _rtl_path = self.artifacts.get(
                 "rtl_path",
-                os.path.join(OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}.v"),
+                os.path.join(
+                    OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}.v"
+                ),
             )
             sim_caps = self._simulation_capabilities(output, _vcd_path)
-            if sim_caps["trace_enabled"] and sim_caps["waveform_generated"] and os.path.exists(_rtl_path):
+            if (
+                sim_caps["trace_enabled"]
+                and sim_caps["waveform_generated"]
+                and os.path.exists(_rtl_path)
+            ):
                 _waveform_mod = WaveformExpertModule()
                 _diagnosis = _waveform_mod.analyze_failure(
                     rtl_path=_rtl_path,
                     vcd_path=_vcd_path,
-                    sim_log=output,          # 'output' is the sim stdout/stderr
+                    sim_log=output,  # 'output' is the sim stdout/stderr
                     design_name=self.name,
                 )
                 waveform_result = self._normalize_waveform_result(_diagnosis, output)
@@ -3344,7 +4195,9 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 else:
                     self.logger.info("[WaveformExpert] No signal mismatch found in VCD")
             else:
-                _vcd_size = os.path.getsize(_vcd_path) if os.path.exists(_vcd_path) else 0
+                _vcd_size = (
+                    os.path.getsize(_vcd_path) if os.path.exists(_vcd_path) else 0
+                )
                 self._record_stage_contract(
                     StageResult(
                         stage=self.state.name,
@@ -3396,13 +4249,17 @@ Reply with JSON only, no prose, using this exact schema:
   "root_cause": "1-line root cause",
   "fix_hint": "surgical fix hint"
 }}''',
-                expected_output='JSON object with class, failing_output, failing_signals, expected_vs_actual, responsible_construct, root_cause, and fix_hint',
-                agent=analyst
+                expected_output="JSON object with class, failing_output, failing_signals, expected_vs_actual, responsible_construct, root_cause, and fix_hint",
+                agent=analyst,
             )
-            
+
             with console.status("[error]Analyzing Failure (Multi-Class)...[/error]"):
-                analysis = str(Crew(verbose=False, agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
-            
+                analysis = str(
+                    self._crew_kickoff(
+                        Crew(verbose=False, agents=[analyst], tasks=[analysis_task])
+                    )
+                ).strip()
+
             self.logger.info(f"FAILURE ANALYSIS:\n{analysis}")
             analyst_result = self._parse_structured_agent_json(
                 agent_name="VerificationAnalyst",
@@ -3423,8 +4280,14 @@ Reply with JSON only, no prose, using this exact schema:
                     analysis,
                     analyst_result.diagnostics,
                 )
-                with console.status("[error]Retrying Failure Analysis (JSON)...[/error]"):
-                    analysis = str(Crew(verbose=False, agents=[analyst], tasks=[analysis_task]).kickoff()).strip()
+                with console.status(
+                    "[error]Retrying Failure Analysis (JSON)...[/error]"
+                ):
+                    analysis = str(
+                        self._crew_kickoff(
+                            Crew(verbose=False, agents=[analyst], tasks=[analysis_task])
+                        )
+                    ).strip()
                 self.logger.info(f"FAILURE ANALYSIS RETRY:\n{analysis}")
                 analyst_result = self._parse_structured_agent_json(
                     agent_name="VerificationAnalyst",
@@ -3440,7 +4303,10 @@ Reply with JSON only, no prose, using this exact schema:
                     ],
                 )
                 if not analyst_result.ok:
-                    self.log("Verification analysis returned invalid JSON twice. Failing closed.", refined=True)
+                    self.log(
+                        "Verification analysis returned invalid JSON twice. Failing closed.",
+                        refined=True,
+                    )
                     self.state = BuildState.FAIL
                     return
             self._set_artifact(
@@ -3459,9 +4325,13 @@ Reply with JSON only, no prose, using this exact schema:
                 failing_signals = ", ".join(str(x) for x in failing_signals_list)
             else:
                 failing_signals = str(failing_signals_list)
-            expected_vs_actual = str(analysis_payload.get("expected_vs_actual", "")).strip()
-            responsible_construct = str(analysis_payload.get("responsible_construct", "")).strip()
-            
+            expected_vs_actual = str(
+                analysis_payload.get("expected_vs_actual", "")
+            ).strip()
+            responsible_construct = str(
+                analysis_payload.get("responsible_construct", "")
+            ).strip()
+
             # Build structured diagnosis string for downstream fix prompts
             structured_diagnosis = (
                 f"FAILING_OUTPUT: {failing_output}\n"
@@ -3471,29 +4341,41 @@ Reply with JSON only, no prose, using this exact schema:
                 f"ROOT_CAUSE: {root_cause}\n"
                 f"FIX_HINT: {fix_hint}"
             )
-            
+
             self.log(
                 f"Diagnosis: CLASS={failure_class} | ROOT_CAUSE={root_cause[:100]} | FIX_HINT={fix_hint[:100]}",
                 refined=True,
             )
-            
+
             # --- Route to fix path based on failure class ---
-            
+
             if failure_class == "C":
                 # PORT_MISMATCH — deterministic auto-fix: regenerate TB from RTL ports
-                self.log("Port mismatch detected. Regenerating TB from RTL ports.", refined=True)
-                fallback_tb = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
+                self.log(
+                    "Port mismatch detected. Regenerating TB from RTL ports.",
+                    refined=True,
+                )
+                fallback_tb = self._deterministic_tb_fallback(
+                    self.artifacts.get("rtl_code", "")
+                )
                 path = write_verilog(self.name, fallback_tb, is_testbench=True)
                 if isinstance(path, str) and not path.startswith("Error:"):
-                    self.artifacts['tb_path'] = path
+                    self.artifacts["tb_path"] = path
                 return
-            
+
             if failure_class == "D":
                 # TIMING_RACE — deterministic auto-fix: progressively extend reset + add stabilization
-                self.log("Timing race detected. Applying reset timing fix to TB.", refined=True)
+                self.log(
+                    "Timing race detected. Applying reset timing fix to TB.",
+                    refined=True,
+                )
                 fixed_tb = tb_code.replace("#20;", "#100;").replace("#50;", "#200;")
                 # Progressive repeat escalation: 5→20→50→100
-                for old_rep, new_rep in [("repeat (5)", "repeat (20)"), ("repeat (20)", "repeat (50)"), ("repeat (50)", "repeat (100)")]:
+                for old_rep, new_rep in [
+                    ("repeat (5)", "repeat (20)"),
+                    ("repeat (20)", "repeat (50)"),
+                    ("repeat (50)", "repeat (100)"),
+                ]:
                     if old_rep in fixed_tb:
                         fixed_tb = fixed_tb.replace(old_rep, new_rep)
                         break
@@ -3504,31 +4386,43 @@ Reply with JSON only, no prose, using this exact schema:
                         if deassert in fixed_tb:
                             fixed_tb = fixed_tb.replace(
                                 deassert,
-                                f"{deassert}\n    repeat (3) @(posedge clk); // post-reset-stab"
+                                f"{deassert}\n    repeat (3) @(posedge clk); // post-reset-stab",
                             )
                             break
                 if fixed_tb != tb_code:
                     path = write_verilog(self.name, fixed_tb, is_testbench=True)
                     if isinstance(path, str) and not path.startswith("Error:"):
-                        self.artifacts['tb_path'] = path
+                        self.artifacts["tb_path"] = path
                     return
                 # If auto-fix didn't change anything, fall through to LLM fix
-                self.log("Timing race auto-fix exhausted. Falling through to LLM fix.", refined=True)
-            
+                self.log(
+                    "Timing race auto-fix exhausted. Falling through to LLM fix.",
+                    refined=True,
+                )
+
             if failure_class == "E":
                 # ARCHITECTURAL — spec is flawed, go back to SPEC stage
-                self.log(f"Architectural issue detected: {root_cause}. Regenerating spec.", refined=True)
-                self.artifacts["logic_decoupling_hint"] = f"Previous build failed due to: {root_cause}. {fix_hint}"
+                self.log(
+                    f"Architectural issue detected: {root_cause}. Regenerating spec.",
+                    refined=True,
+                )
+                self.artifacts["logic_decoupling_hint"] = (
+                    f"Previous build failed due to: {root_cause}. {fix_hint}"
+                )
                 self.transition(BuildState.SPEC, preserve_retries=True)
                 return
-            
+
             # Classes A (TB syntax) and B (RTL logic) — use LLM fix
             is_tb_issue = failure_class == "A"
-            
+
             if is_tb_issue:
-                self.log("Analyst identified Testbench Error. Fixing TB...", refined=True)
-                fixer = get_testbench_agent(self.get_llm_for_role("fixer"), f"Fix TB for {self.name}")
-                port_info = self._extract_module_interface(self.artifacts['rtl_code'])
+                self.log(
+                    "Analyst identified Testbench Error. Fixing TB...", refined=True
+                )
+                fixer = get_testbench_agent(
+                    self.get_llm_for_role("fixer"), f"Fix TB for {self.name}"
+                )
+                port_info = self._extract_module_interface(self.artifacts["rtl_code"])
                 fix_prompt = f"""Fix the Testbench logic/syntax.
 
 DIAGNOSIS FROM ERROR ANALYST:
@@ -3548,7 +4442,7 @@ Current TB:
 
 Ref RTL:
 ```verilog
-{self.artifacts['rtl_code']}
+{self.artifacts["rtl_code"]}
 ```
 
 PREVIOUS ATTEMPTS:
@@ -3570,11 +4464,21 @@ always wait for at least one complete clock cycle (`@(posedge clk);` or
 Never sample a DUT output in the same time step that stimulus is applied.
 """
             else:
-                self.log("Analyst identified RTL Logic Error. Fixing RTL...", refined=True)
-                fixer = get_designer_agent(self.get_llm_for_role("fixer"), f"Fix RTL for {self.name}", strategy=self.strategy.name)
-                error_lines = [line for line in output.split('\n') if "Error" in line or "fail" in line.lower()]
+                self.log(
+                    "Analyst identified RTL Logic Error. Fixing RTL...", refined=True
+                )
+                fixer = get_designer_agent(
+                    self.get_llm_for_role("fixer"),
+                    f"Fix RTL for {self.name}",
+                    strategy=self.strategy.name,
+                )
+                error_lines = [
+                    line
+                    for line in output.split("\n")
+                    if "Error" in line or "fail" in line.lower()
+                ]
                 error_summary = "\n".join(error_lines)
-                
+
                 fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. No explanation, no commentary, no "Thought:" prefixes.
 
 SURGICAL FIX REQUIRED — make the MINIMUM change to fix the specific issue identified.
@@ -3590,7 +4494,7 @@ Full Log:
 
 Current RTL:
 ```verilog
-{self.artifacts['rtl_code']}
+{self.artifacts["rtl_code"]}
 ```
 
 Ref TB:
@@ -3611,46 +4515,72 @@ CRITICAL RULES:
 - Use your syntax_check tool to verify the fix compiles before returning it.
 - Return ONLY the fixed {self.strategy.name} code in ```verilog fences.
 """
-            
+
             # Execute Fix — fixer uses analyst's diagnosis as context
             fix_task = Task(
                 description=fix_prompt,
                 expected_output="Fixed Verilog Code in ```verilog fences",
-                agent=fixer
+                agent=fixer,
             )
-            
-            with console.status("[warning]AI Implementing Fix...[/warning]", spinner="dots12", spinner_style="spinner"):
-                 result = Crew(verbose=False, agents=[fixer],
-                     tasks=[fix_task],
-                 ).kickoff()
+
+            with console.status(
+                "[warning]AI Implementing Fix...[/warning]",
+                spinner="dots12",
+                spinner_style="spinner",
+            ):
+                result = self._crew_kickoff(
+                    Crew(
+                        verbose=False,
+                        agents=[fixer],
+                        tasks=[fix_task],
+                    )
+                )
             fixed_code = str(result)
             # --- Universal code output validation (verification fix) ---
             if not validate_llm_code_output(fixed_code):
-                self.log("Fix generation returned prose instead of code. Retrying once.", refined=True)
-                self.logger.warning(f"FIX VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
-                fixed_code = str(Crew(verbose=False, agents=[fixer],
-                    tasks=[fix_task],
-                ).kickoff())
+                self.log(
+                    "Fix generation returned prose instead of code. Retrying once.",
+                    refined=True,
+                )
+                self.logger.warning(
+                    f"FIX VALIDATION FAIL (prose detected):\n{fixed_code[:500]}"
+                )
+                fixed_code = str(
+                    self._crew_kickoff(
+                        Crew(
+                            verbose=False,
+                            agents=[fixer],
+                            tasks=[fix_task],
+                        )
+                    )
+                )
             self.logger.info(f"FIXED CODE:\n{fixed_code}")
-            
+
             if not is_tb_issue:
                 # RTL Fix — diff check to reject full rewrites
-                original_code = self.artifacts.get('rtl_code', '')
+                original_code = self.artifacts.get("rtl_code", "")
                 original_lines = original_code.splitlines()
                 fixed_lines = fixed_code.splitlines()
 
                 # Count changed lines using SequenceMatcher
                 if original_lines and fixed_lines:
                     matcher = difflib.SequenceMatcher(None, original_lines, fixed_lines)
-                    unchanged = sum(block.size for block in matcher.get_matching_blocks())
+                    unchanged = sum(
+                        block.size for block in matcher.get_matching_blocks()
+                    )
                     total = max(len(original_lines), len(fixed_lines))
                     changed_ratio = 1.0 - (unchanged / total) if total > 0 else 0.0
-                    self.logger.info(f"RTL DIFF CHECK: {changed_ratio:.1%} of lines changed "
-                                     f"({total - unchanged}/{total})")
+                    self.logger.info(
+                        f"RTL DIFF CHECK: {changed_ratio:.1%} of lines changed "
+                        f"({total - unchanged}/{total})"
+                    )
 
                     if changed_ratio > 0.30:
-                        self.log(f"RTL fix rejected: {changed_ratio:.0%} of lines changed (>30%). "
-                                 "Requesting surgical retry.", refined=True)
+                        self.log(
+                            f"RTL fix rejected: {changed_ratio:.0%} of lines changed (>30%). "
+                            "Requesting surgical retry.",
+                            refined=True,
+                        )
                         # Re-prompt with explicit rejection context
                         retry_prompt = f"""RESPOND WITH VERILOG CODE ONLY.
 
@@ -3670,43 +4600,66 @@ Return the complete module with ONLY the minimal fix applied.
                         retry_task = Task(
                             description=retry_prompt,
                             expected_output="Fixed Verilog Code in ```verilog fences",
-                            agent=fixer
+                            agent=fixer,
                         )
-                        with console.status("[warning]AI Implementing Surgical Fix (retry)...[/warning]"):
-                            result2 = Crew(verbose=False, agents=[fixer], tasks=[retry_task]).kickoff()
+                        with console.status(
+                            "[warning]AI Implementing Surgical Fix (retry)...[/warning]"
+                        ):
+                            result2 = self._crew_kickoff(
+                                Crew(verbose=False, agents=[fixer], tasks=[retry_task])
+                            )
                         fixed_code = str(result2)
                         # --- Universal code output validation (surgical RTL retry) ---
                         if not validate_llm_code_output(fixed_code):
-                            self.log("Surgical RTL retry returned prose instead of code. Retrying once.", refined=True)
-                            self.logger.warning(f"SURGICAL RETRY VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
-                            fixed_code = str(Crew(verbose=False, agents=[fixer], tasks=[retry_task]).kickoff())
+                            self.log(
+                                "Surgical RTL retry returned prose instead of code. Retrying once.",
+                                refined=True,
+                            )
+                            self.logger.warning(
+                                f"SURGICAL RETRY VALIDATION FAIL (prose detected):\n{fixed_code[:500]}"
+                            )
+                            fixed_code = str(
+                                self._crew_kickoff(
+                                    Crew(
+                                        verbose=False,
+                                        agents=[fixer],
+                                        tasks=[retry_task],
+                                    )
+                                )
+                            )
                         self.logger.info(f"SURGICAL RETRY CODE:\n{fixed_code}")
 
                 # Write cleaned code and read it back
                 path = write_verilog(self.name, fixed_code)
                 if isinstance(path, str) and path.startswith("Error:"):
-                    self.log(f"File Write Error when fixing RTL logic: {path}", refined=True)
+                    self.log(
+                        f"File Write Error when fixing RTL logic: {path}", refined=True
+                    )
                     self.state = BuildState.FAIL
                     return
-                self.artifacts['rtl_path'] = path
-                with open(path, 'r') as f:
-                    self.artifacts['rtl_code'] = f.read()
+                self.artifacts["rtl_path"] = path
+                with open(path, "r") as f:
+                    self.artifacts["rtl_code"] = f.read()
                 # Flag that RTL was structurally changed from the sim-failure path
                 # so TB compile gate knows to regenerate the testbench if needed
-                self.artifacts['rtl_changed_from_sim_fix'] = True
-                self.log("RTL Updated. Transitioning back to RTL_FIX to verify syntax.", refined=True)
+                self.artifacts["rtl_changed_from_sim_fix"] = True
+                self.log(
+                    "RTL Updated. Transitioning back to RTL_FIX to verify syntax.",
+                    refined=True,
+                )
                 self.transition(BuildState.RTL_FIX, preserve_retries=True)
                 return
             else:
                 # TB Fix
                 path = write_verilog(self.name, fixed_code, is_testbench=True)
                 if isinstance(path, str) and path.startswith("Error:"):
-                    self.log(f"File Write Error when fixing TB logic: {path}", refined=True)
+                    self.log(
+                        f"File Write Error when fixing TB logic: {path}", refined=True
+                    )
                     self.state = BuildState.FAIL
                     return
-                self.artifacts['tb_path'] = path
+                self.artifacts["tb_path"] = path
                 return
-
 
     # ===============================================
     # INDUSTRY-STANDARD STATE HANDLERS
@@ -3715,19 +4668,19 @@ Return the complete module with ONLY the minimal fix applied.
     def do_formal_verify(self):
         """Runs formal property verification using SymbiYosys."""
         self.log("Starting Formal Property Verification...", refined=True)
-        
-        rtl_path = self.artifacts.get('rtl_path')
+
+        rtl_path = self.artifacts.get("rtl_path")
         if not rtl_path:
             self.log("RTL path not found in artifacts. Skipping formal.", refined=True)
             self.transition(BuildState.COVERAGE_CHECK)
             return
-        
+
         # 1. Generate SVA assertions using LLM
         sva_path = f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_sva.sv"
-        
+
         if not os.path.exists(sva_path):
             self.log("Generating SVA Assertions...", refined=True)
-            
+
             # Bug 3: Inject DeepDebugger diagnostic context into the SVA generation prompt
             formal_debug = self.artifacts.get("formal_debug_context", "")
             formal_preflight_error = self._consume_handoff(
@@ -3751,7 +4704,7 @@ Return the complete module with ONLY the minimal fix applied.
             except OSError:
                 rtl_for_sva = self.artifacts.get("rtl_code", "")
             signal_inventory = self._format_signal_inventory_for_prompt(rtl_for_sva)
-            
+
             verif_agent = get_verification_agent(self.get_llm_for_role("verifier"))
             sva_task = Task(
                 description=f"""Generate SystemVerilog Assertions (SVA) for module "{self.name}".
@@ -3768,7 +4721,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 Use only these signals and these exact widths in every assertion. Do not invent signals, aliases, or widths.
                 
                 SPECIFICATION:
-                {self.artifacts.get('spec', '')}
+                {self.artifacts.get("spec", "")}
                 {formal_debug_str}
                 Requirements:
                 1. Create a separate SVA module named "{self.name}_sva"
@@ -3788,13 +4741,21 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 OUTPUT FORMAT CONSTRAINT (mandatory):
                 Your entire response must be valid SystemVerilog code only. No explanations, no prose, no comments before the module declaration. Your response must begin with the keyword `module`. Any response that does not begin with `module` will be rejected and retried.
                 """,
-                expected_output='SystemVerilog SVA module',
-                agent=verif_agent
+                expected_output="SystemVerilog SVA module",
+                agent=verif_agent,
             )
-            
-            with console.status("[accent]AI Generating SVA Assertions...[/accent]", spinner="dots12", spinner_style="spinner"):
-                sva_result = str(Crew(verbose=False, agents=[verif_agent], tasks=[sva_task]).kickoff())
-            
+
+            with console.status(
+                "[accent]AI Generating SVA Assertions...[/accent]",
+                spinner="dots12",
+                spinner_style="spinner",
+            ):
+                sva_result = str(
+                    self._crew_kickoff(
+                        Crew(verbose=False, agents=[verif_agent], tasks=[sva_task])
+                    )
+                )
+
             # --- Universal code output validation (SVA) ---
             if not validate_llm_code_output(sva_result):
                 self._record_non_consumable_output(
@@ -3802,14 +4763,28 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     sva_result,
                     ["SVA generation returned prose instead of code."],
                 )
-                self.log("SVA generation returned prose instead of code. Retrying once.", refined=True)
-                self.logger.warning(f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}")
-                sva_result = str(Crew(verbose=False, agents=[verif_agent], tasks=[sva_task]).kickoff())
+                self.log(
+                    "SVA generation returned prose instead of code. Retrying once.",
+                    refined=True,
+                )
+                self.logger.warning(
+                    f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}"
+                )
+                sva_result = str(
+                    self._crew_kickoff(
+                        Crew(verbose=False, agents=[verif_agent], tasks=[sva_task])
+                    )
+                )
                 if not validate_llm_code_output(sva_result):
-                    self.log("SVA retry also returned invalid output. Skipping formal.", refined=True)
+                    self.log(
+                        "SVA retry also returned invalid output. Skipping formal.",
+                        refined=True,
+                    )
                     self.transition(BuildState.COVERAGE_CHECK)
                     return
-            sva_validation_issues = self._validate_sva_candidate(sva_result, rtl_for_sva)
+            sva_validation_issues = self._validate_sva_candidate(
+                sva_result, rtl_for_sva
+            )
             if sva_validation_issues:
                 self._record_stage_contract(
                     StageResult(
@@ -3821,32 +4796,46 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                         next_action="retry_sva_generation",
                     )
                 )
-                self.log(f"SVA candidate rejected: {sva_validation_issues[0]}", refined=True)
+                self.log(
+                    f"SVA candidate rejected: {sva_validation_issues[0]}", refined=True
+                )
                 for stale in (sva_path,):
                     if os.path.exists(stale):
                         os.remove(stale)
                 return
-            
+
             self.logger.info(f"GENERATED SVA:\n{sva_result}")
-            
+
             # Write SVA file
-            sva_write_path = write_verilog(self.name, sva_result, suffix="_sva", ext=".sv")
+            sva_write_path = write_verilog(
+                self.name, sva_result, suffix="_sva", ext=".sv"
+            )
             if isinstance(sva_write_path, str) and sva_write_path.startswith("Error:"):
-                self.log(f"SVA write failed: {sva_write_path}. Skipping formal.", refined=True)
+                self.log(
+                    f"SVA write failed: {sva_write_path}. Skipping formal.",
+                    refined=True,
+                )
                 self.transition(BuildState.COVERAGE_CHECK)
                 return
-        
+
         # 2. Convert SVA to Yosys-compatible format
         try:
-            with open(sva_path, 'r') as f:
+            with open(sva_path, "r") as f:
                 sva_content = f.read()
-            
+
             yosys_code = convert_sva_to_yosys(sva_content, self.name)
             if not yosys_code:
-                self.artifacts['formal_result'] = "FAIL: unable to translate SVA into Yosys-compatible form"
-                self.log("Failed to convert generated SVA to Yosys-compatible assertions.", refined=True)
+                self.artifacts["formal_result"] = (
+                    "FAIL: unable to translate SVA into Yosys-compatible form"
+                )
+                self.log(
+                    "Failed to convert generated SVA to Yosys-compatible assertions.",
+                    refined=True,
+                )
                 if self.strict_gates:
-                    self.log("Formal translation failed under strict mode.", refined=True)
+                    self.log(
+                        "Formal translation failed under strict mode.", refined=True
+                    )
                     self.state = BuildState.FAIL
                     return
                 self.transition(BuildState.COVERAGE_CHECK)
@@ -3872,32 +4861,45 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     producer="orchestrator_formal_preflight",
                     consumer="FORMAL_VERIFY",
                 )
-                self.log(f"Formal preflight failed: {preflight_report.get('issue_count', 0)} issue(s).", refined=True)
-                self.artifacts['formal_result'] = 'FAIL'
+                self.log(
+                    f"Formal preflight failed: {preflight_report.get('issue_count', 0)} issue(s).",
+                    refined=True,
+                )
+                self.artifacts["formal_result"] = "FAIL"
                 if self.strict_gates:
-                    self.log("Formal preflight issues are blocking under strict mode.", refined=True)
+                    self.log(
+                        "Formal preflight issues are blocking under strict mode.",
+                        refined=True,
+                    )
                     self.state = BuildState.FAIL
                     return
                 self.transition(BuildState.COVERAGE_CHECK)
                 return
 
-            sby_check_path = f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_sby_check.sv"
-            with open(sby_check_path, 'w') as f:
+            sby_check_path = (
+                f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_sby_check.sv"
+            )
+            with open(sby_check_path, "w") as f:
                 f.write(yosys_code)
             self.log("Yosys-compatible assertions generated.", refined=True)
-            
+
             # 3. Yosys SVA preflight — catch syntax errors before sby runs
             from .config import YOSYS_BIN as _YOSYS_BIN
+
             _yosys = _YOSYS_BIN or "yosys"
             preflight_cmd = [_yosys, "-p", f"read_verilog -formal -sv {sby_check_path}"]
             try:
-                pf = subprocess.run(preflight_cmd, capture_output=True, text=True, timeout=30)
+                pf = subprocess.run(
+                    preflight_cmd, capture_output=True, text=True, timeout=30
+                )
                 if pf.returncode != 0:
                     yosys_err = (pf.stderr or pf.stdout or "").strip()
                     self.logger.info(f"YOSYS SVA PREFLIGHT FAIL:\n{yosys_err}")
                     prev_err = self.artifacts.get("sva_preflight_error_last", "")
                     if prev_err == yosys_err:
-                        streak = int(self.artifacts.get("sva_preflight_error_streak", 0)) + 1
+                        streak = (
+                            int(self.artifacts.get("sva_preflight_error_streak", 0)) + 1
+                        )
                     else:
                         streak = 1
                     self.artifacts["sva_preflight_error_last"] = yosys_err
@@ -3910,12 +4912,18 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                         consumer="FORMAL_VERIFY",
                     )
                     if streak >= 2:
-                        self.log("Repeated Yosys SVA preflight failure detected. Skipping formal instead of regenerating again.", refined=True)
+                        self.log(
+                            "Repeated Yosys SVA preflight failure detected. Skipping formal instead of regenerating again.",
+                            refined=True,
+                        )
                         self.artifacts["formal_result"] = "SKIP"
                         self.artifacts["sva_preflight_skip_reason"] = yosys_err[:2000]
                         self.transition(BuildState.COVERAGE_CHECK)
                         return
-                    self.log("Yosys SVA preflight failed. Regenerating SVA with error context.", refined=True)
+                    self.log(
+                        "Yosys SVA preflight failed. Regenerating SVA with error context.",
+                        refined=True,
+                    )
                     # Remove stale SVA files so the next iteration regenerates
                     for stale in (sva_path, sby_check_path):
                         if os.path.exists(stale):
@@ -3929,15 +4937,17 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
 
             # 4. Write SBY config and run
             write_sby_config(self.name, use_sby_check=True)
-            
-            with console.status("[accent]Running Formal Verification (SymbiYosys)...[/accent]"):
+
+            with console.status(
+                "[accent]Running Formal Verification (SymbiYosys)...[/accent]"
+            ):
                 success, result = run_formal_verification(self.name)
-            
+
             self.logger.info(f"FORMAL RESULT:\n{result}")
-            
+
             if success:
                 self.log("Formal Verification PASSED!", refined=True)
-                self.artifacts['formal_result'] = 'PASS'
+                self.artifacts["formal_result"] = "PASS"
             else:
                 self.log(f"Formal Verification: {result[:200]}", refined=True)
 
@@ -3945,14 +4955,23 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 _formal_debug_context = ""
                 _rtl_path_fv = self.artifacts.get("rtl_path", "")
                 _sby_cfg = os.path.join(
-                    OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}_sby_check.sby"
+                    OPENLANE_ROOT,
+                    "designs",
+                    self.name,
+                    "src",
+                    f"{self.name}_sby_check.sby",
                 )
                 # sby config is written by write_sby_config() — check both extensions
                 if not os.path.exists(_sby_cfg):
                     _sby_cfg = os.path.join(
-                        OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}_formal.sby"
+                        OPENLANE_ROOT,
+                        "designs",
+                        self.name,
+                        "src",
+                        f"{self.name}_formal.sby",
                     )
                 from .config import SBY_BIN as _SBY_BIN, YOSYS_BIN as _YOSYS_BIN
+
                 if os.path.exists(_sby_cfg) and os.path.exists(_rtl_path_fv):
                     _debugger = DeepDebuggerModule(
                         llm=self.get_llm_for_role("debugger"),
@@ -3988,7 +5007,9 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                             f"line {_verdict.root_cause_line} conf={_verdict.confidence:.2f}"
                         )
                     else:
-                        self.logger.info("[DeepDebugger] No verdict (all signals uncertain)")
+                        self.logger.info(
+                            "[DeepDebugger] No verdict (all signals uncertain)"
+                        )
                 else:
                     self.logger.info(
                         f"[DeepDebugger] Skipping — "
@@ -4002,25 +5023,31 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     consumer="FORMAL_VERIFY",
                 )
 
-                self.artifacts['formal_result'] = 'FAIL'
+                self.artifacts["formal_result"] = "FAIL"
                 if self.strict_gates:
-                    self.log("Formal verification failed under strict mode.", refined=True)
+                    self.log(
+                        "Formal verification failed under strict mode.", refined=True
+                    )
                     self.state = BuildState.FAIL
                     return
         except Exception as e:
             self.log(f"Formal verification error: {str(e)}.", refined=True)
-            self.artifacts['formal_result'] = f'ERROR: {str(e)}'
+            self.artifacts["formal_result"] = f"ERROR: {str(e)}"
             if self.strict_gates:
                 self.state = BuildState.FAIL
                 return
-        
+
         # 4. Run CDC check
-        with console.status("[accent]Running CDC Analysis...[/accent]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[accent]Running CDC Analysis...[/accent]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             cdc_clean, cdc_report = run_cdc_check(rtl_path)
-        
+
         self.logger.info(f"CDC REPORT:\n{cdc_report}")
-        self.artifacts['cdc_result'] = 'CLEAN' if cdc_clean else 'WARNINGS'
-        
+        self.artifacts["cdc_result"] = "CLEAN" if cdc_clean else "WARNINGS"
+
         if cdc_clean:
             self.log("CDC Analysis: CLEAN", refined=True)
         else:
@@ -4029,7 +5056,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 self.log("CDC issues are blocking under strict mode.", refined=True)
                 self.state = BuildState.FAIL
                 return
-        
+
         if self.skip_coverage:
             self.log("Skipping Coverage Analysis (--skip-coverage).", refined=True)
             self.transition(BuildState.REGRESSION)
@@ -4040,7 +5067,9 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
     def do_coverage_check(self):
         """Runs coverage with adapter backend and strict fail-closed semantics."""
         thresholds = dict(self.coverage_thresholds)
-        thresholds["line"] = max(float(thresholds.get("line", 85.0)), float(self.min_coverage))
+        thresholds["line"] = max(
+            float(thresholds.get("line", 85.0)), float(self.min_coverage)
+        )
         self.log(
             (
                 f"Running Coverage Analysis "
@@ -4050,7 +5079,11 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        with console.status("[accent]Running Coverage-Instrumented Simulation...[/accent]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[accent]Running Coverage-Instrumented Simulation...[/accent]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             sim_passed, sim_output, coverage_data = run_simulation_with_coverage(
                 self.name,
                 backend=self.coverage_backend,
@@ -4076,16 +5109,22 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             }
 
         self.logger.info(f"COVERAGE DATA:\n{coverage_data}")
-        self.logger.info(f"COVERAGE SIM OUTPUT:\n{sim_output[:8000] if isinstance(sim_output, str) else sim_output}")
+        self.logger.info(
+            f"COVERAGE SIM OUTPUT:\n{sim_output[:8000] if isinstance(sim_output, str) else sim_output}"
+        )
         coverage_data["thresholds"] = thresholds
         self.artifacts["coverage"] = coverage_data
-        self.artifacts["coverage_backend_used"] = coverage_data.get("backend", self.coverage_backend)
+        self.artifacts["coverage_backend_used"] = coverage_data.get(
+            "backend", self.coverage_backend
+        )
         self.artifacts["coverage_mode"] = coverage_data.get("coverage_mode", "unknown")
         self._set_artifact(
             "coverage_improvement_context",
             {
                 "coverage_data": coverage_data,
-                "sim_output": sim_output[:4000] if isinstance(sim_output, str) else str(sim_output),
+                "sim_output": sim_output[:4000]
+                if isinstance(sim_output, str)
+                else str(sim_output),
             },
             producer="orchestrator_coverage",
             consumer="COVERAGE_CHECK",
@@ -4095,7 +5134,9 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         os.makedirs(src_dir, exist_ok=True)
         attempt = int(self.artifacts.get("coverage_attempt_count", 0)) + 1
         self.artifacts["coverage_attempt_count"] = attempt
-        coverage_attempt = os.path.join(src_dir, f"{self.name}_coverage_attempt{attempt}.json")
+        coverage_attempt = os.path.join(
+            src_dir, f"{self.name}_coverage_attempt{attempt}.json"
+        )
         coverage_latest = os.path.join(src_dir, f"{self.name}_coverage_latest.json")
         with open(coverage_attempt, "w") as f:
             json.dump(coverage_data, f, indent=2)
@@ -4125,7 +5166,10 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 refined=True,
             )
             if self.coverage_fallback_policy == "skip":
-                self.log("Coverage fallback policy=skip; proceeding without blocking.", refined=True)
+                self.log(
+                    "Coverage fallback policy=skip; proceeding without blocking.",
+                    refined=True,
+                )
                 if self.full_signoff:
                     self.transition(BuildState.REGRESSION)
                 elif self.skip_openlane:
@@ -4134,10 +5178,15 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     self.transition(BuildState.SDC_GEN)
                 return
             if self.strict_gates:
-                self.log("Coverage infra failure is blocking under strict mode.", refined=True)
+                self.log(
+                    "Coverage infra failure is blocking under strict mode.",
+                    refined=True,
+                )
                 self.state = BuildState.FAIL
                 return
-            self.log("Coverage infra failure tolerated in non-strict mode.", refined=True)
+            self.log(
+                "Coverage infra failure tolerated in non-strict mode.", refined=True
+            )
             if self.full_signoff:
                 self.transition(BuildState.REGRESSION)
             elif self.skip_openlane:
@@ -4160,19 +5209,22 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         }
         coverage_pass = all(coverage_checks.values())
 
-        if not hasattr(self, 'best_coverage') or self.best_coverage is None:
+        if not hasattr(self, "best_coverage") or self.best_coverage is None:
             self.best_coverage = -1.0
             self.best_tb_backup = None
 
         if line_pct > getattr(self, "best_coverage", -1.0):
             self.best_coverage = line_pct
             import shutil
+
             tb_path = self.artifacts.get("tb_path")
             if tb_path and os.path.exists(tb_path):
                 backup_path = tb_path + ".best"
                 shutil.copy(tb_path, backup_path)
                 self.best_tb_backup = backup_path
-                self.log(f"New Best Coverage: {line_pct:.1f}% (Backed up)", refined=True)
+                self.log(
+                    f"New Best Coverage: {line_pct:.1f}% (Backed up)", refined=True
+                )
 
         if coverage_pass:
             self.log(
@@ -4192,17 +5244,29 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             return
 
         self.retry_count += 1
-        coverage_max_retries = min(self.max_retries, 5) # Increased for closure loop
+        coverage_max_retries = min(self.max_retries, 5)  # Increased for closure loop
         if self.retry_count > coverage_max_retries:
-            if getattr(self, "best_tb_backup", None) and os.path.exists(self.best_tb_backup):
-                self.log(f"Restoring Best Testbench ({self.best_coverage:.1f}%) before proceeding.", refined=True)
+            if getattr(self, "best_tb_backup", None) and os.path.exists(
+                self.best_tb_backup
+            ):
+                self.log(
+                    f"Restoring Best Testbench ({self.best_coverage:.1f}%) before proceeding.",
+                    refined=True,
+                )
                 import shutil
+
                 shutil.copy(self.best_tb_backup, self.artifacts["tb_path"])
             if self.strict_gates:
-                self.log(f"Coverage below thresholds after {coverage_max_retries} attempts. Failing strict gate.", refined=True)
+                self.log(
+                    f"Coverage below thresholds after {coverage_max_retries} attempts. Failing strict gate.",
+                    refined=True,
+                )
                 self.state = BuildState.FAIL
                 return
-            self.log(f"Coverage below thresholds after {coverage_max_retries} attempts. Proceeding anyway.", refined=True)
+            self.log(
+                f"Coverage below thresholds after {coverage_max_retries} attempts. Proceeding anyway.",
+                refined=True,
+            )
             if self.full_signoff:
                 self.transition(BuildState.REGRESSION)
             elif self.skip_openlane:
@@ -4220,23 +5284,27 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             refined=True,
         )
 
-        tb_agent = get_testbench_agent(self.get_llm_for_role("testbench_designer"), f"Improve coverage for {self.name}", strategy=self.strategy.name)
+        tb_agent = get_testbench_agent(
+            self.get_llm_for_role("testbench_designer"),
+            f"Improve coverage for {self.name}",
+            strategy=self.strategy.name,
+        )
 
-        branch_target = float(thresholds['branch'])
+        branch_target = float(thresholds["branch"])
         improve_prompt = f"""The current testbench for "{self.name}" does not meet coverage thresholds.
-        TARGET: Branch >={branch_target:.1f}%, Line >={float(thresholds['line']):.1f}%.
+        TARGET: Branch >={branch_target:.1f}%, Line >={float(thresholds["line"]):.1f}%.
         Current Coverage Data: {coverage_data}
         PREVIOUS FAILED ATTEMPTS:
         {self._format_failure_history()}
         
         Current RTL:
         ```verilog
-        {self.artifacts.get('rtl_code', '')}
+        {self.artifacts.get("rtl_code", "")}
         ```
         
         Current Testbench:
         ```verilog
-        {open(self.artifacts['tb_path'], 'r').read() if 'tb_path' in self.artifacts and os.path.exists(self.artifacts.get('tb_path', '')) else 'NOT AVAILABLE'}
+        {open(self.artifacts["tb_path"], "r").read() if "tb_path" in self.artifacts and os.path.exists(self.artifacts.get("tb_path", "")) else "NOT AVAILABLE"}
         ```
         
         Create an IMPROVED self-checking testbench that:
@@ -4260,12 +5328,18 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
 
         improve_task = Task(
             description=improve_prompt,
-            expected_output='Improved SystemVerilog Testbench',
-            agent=tb_agent
+            expected_output="Improved SystemVerilog Testbench",
+            agent=tb_agent,
         )
 
-        with console.status("[warning]AI Improving Test Coverage...[/warning]", spinner="dots12", spinner_style="spinner"):
-            result = Crew(verbose=False, agents=[tb_agent], tasks=[improve_task]).kickoff()
+        with console.status(
+            "[warning]AI Improving Test Coverage...[/warning]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
+            result = self._crew_kickoff(
+                Crew(verbose=False, agents=[tb_agent], tasks=[improve_task])
+            )
 
         improved_tb = str(result)
         # --- Universal code output validation (coverage TB improvement) ---
@@ -4275,9 +5349,18 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 improved_tb,
                 ["Coverage TB improvement returned prose instead of code."],
             )
-            self.log("Coverage TB improvement returned prose instead of code. Retrying once.", refined=True)
-            self.logger.warning(f"COVERAGE TB VALIDATION FAIL (prose detected):\n{improved_tb[:500]}")
-            improved_tb = str(Crew(verbose=False, agents=[tb_agent], tasks=[improve_task]).kickoff())
+            self.log(
+                "Coverage TB improvement returned prose instead of code. Retrying once.",
+                refined=True,
+            )
+            self.logger.warning(
+                f"COVERAGE TB VALIDATION FAIL (prose detected):\n{improved_tb[:500]}"
+            )
+            improved_tb = str(
+                self._crew_kickoff(
+                    Crew(verbose=False, agents=[tb_agent], tasks=[improve_task])
+                )
+            )
         tb_validation_issues = self._validate_tb_candidate(improved_tb)
         if tb_validation_issues:
             self._record_stage_contract(
@@ -4290,7 +5373,10 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     next_action="keep_previous_tb",
                 )
             )
-            self.log(f"Coverage TB candidate rejected: {tb_validation_issues[0]}", refined=True)
+            self.log(
+                f"Coverage TB candidate rejected: {tb_validation_issues[0]}",
+                refined=True,
+            )
             return
         self.logger.info(f"IMPROVED TB:\n{improved_tb}")
 
@@ -4302,24 +5388,24 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
     def do_regression(self):
         """Generates and runs multiple directed test scenarios."""
         self.log("Starting Regression Testing...", refined=True)
-        
+
         regression_agent = get_regression_agent(
-            self.get_llm_for_role("testbench_designer"), 
-            f"Generate regression tests for {self.name}", 
-            verbose=self.verbose
+            self.get_llm_for_role("testbench_designer"),
+            f"Generate regression tests for {self.name}",
+            verbose=self.verbose,
         )
-        
+
         # Generate regression test plan
         regression_task = Task(
             description=f"""Generate 3 directed regression test scenarios for module "{self.name}".
             
             RTL:
             ```verilog
-            {self.artifacts.get('rtl_code', '')}
+            {self.artifacts.get("rtl_code", "")}
             ```
             
             SPEC:
-            {self.artifacts.get('spec', '')}
+            {self.artifacts.get("spec", "")}
             
             Create 3 separate self-checking testbenches, each targeting a different scenario:
             1. CORNER CASE TEST - Test with extreme values (max/min/zero/overflow)
@@ -4331,112 +5417,169 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             Each test must print "TEST PASSED" on success or "TEST FAILED" on failure.
             Each must use $finish to terminate.
             """,
-            expected_output='3 separate Verilog testbench code blocks',
-            agent=regression_agent
+            expected_output="3 separate Verilog testbench code blocks",
+            agent=regression_agent,
         )
-        
-        with console.status("[accent]AI Generating Regression Tests...[/accent]", spinner="dots12", spinner_style="spinner"):
-            result = str(Crew(verbose=False, agents=[regression_agent], tasks=[regression_task]).kickoff())
-        
+
+        with console.status(
+            "[accent]AI Generating Regression Tests...[/accent]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
+            result = str(
+                self._crew_kickoff(
+                    Crew(
+                        verbose=False,
+                        agents=[regression_agent],
+                        tasks=[regression_task],
+                    )
+                )
+            )
+
         self.logger.info(f"REGRESSION TESTS:\n{result}")
-        
+
         # Parse out individual tests from the LLM output
-        test_blocks = re.findall(r'```(?:verilog|v)?\s*\n(.*?)```', result, re.DOTALL)
-        
+        test_blocks = re.findall(r"```(?:verilog|v)?\s*\n(.*?)```", result, re.DOTALL)
+
         if not test_blocks:
-            self.log("No regression tests extracted. Skipping regression.", refined=True)
+            self.log(
+                "No regression tests extracted. Skipping regression.", refined=True
+            )
             if self.skip_openlane:
                 self.transition(BuildState.SUCCESS)
             else:
                 self.transition(BuildState.HARDENING)
             return
-        
+
         # Run each test
         all_passed = True
         test_results = []
-        
+
         for i, test_code in enumerate(test_blocks[:3]):  # Max 3 tests
-            test_name = f"regression_test_{i+1}"
-            self.log(f"Running Regression Test {i+1}/{len(test_blocks[:3])}...", refined=True)
-            
+            test_name = f"regression_test_{i + 1}"
+            self.log(
+                f"Running Regression Test {i + 1}/{len(test_blocks[:3])}...",
+                refined=True,
+            )
+
             # Write test to file
-            test_path = write_verilog(self.name, test_code, suffix=f"_{test_name}", ext=".v")
+            test_path = write_verilog(
+                self.name, test_code, suffix=f"_{test_name}", ext=".v"
+            )
             if isinstance(test_path, str) and test_path.startswith("Error:"):
-                test_results.append({"test": test_name, "status": "WRITE_ERROR", "output": test_path})
+                test_results.append(
+                    {"test": test_name, "status": "WRITE_ERROR", "output": test_path}
+                )
                 all_passed = False
                 continue
-            
+
             # Compile and run
             src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
-            rtl_file = self.artifacts.get('rtl_path', f"{src_dir}/{self.name}.v")
+            rtl_file = self.artifacts.get("rtl_path", f"{src_dir}/{self.name}.v")
             sim_out = f"{src_dir}/sim_{test_name}"
-            
+
             try:
                 import subprocess
-                
+
                 # Detect testbench module name
                 tb_module = f"{self.name}_{test_name}"
                 try:
-                    with open(test_path, 'r') as f:
+                    with open(test_path, "r") as f:
                         tb_content = f.read()
-                    m = re.search(r'module\s+(\w+)', tb_content)
+                    m = re.search(r"module\s+(\w+)", tb_content)
                     if m:
                         tb_module = m.group(1)
                 except Exception:
                     pass
-                
+
                 sim_obj_dir = f"{src_dir}/obj_dir_{test_name}"
                 sim_binary = f"{sim_obj_dir}/V{tb_module}"
-                
+
                 compile_result = subprocess.run(
-                    ["verilator", "--binary", "--timing",
-                     "-Wno-UNUSED", "-Wno-PINMISSING", "-Wno-CASEINCOMPLETE",
-                     "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC", "-Wno-LATCH",
-                     "-Wno-UNOPTFLAT", "-Wno-BLKANDNBLK",
-                     "--top-module", tb_module,
-                     "--Mdir", sim_obj_dir,
-                     "-o", f"V{tb_module}",
-                     rtl_file, test_path],
-                    capture_output=True, text=True, timeout=300
+                    [
+                        "verilator",
+                        "--binary",
+                        "--timing",
+                        "-Wno-UNUSED",
+                        "-Wno-PINMISSING",
+                        "-Wno-CASEINCOMPLETE",
+                        "-Wno-WIDTHEXPAND",
+                        "-Wno-WIDTHTRUNC",
+                        "-Wno-LATCH",
+                        "-Wno-UNOPTFLAT",
+                        "-Wno-BLKANDNBLK",
+                        "--top-module",
+                        tb_module,
+                        "--Mdir",
+                        sim_obj_dir,
+                        "-o",
+                        f"V{tb_module}",
+                        rtl_file,
+                        test_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
                 )
                 if compile_result.returncode != 0:
-                    test_results.append({"test": test_name, "status": "COMPILE_FAIL", "output": compile_result.stderr[:500]})
+                    test_results.append(
+                        {
+                            "test": test_name,
+                            "status": "COMPILE_FAIL",
+                            "output": compile_result.stderr[:500],
+                        }
+                    )
                     all_passed = False
                     continue
-                
+
                 run_result = subprocess.run(
-                    [sim_binary],
-                    capture_output=True, text=True, timeout=300
+                    [sim_binary], capture_output=True, text=True, timeout=300
                 )
-                sim_text = (run_result.stdout or "") + ("\n" + run_result.stderr if run_result.stderr else "")
-                
+                sim_text = (run_result.stdout or "") + (
+                    "\n" + run_result.stderr if run_result.stderr else ""
+                )
+
                 passed = "TEST PASSED" in sim_text
-                test_results.append({"test": test_name, "status": "PASS" if passed else "FAIL", "output": sim_text[-500:]})
+                test_results.append(
+                    {
+                        "test": test_name,
+                        "status": "PASS" if passed else "FAIL",
+                        "output": sim_text[-500:],
+                    }
+                )
                 if not passed:
                     all_passed = False
-                    
+
             except subprocess.TimeoutExpired:
-                test_results.append({"test": test_name, "status": "TIMEOUT", "output": "Timed out"})
+                test_results.append(
+                    {"test": test_name, "status": "TIMEOUT", "output": "Timed out"}
+                )
                 all_passed = False
             except Exception as e:
-                test_results.append({"test": test_name, "status": "ERROR", "output": str(e)})
+                test_results.append(
+                    {"test": test_name, "status": "ERROR", "output": str(e)}
+                )
                 all_passed = False
-        
+
         # Log results
-        self.artifacts['regression_results'] = test_results
+        self.artifacts["regression_results"] = test_results
         for tr in test_results:
             self.log(f"  Regression {tr['test']}: {tr['status']}", refined=True)
-        
+
         if all_passed:
             self.log(f"All {len(test_results)} regression tests PASSED!", refined=True)
         else:
-            passed_count = sum(1 for tr in test_results if tr['status'] == 'PASS')
-            self.log(f"Regression: {passed_count}/{len(test_results)} passed", refined=True)
+            passed_count = sum(1 for tr in test_results if tr["status"] == "PASS")
+            self.log(
+                f"Regression: {passed_count}/{len(test_results)} passed", refined=True
+            )
             if self.strict_gates:
-                self.log("Regression failures are blocking under strict mode.", refined=True)
+                self.log(
+                    "Regression failures are blocking under strict mode.", refined=True
+                )
                 self.state = BuildState.FAIL
                 return
-        
+
         # Regression failures are non-blocking (logged but proceed)
         if self.skip_openlane:
             self.transition(BuildState.SUCCESS)
@@ -4448,11 +5591,15 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
         os.makedirs(src_dir, exist_ok=True)
         sdc_path = os.path.join(src_dir, f"{self.name}.sdc")
-        
+
         self.log("Generating SDC Timing Constraints...", refined=True)
-        sdc_agent = get_sdc_agent(self.get_llm_for_role("physical"), "Generate Synthesis Design Constraints", self.verbose)
-        
-        arch_spec = self.artifacts.get('spec', 'No spec generated.')
+        sdc_agent = get_sdc_agent(
+            self.get_llm_for_role("physical"),
+            "Generate Synthesis Design Constraints",
+            self.verbose,
+        )
+
+        arch_spec = self.artifacts.get("spec", "No spec generated.")
         sdc_task = Task(
             description=f"""Generate an SDC file for module '{self.name}'.
             
@@ -4465,30 +5612,747 @@ REQUIREMENTS:
 3. Output ONLY the raw SDC constraints. DO NOT output code blocks or markdown wrappers (no ```sdc).
 """,
             expected_output="Raw SDC constraints text cleanly formatted.",
-            agent=sdc_agent
+            agent=sdc_agent,
         )
-        
+
         with console.status("[accent]Generating Timing Constraints (SDC)...[/accent]"):
-            sdc_content = str(Crew(verbose=False, agents=[sdc_agent], tasks=[sdc_task]).kickoff()).strip()
-            
+            sdc_content = str(
+                self._crew_kickoff(
+                    Crew(verbose=False, agents=[sdc_agent], tasks=[sdc_task])
+                )
+            ).strip()
+
             # Clean up potential markdown wrappers created by LLM anyway
             if sdc_content.startswith("```"):
                 lines = sdc_content.split("\n")
                 if len(lines) > 2:
                     sdc_content = "\n".join(lines[1:-1])
-            
+
             with open(sdc_path, "w") as f:
                 f.write(sdc_content)
-                
+
             self.artifacts["sdc_path"] = sdc_path
             self.log(f"SDC Constraints generated: {sdc_path}", refined=True)
-            
+
+        self.transition(BuildState.SYNTHESIS)
+
+    def do_synthesis(self):
+        """Direct Yosys synthesis: RTL → gate-level netlist with pre-STA."""
+        self.log("Running Direct Yosys Synthesis...", refined=True)
+        src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
+        synth_dir = f"{OPENLANE_ROOT}/designs/{self.name}/synth"
+        os.makedirs(synth_dir, exist_ok=True)
+
+        rtl_files = [
+            os.path.join(src_dir, f)
+            for f in os.listdir(src_dir)
+            if f.endswith((".v", ".sv"))
+        ]
+        if not rtl_files:
+            rtl_main = self.artifacts.get("rtl_path")
+            if rtl_main:
+                rtl_files = [rtl_main]
+            else:
+                self.log("No RTL files found for synthesis.", refined=True)
+                self.transition(BuildState.DFT_SCAN)
+                return
+
+        sdc_path = self.artifacts.get("sdc_path", "")
+        clk_constraint_ns = 10.0
+        if sdc_path and os.path.exists(sdc_path):
+            with open(sdc_path) as f:
+                content = f.read()
+            m = re.search(r"create_clock\s+-period\s+([\d.]+)", content)
+            if m:
+                clk_constraint_ns = float(m.group(1))
+
+        with console.status("[accent]Running Yosys Synthesis...[/accent]"):
+            from .tools.synth_tools import run_yosys_synth, SynthesisResult
+
+            result = run_yosys_synth(
+                rtl_files=rtl_files,
+                top_module=self.name,
+                output_dir=synth_dir,
+                pdk=self.pdk_profile.get("pdk", PDK),
+                pdk_root=os.environ.get("PDK_ROOT"),
+                clk_constraint=clk_constraint_ns,
+                ungroup_cells=True,
+                flatten_hierarchy=False,
+                timeout=600,
+                design_name=self.name,
+            )
+
+        if result.ok:
+            self.artifacts["synth_netlist"] = result.netlist_path
+            self.artifacts["synth_checkpoint"] = result.checkpoint_path
+            self.artifacts["synth_report"] = result.report_path
+            self.artifacts["synth_metrics"] = {
+                "cell_count": result.cell_count,
+                "gate_count": result.gate_count,
+                "area_um2": result.area_um2,
+                "dff_count": result.dff_count,
+                "lut_count": result.lut_count,
+                "wns": getattr(result, "wns", 0.0),
+                "tns": getattr(result, "tns", 0.0),
+                "max_freq_mhz": result.frequency_mhz,
+            }
+            self.log(
+                f"Synthesis OK: {result.cell_count} cells, "
+                f"{result.gate_count:.0f} gates, "
+                f"area={result.area_um2:.1f}um^2, "
+                f"freq={result.frequency_mhz:.1f}MHz",
+                refined=True,
+            )
+            if result.warnings:
+                for w in result.warnings[:3]:
+                    self.log(f"  WARN: {w}", refined=True)
+            self.transition(BuildState.DFT_SCAN)
+        else:
+            self.log(f"Synthesis FAILED: {'; '.join(result.errors[:2])}", refined=True)
+            self.artifacts["synth_error"] = result.errors
+            self.transition(BuildState.DFT_SCAN)
+
+    def do_dft_scan(self):
+        """Insert scan chains into synthesized netlist for testability."""
+        self.log("Running DFT Scan Chain Insertion...", refined=True)
+        synth_netlist = self.artifacts.get("synth_netlist", "")
+        dft_dir = f"{OPENLANE_ROOT}/designs/{self.name}/dft"
+
+        if not synth_netlist or not os.path.exists(synth_netlist):
+            self.log("No synth netlist for DFT scan; skipping.", refined=True)
+            self.transition(BuildState.DFT_ATPG)
+            return
+
+        os.makedirs(dft_dir, exist_ok=True)
+        scan_chain_count = int(self.artifacts.get("dft_scan_chains", 4))
+
+        with console.status("[accent]Inserting Scan Chains...[/accent]"):
+            from .tools.dft_tools import run_scan_insertion, DFTResult
+
+            result = run_scan_insertion(
+                rtl_files=[synth_netlist],
+                top_module=self.name,
+                output_dir=dft_dir,
+                scan_chain_count=scan_chain_count,
+                scan_enable_signal="scan_en",
+                scan_mode_signal="scan_mode",
+                pdk=self.pdk_profile.get("pdk", PDK),
+                timeout=600,
+            )
+
+        if result.ok:
+            self.artifacts["scan_netlist"] = result.scan_netlist_path
+            self.artifacts["scan_chain_count"] = result.scan_chain_count
+            self.artifacts["dft_metrics"] = {
+                "scan_chains": result.scan_chain_count,
+                "total_faults": result.total_faults,
+                "detected_faults": result.detected_faults,
+                "coverage_percent": result.atpg_coverage_percent,
+                "compression_ratio": result.compression_ratio,
+            }
+            self.log(
+                f"DFT Scan OK: {result.scan_chain_count} chains, "
+                f"{result.atpg_coverage_percent:.1f}% fault coverage, "
+                f"compression={result.compression_ratio:.1f}x",
+                refined=True,
+            )
+            self.transition(BuildState.DFT_ATPG)
+        else:
+            self.log(f"DFT scan FAILED: {'; '.join(result.errors[:2])}", refined=True)
+            self.artifacts["dft_error"] = result.errors
+            self.transition(BuildState.DFT_ATPG)
+
+    def do_dft_atpg(self):
+        """Generate ATPG test patterns for scan-inserted netlist."""
+        self.log("Running ATPG Pattern Generation...", refined=True)
+        scan_netlist = self.artifacts.get("scan_netlist", "")
+        dft_dir = f"{OPENLANE_ROOT}/designs/{self.name}/dft"
+
+        if not scan_netlist or not os.path.exists(scan_netlist):
+            synth_netlist = self.artifacts.get("synth_netlist", "")
+            if synth_netlist:
+                scan_netlist = synth_netlist
+                self.log(
+                    "Using synth netlist for ATPG (no scan netlist).", refined=True
+                )
+            else:
+                self.log("No netlist for ATPG; skipping to MBIST.", refined=True)
+                self.transition(BuildState.MBIST)
+                return
+
+        with console.status("[accent]Generating ATPG Patterns...[/accent]"):
+            from .tools.dft_tools import run_atpg, ATPGResult
+
+            result = run_atpg(
+                netlist_files=[scan_netlist],
+                top_module=self.name,
+                output_dir=dft_dir,
+                target_coverage=95.0,
+                max_patterns=5000,
+                pdk=self.pdk_profile.get("pdk", PDK),
+                timeout=600,
+            )
+
+        if result.ok:
+            self.artifacts["atpg_pattern_file"] = result.pattern_file
+            self.artifacts["atpg_fault_file"] = result.fault_file
+            self.artifacts["atpg_metrics"] = {
+                "total_faults": result.total_faults,
+                "detected": result.detected,
+                "coverage_percent": result.coverage_percent,
+                "pattern_count": result.pattern_count,
+                "compression_ratio": result.compression_ratio,
+            }
+            self.log(
+                f"ATPG OK: {result.pattern_count} patterns, "
+                f"{result.coverage_percent:.1f}% fault coverage, "
+                f"{result.undetected} undetected faults",
+                refined=True,
+            )
+            self.transition(BuildState.MBIST)
+        else:
+            self.log(f"ATPG FAILED: {'; '.join(result.errors[:2])}", refined=True)
+            self.artifacts["atpg_error"] = result.errors
+            self.transition(BuildState.MBIST)
+
+    def do_mbist(self):
+        """Generate Memory BIST wrappers for embedded memories."""
+        self.log("Running Memory BIST Insertion...", refined=True)
+        synth_netlist = self.artifacts.get("synth_netlist", "")
+        mbist_dir = f"{OPENLANE_ROOT}/designs/{self.name}/mbist"
+        os.makedirs(mbist_dir, exist_ok=True)
+
+        memories_found = False
+        if synth_netlist and os.path.exists(synth_netlist):
+            with open(synth_netlist) as f:
+                content = f.read()
+            mem_matches = re.findall(
+                r"\b(sky130_sram|spm|dp_ram|sram|mem|buffer_fifo|async_fifo|sync_fifo)\b",
+                content,
+                re.IGNORECASE,
+            )
+            if mem_matches:
+                memories_found = True
+                self.log(
+                    f"Detected {len(mem_matches)} memory instances for BIST.",
+                    refined=True,
+                )
+
+        if not memories_found:
+            self.log("No embedded memories detected; skipping MBIST.", refined=True)
+            self.transition(BuildState.GLS_SIM)
+            return
+
+        with console.status("[accent]Generating MBIST Wrappers...[/accent]"):
+            from .tools.dft_tools import generate_mbist_wrapper, MBISTConfig
+            from .tools.dft_tools import run_testability_analysis
+
+            test_result = run_testability_analysis(
+                netlist_files=[synth_netlist] if synth_netlist else [],
+                top_module=self.name,
+                output_dir=mbist_dir,
+            )
+            self.artifacts["testability_metrics"] = test_result
+
+            memory_instances = re.findall(
+                r"(\w+)\s*(?: Instantiates? )?\s*(?:memory|sram|ram|rom)\w*",
+                content if memories_found else "",
+                re.IGNORECASE,
+            )
+            mem_configs = []
+            for i, mem_name in enumerate(set(memory_instances[:8])):
+                cfg = MBISTConfig(
+                    memory_instance=mem_name,
+                    memory_depth=256 * (2**i),
+                    memory_width=8,
+                    test_algorithm="march",
+                    bist_clock_mhz=100.0,
+                )
+                mem_configs.append(cfg)
+
+            if not mem_configs:
+                cfg = MBISTConfig(
+                    memory_instance="u_mem_0",
+                    memory_depth=256,
+                    memory_width=8,
+                    test_algorithm="march",
+                    bist_clock_mhz=100.0,
+                )
+                mem_configs.append(cfg)
+
+            for cfg in mem_configs:
+                mbist_result = generate_mbist_wrapper(
+                    mbist_config=cfg,
+                    output_dir=mbist_dir,
+                    top_module=self.name,
+                )
+                self.log(
+                    f"MBIST: {cfg.memory_instance} -> "
+                    f"{mbist_result.get('wrapper_path', 'generated')}",
+                    refined=True,
+                )
+
+        self.artifacts["mbist_dir"] = mbist_dir
+        self.artifacts["mbist_configs"] = [cfg.memory_instance for cfg in mem_configs]
+        self.log(
+            f"MBIST: {len(mem_configs)} memory BIST wrappers generated.", refined=True
+        )
+        self.transition(BuildState.GLS_SIM)
+
+    def do_gls_simulation(self):
+        """Gate-level simulation with SDF timing annotation."""
+        self.log("Running Gate-Level Simulation (GLS)...", refined=True)
+        scan_netlist = self.artifacts.get("scan_netlist", "")
+        synth_netlist = self.artifacts.get("synth_netlist", "")
+        netlist = (
+            scan_netlist
+            if scan_netlist and os.path.exists(scan_netlist)
+            else synth_netlist
+        )
+        sdf_path = self.artifacts.get("synth_sdf", "")
+
+        if not netlist or not os.path.exists(netlist):
+            self.log("No gate netlist for GLS; skipping to floorplan.", refined=True)
+            self.transition(BuildState.FLOORPLAN)
+            return
+
+        gls_dir = f"{OPENLANE_ROOT}/designs/{self.name}/gls"
+        os.makedirs(gls_dir, exist_ok=True)
+
+        with console.status("[accent]Running Gate-Level Simulation...[/accent]"):
+            from .tools.sdf_tools import generate_sdf, SDFResult
+
+            if not sdf_path or not os.path.exists(sdf_path):
+                lib_files = []
+                pdk_lib_dir = os.path.join(
+                    os.environ.get("PDK_ROOT", ""),
+                    self.pdk_profile.get("pdk", PDK),
+                    "libs.ref",
+                    self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd"),
+                )
+                if os.path.isdir(pdk_lib_dir):
+                    lib_files = [
+                        os.path.join(pdk_lib_dir, f)
+                        for f in os.listdir(pdk_lib_dir)
+                        if f.endswith(".lib")
+                    ]
+                if lib_files:
+                    sdf_result = generate_sdf(
+                        liberty_files=lib_files,
+                        netlist=netlist,
+                        output_dir=gls_dir,
+                        corner="tt",
+                    )
+                    if sdf_result.ok:
+                        sdf_path = sdf_result.sdf_path
+                        self.artifacts["synth_sdf"] = sdf_path
+                        self.log(f"SDF generated: {sdf_path}", refined=True)
+                    else:
+                        self.log(
+                            "SDF generation failed; GLS will use zero-delay.",
+                            refined=True,
+                        )
+
+            tb_rtl = self.artifacts.get("tb_rtl_path", "")
+            tb_gls = os.path.join(gls_dir, f"{self.name}_gls_tb.v")
+
+            if tb_rtl and os.path.exists(tb_rtl):
+                with open(tb_rtl) as f:
+                    tb_src = f.read()
+                tb_src = tb_src.replace(self.name, f"{self.name}_gl").replace(
+                    "initial begin",
+                    "initial begin // GLS mode",
+                )
+                with open(tb_gls, "w") as f:
+                    f.write(tb_src)
+
+            sim_result = self.artifacts.get("gls_sim_result", None)
+            if sim_result is None:
+                from .tools.vlsi_tools import run_gls_simulation
+
+                ok, log = run_gls_simulation(
+                    self.name,
+                    netlist=netlist,
+                    sdf=sdf_path if sdf_path and os.path.exists(sdf_path) else None,
+                    testbench=tb_gls if os.path.exists(tb_gls) else tb_rtl,
+                )
+                sim_result = {"ok": ok, "log": log}
+                self.artifacts["gls_sim_result"] = sim_result
+
+            self.log(
+                f"GLS: {'PASS' if sim_result.get('ok') else 'FAIL'}",
+                refined=True,
+            )
+            if not sim_result.get("ok"):
+                self.artifacts["gls_warnings"] = ["GLS simulation failed"]
+
         self.transition(BuildState.FLOORPLAN)
+
+    def do_power_analysis(self):
+        """Post-PnR power analysis with SPEF extraction."""
+        self.log("Running Post-PnR Power Analysis...", refined=True)
+        run_tag = self.artifacts.get("run_tag", "agentrun")
+        pdk_name = self.pdk_profile.get("pdk", PDK)
+        pdk_root = os.environ.get("PDK_ROOT", "")
+
+        spef_path = ""
+        spef_base = (
+            f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/routing"
+        )
+        if os.path.isdir(spef_base):
+            for f in os.listdir(spef_base):
+                if f.endswith(".spef") or f.endswith(".spef.gz"):
+                    spef_path = os.path.join(spef_base, f)
+                    break
+
+        if spef_path and os.path.exists(spef_path):
+            from .tools.power_tools import parse_spef
+
+            ok, spef_nets = parse_spef(spef_path)
+            self.artifacts["spef_nets"] = [n.name for n in spef_nets]
+            self.artifacts["total_capacitance_ff"] = sum(
+                n.capacitance_ff for n in spef_nets
+            )
+        else:
+            self.log(
+                "No SPEF found; power analysis from synth estimates.", refined=True
+            )
+
+        gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
+        lib_files = []
+        lib_base = os.path.join(
+            pdk_root,
+            pdk_name,
+            "libs.ref",
+            self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd"),
+        )
+        if os.path.isdir(lib_base):
+            lib_files = [
+                os.path.join(lib_base, f)
+                for f in os.listdir(lib_base)
+                if f.endswith(".lib")
+            ]
+
+        freq_mhz = float(
+            self.artifacts.get("synth_metrics", {}).get("max_freq_mhz", 100.0)
+        )
+        power_dir = f"{OPENLANE_ROOT}/designs/{self.name}/power"
+        os.makedirs(power_dir, exist_ok=True)
+
+        with console.status("[accent]Analyzing Power...[/accent]"):
+            from .tools.power_tools import run_power_analysis, PowerAnalysisResult
+
+            result = run_power_analysis(
+                netlist=gate_netlist
+                if os.path.exists(gate_netlist)
+                else self.artifacts.get("synth_netlist", ""),
+                spef=spef_path if spef_path else None,
+                lib_files=lib_files,
+                output_dir=power_dir,
+                vdd_value=1.8,
+                frequency_mhz=freq_mhz,
+                corner="tt",
+                temperature_c=25,
+            )
+
+        if result.ok:
+            self.artifacts["power_metrics"] = {
+                "total_power_uW": result.total_power_uW,
+                "dynamic_power_uW": result.dynamic_power_uW,
+                "leakage_power_uW": result.leakage_power_uW,
+                "power_density_mW_per_mm2": result.power_density_mW_per_mm2,
+                "ir_drop_mV": result.ir_drop.max_drop_mV,
+            }
+            self.log(
+                f"Power: Total={result.total_power_uW:.2f}uW "
+                f"(dyn={result.dynamic_power_uW:.2f}uW, "
+                f"leak={result.leakage_power_uW:.4f}uW), "
+                f"IR-drop={result.ir_drop.max_drop_mV:.2f}mV",
+                refined=True,
+            )
+            if result.ir_drop.electromigration_warnings:
+                for em_warn in result.ir_drop.electromigration_warnings[:3]:
+                    self.log(f"  EM WARN: {em_warn}", refined=True)
+        else:
+            self.log(
+                f"Power analysis skipped: {'; '.join(result.errors[:2])}", refined=True
+            )
+
+        self.transition(BuildState.TIMING_ANALYSIS)
+
+    def do_timing_analysis(self):
+        """Multi-corner STA across SS/TT/FF with OpenSTA."""
+        self.log("Running Multi-Corner Static Timing Analysis...", refined=True)
+        run_tag = self.artifacts.get("run_tag", "agentrun")
+        pdk_name = self.pdk_profile.get("pdk", PDK)
+        pdk_root = os.environ.get("PDK_ROOT", "")
+        sdc_path = self.artifacts.get("sdc_path", "")
+
+        gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
+        netlist = (
+            gate_netlist
+            if os.path.exists(gate_netlist)
+            else self.artifacts.get("synth_netlist", "")
+        )
+
+        if not sdc_path or not os.path.exists(sdc_path):
+            sdc_path = f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}.sdc"
+
+        lib_base = os.path.join(
+            pdk_root,
+            pdk_name,
+            "libs.ref",
+            self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd"),
+        )
+        lib_files = []
+        if os.path.isdir(lib_base):
+            lib_files = [
+                os.path.join(lib_base, f)
+                for f in os.listdir(lib_base)
+                if f.endswith(".lib")
+            ]
+
+        if not lib_files:
+            lib_files = self.artifacts.get("lib_files", [])
+
+        if not lib_files:
+            self.log("No liberty files for STA; using synth metrics.", refined=True)
+            synth_metrics = self.artifacts.get("synth_metrics", {})
+            wns = synth_metrics.get("wns", 0.0)
+            self.artifacts["sta_metrics"] = {
+                "wns_setup": wns,
+                "wns_hold": 0.0,
+                "corner": "synth_est",
+            }
+            self.transition(BuildState.PHYSICAL_VERIFY)
+            return
+
+        sta_dir = f"{OPENLANE_ROOT}/designs/{self.name}/sta"
+        os.makedirs(sta_dir, exist_ok=True)
+
+        with console.status("[accent]Running Multi-Corner STA...[/accent]"):
+            from .tools.sta_tools import run_multi_corner_sta, MultiCornerSTAResult
+
+            result = run_multi_corner_sta(
+                design_name=self.name,
+                netlist=netlist,
+                sdc=sdc_path if os.path.exists(sdc_path) else "",
+                lib_files=lib_files,
+                output_dir=sta_dir,
+                corners=["ss", "tt", "ff"],
+                modes=["func"],
+                pdk=pdk_name,
+                enable_route=False,
+            )
+
+        if result.corners:
+            corner_summaries = []
+            for corner, rpt in result.corners.items():
+                corner_summaries.append(
+                    f"{corner}: WNS={rpt.wns_setup:.3f}ns, "
+                    f"TNS={rpt.tns_setup:.1f}ns, "
+                    f"max_freq={rpt.max_freq_mhz:.1f}MHz"
+                )
+                self.log(
+                    f"  {corner.upper()}: WNS_setup={rpt.wns_setup:.3f}ns, WNS_hold={rpt.wns_hold:.3f}ns",
+                    refined=True,
+                )
+                if rpt.warnings:
+                    for w in rpt.warnings[:2]:
+                        self.log(f"    WARN: {w}", refined=True)
+
+            self.artifacts["sta_metrics"] = {
+                "worst_wns_setup": result.worst_wns_setup,
+                "worst_wns_hold": result.worst_wns_hold,
+                "worst_tns_setup": result.worst_tns_setup,
+                "worst_tns_hold": result.worst_tns_hold,
+                "max_freq_mhz": result.max_freq_mhz,
+                "all_corners_pass": result.all_corners_pass,
+                "corners": {
+                    c: {
+                        "wns_setup": r.wns_setup,
+                        "wns_hold": r.wns_hold,
+                        "max_freq_mhz": r.max_freq_mhz,
+                    }
+                    for c, r in result.corners.items()
+                },
+            }
+            self.artifacts["sta_summary_path"] = result.summary_path
+            self.log(
+                f"STA: Worst WNS_setup={result.worst_wns_setup:.3f}ns, "
+                f"max_freq={result.max_freq_mhz:.1f}MHz, "
+                f"all_corners={'PASS' if result.all_corners_pass else 'FAIL'}",
+                refined=True,
+            )
+        else:
+            self.log("STA produced no results; check netlist and SDC.", refined=True)
+
+        self.transition(BuildState.PHYSICAL_VERIFY)
+
+    def do_physical_verify(self):
+        """Independent DRC (Magic) and LVS (Netgen) physical verification."""
+        self.log("Running Independent Physical Verification...", refined=True)
+        run_tag = self.artifacts.get("run_tag", "agentrun")
+        pdk_name = self.pdk_profile.get("pdk", PDK)
+        pdk_root = os.environ.get("PDK_ROOT", "")
+        pv_dir = f"{OPENLANE_ROOT}/designs/{self.name}/pv"
+        os.makedirs(pv_dir, exist_ok=True)
+
+        gds_path = self.artifacts.get("gds", "")
+        if not gds_path:
+            gds_path = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/signoff/magic/{self.name}.gds"
+        lef_path = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/signoff/openlane/{self.name}.lef"
+        if not os.path.exists(gds_path) and not os.path.exists(lef_path):
+            self.log("No GDS/LEF for physical verification; proceeding.", refined=True)
+            self.transition(BuildState.SIGNOFF)
+            return
+
+        gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
+        synth_netlist = self.artifacts.get("synth_netlist", "")
+
+        with console.status("[accent]Running Magic DRC...[/accent]"):
+            from .tools.physical_tools import run_magic_drc, DRCResult
+
+            drc_result = run_magic_drc(
+                gds_path=gds_path if os.path.exists(gds_path) else "",
+                lef_path=lef_path if os.path.exists(lef_path) else "",
+                output_dir=pv_dir,
+                pdk=pdk_name,
+                pdk_root=pdk_root,
+                timeout=600,
+            )
+
+        if drc_result.ok:
+            self.log(
+                f"Magic DRC: {drc_result.drc_violations} violations "
+                f"({drc_result.runtime_sec:.1f}s)",
+                refined=True,
+            )
+            if drc_result.violations:
+                for v in drc_result.violations[:5]:
+                    self.log(
+                        f"  DRC: {v.rule} @ ({v.x_um:.2f},{v.y_um:.2f}): {v.message}",
+                        refined=True,
+                    )
+        else:
+            self.log(
+                f"Magic DRC failed: {'; '.join(drc_result.errors[:2])}", refined=True
+            )
+
+        self.artifacts["drc_result"] = drc_result
+
+        with console.status("[accent]Running Netgen LVS...[/accent]"):
+            from .tools.physical_tools import run_netgen_lvs, LVSResult
+
+            lvs_result = run_netgen_lvs(
+                schematic_netlist=synth_netlist
+                if synth_netlist and os.path.exists(synth_netlist)
+                else gate_netlist,
+                layout_gds=gds_path if os.path.exists(gds_path) else "",
+                output_dir=pv_dir,
+                pdk=pdk_name,
+                pdk_root=pdk_root,
+                top_module=self.name,
+                timeout=600,
+            )
+
+        if lvs_result.ok:
+            self.log(
+                f"Netgen LVS: {'EQUIVALENT' if lvs_result.equivalent else 'MISMATCH'} "
+                f"({lvs_result.runtime_sec:.1f}s)",
+                refined=True,
+            )
+            if not lvs_result.equivalent:
+                self.log(f"  LVS errors: {lvs_result.lvs_errors}", refined=True)
+        else:
+            self.log(
+                f"Netgen LVS failed: {'; '.join(lvs_result.errors[:2])}", refined=True
+            )
+
+        self.artifacts["lvs_result"] = lvs_result
+        self.artifacts["pv_metrics"] = {
+            "drc_violations": drc_result.drc_violations,
+            "lvs_errors": lvs_result.lvs_errors,
+            "lvs_equivalent": lvs_result.equivalent,
+        }
+
+        self.transition(BuildState.SIGNOFF)
+
+    def do_ip_package(self):
+        """Generate IP-XACT component and ATPG pattern export."""
+        self.log("Running IP Packaging...", refined=True)
+        ip_dir = f"{OPENLANE_ROOT}/designs/{self.name}/ip"
+        os.makedirs(ip_dir, exist_ok=True)
+
+        rtl_files = []
+        src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
+        if os.path.isdir(src_dir):
+            rtl_files = [
+                os.path.join(src_dir, f)
+                for f in os.listdir(src_dir)
+                if f.endswith((".v", ".sv"))
+            ]
+
+        spec_data = self.artifacts.get("spec", "")
+        hw_spec = self.artifacts.get("hw_spec", {})
+        if isinstance(hw_spec, str):
+            import json as _json
+
+            try:
+                hw_spec = _json.loads(hw_spec)
+            except Exception:
+                hw_spec = {}
+
+        with console.status("[accent]Generating IP-XACT Component...[/accent]"):
+            from .tools.ipxact_packager import (
+                generate_ipxact_component,
+                IPXACTComponent,
+            )
+
+            comp = generate_ipxact_component(
+                design_name=self.name,
+                rtl_files=rtl_files,
+                spec_data=hw_spec,
+                output_dir=ip_dir,
+                bus_interfaces=self.artifacts.get("bus_interfaces", []),
+                memory_maps=self.artifacts.get("memory_maps", []),
+            )
+            self.artifacts["ipxact_xml"] = comp.xml_path
+            self.artifacts["ipxact_catalog"] = comp.catalog_path
+            self.log(f"IP-XACT: {comp.xml_path}", refined=True)
+
+        atpg_pattern = self.artifacts.get("atpg_pattern_file", "")
+        if atpg_pattern and os.path.exists(atpg_pattern):
+            with console.status("[accent]Exporting ATPG Patterns...[/accent]"):
+                from .tools.ipxact_packager import (
+                    export_atpg_patterns,
+                    ATPGExportResult,
+                )
+
+                atpg_result = export_atpg_patterns(
+                    pattern_file=atpg_pattern,
+                    output_dir=ip_dir,
+                    format="stil",
+                    scan_chain_count=self.artifacts.get("scan_chain_count", 4),
+                )
+                if atpg_result.ok:
+                    self.artifacts["atpg_export"] = atpg_result.pattern_file
+                    self.log(f"ATPG Export: {atpg_result.pattern_file}", refined=True)
+                else:
+                    self.log(
+                        f"ATPG export warning: {'; '.join(atpg_result.errors[:2])}",
+                        refined=True,
+                    )
+
+        self.log("IP Packaging complete.", refined=True)
+        self.transition(BuildState.SUCCESS)
 
     def do_floorplan(self):
         """Generate floorplan artifacts and feed hardening with spatial intent."""
         self.floorplan_attempts += 1
-        self.log(f"Preparing floorplan attempt {self.floorplan_attempts}...", refined=True)
+        self.log(
+            f"Preparing floorplan attempt {self.floorplan_attempts}...", refined=True
+        )
         src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
         os.makedirs(src_dir, exist_ok=True)
 
@@ -4500,14 +6364,17 @@ REQUIREMENTS:
         # Heuristic defaults (used as fallback if LLM fails)
         heuristic_die = 300 if line_count < 100 else 500 if line_count < 300 else 800
         heuristic_util = 40 if line_count >= 200 else 50
-        heuristic_clk = self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0"))
+        heuristic_clk = self.artifacts.get(
+            "clock_period_override",
+            self.pdk_profile.get("default_clock_period", "10.0"),
+        )
 
         try:
             module_count = len(re.findall(r"\bmodule\b", rtl_code))
             estimator = Agent(
-                role='Physical Design Estimator',
-                goal='Estimate die area, utilization, and clock period for floorplanning',
-                backstory='Senior PD engineer who estimates area from RTL complexity, gate count, and PDK constraints.',
+                role="Physical Design Estimator",
+                goal="Estimate die area, utilization, and clock period for floorplanning",
+                backstory="Senior PD engineer who estimates area from RTL complexity, gate count, and PDK constraints.",
                 llm=self.get_llm_for_role("fixer"),
                 verbose=False,
                 allow_delegation=False,
@@ -4517,8 +6384,8 @@ REQUIREMENTS:
 
 DESIGN METRICS:
 - RTL: {line_count} non-blank lines, {module_count} modules, ~{cell_count_est} estimated cells
-- PDK: {self.pdk_profile.get('profile', 'sky130')} ({self.pdk_profile.get('pdk', 'sky130A')})
-- Previous convergence: {[{'wns': s.wns, 'cong': s.congestion, 'area': s.area_um2} for s in self.convergence_history[-2:]] if self.convergence_history else 'First attempt'}
+- PDK: {self.pdk_profile.get("profile", "sky130")} ({self.pdk_profile.get("pdk", "sky130A")})
+- Previous convergence: {[{"wns": s.wns, "cong": s.congestion, "area": s.area_um2} for s in self.convergence_history[-2:]] if self.convergence_history else "First attempt"}
 - Floorplan attempt: {self.floorplan_attempts}
 
 Reply in this EXACT format (4 lines):
@@ -4526,12 +6393,20 @@ DIE_AREA: <integer 200-2000>
 UTILIZATION: <integer 30-70>
 CLOCK_PERIOD: <float like 10.0>
 REASONING: <1-line explanation>""",
-                expected_output='Floorplan parameters in structured format',
+                expected_output="Floorplan parameters in structured format",
                 agent=estimator,
             )
 
-            with console.status("[accent]LLM Estimating Floorplan...[/accent]", spinner="dots12", spinner_style="spinner"):
-                est_result = str(Crew(verbose=False, agents=[estimator], tasks=[estimate_task]).kickoff()).strip()
+            with console.status(
+                "[accent]LLM Estimating Floorplan...[/accent]",
+                spinner="dots12",
+                spinner_style="spinner",
+            ):
+                est_result = str(
+                    self._crew_kickoff(
+                        Crew(verbose=False, agents=[estimator], tasks=[estimate_task])
+                    )
+                ).strip()
             self.logger.info(f"FLOORPLAN LLM ESTIMATE:\n{est_result}")
 
             # Parse structured response
@@ -4543,19 +6418,31 @@ REASONING: <1-line explanation>""",
                 est_line_s = est_line.strip()
                 if est_line_s.startswith("DIE_AREA:"):
                     try:
-                        llm_die = int(re.search(r"\d+", est_line_s.replace("DIE_AREA:", "")).group())
+                        llm_die = int(
+                            re.search(
+                                r"\d+", est_line_s.replace("DIE_AREA:", "")
+                            ).group()
+                        )
                         llm_die = max(200, min(2000, llm_die))
                     except (ValueError, AttributeError):
                         pass
                 elif est_line_s.startswith("UTILIZATION:"):
                     try:
-                        llm_util = int(re.search(r"\d+", est_line_s.replace("UTILIZATION:", "")).group())
+                        llm_util = int(
+                            re.search(
+                                r"\d+", est_line_s.replace("UTILIZATION:", "")
+                            ).group()
+                        )
                         llm_util = max(30, min(70, llm_util))
                     except (ValueError, AttributeError):
                         pass
                 elif est_line_s.startswith("CLOCK_PERIOD:"):
                     try:
-                        llm_clk = float(re.search(r"[\d.]+", est_line_s.replace("CLOCK_PERIOD:", "")).group())
+                        llm_clk = float(
+                            re.search(
+                                r"[\d.]+", est_line_s.replace("CLOCK_PERIOD:", "")
+                            ).group()
+                        )
                         llm_clk = max(1.0, min(100.0, llm_clk))
                     except (ValueError, AttributeError):
                         pass
@@ -4564,10 +6451,15 @@ REASONING: <1-line explanation>""",
 
             if llm_die is not None:
                 base_die = llm_die
-                self.log(f"LLM estimated die area: {llm_die} ({llm_reasoning})", refined=True)
+                self.log(
+                    f"LLM estimated die area: {llm_die} ({llm_reasoning})", refined=True
+                )
             else:
                 base_die = heuristic_die
-                self.log(f"LLM floorplan parse failed; using heuristic die={heuristic_die}", refined=True)
+                self.log(
+                    f"LLM floorplan parse failed; using heuristic die={heuristic_die}",
+                    refined=True,
+                )
 
             util = llm_util if llm_util is not None else heuristic_util
             if llm_clk is not None and "clock_period_override" not in self.artifacts:
@@ -4576,7 +6468,9 @@ REASONING: <1-line explanation>""",
                 clock_period = heuristic_clk
 
         except Exception as e:
-            self.log(f"LLM floorplan estimation failed ({e}); using heuristic.", refined=True)
+            self.log(
+                f"LLM floorplan estimation failed ({e}); using heuristic.", refined=True
+            )
             base_die = heuristic_die
             util = heuristic_util
             clock_period = heuristic_clk
@@ -4596,24 +6490,28 @@ REASONING: <1-line explanation>""",
             )
 
         floorplan_tcl = os.path.join(src_dir, f"{self.name}_floorplan.tcl")
-        sdc_injection = f"set ::env(BASE_SDC_FILE) \"$::env(DESIGN_DIR)/src/{self.name}.sdc\"\n" if "sdc_path" in self.artifacts else ""
-        
+        sdc_injection = (
+            f'set ::env(BASE_SDC_FILE) "$::env(DESIGN_DIR)/src/{self.name}.sdc"\n'
+            if "sdc_path" in self.artifacts
+            else ""
+        )
+
         with open(floorplan_tcl, "w") as f:
             f.write(
-                f"set ::env(DESIGN_NAME) \"{self.name}\"\n"
-                f"set ::env(PDK) \"{self.pdk_profile.get('pdk', PDK)}\"\n"
-                f"set ::env(STD_CELL_LIBRARY) \"{self.pdk_profile.get('std_cell_library', 'sky130_fd_sc_hd')}\"\n"
+                f'set ::env(DESIGN_NAME) "{self.name}"\n'
+                f'set ::env(PDK) "{self.pdk_profile.get("pdk", PDK)}"\n'
+                f'set ::env(STD_CELL_LIBRARY) "{self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")}"\n'
                 f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]\n"
                 f"{sdc_injection}"
-                "set ::env(SYNTH_STRATEGY) \"AREA 0\"\n"
+                'set ::env(SYNTH_STRATEGY) "AREA 0"\n'
                 "set ::env(SYNTH_SIZING) 1\n"
                 "set ::env(MAGIC_DRC_USE_GDS) 1\n"
-                "set ::env(FP_SIZING) \"absolute\"\n"
-                f"set ::env(DIE_AREA) \"0 0 {die} {die}\"\n"
+                'set ::env(FP_SIZING) "absolute"\n'
+                f'set ::env(DIE_AREA) "0 0 {die} {die}"\n'
                 f"set ::env(FP_CORE_UTIL) {util}\n"
                 f"set ::env(PL_TARGET_DENSITY) {util / 100 + 0.05:.2f}\n"
-                f"set ::env(CLOCK_PERIOD) \"{clock_period}\"\n"
-                f"set ::env(CLOCK_PORT) \"clk\"\n"
+                f'set ::env(CLOCK_PERIOD) "{clock_period}"\n'
+                f'set ::env(CLOCK_PORT) "clk"\n'
                 "set ::env(GRT_ADJUSTMENT) 0.15\n"
             )
 
@@ -4629,7 +6527,10 @@ REASONING: <1-line explanation>""",
 
     def _pivot_strategy(self, reason: str):
         self.pivot_count += 1
-        self.log(f"Strategy pivot triggered ({self.pivot_count}/{self.max_pivots}): {reason}", refined=True)
+        self.log(
+            f"Strategy pivot triggered ({self.pivot_count}/{self.max_pivots}): {reason}",
+            refined=True,
+        )
         if self.pivot_count > self.max_pivots:
             self.log("Pivot budget exceeded. Failing closed.", refined=True)
             self.state = BuildState.FAIL
@@ -4639,10 +6540,18 @@ REASONING: <1-line explanation>""",
         self.strategy_pivot_stage += 1
 
         if stage == 0:
-            old = float(self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0")))
+            old = float(
+                self.artifacts.get(
+                    "clock_period_override",
+                    self.pdk_profile.get("default_clock_period", "10.0"),
+                )
+            )
             new = round(old * 1.10, 2)
             self.artifacts["clock_period_override"] = str(new)
-            self.log(f"Pivot step: timing constraint tune ({old}ns -> {new}ns).", refined=True)
+            self.log(
+                f"Pivot step: timing constraint tune ({old}ns -> {new}ns).",
+                refined=True,
+            )
             self.transition(BuildState.FLOORPLAN, preserve_retries=True)
             return
 
@@ -4650,7 +6559,10 @@ REASONING: <1-line explanation>""",
             old_scale = float(self.artifacts.get("area_scale", 1.0))
             new_scale = round(old_scale * 1.15, 3)
             self.artifacts["area_scale"] = new_scale
-            self.log(f"Pivot step: area expansion ({old_scale}x -> {new_scale}x).", refined=True)
+            self.log(
+                f"Pivot step: area expansion ({old_scale}x -> {new_scale}x).",
+                refined=True,
+            )
             self.transition(BuildState.FLOORPLAN, preserve_retries=True)
             return
 
@@ -4659,14 +6571,19 @@ REASONING: <1-line explanation>""",
             "Apply register slicing / pipeline decoupling on critical path; "
             "reduce combinational depth while preserving behavior."
         )
-        self.log("Pivot step: requesting logic decoupling (register slicing) in RTL regen.", refined=True)
+        self.log(
+            "Pivot step: requesting logic decoupling (register slicing) in RTL regen.",
+            refined=True,
+        )
         self.transition(BuildState.RTL_GEN, preserve_retries=True)
 
     def do_convergence_review(self):
         """Assess congestion/timing convergence and prevent futile loops."""
         self.log("Assessing convergence (timing + congestion + PPA)...", refined=True)
 
-        congestion = parse_congestion_metrics(self.name, run_tag=self.artifacts.get("run_tag", "agentrun"))
+        congestion = parse_congestion_metrics(
+            self.name, run_tag=self.artifacts.get("run_tag", "agentrun")
+        )
         sta = parse_sta_signoff(self.name)
         power = parse_power_signoff(self.name)
         metrics, _ = check_physical_metrics(self.name)
@@ -4691,7 +6608,9 @@ REASONING: <1-line explanation>""",
             power_w=power_w,
         )
         self.convergence_history.append(snap)
-        self.artifacts["convergence_history"] = [asdict(x) for x in self.convergence_history]
+        self.artifacts["convergence_history"] = [
+            asdict(x) for x in self.convergence_history
+        ]
 
         self.log(
             f"Convergence snapshot: WNS={wns:.3f}ns, congestion={cong_pct:.2f}%, area={area_um2:.1f}um^2, power={power_w:.6f}W",
@@ -4701,9 +6620,9 @@ REASONING: <1-line explanation>""",
         # --- LLM-driven convergence analysis with hardcoded fallback ---
         try:
             conv_analyst = Agent(
-                role='PPA Convergence Analyst',
-                goal='Decide whether to continue, pivot, or accept current PPA metrics',
-                backstory='Expert in timing closure, congestion mitigation, and PPA trade-offs for ASIC designs.',
+                role="PPA Convergence Analyst",
+                goal="Decide whether to continue, pivot, or accept current PPA metrics",
+                backstory="Expert in timing closure, congestion mitigation, and PPA trade-offs for ASIC designs.",
                 llm=self.get_llm_for_role("physical"),
                 verbose=False,
                 allow_delegation=False,
@@ -4720,7 +6639,7 @@ CURRENT METRICS:
 - Area: {area_um2:.1f}um²
 - Power: {power_w:.6f}W
 - Pivot budget remaining: {self.max_pivots - self.pivot_count}
-- Area expansions done: {self.artifacts.get('area_expansions', 0)}
+- Area expansions done: {self.artifacts.get("area_expansions", 0)}
 
 DECIDE one of:
 A) CONVERGED — Metrics are acceptable (WNS >= 0, congestion within threshold), proceed to signoff
@@ -4732,12 +6651,24 @@ E) FAIL — No convergence possible within remaining budget
 Reply in this EXACT format (2 lines):
 DECISION: <letter A-E>
 REASONING: <1-line explanation>""",
-                expected_output='Convergence decision with DECISION and REASONING',
+                expected_output="Convergence decision with DECISION and REASONING",
                 agent=conv_analyst,
             )
 
-            with console.status("[accent]LLM Analyzing Convergence...[/accent]", spinner="dots12", spinner_style="spinner"):
-                conv_result = str(Crew(verbose=False, agents=[conv_analyst], tasks=[convergence_task]).kickoff()).strip()
+            with console.status(
+                "[accent]LLM Analyzing Convergence...[/accent]",
+                spinner="dots12",
+                spinner_style="spinner",
+            ):
+                conv_result = str(
+                    self._crew_kickoff(
+                        Crew(
+                            verbose=False,
+                            agents=[conv_analyst],
+                            tasks=[convergence_task],
+                        )
+                    )
+                ).strip()
             self.logger.info(f"CONVERGENCE LLM ANALYSIS:\n{conv_result}")
 
             # Parse decision
@@ -4753,22 +6684,36 @@ REASONING: <1-line explanation>""",
                     conv_reasoning = conv_line_s.replace("REASONING:", "").strip()
 
             if decision:
-                self.log(f"LLM convergence decision: {decision} ({conv_reasoning})", refined=True)
+                self.log(
+                    f"LLM convergence decision: {decision} ({conv_reasoning})",
+                    refined=True,
+                )
                 if decision == "A":
-                    self.transition(BuildState.SIGNOFF)
+                    self.transition(BuildState.POWER_ANALYSIS)
                     return
                 elif decision == "B":
-                    old = float(self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0")))
+                    old = float(
+                        self.artifacts.get(
+                            "clock_period_override",
+                            self.pdk_profile.get("default_clock_period", "10.0"),
+                        )
+                    )
                     new = round(old * 1.10, 2)
                     self.artifacts["clock_period_override"] = str(new)
-                    self.log(f"LLM-directed: timing constraint tune ({old}ns -> {new}ns).", refined=True)
+                    self.log(
+                        f"LLM-directed: timing constraint tune ({old}ns -> {new}ns).",
+                        refined=True,
+                    )
                     self.transition(BuildState.FLOORPLAN, preserve_retries=True)
                     return
                 elif decision == "C":
                     old_scale = float(self.artifacts.get("area_scale", 1.0))
                     new_scale = round(old_scale * 1.15, 3)
                     self.artifacts["area_scale"] = new_scale
-                    self.log(f"LLM-directed: area expansion ({old_scale}x -> {new_scale}x).", refined=True)
+                    self.log(
+                        f"LLM-directed: area expansion ({old_scale}x -> {new_scale}x).",
+                        refined=True,
+                    )
                     self.transition(BuildState.FLOORPLAN, preserve_retries=True)
                     return
                 elif decision == "D":
@@ -4776,18 +6721,30 @@ REASONING: <1-line explanation>""",
                         f"LLM convergence analysis: {conv_reasoning}. "
                         "Apply register slicing / pipeline decoupling on critical path."
                     )
-                    self.log("LLM-directed: requesting logic decoupling in RTL regen.", refined=True)
+                    self.log(
+                        "LLM-directed: requesting logic decoupling in RTL regen.",
+                        refined=True,
+                    )
                     self.transition(BuildState.RTL_GEN, preserve_retries=True)
                     return
                 else:  # E = FAIL
-                    self.log(f"LLM convergence verdict: FAIL ({conv_reasoning})", refined=True)
+                    self.log(
+                        f"LLM convergence verdict: FAIL ({conv_reasoning})",
+                        refined=True,
+                    )
                     self.state = BuildState.FAIL
                     return
             else:
-                self.log("LLM convergence parse failed; falling back to heuristic.", refined=True)
+                self.log(
+                    "LLM convergence parse failed; falling back to heuristic.",
+                    refined=True,
+                )
 
         except Exception as e:
-            self.log(f"LLM convergence analysis failed ({e}); falling back to heuristic.", refined=True)
+            self.log(
+                f"LLM convergence analysis failed ({e}); falling back to heuristic.",
+                refined=True,
+            )
 
         # --- Hardcoded fallback (original logic) ---
         if cong_pct > self.congestion_threshold:
@@ -4798,8 +6755,12 @@ REASONING: <1-line explanation>""",
             area_expansions = int(self.artifacts.get("area_expansions", 0))
             if area_expansions < 2:
                 self.artifacts["area_expansions"] = area_expansions + 1
-                self.artifacts["area_scale"] = round(float(self.artifacts.get("area_scale", 1.0)) * 1.15, 3)
-                self.log("Applying +15% area expansion due to congestion.", refined=True)
+                self.artifacts["area_scale"] = round(
+                    float(self.artifacts.get("area_scale", 1.0)) * 1.15, 3
+                )
+                self.log(
+                    "Applying +15% area expansion due to congestion.", refined=True
+                )
                 self.transition(BuildState.FLOORPLAN, preserve_retries=True)
                 return
             self._pivot_strategy("congestion persisted after area expansions")
@@ -4815,7 +6776,7 @@ REASONING: <1-line explanation>""",
                 self._pivot_strategy("WNS stagnated for 2 iterations (<0.01ns)")
                 return
 
-        self.transition(BuildState.SIGNOFF)
+        self.transition(BuildState.POWER_ANALYSIS)
 
     def do_eco_patch(self):
         """Dual-mode ECO: attempt gate patch first, fallback to RTL micro-patch."""
@@ -4835,28 +6796,37 @@ REASONING: <1-line explanation>""",
     def do_hardening(self):
         # 1. Generate config.tcl (CRITICAL: Required for OpenLane)
         self.log(f"Generating OpenLane config for {self.name}...", refined=True)
-        
+
         # Dynamic Clock Detection
-        rtl_code = self.artifacts.get('rtl_code', '')
-        clock_port = "clk" # Default
-        
+        rtl_code = self.artifacts.get("rtl_code", "")
+        clock_port = "clk"  # Default
+
         # Regex to find clock port: input ... clk ... ;
         # Matches: input clk, input wire clk, input logic clk
-        clk_match = re.search(r'input\s+(?:wire\s+|logic\s+)?(\w*(?:clk|clock|sclk|aclk)\w*)\s*[;,\)]', rtl_code, re.IGNORECASE)
+        clk_match = re.search(
+            r"input\s+(?:wire\s+|logic\s+)?(\w*(?:clk|clock|sclk|aclk)\w*)\s*[;,\)]",
+            rtl_code,
+            re.IGNORECASE,
+        )
         if clk_match:
             clock_port = clk_match.group(1)
             self.log(f"Detected Clock Port: {clock_port}", refined=True)
-        
-# Modern OpenLane Config Template
+
+        # Modern OpenLane Config Template
         # Note: We use GRT_ADJUSTMENT instead of deprecated GLB_RT_ADJUSTMENT
-        
+
         std_cell_lib = self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")
         pdk_name = self.pdk_profile.get("pdk", PDK)
-        clock_period = str(self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0")))
+        clock_period = str(
+            self.artifacts.get(
+                "clock_period_override",
+                self.pdk_profile.get("default_clock_period", "10.0"),
+            )
+        )
         floor_meta = self.artifacts.get("floorplan_meta", {})
         die = int(floor_meta.get("die_area", 500))
         util = 40 if die >= 500 else 50
-            
+
         config_tcl = f"""
 # User config
 set ::env(DESIGN_NAME) "{self.name}"
@@ -4891,13 +6861,14 @@ set ::env(GRT_ADJUSTMENT) 0.15
 set ::env(MAGIC_DRC_USE_GDS) 1
 """
         from .tools.vlsi_tools import write_config
+
         try:
-             write_config(self.name, config_tcl)
-             self.log("OpenLane config.tcl generated successfully.", refined=True)
+            write_config(self.name, config_tcl)
+            self.log("OpenLane config.tcl generated successfully.", refined=True)
         except Exception as e:
-             self.log(f"Failed to generate config.tcl: {e}", refined=True)
-             self.state = BuildState.FAIL
-             return
+            self.log(f"Failed to generate config.tcl: {e}", refined=True)
+            self.state = BuildState.FAIL
+            return
 
         # 2. Run OpenLane
         run_tag = f"agentrun_{self.global_step_count}"
@@ -4910,48 +6881,61 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                 floorplan_tcl=floorplan_tcl,
                 pdk_name=pdk_name,
             )
-            
+
         if success:
-            self.artifacts['gds'] = result
-            self.artifacts['run_tag'] = run_tag
+            self.artifacts["gds"] = result
+            self.artifacts["run_tag"] = run_tag
             self.log(f"GDSII generated: {result}", refined=True)
             self.transition(BuildState.CONVERGENCE_REVIEW)
         else:
             # ── Self-Reflective Retry via SelfReflectPipeline ──
-            self.log(f"Hardening failed. Activating self-reflection retry...", refined=True)
+            self.log(
+                f"Hardening failed. Activating self-reflection retry...", refined=True
+            )
             try:
                 reflect_pipeline = SelfReflectPipeline(
                     llm=self.get_llm_for_role("manager"),
                     max_retries=3,
                     verbose=self.verbose,
                     on_reflection=lambda evt: self.log(
-                        f"[Self-Reflect] {evt.get('category','')}: {evt.get('reflection','')[:120]}",
-                        refined=True
+                        f"[Self-Reflect] {evt.get('category', '')}: {evt.get('reflection', '')[:120]}",
+                        refined=True,
                     ),
                 )
 
                 def _hardening_action():
                     """Re-run OpenLane and return (success, error_msg, metrics)."""
-                    new_tag = f"agentrun_{self.global_step_count}_{int(time.time()) % 10000}"
+                    new_tag = (
+                        f"agentrun_{self.global_step_count}_{int(time.time()) % 10000}"
+                    )
                     ok, res = run_openlane(
-                        self.name, background=False, run_tag=new_tag,
+                        self.name,
+                        background=False,
+                        run_tag=new_tag,
                         floorplan_tcl=self.artifacts.get("floorplan_tcl", ""),
                         pdk_name=pdk_name,
                     )
                     if ok:
-                        self.artifacts['gds'] = res
-                        self.artifacts['run_tag'] = new_tag
-                            
+                        self.artifacts["gds"] = res
+                        self.artifacts["run_tag"] = new_tag
+
                     return ok, res if not ok else "", {}
 
                 def _hardening_fix(action):
                     """Apply a corrective action from self-reflection."""
                     if action.action_type == "adjust_config":
                         # Common fix: increase die area or relax utilisation
-                        self.log(f"Applying config fix: {action.description}", refined=True)
-                        return True  # Mark as applied; the next retry re-generates config
+                        self.log(
+                            f"Applying config fix: {action.description}", refined=True
+                        )
+                        return (
+                            True  # Mark as applied; the next retry re-generates config
+                        )
                     elif action.action_type == "modify_rtl":
-                        self.log(f"RTL modification suggested: {action.description}", refined=True)
+                        self.log(
+                            f"RTL modification suggested: {action.description}",
+                            refined=True,
+                        )
                         return True
                     return False
 
@@ -4964,12 +6948,20 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                 )
 
                 if ok:
-                    self.log(f"Hardening recovered via self-reflection: {msg}", refined=True)
-                    self.artifacts['self_reflect_history'] = reflect_pipeline.get_summary()
+                    self.log(
+                        f"Hardening recovered via self-reflection: {msg}", refined=True
+                    )
+                    self.artifacts["self_reflect_history"] = (
+                        reflect_pipeline.get_summary()
+                    )
                     self.transition(BuildState.CONVERGENCE_REVIEW)
                 else:
-                    self.log(f"Hardening failed after self-reflection: {msg}", refined=True)
-                    self.artifacts['self_reflect_history'] = reflect_pipeline.get_summary()
+                    self.log(
+                        f"Hardening failed after self-reflection: {msg}", refined=True
+                    )
+                    self.artifacts["self_reflect_history"] = (
+                        reflect_pipeline.get_summary()
+                    )
                     self.state = BuildState.FAIL
             except Exception as e:
                 self.logger.warning(f"SelfReflectPipeline error: {e}")
@@ -4982,7 +6974,9 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         fab_ready = True
         run_tag = self.artifacts.get("run_tag", "agentrun")
         gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
-        rtl_path = self.artifacts.get("rtl_path", f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}.v")
+        rtl_path = self.artifacts.get(
+            "rtl_path", f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}.v"
+        )
         if os.path.exists(rtl_path) and os.path.exists(gate_netlist):
             lec_ok, lec_log = run_eqy_lec(self.name, rtl_path, gate_netlist)
             self.artifacts["lec_result"] = "PASS" if lec_ok else "FAIL"
@@ -4995,91 +6989,130 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         else:
             self.artifacts["lec_result"] = "SKIP"
             self.log("LEC: skipped (missing RTL or gate netlist)", refined=True)
-        
+
         # ── 1. DRC / LVS ──
-        with console.status("[info]Checking DRC/LVS Reports...[/info]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[info]Checking DRC/LVS Reports...[/info]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             signoff_pass, signoff_details = parse_drc_lvs_reports(self.name)
-        
+
         self.logger.info(f"SIGNOFF DETAILS:\n{signoff_details}")
-        self.artifacts['signoff'] = signoff_details
-        
-        drc_v = signoff_details.get('drc_violations', -1)
-        lvs_e = signoff_details.get('lvs_errors', -1)
-        ant_v = signoff_details.get('antenna_violations', -1)
-        
-        self.log(f"DRC: {drc_v} violations | LVS: {lvs_e} errors | Antenna: {ant_v}", refined=True)
-        
+        self.artifacts["signoff"] = signoff_details
+
+        drc_v = signoff_details.get("drc_violations", -1)
+        lvs_e = signoff_details.get("lvs_errors", -1)
+        ant_v = signoff_details.get("antenna_violations", -1)
+
+        self.log(
+            f"DRC: {drc_v} violations | LVS: {lvs_e} errors | Antenna: {ant_v}",
+            refined=True,
+        )
+
         if not signoff_pass:
             fab_ready = False
-        
+
         # ── 2. TIMING CLOSURE (multi-corner STA) ──
         self.log("Checking Timing Closure (all corners)...", refined=True)
-        with console.status("[info]Parsing STA Reports...[/info]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[info]Parsing STA Reports...[/info]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             sta = parse_sta_signoff(self.name)
-        
+
         self.logger.info(f"STA RESULTS: {sta}")
-        self.artifacts['sta_signoff'] = sta
-        
-        if sta.get('error'):
+        self.artifacts["sta_signoff"] = sta
+
+        if sta.get("error"):
             self.log(f"STA: {sta['error']}", refined=True)
             fab_ready = False
         else:
-            for c in sta['corners']:
-                status = "✓" if (c['setup_slack'] >= 0 and c['hold_slack'] >= 0) else "✗"
-                self.log(f"  {status} {c['name']}: setup={c['setup_slack']:.2f}ns hold={c['hold_slack']:.2f}ns", refined=True)
-            
-            if sta['timing_met']:
-                self.log(f"Timing Closure: MET ✓ (worst setup={sta['worst_setup']:.2f}ns, hold={sta['worst_hold']:.2f}ns)", refined=True)
+            for c in sta["corners"]:
+                status = (
+                    "✓" if (c["setup_slack"] >= 0 and c["hold_slack"] >= 0) else "✗"
+                )
+                self.log(
+                    f"  {status} {c['name']}: setup={c['setup_slack']:.2f}ns hold={c['hold_slack']:.2f}ns",
+                    refined=True,
+                )
+
+            if sta["timing_met"]:
+                self.log(
+                    f"Timing Closure: MET ✓ (worst setup={sta['worst_setup']:.2f}ns, hold={sta['worst_hold']:.2f}ns)",
+                    refined=True,
+                )
             else:
-                self.log(f"Timing Closure: FAILED ✗ (worst setup={sta['worst_setup']:.2f}ns, hold={sta['worst_hold']:.2f}ns)", refined=True)
+                self.log(
+                    f"Timing Closure: FAILED ✗ (worst setup={sta['worst_setup']:.2f}ns, hold={sta['worst_hold']:.2f}ns)",
+                    refined=True,
+                )
                 fab_ready = False
-        
+
         # ── 3. POWER & IR-DROP ──
         self.log("Analyzing Power & IR-Drop...", refined=True)
-        with console.status("[info]Parsing Power Reports...[/info]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[info]Parsing Power Reports...[/info]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             power = parse_power_signoff(self.name)
-        
+
         self.logger.info(f"POWER RESULTS: {power}")
-        self.artifacts['power_signoff'] = power
-        
-        if power['total_power_w'] > 0:
-            power_mw = power['total_power_w'] * 1000
-            self.log(f"Total Power: {power_mw:.3f} mW (Internal {power['internal_power_w']*1000:.3f} + Switching {power['switching_power_w']*1000:.3f} + Leakage {power['leakage_power_w']*1e6:.3f} µW)", refined=True)
-            self.log(f"Breakdown: Sequential {power['sequential_pct']:.1f}% | Combinational {power['combinational_pct']:.1f}%", refined=True)
-            
-            if power['irdrop_max_vpwr'] > 0 or power['irdrop_max_vgnd'] > 0:
-                self.log(f"IR-Drop: VPWR={power['irdrop_max_vpwr']*1000:.1f}mV  VGND={power['irdrop_max_vgnd']*1000:.1f}mV", refined=True)
-                if not power['power_ok']:
+        self.artifacts["power_signoff"] = power
+
+        if power["total_power_w"] > 0:
+            power_mw = power["total_power_w"] * 1000
+            self.log(
+                f"Total Power: {power_mw:.3f} mW (Internal {power['internal_power_w'] * 1000:.3f} + Switching {power['switching_power_w'] * 1000:.3f} + Leakage {power['leakage_power_w'] * 1e6:.3f} µW)",
+                refined=True,
+            )
+            self.log(
+                f"Breakdown: Sequential {power['sequential_pct']:.1f}% | Combinational {power['combinational_pct']:.1f}%",
+                refined=True,
+            )
+
+            if power["irdrop_max_vpwr"] > 0 or power["irdrop_max_vgnd"] > 0:
+                self.log(
+                    f"IR-Drop: VPWR={power['irdrop_max_vpwr'] * 1000:.1f}mV  VGND={power['irdrop_max_vgnd'] * 1000:.1f}mV",
+                    refined=True,
+                )
+                if not power["power_ok"]:
                     self.log("IR-Drop: EXCEEDS 5% VDD THRESHOLD ✗", refined=True)
                     fab_ready = False
                 else:
                     self.log("IR-Drop: Within limits ✓", refined=True)
-        
+
         # 4. Physical Metrics
-        with console.status("[info]Analyzing Physical Metrics...[/info]", spinner="dots12", spinner_style="spinner"):
+        with console.status(
+            "[info]Analyzing Physical Metrics...[/info]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
             metrics, metrics_status = check_physical_metrics(self.name)
-        
+
         if metrics:
-            self.artifacts['metrics'] = metrics
+            self.artifacts["metrics"] = metrics
             self.log(f"Area: {metrics.get('chip_area_um2', 'N/A')} µm²", refined=True)
-        
+
         # 5. Documentation
         self.log("Generating Design Documentation (AI-Powered)...", refined=True)
-        
+
         doc_agent = get_doc_agent(self.get_llm_for_role("documenter"))
-        
+
         doc_task = Task(
             description=f"""Generate a comprehensive Datasheet (Markdown) for "{self.name}".
             
             1. **Architecture Spec**:
-            {self.artifacts.get('spec', 'N/A')}
+            {self.artifacts.get("spec", "N/A")}
             
             2. **Physical Metrics**:
-            {metrics if metrics else 'N/A'}
+            {metrics if metrics else "N/A"}
             
             3. **RTL Source Code**:
             ```verilog
-            {self.artifacts.get('rtl_code', '')[:15000]} 
+            {self.artifacts.get("rtl_code", "")[:15000]} 
             // ... truncated if too long
             ```
             
@@ -5094,19 +7127,27 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             
             Return ONLY the Markdown content.
             """,
-            expected_output='Markdown Datasheet',
-            agent=doc_agent
+            expected_output="Markdown Datasheet",
+            agent=doc_agent,
         )
-        
-        with console.status("[accent]AI Writing Datasheet...[/accent]", spinner="dots12", spinner_style="spinner"):
-            doc_content = str(Crew(verbose=False, agents=[doc_agent], tasks=[doc_task]).kickoff())
-        
+
+        with console.status(
+            "[accent]AI Writing Datasheet...[/accent]",
+            spinner="dots12",
+            spinner_style="spinner",
+        ):
+            doc_content = str(
+                self._crew_kickoff(
+                    Crew(verbose=False, agents=[doc_agent], tasks=[doc_task])
+                )
+            )
+
         # Save to file
         doc_path = f"{OPENLANE_ROOT}/designs/{self.name}/{self.name}_datasheet.md"
         try:
-            with open(doc_path, 'w') as f:
+            with open(doc_path, "w") as f:
                 f.write(doc_content)
-            self.artifacts['datasheet'] = doc_path
+            self.artifacts["datasheet"] = doc_path
             self.log(f"Datasheet generated: {doc_path}", refined=True)
         except Exception as e:
             self.log(f"Error writing datasheet: {e}", refined=True)
@@ -5117,17 +7158,24 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.log(f"IP manifest generation warning: {e}", refined=True)
 
         if self.strict_gates:
-            if self.artifacts.get("formal_result", "").startswith("FAIL") or str(self.artifacts.get("formal_result", "")).startswith("ERROR"):
+            if self.artifacts.get("formal_result", "").startswith("FAIL") or str(
+                self.artifacts.get("formal_result", "")
+            ).startswith("ERROR"):
                 fab_ready = False
             cov = self.artifacts.get("coverage", {})
             if cov:
                 cov_thresholds = dict(self.coverage_thresholds)
-                cov_thresholds["line"] = max(float(cov_thresholds.get("line", 85.0)), float(self.min_coverage))
+                cov_thresholds["line"] = max(
+                    float(cov_thresholds.get("line", 85.0)), float(self.min_coverage)
+                )
                 cov_checks = {
                     "line": float(cov.get("line_pct", 0.0)) >= cov_thresholds["line"],
-                    "branch": float(cov.get("branch_pct", 0.0)) >= cov_thresholds["branch"],
-                    "toggle": float(cov.get("toggle_pct", 0.0)) >= cov_thresholds["toggle"],
-                    "functional": float(cov.get("functional_pct", 0.0)) >= cov_thresholds["functional"],
+                    "branch": float(cov.get("branch_pct", 0.0))
+                    >= cov_thresholds["branch"],
+                    "toggle": float(cov.get("toggle_pct", 0.0))
+                    >= cov_thresholds["toggle"],
+                    "functional": float(cov.get("functional_pct", 0.0))
+                    >= cov_thresholds["functional"],
                 }
                 if cov.get("coverage_mode") == "skipped":
                     pass
@@ -5136,44 +7184,56 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                         fab_ready = False
                 elif not all(cov_checks.values()):
                     fab_ready = False
-        
+
         # FINAL VERDICT
-        timing_status = "MET" if sta.get('timing_met') else "FAILED" if not sta.get('error') else "N/A"
-        power_status = f"{power['total_power_w']*1000:.3f} mW" if power['total_power_w'] > 0 else "N/A"
-        irdrop_status = "OK" if power.get('power_ok') else "FAIL (>5% VDD)"
-        
+        timing_status = (
+            "MET"
+            if sta.get("timing_met")
+            else "FAILED"
+            if not sta.get("error")
+            else "N/A"
+        )
+        power_status = (
+            f"{power['total_power_w'] * 1000:.3f} mW"
+            if power["total_power_w"] > 0
+            else "N/A"
+        )
+        irdrop_status = "OK" if power.get("power_ok") else "FAIL (>5% VDD)"
+
         console.print()
-        console.print(Panel(
-            f"[accent]Fabrication Readiness Report[/accent]\n\n"
-            f"DRC:        {drc_v} violations\n"
-            f"LVS:        {lvs_e} errors\n"
-            f"Timing:     {timing_status} (WNS={sta.get('worst_setup', 0):.2f}ns)\n"
-            f"Power:      {power_status}\n"
-            f"IR-Drop:    {irdrop_status}\n"
-            f"LEC:        {self.artifacts.get('lec_result', 'N/A')}\n"
-            f"TB Gates:   {self.artifacts.get('tb_gate_history_count', 0)} events (last={self.artifacts.get('tb_gate_last_action', 'N/A')})\n"
-            f"Coverage:   line={self.artifacts.get('coverage', {}).get('line_pct', 'N/A')}% "
-            f"branch={self.artifacts.get('coverage', {}).get('branch_pct', 'N/A')}% "
-            f"toggle={self.artifacts.get('coverage', {}).get('toggle_pct', 'N/A')}% "
-            f"func={self.artifacts.get('coverage', {}).get('functional_pct', 'N/A')}% "
-            f"[{self.artifacts.get('coverage', {}).get('backend', 'N/A')}/{self.artifacts.get('coverage', {}).get('coverage_mode', 'N/A')}]\n"
-            f"Formal:     {self.artifacts.get('formal_result', 'SKIPPED')}\n\n"
-            f"{'[success]FABRICATION READY ✓[/]' if fab_ready else '[error]NOT FABRICATION READY ✗[/]'}",
-            title="📋 Signoff Report"
-        ))
+        console.print(
+            Panel(
+                f"[accent]Fabrication Readiness Report[/accent]\n\n"
+                f"DRC:        {drc_v} violations\n"
+                f"LVS:        {lvs_e} errors\n"
+                f"Timing:     {timing_status} (WNS={sta.get('worst_setup', 0):.2f}ns)\n"
+                f"Power:      {power_status}\n"
+                f"IR-Drop:    {irdrop_status}\n"
+                f"LEC:        {self.artifacts.get('lec_result', 'N/A')}\n"
+                f"TB Gates:   {self.artifacts.get('tb_gate_history_count', 0)} events (last={self.artifacts.get('tb_gate_last_action', 'N/A')})\n"
+                f"Coverage:   line={self.artifacts.get('coverage', {}).get('line_pct', 'N/A')}% "
+                f"branch={self.artifacts.get('coverage', {}).get('branch_pct', 'N/A')}% "
+                f"toggle={self.artifacts.get('coverage', {}).get('toggle_pct', 'N/A')}% "
+                f"func={self.artifacts.get('coverage', {}).get('functional_pct', 'N/A')}% "
+                f"[{self.artifacts.get('coverage', {}).get('backend', 'N/A')}/{self.artifacts.get('coverage', {}).get('coverage_mode', 'N/A')}]\n"
+                f"Formal:     {self.artifacts.get('formal_result', 'SKIPPED')}\n\n"
+                f"{'[success]FABRICATION READY ✓[/]' if fab_ready else '[error]NOT FABRICATION READY ✗[/]'}",
+                title="📋 Signoff Report",
+            )
+        )
 
         if fab_ready:
             self.log("✅ SIGNOFF PASSED (Timing Closed, DRC Clean)", refined=True)
-            self.artifacts['signoff_result'] = 'PASS'
-            self.transition(BuildState.SUCCESS)
+            self.artifacts["signoff_result"] = "PASS"
+            self.transition(BuildState.IP_PACKAGE)
         else:
             # --- LLM-driven signoff failure analysis before ECO ---
             if self.strict_gates and self.eco_attempts < 2:
                 try:
                     signoff_analyst = Agent(
-                        role='Signoff Failure Analyst',
-                        goal='Identify root cause of signoff failure and recommend fix path',
-                        backstory='Expert in DRC/LVS debugging, timing closure, IR-drop mitigation, and ECO strategies.',
+                        role="Signoff Failure Analyst",
+                        goal="Identify root cause of signoff failure and recommend fix path",
+                        backstory="Expert in DRC/LVS debugging, timing closure, IR-drop mitigation, and ECO strategies.",
                         llm=self.get_llm_for_role("physical"),
                         verbose=False,
                         allow_delegation=False,
@@ -5182,23 +7242,35 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                         description=f"""Signoff failed for "{self.name}". Analyze the failure:
 
 DRC: {drc_v} violations | LVS: {lvs_e} errors | Antenna: {ant_v}
-Timing: {timing_status} (WNS={sta.get('worst_setup', 0):.2f}ns)
+Timing: {timing_status} (WNS={sta.get("worst_setup", 0):.2f}ns)
 Power: {power_status} | IR-Drop: {irdrop_status}
-LEC: {self.artifacts.get('lec_result', 'N/A')}
+LEC: {self.artifacts.get("lec_result", "N/A")}
 
 CONVERGENCE HISTORY:
-{json.dumps([asdict(s) for s in self.convergence_history[-3:]], indent=2) if self.convergence_history else 'N/A'}
+{json.dumps([asdict(s) for s in self.convergence_history[-3:]], indent=2) if self.convergence_history else "N/A"}
 
 What is the most likely root cause and what ECO strategy should we use?
 Reply in this EXACT format (2 lines):
 ROOT_CAUSE: <description of the primary issue>
 FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
-                        expected_output='Root cause and fix recommendation',
+                        expected_output="Root cause and fix recommendation",
                         agent=signoff_analyst,
                     )
 
-                    with console.status("[error]LLM Analyzing Signoff Failure...[/error]", spinner="dots12", spinner_style="spinner"):
-                        signoff_analysis = str(Crew(verbose=False, agents=[signoff_analyst], tasks=[signoff_analysis_task]).kickoff()).strip()
+                    with console.status(
+                        "[error]LLM Analyzing Signoff Failure...[/error]",
+                        spinner="dots12",
+                        spinner_style="spinner",
+                    ):
+                        signoff_analysis = str(
+                            self._crew_kickoff(
+                                Crew(
+                                    verbose=False,
+                                    agents=[signoff_analyst],
+                                    tasks=[signoff_analysis_task],
+                                )
+                            )
+                        ).strip()
                     self.logger.info(f"SIGNOFF FAILURE ANALYSIS:\n{signoff_analysis}")
 
                     # Parse and log
@@ -5210,39 +7282,64 @@ FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
                             so_root_cause = so_line_s.replace("ROOT_CAUSE:", "").strip()
                         elif so_line_s.startswith("FIX:"):
                             so_fix_val = so_line_s.replace("FIX:", "").strip().upper()
-                            if so_fix_val in {"GATE_ECO", "RTL_PATCH", "AREA_EXPAND", "TIMING_RELAX"}:
+                            if so_fix_val in {
+                                "GATE_ECO",
+                                "RTL_PATCH",
+                                "AREA_EXPAND",
+                                "TIMING_RELAX",
+                            }:
                                 so_fix = so_fix_val
 
-                    self.log(f"Signoff diagnosis: {so_root_cause} -> {so_fix}", refined=True)
+                    self.log(
+                        f"Signoff diagnosis: {so_root_cause} -> {so_fix}", refined=True
+                    )
                     self.artifacts["signoff_failure_analysis"] = {
                         "root_cause": so_root_cause,
                         "recommended_fix": so_fix,
                     }
 
                     if so_fix == "AREA_EXPAND":
-                        self.artifacts["area_scale"] = round(float(self.artifacts.get("area_scale", 1.0)) * 1.15, 3)
-                        self.log("LLM recommends area expansion. Re-running floorplan.", refined=True)
+                        self.artifacts["area_scale"] = round(
+                            float(self.artifacts.get("area_scale", 1.0)) * 1.15, 3
+                        )
+                        self.log(
+                            "LLM recommends area expansion. Re-running floorplan.",
+                            refined=True,
+                        )
                         self.transition(BuildState.FLOORPLAN, preserve_retries=True)
                         return
                     elif so_fix == "TIMING_RELAX":
-                        old_clk = float(self.artifacts.get("clock_period_override", self.pdk_profile.get("default_clock_period", "10.0")))
+                        old_clk = float(
+                            self.artifacts.get(
+                                "clock_period_override",
+                                self.pdk_profile.get("default_clock_period", "10.0"),
+                            )
+                        )
                         new_clk = round(old_clk * 1.10, 2)
                         self.artifacts["clock_period_override"] = str(new_clk)
-                        self.log(f"LLM recommends timing relaxation ({old_clk}ns -> {new_clk}ns). Re-running.", refined=True)
+                        self.log(
+                            f"LLM recommends timing relaxation ({old_clk}ns -> {new_clk}ns). Re-running.",
+                            refined=True,
+                        )
                         self.transition(BuildState.FLOORPLAN, preserve_retries=True)
                         return
                     else:
                         # GATE_ECO or RTL_PATCH -> route to ECO stage
-                        self.log("Signoff failed. Triggering ECO patch stage.", refined=True)
+                        self.log(
+                            "Signoff failed. Triggering ECO patch stage.", refined=True
+                        )
                         self.transition(BuildState.ECO_PATCH, preserve_retries=True)
                         return
 
                 except Exception as e:
-                    self.log(f"Signoff analysis failed ({e}); falling back to ECO.", refined=True)
+                    self.log(
+                        f"Signoff analysis failed ({e}); falling back to ECO.",
+                        refined=True,
+                    )
                     self.transition(BuildState.ECO_PATCH, preserve_retries=True)
                     return
 
             self.log("❌ SIGNOFF FAILED (Violations Found)", refined=True)
-            self.artifacts['signoff_result'] = 'FAIL'
+            self.artifacts["signoff_result"] = "FAIL"
             self.errors.append("Signoff failed (see report).")
             self.state = BuildState.FAIL

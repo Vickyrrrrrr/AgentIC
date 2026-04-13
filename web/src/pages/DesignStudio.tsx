@@ -99,7 +99,9 @@ export const DesignStudio = () => {
         workspace_successful_builds?: number,
         total_builds?: number,
         running_builds?: number,
-        has_byok_key?: boolean
+        has_byok_key?: boolean,
+        plan_type?: string,
+        build_limit?: number | null,
     } | null>(null);
     const [showBillingModal, setShowBillingModal] = useState(false);
 
@@ -132,14 +134,26 @@ export const DesignStudio = () => {
 
     // Fetch Profile Limits
     useEffect(() => {
-        api.get('/profile')
-            .then(res => setProfile(res.data))
-            .catch(() => setProfile(null)); // Ignored explicitly if no auth
+        // Load profile + billing status in parallel
+        Promise.allSettled([
+            api.get('/profile'),
+            api.get('/billing/status'),
+        ]).then(([profileRes, billingRes]) => {
+            const prof = profileRes.status === 'fulfilled' ? profileRes.value.data : null;
+            const billing = billingRes.status === 'fulfilled' ? billingRes.value.data : null;
+            if (prof && billing) {
+                setProfile({ ...prof, plan_type: billing.plan_type, build_limit: billing.build_limit });
+            } else if (prof) {
+                setProfile(prof);
+            }
+        }).catch(() => setProfile(null));
     }, []);
 
     const hasLocalByok = Boolean(localStorage.getItem('agentic_byok_key'));
     const hasServerByok = Boolean(profile?.has_byok_key);
-    const launchStatus = (hasLocalByok || hasServerByok) ? 'BYOK configured' : 'BYOK required';
+    const isAgenticPaid = profile?.plan_type === 'agentic_paid';
+    const hasActivePlan = isAgenticPaid || hasLocalByok || hasServerByok;
+    const launchStatus = isAgenticPaid ? 'AgentIC Model active' : hasActivePlan ? 'BYOK configured' : 'Configure required';
     const launchModeLabel = skipOpenlane ? 'Verification-first run' : 'Full silicon path';
     const workspaceSuccessfulBuilds = profile?.workspace_successful_builds ?? profile?.successful_builds ?? 0;
     const usageLabel = profile
@@ -151,23 +165,26 @@ export const DesignStudio = () => {
         if (!prompt.trim()) return;
         setError('');
 
-        const hasAnyByok = Boolean(localStorage.getItem('agentic_byok_key')) || Boolean(profile?.has_byok_key);
-        if (!hasAnyByok) {
+        // Guard: require either AgentIC paid plan or BYOK configured
+        if (!hasActivePlan) {
             setShowBillingModal(true);
             return;
         }
 
-
-        // Billing Guard: enforce 2 free successful builds
-        if (profile?.auth_enabled) {
-            const { plan, successful_builds, has_byok_key } = profile;
-            if (plan === 'free' && (successful_builds ?? 0) >= 2 && !has_byok_key) {
+        // Billing Guard: enforce build limit for AgentIC-paid users
+        if (isAgenticPaid && profile) {
+            const { successful_builds, build_limit } = profile;
+            if (build_limit !== null && build_limit !== undefined && (successful_builds ?? 0) >= build_limit) {
                 setShowBillingModal(true);
                 return;
             }
         }
 
         try {
+            // Build the BYOK payload if user has BYOK configured
+            const byokRaw = localStorage.getItem('agentic_byok_key');
+            const byokKey = byokRaw ? JSON.parse(byokRaw) : null;
+
             const res = await api.post(`/build`, {
                 design_name: designName || slugify(prompt),
                 description: prompt,
@@ -187,36 +204,50 @@ export const DesignStudio = () => {
                 tb_fallback_template: tbFallbackTemplate,
                 coverage_backend: coverageBackend,
                 coverage_fallback_policy: coverageFallbackPolicy,
-                coverage_profile: coverageProfile
+                coverage_profile: coverageProfile,
+                // Send BYOK key as JSON string in body
+                api_key: byokKey ? JSON.stringify(byokKey) : null,
+                // Tell backend which path: agentic_paid or byok
+                plan_type: isAgenticPaid ? 'agentic_paid' : 'byok',
             });
             const { job_id } = res.data;
             setJobId(job_id);
             setPhase('building');
-            startStreaming(job_id);
+            startStreaming(job_id, byokKey);
         } catch (e: any) {
             if (e?.code === 'ERR_NETWORK' || !e?.response) {
-                setError('Backend is offline. Start the server with: uvicorn server.api:app --port 7860');
+                setError('Backend is offline. Please check your connection and try again.');
             } else {
-                setError(e?.response?.data?.detail || 'Build failed. Check the backend logs.');
+                const detail = e?.response?.data?.detail;
+                if (typeof detail === 'object' && detail?.error === 'build_limit_reached') {
+                    setShowBillingModal(true);
+                    return;
+                }
+                setError(detail || 'Build failed. Check the backend logs.');
             }
         }
     };
 
-    const startStreaming = (jid: string) => {
+    const startStreaming = (jid: string, byokKey: any = null) => {
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         const ctrl = new AbortController();
         abortCtrlRef.current = ctrl;
 
-        // Clear previous events on reconnect to prevent duplicates
-        // (server replays all events from the beginning on each connection)
         setEvents([]);
+
+        const headers: Record<string, string> = {
+            'ngrok-skip-browser-warning': 'true',
+            'Accept': 'text/event-stream',
+        };
+
+        // Forward BYOK key as header for SSE stream
+        if (byokKey) {
+            headers['X-LLM-API-Key'] = JSON.stringify(byokKey);
+        }
 
         fetchEventSource(`${API_BASE}/build/stream/${jid}`, {
             method: 'GET',
-            headers: {
-                'ngrok-skip-browser-warning': 'true',
-                'Accept': 'text/event-stream',
-            },
+            headers,
             signal: ctrl.signal,
             onmessage(evt) {
                 try {
@@ -228,11 +259,8 @@ export const DesignStudio = () => {
                         return;
                     }
                     setEvents(prev => {
-                        // Deduplicate: avoid replay loops when reconnecting. 
-                        // The backend replays all events from index 0 on reconnect.
                         const isDuplicate = prev.some(e => e.timestamp === data.timestamp && e.type === data.type && e.message === data.message);
                         if (isDuplicate) return prev;
-                        
                         return [...prev, data];
                     });
                     setJobStatus(data.type === 'error' ? 'failed' : 'running');
@@ -536,8 +564,19 @@ export const DesignStudio = () => {
                 isOpen={showBillingModal}
                 onClose={() => setShowBillingModal(false)}
                 onKeySaved={() => {
-                    // Update profile locally to unblock
-                    setProfile(prev => prev ? { ...prev, has_byok_key: true } : null);
+                    // Refresh profile + billing status
+                    Promise.allSettled([
+                        api.get('/profile'),
+                        api.get('/billing/status'),
+                    ]).then(([profileRes, billingRes]) => {
+                        const prof = profileRes.status === 'fulfilled' ? profileRes.value.data : null;
+                        const billing = billingRes.status === 'fulfilled' ? billingRes.value.data : null;
+                        if (prof && billing) {
+                            setProfile({ ...prof, plan_type: billing.plan_type, build_limit: billing.build_limit });
+                        } else if (prof) {
+                            setProfile(prof);
+                        }
+                    });
                 }}
             />
         </div>

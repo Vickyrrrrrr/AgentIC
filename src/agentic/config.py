@@ -6,7 +6,10 @@ from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 # Project Paths
-WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+WORKSPACE_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+
 
 # Load .env from explicit env var, current working directory, and package root.
 # Never override already-exported environment variables.
@@ -66,6 +69,7 @@ def _normalize_base_url(raw_url: str) -> str:
         return f"http://{url}"
     return f"https://{url}"
 
+
 # For end-users, we want designs to generate exactly where they run the command.
 # Developers can still override OPENLANE_ROOT with an environment variable.
 def _ensure_writable_dir(path: str) -> bool:
@@ -123,6 +127,7 @@ def _default_group_credentials() -> Dict[str, str]:
             return group
     return {"model": "", "base_url": "", "api_key": ""}
 
+
 # =============================================================================
 # Universal LLM Config
 # =============================================================================
@@ -141,7 +146,7 @@ def _default_group_credentials() -> Dict[str, str]:
 
 _DEFAULT_GROUP = _default_group_credentials()
 
-DEFAULT_LLM_CONFIG = {
+_DEFAULT_LLM_CONFIG = {
     "model": (
         os.environ.get("LLM_MODEL", "").strip()
         or _DEFAULT_GROUP.get("model", "")
@@ -153,22 +158,21 @@ DEFAULT_LLM_CONFIG = {
         or "https://api.openai.com/v1"
     ),
     "api_key": (
-        os.environ.get("LLM_API_KEY", "").strip()
-        or _DEFAULT_GROUP.get("api_key", "")
+        os.environ.get("LLM_API_KEY", "").strip() or _DEFAULT_GROUP.get("api_key", "")
     ),
 }
 
-# Backward-compat aliases — keeps the rest of the codebase unchanged
-CLOUD_CONFIG    = DEFAULT_LLM_CONFIG
-NVIDIA_CONFIG   = DEFAULT_LLM_CONFIG
-LOCAL_CONFIG    = DEFAULT_LLM_CONFIG
-GROQ_CONFIG     = DEFAULT_LLM_CONFIG
-GLM_CONFIG      = DEFAULT_LLM_CONFIG
-DEEPSEEK_CONFIG = DEFAULT_LLM_CONFIG
+DEFAULT_LLM_CONFIG = _DEFAULT_LLM_CONFIG.copy()
+CLOUD_CONFIG = _DEFAULT_LLM_CONFIG.copy()
+NVIDIA_CONFIG = _DEFAULT_LLM_CONFIG.copy()
+LOCAL_CONFIG = _DEFAULT_LLM_CONFIG.copy()
+GROQ_CONFIG = _DEFAULT_LLM_CONFIG.copy()
+GLM_CONFIG = _DEFAULT_LLM_CONFIG.copy()
+DEEPSEEK_CONFIG = _DEFAULT_LLM_CONFIG.copy()
 
-LLM_MODEL    = DEFAULT_LLM_CONFIG["model"]
+LLM_MODEL = DEFAULT_LLM_CONFIG["model"]
 LLM_BASE_URL = DEFAULT_LLM_CONFIG["base_url"]
-LLM_API_KEY  = DEFAULT_LLM_CONFIG["api_key"]
+LLM_API_KEY = DEFAULT_LLM_CONFIG["api_key"]
 
 _ROLE_TO_GROUP = {
     "architect": "build",
@@ -204,35 +208,203 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     role_group = _ROLE_TO_GROUP.get(role_key, "build")
     group_cfg = _credential_group(role_group)
 
-    model    = os.environ.get(f"ROLE_{role_upper}_MODEL", "").strip() or group_cfg.get("model", "")
+    model = os.environ.get(f"ROLE_{role_upper}_MODEL", "").strip() or group_cfg.get(
+        "model", ""
+    )
     base_url = _normalize_base_url(
         os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip()
         or group_cfg.get("base_url", "")
     )
-    api_key  = os.environ.get(f"ROLE_{role_upper}_API_KEY", "").strip() or group_cfg.get("api_key", "")
+    api_key = os.environ.get(f"ROLE_{role_upper}_API_KEY", "").strip() or group_cfg.get(
+        "api_key", ""
+    )
 
     return {
-        "model":    model    or DEFAULT_LLM_CONFIG["model"],
+        "model": model or DEFAULT_LLM_CONFIG["model"],
         "base_url": base_url or DEFAULT_LLM_CONFIG["base_url"],
-        "api_key":  api_key  or DEFAULT_LLM_CONFIG["api_key"],
+        "api_key": api_key or DEFAULT_LLM_CONFIG["api_key"],
     }
 
 
-# Portable OSS-PDK profiles (adapter-style)
 PDK_PROFILES: Dict[str, Dict[str, Any]] = {
     "sky130": {
         "pdk": "sky130A",
         "std_cell_library": "sky130_fd_sc_hd",
         "default_clock_period": "10.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.46",
+        "description": "SkyWater 130nm — most mature open PDK, best tool support",
     },
-    "gf180": {
+    "gf180mcu": {
         "pdk": "gf180mcuC",
         "std_cell_library": "gf180mcu_fd_sc_mcu7t5v0",
         "default_clock_period": "15.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.54",
+        "description": "GlobalFoundries 180nm — automotive grade, high voltage options",
+    },
+    "asap7": {
+        "pdk": "asap7",
+        "std_cell_library": "asap7sc7p5t",
+        "default_clock_period": "5.0",
+        "voltage_vdd": "0.7",
+        "min_cell_height": "0.144",
+        "description": "ASAP 7nm — cutting-edge predictive PDK, high density",
+    },
+    "nangate45": {
+        "pdk": "nangate45",
+        "std_cell_library": "NangateOpenCellLibrary",
+        "default_clock_period": "10.0",
+        "voltage_vdd": "1.1",
+        "min_cell_height": "0.4",
+        "description": "NanGate 45nm — academic/research, clean and simple",
+    },
+    "osu018": {
+        "pdk": "osu018",
+        "std_cell_library": "osu018_stdcells",
+        "default_clock_period": "12.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.5",
+        "description": "Oklahoma State 180nm — educational/research focus",
+    },
+    "osu035": {
+        "pdk": "osu035",
+        "std_cell_library": "osu035_stdcells",
+        "default_clock_period": "15.0",
+        "voltage_vdd": "3.3",
+        "min_cell_height": "0.6",
+        "description": "Oklahoma State 350nm — high voltage, easy to probe",
+    },
+    "efly45": {
+        "pdk": "efly45",
+        "std_cell_library": "sky130_fd_sc_hd",
+        "default_clock_period": "10.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.46",
+        "description": "EFLY 45nm — emerging foundry, compatible with sky130 libs",
     },
 }
 
+
+def detect_available_pdks() -> Dict[str, Dict[str, Any]]:
+    """Auto-detect which PDKs are installed on this system.
+
+    Searches in order:
+      1. $PDK_ROOT/{pdk_name}              (user-configured PDK root)
+      2. $PDK_ROOT/{pdk}                   (variant name)
+      3. $OPENLANE_ROOT/pdks/{pdk_name}    (OpenLane bundled PDKs)
+      4. ~/.ciel/{pdk_name}                (Ciel/volare default)
+      5. ~/.volare/{pdk_name}              (Volare PDK manager)
+      6. /usr/local/pdk/{pdk_name}
+
+    A PDK is considered "available" when:
+      - libs.ref/{lib_name}/verilog/*.v  exists  (cell models)
+      - libs.tech/magic/{pdk}.tech exists OR  (Magic DRC)
+        libs.tech/netgen/{pdk}_tech.setup  exists (Netgen LVS)
+
+    Returns:
+        Dict mapping detected profile name -> its profile dict (with extra fields:
+        'available', 'root_path', 'lib_path')
+    """
+    import glob as _glob
+    import subprocess as _subprocess
+
+    available = {}
+
+    # Collect all candidate roots to scan
+    pdk_roots = []
+    for env_var in ("PDK_ROOT", "OPENLANE_PDK_ROOT", "PDKS_ROOT"):
+        val = os.environ.get(env_var, "").strip()
+        if val and val not in pdk_roots:
+            pdk_roots.append(val)
+
+    # Standard OSS-CAD / CIEL / Volare locations
+    standard_roots = [
+        os.path.expanduser("~/.ciel"),
+        os.path.expanduser("~/.volare"),
+        "/usr/local/pdk",
+        "/opt/pdk",
+    ]
+    for r in standard_roots:
+        if r not in pdk_roots:
+            pdk_roots.append(r)
+
+    for profile_name, profile_data in PDK_PROFILES.items():
+        pdk_name = profile_data["pdk"]
+        lib_name = profile_data["std_cell_library"]
+        found_root = None
+        found_lib_dir = None
+
+        for root in pdk_roots:
+            if not root or not os.path.isdir(root):
+                continue
+
+            # Try {root}/{pdk_name}  e.g. ~/.ciel/sky130A
+            candidate = os.path.join(root, pdk_name)
+            if os.path.isdir(candidate):
+                # Check for libs.ref/{lib}/verilog/
+                lib_dir = os.path.join(candidate, "libs.ref", lib_name, "verilog")
+                if os.path.isdir(lib_dir):
+                    found_root = candidate
+                    found_lib_dir = lib_dir
+                    break
+
+            # Try {root}/{profile_name}  e.g. ~/.ciel/sky130
+            candidate2 = os.path.join(root, profile_name)
+            if os.path.isdir(candidate2):
+                lib_dir2 = os.path.join(candidate2, "libs.ref", lib_name, "verilog")
+                if os.path.isdir(lib_dir2):
+                    found_root = candidate2
+                    found_lib_dir = lib_dir2
+                    break
+
+        # Also check OpenLane's pdks subdirectory
+        ol_root = os.environ.get("OPENLANE_ROOT", "").strip()
+        if not found_root and ol_root:
+            ol_pdk_dir = os.path.join(ol_root, "pdks", pdk_name)
+            if os.path.isdir(ol_pdk_dir):
+                lib_dir = os.path.join(ol_pdk_dir, "libs.ref", lib_name, "verilog")
+                if os.path.isdir(lib_dir):
+                    found_root = ol_pdk_dir
+                    found_lib_dir = lib_dir
+
+        # Validate tech files exist
+        tech_ok = False
+        if found_root:
+            tech_candidates = [
+                os.path.join(found_root, "libs.tech", "magic", f"{pdk_name}.tech"),
+                os.path.join(
+                    found_root, "libs.tech", "netgen", f"{pdk_name}_tech.setup"
+                ),
+                os.path.join(found_root, "libs", "tech", "magic", f"{pdk_name}.tech"),
+            ]
+            tech_ok = any(os.path.isfile(p) for p in tech_candidates)
+
+        if found_root:
+            result = dict(profile_data)
+            result["profile"] = profile_name
+            result["available"] = True
+            result["root_path"] = found_root
+            result["lib_path"] = found_lib_dir
+            result["tech_ok"] = tech_ok
+            available[profile_name] = result
+
+    return available
+
+
 DEFAULT_PDK_PROFILE = os.environ.get("PDK_PROFILE", "sky130").strip().lower()
+# Normalize legacy aliases
+_PDK_ALIASES = {
+    "gf180": "gf180mcu",
+    "asap7": "asap7",
+    "nangate45": "nangate45",
+    "osu018": "osu018",
+    "osu035": "osu035",
+    "sky130": "sky130",
+    "efly45": "efly45",
+}
+if DEFAULT_PDK_PROFILE not in PDK_PROFILES:
+    DEFAULT_PDK_PROFILE = _PDK_ALIASES.get(DEFAULT_PDK_PROFILE, "sky130")
 if DEFAULT_PDK_PROFILE not in PDK_PROFILES:
     DEFAULT_PDK_PROFILE = "sky130"
 
@@ -244,7 +416,7 @@ PDK = os.environ.get("PDK", PDK_PROFILES[DEFAULT_PDK_PROFILE]["pdk"])
 _ARCH = "arm64" if _platform.machine() in ("aarch64", "arm64") else "amd64"
 OPENLANE_IMAGE = os.environ.get(
     "OPENLANE_IMAGE",
-    f"ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-{_ARCH}"
+    f"ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-{_ARCH}",
 )
 
 # Simulation/Coverage adapter defaults
@@ -252,11 +424,15 @@ SIM_BACKEND_DEFAULT = os.environ.get("SIM_BACKEND_DEFAULT", "auto").strip().lowe
 if SIM_BACKEND_DEFAULT not in {"auto", "verilator", "iverilog"}:
     SIM_BACKEND_DEFAULT = "auto"
 
-COVERAGE_FALLBACK_POLICY_DEFAULT = os.environ.get("COVERAGE_FALLBACK_POLICY", "fallback_oss").strip().lower()
+COVERAGE_FALLBACK_POLICY_DEFAULT = (
+    os.environ.get("COVERAGE_FALLBACK_POLICY", "fallback_oss").strip().lower()
+)
 if COVERAGE_FALLBACK_POLICY_DEFAULT not in {"fail_closed", "fallback_oss", "skip"}:
     COVERAGE_FALLBACK_POLICY_DEFAULT = "fallback_oss"
 
-COVERAGE_PROFILE_DEFAULT = os.environ.get("COVERAGE_PROFILE", "balanced").strip().lower()
+COVERAGE_PROFILE_DEFAULT = (
+    os.environ.get("COVERAGE_PROFILE", "balanced").strip().lower()
+)
 if COVERAGE_PROFILE_DEFAULT not in {"balanced", "aggressive", "relaxed"}:
     COVERAGE_PROFILE_DEFAULT = "balanced"
 
@@ -289,20 +465,25 @@ def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
     return bin_name
 
 
-OSS_CAD_SUITE_ROOT = os.environ.get("OSS_CAD_SUITE_HOME", os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
+OSS_CAD_SUITE_ROOT = os.environ.get(
+    "OSS_CAD_SUITE_HOME", os.path.join(WORKSPACE_ROOT, "oss-cad-suite")
+)
 
-# All EDA tool binaries resolved via OSS CAD Suite
-SBY_BIN       = _resolve_tool_binary("sby",       env_var="SBY_BIN")
-YOSYS_BIN     = _resolve_tool_binary("yosys",     env_var="YOSYS_BIN")
-EQY_BIN       = _resolve_tool_binary("eqy",       env_var="EQY_BIN")
+SBY_BIN = _resolve_tool_binary("sby", env_var="SBY_BIN")
+YOSYS_BIN = _resolve_tool_binary("yosys", env_var="YOSYS_BIN")
+EQY_BIN = _resolve_tool_binary("eqy", env_var="EQY_BIN")
 VERILATOR_BIN = _resolve_tool_binary("verilator", env_var="VERILATOR_BIN")
-IVERILOG_BIN  = _resolve_tool_binary("iverilog",  env_var="IVERILOG_BIN")
-VVP_BIN       = _resolve_tool_binary("vvp",       env_var="VVP_BIN")
-SV2V_BIN      = _resolve_tool_binary("sv2v",      env_var="SV2V_BIN")
+IVERILOG_BIN = _resolve_tool_binary("iverilog", env_var="IVERILOG_BIN")
+VVP_BIN = _resolve_tool_binary("vvp", env_var="VVP_BIN")
+SV2V_BIN = _resolve_tool_binary("sv2v", env_var="SV2V_BIN")
+OPENSTA_BIN = _resolve_tool_binary("sta", env_var="OPENSTA_BIN")
+MAGIC_BIN = _resolve_tool_binary("magic", env_var="MAGIC_BIN")
+NETGEN_BIN = _resolve_tool_binary("netgen", env_var="NETGEN_BIN")
 
 
-def get_pdk_profile(profile: str) -> Dict[str, Any]:
+def get_pdk_profile(profile: Optional[str]) -> Dict[str, Any]:
     key = (profile or DEFAULT_PDK_PROFILE).strip().lower()
+    key = _PDK_ALIASES.get(key, key)
     if key not in PDK_PROFILES:
         key = "sky130"
     data = dict(PDK_PROFILES[key])
@@ -310,27 +491,48 @@ def get_pdk_profile(profile: str) -> Dict[str, Any]:
     return data
 
 
+def list_pdk_profiles() -> Dict[str, Dict[str, Any]]:
+    """Return all known PDK profile definitions (metadata only, no filesystem check)."""
+    return {k: {kk: vv for kk, vv in v.items()} for k, v in PDK_PROFILES.items()}
+
+
 def get_toolchain_diagnostics() -> Dict[str, Any]:
     """Return resolved toolchain paths and existence info for startup checks."""
     bins = {
-        "sby":       SBY_BIN,
-        "yosys":     YOSYS_BIN,
-        "eqy":       EQY_BIN,
+        "sby": SBY_BIN,
+        "yosys": YOSYS_BIN,
+        "eqy": EQY_BIN,
         "verilator": VERILATOR_BIN,
-        "iverilog":  IVERILOG_BIN,
-        "vvp":       VVP_BIN,
-        "sv2v":      SV2V_BIN,
+        "iverilog": IVERILOG_BIN,
+        "vvp": VVP_BIN,
+        "sv2v": SV2V_BIN,
+        "opensta": OPENSTA_BIN,
+        "magic": MAGIC_BIN,
+        "netgen": NETGEN_BIN,
     }
+    detected_pdks = detect_available_pdks()
     return {
-        "workspace_root":     WORKSPACE_ROOT,
-        "openlane_root":      OPENLANE_ROOT,
-        "pdk_root":           PDK_ROOT,
-        "pdk":                PDK,
+        "workspace_root": WORKSPACE_ROOT,
+        "openlane_root": OPENLANE_ROOT,
+        "pdk_root": PDK_ROOT,
+        "pdk": PDK,
         "oss_cad_suite_home": os.environ.get("OSS_CAD_SUITE_HOME", ""),
-        "llm_model":          LLM_MODEL,
-        "llm_base_url":       LLM_BASE_URL,
+        "llm_model": LLM_MODEL,
+        "llm_base_url": LLM_BASE_URL,
+        "available_pdks": {
+            name: {
+                "available": info.get("available", False),
+                "root_path": info.get("root_path", ""),
+                "tech_ok": info.get("tech_ok", False),
+                "description": info.get("description", ""),
+            }
+            for name, info in detected_pdks.items()
+        },
         "bins": {
-            name: {"path": path, "exists": os.path.exists(path) if os.path.isabs(path) else False}
+            name: {
+                "path": path,
+                "exists": os.path.exists(path) if os.path.isabs(path) else False,
+            }
             for name, path in bins.items()
         },
     }

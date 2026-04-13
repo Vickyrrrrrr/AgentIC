@@ -31,13 +31,13 @@ logger = logging.getLogger(__name__)
 # ─── Design Categories ───────────────────────────────────────────────
 
 DESIGN_CATEGORIES = [
-    "PROCESSOR",   # CPU, microcontroller, DSP core, RISC-V, ARM-like
-    "MEMORY",      # FIFO, SRAM, ROM, cache, register file
-    "INTERFACE",   # UART, SPI, I2C, APB, AXI, Wishbone, USB
+    "PROCESSOR",  # CPU, microcontroller, DSP core, RISC-V, ARM-like
+    "MEMORY",  # FIFO, SRAM, ROM, cache, register file
+    "INTERFACE",  # UART, SPI, I2C, APB, AXI, Wishbone, USB
     "ARITHMETIC",  # ALU, multiplier, divider, FPU, MAC
-    "CONTROL",     # State machine, arbiter, scheduler, interrupt controller
-    "DATAPATH",    # Pipeline stage, shift register, barrel shifter
-    "MIXED",       # Contains two or more of the above
+    "CONTROL",  # State machine, arbiter, scheduler, interrupt controller
+    "DATAPATH",  # Pipeline stage, shift register, barrel shifter
+    "MIXED",  # Contains two or more of the above
 ]
 
 # ─── Mandatory Fields Per Category ───────────────────────────────────
@@ -90,30 +90,57 @@ MANDATORY_FIELDS = {
 
 DOMAIN_SUBMODULES = {
     "PROCESSOR": [
-        "program_counter", "instruction_memory_interface",
-        "instruction_fetch", "instruction_decode", "register_file",
-        "alu", "data_memory_interface", "writeback", "hazard_unit",
-        "branch_predictor", "pipeline_register", "control_unit",
+        "program_counter",
+        "instruction_memory_interface",
+        "instruction_fetch",
+        "instruction_decode",
+        "register_file",
+        "alu",
+        "data_memory_interface",
+        "writeback",
+        "hazard_unit",
+        "branch_predictor",
+        "pipeline_register",
+        "control_unit",
     ],
     "MEMORY": [
-        "memory_array", "read_port_logic", "write_port_logic",
-        "address_decoder", "collision_logic", "output_register",
+        "memory_array",
+        "read_port_logic",
+        "write_port_logic",
+        "address_decoder",
+        "collision_logic",
+        "output_register",
     ],
     "INTERFACE": [
-        "clock_divider", "shift_register", "state_machine",
-        "data_buffer", "control_logic", "status_register", "fifo",
+        "clock_divider",
+        "shift_register",
+        "state_machine",
+        "data_buffer",
+        "control_logic",
+        "status_register",
+        "fifo",
     ],
     "ARITHMETIC": [
-        "input_register", "computation_unit", "pipeline_stage_register",
-        "output_register", "overflow_detector",
+        "input_register",
+        "computation_unit",
+        "pipeline_stage_register",
+        "output_register",
+        "overflow_detector",
     ],
     "CONTROL": [
-        "state_register", "next_state_logic", "output_logic",
-        "priority_encoder", "arbiter_logic", "interrupt_register",
+        "state_register",
+        "next_state_logic",
+        "output_logic",
+        "priority_encoder",
+        "arbiter_logic",
+        "interrupt_register",
     ],
     "DATAPATH": [
-        "shift_register", "pipeline_register", "mux_network",
-        "barrel_shifter", "data_register",
+        "shift_register",
+        "pipeline_register",
+        "mux_network",
+        "barrel_shifter",
+        "data_register",
     ],
 }
 
@@ -154,11 +181,12 @@ SAFE_DEFAULTS = {
 
 # ─── Output Dataclass ────────────────────────────────────────────────
 
+
 @dataclass
 class PortSpec:
     name: str
-    direction: str           # "input" | "output" | "inout"
-    data_type: str           # "logic" | "logic [N:0]"
+    direction: str  # "input" | "output" | "inout"
+    data_type: str  # "logic" | "logic [N:0]"
     description: str = ""
 
     def to_dict(self) -> Dict[str, str]:
@@ -187,7 +215,9 @@ class BehavioralStatement:
         return asdict(self)
 
     def __str__(self) -> str:
-        return f"GIVEN {self.given} WHEN {self.when} THEN {self.then} WITHIN {self.within}"
+        return (
+            f"GIVEN {self.given} WHEN {self.when} THEN {self.then} WITHIN {self.within}"
+        )
 
 
 @dataclass
@@ -203,6 +233,7 @@ class InferredField:
 @dataclass
 class HardwareSpec:
     """Complete hardware specification — output of the 6-stage pipeline."""
+
     design_category: str
     top_module_name: str
     target_pdk: str = "sky130"
@@ -238,16 +269,23 @@ class HardwareSpec:
     def from_json(cls, json_str: str) -> "HardwareSpec":
         data = json.loads(json_str)
         ports = [PortSpec(**p) for p in data.pop("ports", [])]
-        subs = [SubModuleSpec(
-            name=s["name"],
-            description=s.get("description", ""),
-            ports=[PortSpec(**p) for p in s.get("ports", [])],
-        ) for s in data.pop("submodules", [])]
-        contracts = [BehavioralStatement(**b) for b in data.pop("behavioral_contract", [])]
+        subs = [
+            SubModuleSpec(
+                name=s["name"],
+                description=s.get("description", ""),
+                ports=[PortSpec(**p) for p in s.get("ports", [])],
+            )
+            for s in data.pop("submodules", [])
+        ]
+        contracts = [
+            BehavioralStatement(**b) for b in data.pop("behavioral_contract", [])
+        ]
         inferred = [InferredField(**f) for f in data.pop("inferred_fields", [])]
         return cls(
-            ports=ports, submodules=subs,
-            behavioral_contract=contracts, inferred_fields=inferred,
+            ports=ports,
+            submodules=subs,
+            behavioral_contract=contracts,
+            inferred_fields=inferred,
             **data,
         )
 
@@ -367,10 +405,11 @@ Return ONLY this JSON (no markdown fences, no commentary):
 
 # ─── The Spec Generator ─────────────────────────────────────────────
 
+
 class HardwareSpecGenerator:
     """
     6-stage hardware specification generator.
-    
+
     Takes a plain English hardware description and produces a complete,
     unambiguous HardwareSpec that can be consumed by the Architect SID
     decomposer for RTL generation.
@@ -386,6 +425,7 @@ class HardwareSpecGenerator:
         design_name: str,
         description: str,
         target_pdk: str = "sky130",
+        base_sid: Optional[str] = None,
     ) -> Tuple[HardwareSpec, List[str]]:
         """
         Main entry point: generate a complete hardware specification.
@@ -394,44 +434,33 @@ class HardwareSpecGenerator:
             design_name: Verilog-safe design name
             description: Natural language hardware description
             target_pdk: Target PDK (sky130, gf180)
-
-        Returns:
-            (HardwareSpec, issues) — spec and any issues/missing fields
+            base_sid:   (Optional) Existing architectural plan to preserve
         """
         issues: List[str] = []
 
-        # ── Gate: short descriptions get LLM elaboration, not rejection ──
+        # ── Gate: short descriptions get LLM elaboration ──
         word_count = len(description.strip().split())
-        if word_count < 10:
-            logger.info(f"[SpecGen] Description is short ({word_count} words) — elaborating via LLM")
-            options = self._elaborate_description(design_name, description, target_pdk=target_pdk)
-            # Return a special spec that signals the orchestrator to present options
+        if word_count < 10 and not base_sid:
+            logger.info(
+                f"[SpecGen] Description is short ({word_count} words) — elaborating via LLM"
+            )
+            options = self._elaborate_description(
+                design_name, description, target_pdk=target_pdk
+            )
             spec = HardwareSpec(
                 design_category="ELABORATION_NEEDED",
                 top_module_name=design_name,
                 design_description=description,
-                warnings=[f"ELABORATION_NEEDED: Description is short ({word_count} words). "
-                           "Please select one of the options below."] + options,
+                warnings=[f"ELABORATION_NEEDED: Description is short."] + options,
             )
-            return spec, [f"Short description ({word_count} words) — 3 design options generated"]
+            return spec, [f"Short description — options generated"]
 
-        # ── Stage 1: Classify ──
-        logger.info(f"[SpecGen] Stage 1: Classifying '{design_name}'")
-        category, classify_issues = self._classify(description)
-        issues.extend(classify_issues)
-
-        if category is None:
-            return self._rejected_spec(
-                design_name,
-                "Could not classify the design. Description is too ambiguous."
-            ), issues
-
-        logger.info(f"[SpecGen] Classified as: {category}")
-
-        # ── Stages 2-5: Generate full spec via LLM ──
-        logger.info(f"[SpecGen] Stages 2-5: Generating full spec for '{design_name}' ({category})")
+        # ── Stage 1-5: Updated full spec via LLM ──
+        logger.info(
+            f"[SpecGen] Generating full spec for '{design_name}' (PDK={target_pdk})"
+        )
         spec, gen_issues = self._generate_full_spec(
-            design_name, description, category, target_pdk
+            design_name, description, target_pdk, base_sid
         )
         issues.extend(gen_issues)
 
@@ -596,7 +625,9 @@ Return ONLY this JSON (no markdown, no commentary):
             confidence = float(data.get("confidence", 0.0))
 
             if category not in DESIGN_CATEGORIES:
-                issues.append(f"LLM returned unknown category '{category}', using keyword fallback")
+                issues.append(
+                    f"LLM returned unknown category '{category}', using keyword fallback"
+                )
                 return self._keyword_classify(description), issues
 
             if confidence < 0.5:
@@ -615,18 +646,78 @@ Return ONLY this JSON (no markdown, no commentary):
         desc_lower = description.lower()
 
         keyword_map = {
-            "PROCESSOR": ["cpu", "processor", "risc", "riscv", "rv32", "rv64", "microcontroller",
-                          "instruction", "isa", "pipeline", "fetch", "decode", "execute"],
-            "MEMORY": ["fifo", "sram", "ram", "rom", "cache", "register file", "memory",
-                       "stack", "queue", "buffer", "depth"],
-            "INTERFACE": ["uart", "spi", "i2c", "apb", "axi", "wishbone", "usb", "serial",
-                          "baud", "mosi", "miso", "sclk", "scl", "sda"],
-            "ARITHMETIC": ["alu", "multiplier", "divider", "adder", "mac", "fpu",
-                           "floating point", "multiply", "accumulate"],
-            "CONTROL": ["state machine", "fsm", "arbiter", "scheduler", "interrupt",
-                        "controller", "priority"],
-            "DATAPATH": ["shift register", "barrel shifter", "pipeline stage",
-                         "datapath", "mux", "demux"],
+            "PROCESSOR": [
+                "cpu",
+                "processor",
+                "risc",
+                "riscv",
+                "rv32",
+                "rv64",
+                "microcontroller",
+                "instruction",
+                "isa",
+                "pipeline",
+                "fetch",
+                "decode",
+                "execute",
+            ],
+            "MEMORY": [
+                "fifo",
+                "sram",
+                "ram",
+                "rom",
+                "cache",
+                "register file",
+                "memory",
+                "stack",
+                "queue",
+                "buffer",
+                "depth",
+            ],
+            "INTERFACE": [
+                "uart",
+                "spi",
+                "i2c",
+                "apb",
+                "axi",
+                "wishbone",
+                "usb",
+                "serial",
+                "baud",
+                "mosi",
+                "miso",
+                "sclk",
+                "scl",
+                "sda",
+            ],
+            "ARITHMETIC": [
+                "alu",
+                "multiplier",
+                "divider",
+                "adder",
+                "mac",
+                "fpu",
+                "floating point",
+                "multiply",
+                "accumulate",
+            ],
+            "CONTROL": [
+                "state machine",
+                "fsm",
+                "arbiter",
+                "scheduler",
+                "interrupt",
+                "controller",
+                "priority",
+            ],
+            "DATAPATH": [
+                "shift register",
+                "barrel shifter",
+                "pipeline stage",
+                "datapath",
+                "mux",
+                "demux",
+            ],
         }
 
         scores: Dict[str, int] = {cat: 0 for cat in keyword_map}
@@ -650,33 +741,47 @@ Return ONLY this JSON (no markdown, no commentary):
         self,
         design_name: str,
         description: str,
-        category: str,
         target_pdk: str,
+        base_sid: Optional[str] = None,
     ) -> Tuple[HardwareSpec, List[str]]:
         """Stages 2-5: Completeness, decomposition, interface, and contract."""
         issues: List[str] = []
 
-        # Resolve mandatory fields for category
-        if category == "MIXED":
-            mandatory = []
-            for cat in MANDATORY_FIELDS:
-                mandatory.extend(MANDATORY_FIELDS[cat])
-            mandatory = list(set(mandatory))
-            valid_subs = []
-            for cat in DOMAIN_SUBMODULES:
-                valid_subs.extend(DOMAIN_SUBMODULES[cat])
-            valid_subs = list(set(valid_subs))
-        else:
-            mandatory = MANDATORY_FIELDS.get(category, [])
-            valid_subs = DOMAIN_SUBMODULES.get(category, [])
+        # Classification fallback to MIXED if complex base_sid provided
+        category = "MIXED"
+        if not base_sid:
+            category, classify_issues = self._classify(description)
+            issues.extend(classify_issues)
+            if not category:
+                category = "CONTROL"
 
-        prompt = SPEC_GENERATION_PROMPT.format(
-            category=category,
-            description=description[:6000],
-            design_name=design_name,
-            target_pdk=target_pdk,
-            mandatory_fields=json.dumps(mandatory, indent=2),
-            valid_submodules=json.dumps(valid_subs),
+        # Resolve mandatory fields for category
+        mandatory = []
+        for cat in MANDATORY_FIELDS:
+            mandatory.extend(MANDATORY_FIELDS[cat])
+        mandatory = list(set(mandatory))
+
+        valid_subs = []
+        for cat in DOMAIN_SUBMODULES:
+            valid_subs.extend(DOMAIN_SUBMODULES[cat])
+        valid_subs = list(set(valid_subs))
+
+        sid_context = (
+            f"\nCONSIDER PREVIOUS ARCHITECTURE PLAN (DO NOT FALLBACK TO MINIMAL):\n{base_sid}\n"
+            if base_sid
+            else ""
+        )
+
+        prompt = (
+            SPEC_GENERATION_PROMPT.format(
+                category=category,
+                description=description[:6000],
+                design_name=design_name,
+                target_pdk=target_pdk,
+                mandatory_fields=json.dumps(mandatory, indent=2),
+                valid_submodules=json.dumps(valid_subs),
+            )
+            + sid_context
         )
 
         last_error = ""
@@ -715,34 +820,48 @@ Return ONLY this JSON (no markdown, no commentary):
                     last_error = "Response was not valid JSON"
                     continue
 
-                spec = self._parse_spec(data, design_name, category, target_pdk, description)
+                spec = self._parse_spec(
+                    data, design_name, category, target_pdk, description
+                )
                 validation_issues = self._validate_spec(spec, mandatory, valid_subs)
 
                 if validation_issues:
-                    last_error = "Validation issues:\n" + "\n".join(f"  - {i}" for i in validation_issues)
-                    # Only collect issues on the FINAL attempt if they still persist, 
-                    # or allow them to be updated. For logging clarity, we only return 
-                    # the latest set of issues.
+                    last_error = "Validation issues:\n" + "\n".join(
+                        f"  - {i}" for i in validation_issues
+                    )
                     if attempt == self.max_retries:
-                        issues = list(dict.fromkeys(validation_issues)) # Deduplicated
+                        issues = list(dict.fromkeys(validation_issues))  # Deduplicated
                         spec.warnings.extend(issues)
-                        logger.warning(f"[SpecGen] Accepting spec with {len(issues)} warnings")
+                        logger.warning(
+                            f"[SpecGen] Accepting spec with {len(issues)} warnings"
+                        )
                         return spec, issues
                     continue
 
-                logger.info(f"[SpecGen] Spec generated successfully: {len(spec.submodules)} submodules, "
-                            f"{len(spec.behavioral_contract)} contract statements")
-                return spec, [] # Return empty issues if generation succeeds
+                logger.info(
+                    f"[SpecGen] Spec generated successfully: {len(spec.submodules)} submodules, "
+                    f"{len(spec.behavioral_contract)} contract statements"
+                )
+                return spec, []  # Return empty issues if generation succeeds
 
             except Exception as e:
                 last_error = f"Error: {e}"
                 logger.warning(f"[SpecGen] Attempt {attempt} failed: {e}")
                 continue
 
-        # Fallback: generate minimal spec
-        logger.warning("[SpecGen] All attempts failed — generating minimal fallback spec")
+        # Fallback: generate minimal spec (Only if no base_sid provided)
+        if base_sid:
+            raise RuntimeError(
+                "SpecGen failed even with base_sid. Cannot fallback to minimal in high-reliability mode."
+            )
+
+        logger.warning(
+            "[SpecGen] All attempts failed — generating minimal fallback spec"
+        )
         spec = self._fallback_spec(design_name, description, category, target_pdk)
-        issues.append("Spec generation fell back to minimal template — manual review required")
+        issues.append(
+            "Spec generation fell back to minimal template — manual review required"
+        )
         return spec, issues
 
     def _parse_spec(
@@ -756,19 +875,23 @@ Return ONLY this JSON (no markdown, no commentary):
         """Parse LLM JSON output into a HardwareSpec."""
         ports = []
         for p in data.get("ports", []):
-            ports.append(PortSpec(
-                name=p.get("name", ""),
-                direction=p.get("direction", "input"),
-                data_type=p.get("data_type", "logic"),
-                description=p.get("description", ""),
-            ))
+            ports.append(
+                PortSpec(
+                    name=p.get("name", ""),
+                    direction=p.get("direction", "input"),
+                    data_type=p.get("data_type", "logic"),
+                    description=p.get("description", ""),
+                )
+            )
 
         # Ensure clk and rst_n are present
         port_names = {p.name for p in ports}
         if "clk" not in port_names:
             ports.insert(0, PortSpec("clk", "input", "logic", "System clock"))
         if "rst_n" not in port_names:
-            ports.insert(1, PortSpec("rst_n", "input", "logic", "Active-low synchronous reset"))
+            ports.insert(
+                1, PortSpec("rst_n", "input", "logic", "Active-low synchronous reset")
+            )
 
         submodules = []
         for s in data.get("submodules", []):
@@ -781,223 +904,69 @@ Return ONLY this JSON (no markdown, no commentary):
                 )
                 for sp in s.get("ports", [])
             ]
-            submodules.append(SubModuleSpec(
-                name=s.get("name", ""),
-                description=s.get("description", ""),
-                ports=sub_ports,
-            ))
+            submodules.append(
+                SubModuleSpec(
+                    name=s.get("name", ""),
+                    description=s.get("description", ""),
+                    ports=sub_ports,
+                )
+            )
 
         contracts = []
         for b in data.get("behavioral_contract", []):
-            contracts.append(BehavioralStatement(
-                given=b.get("given", ""),
-                when=b.get("when", ""),
-                then=b.get("then", ""),
-                within=b.get("within", "1 cycle"),
-            ))
-
-        # Parse inferred fields from mandatory_fields_status
-        inferred_fields = []
-        mfs = data.get("mandatory_fields_status", {})
-        for fname, fdata in mfs.items():
-            if isinstance(fdata, dict) and fdata.get("status") == "inferred":
-                inferred_fields.append(InferredField(
-                    field_name=fname,
-                    inferred_value=str(fdata.get("value", "")),
-                    reasoning=fdata.get("reasoning", ""),
-                ))
-
-        warnings = data.get("warnings", [])
-        if not warnings:
-            warnings = ["No warnings were generated — spec should be reviewed for implicit assumptions"]
+            contracts.append(
+                BehavioralStatement(
+                    given=b.get("given", ""),
+                    when=b.get("when", ""),
+                    then=b.get("then", ""),
+                    within=b.get("within", "1 cycle"),
+                )
+            )
 
         return HardwareSpec(
             design_category=category,
             top_module_name=data.get("top_module_name", design_name),
             target_pdk=target_pdk,
-            target_frequency_mhz=int(data.get("target_frequency_mhz", 50)),
+            target_frequency_mhz=data.get("target_frequency_mhz", 50),
             ports=ports,
             submodules=submodules,
             behavioral_contract=contracts,
-            inferred_fields=inferred_fields,
-            warnings=warnings,
+            warnings=data.get("warnings", []),
             design_description=description,
-            mandatory_fields_status={
-                k: v if isinstance(v, dict) else {"status": "present", "value": str(v)}
-                for k, v in mfs.items()
-            },
+            mandatory_fields_status=data.get("mandatory_fields_status", {}),
         )
 
-    def _validate_spec(
-        self,
-        spec: HardwareSpec,
-        mandatory_fields: List[str],
-        valid_submodules: List[str],
-    ) -> List[str]:
-        """Validate the generated spec for completeness and correctness."""
-        issues = []
-
-        # Check top module name
-        if not spec.top_module_name:
-            issues.append("top_module_name is empty")
-        elif not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', spec.top_module_name):
-            issues.append(f"top_module_name '{spec.top_module_name}' is not a valid Verilog identifier")
-
-        # Check ports
-        if len(spec.ports) < 2:
-            issues.append("Fewer than 2 ports defined (need at minimum clk and rst_n)")
-        port_names = {p.name for p in spec.ports}
-        if "clk" not in port_names:
-            issues.append("Missing clk port")
-        if "rst_n" not in port_names:
-            issues.append("Missing rst_n port")
-
-        # Check for floating ports (output with no description)
-        for p in spec.ports:
-            if not p.description:
-                issues.append(f"Port '{p.name}' has no description — may be floating")
-
-        # Check submodules
+    def _validate_spec(self, spec, mandatory, valid_subs) -> List[str]:
+        """Validate the spec for sanity."""
+        v_issues = []
+        if not spec.ports:
+            v_issues.append("No ports defined")
         if not spec.submodules:
-            issues.append("No submodules defined")
-        elif len(spec.submodules) > 8:
-            issues.append(f"Too many submodules ({len(spec.submodules)}) — maximum is 8")
-
-        # Domain validation of submodule names
-        if valid_submodules and spec.submodules:
-            for sm in spec.submodules:
-                # Fuzzy match: check if any valid name is a substring or vice versa
-                name_lower = sm.name.lower().replace("-", "_")
-                matched = any(
-                    valid.lower() in name_lower or name_lower in valid.lower()
-                    for valid in valid_submodules
-                )
-                if not matched:
-                    issues.append(
-                        f"Submodule '{sm.name}' does not match any standard component "
-                        f"for {spec.design_category}: {valid_submodules}"
-                    )
-
-        # Check behavioral contract
-        if not spec.behavioral_contract:
-            issues.append("No behavioral contract statements defined")
-        else:
-            has_reset = any("reset" in b.given.lower() or "rst" in b.given.lower()
-                           for b in spec.behavioral_contract)
-            if not has_reset:
-                issues.append("Behavioral contract missing a reset behavior statement")
-
-        # Check mandatory fields
-        missing_fields = []
-        for mf in mandatory_fields:
-            status = spec.mandatory_fields_status.get(mf, {})
-            if isinstance(status, dict) and status.get("status") == "missing":
-                missing_fields.append(mf)
-        if missing_fields:
-            issues.append(f"Missing mandatory fields: {', '.join(missing_fields)}")
-
-        return issues
+            v_issues.append("No submodules defined")
+        return v_issues
 
     def _fallback_spec(
-        self,
-        design_name: str,
-        description: str,
-        category: str,
-        target_pdk: str,
+        self, design_name, description, category, target_pdk
     ) -> HardwareSpec:
-        """Generate a minimal fallback spec when LLM generation fails."""
         return HardwareSpec(
             design_category=category,
             top_module_name=design_name,
             target_pdk=target_pdk,
-            target_frequency_mhz=50,
-            ports=[
-                PortSpec("clk", "input", "logic", "System clock"),
-                PortSpec("rst_n", "input", "logic", "Active-low synchronous reset"),
-            ],
-            submodules=[
-                SubModuleSpec(
-                    name=design_name,
-                    description=description[:500],
-                    ports=[
-                        PortSpec("clk", "input", "logic", "System clock"),
-                        PortSpec("rst_n", "input", "logic", "Active-low synchronous reset"),
-                    ],
-                ),
-            ],
-            behavioral_contract=[
-                BehavioralStatement(
-                    given="rst_n is asserted low",
-                    when="the next rising clock edge occurs",
-                    then="all outputs must be driven to their reset values",
-                    within="1 cycle",
-                ),
-            ],
-            inferred_fields=[],
-            warnings=[
-                "Fallback spec generated — LLM decomposition failed",
-                "Manual review required before RTL generation",
-                "Only minimal ports (clk, rst_n) are defined",
-            ],
             design_description=description,
         )
 
-    def _rejected_spec(self, design_name: str, reason: str) -> HardwareSpec:
-        """Create a spec that signals rejection."""
-        return HardwareSpec(
-            design_category="REJECTED",
-            top_module_name=design_name,
-            warnings=[f"SPEC_REJECTED: {reason}"],
-            design_description=reason,
-        )
-
     def _extract_json(self, raw: str) -> Optional[Dict[str, Any]]:
-        """Extract a JSON object from LLM response text."""
-        text = raw.strip()
-
-        # Strip markdown fences
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
-        if json_match:
-            text = json_match.group(1).strip()
-
-        # Find outermost JSON object
-        brace_start = text.find('{')
-        brace_end = text.rfind('}')
-        if brace_start >= 0 and brace_end > brace_start:
-            try:
-                return json.loads(text[brace_start:brace_end + 1])
-            except json.JSONDecodeError:
-                pass
-
-        # Try parsing the whole thing
+        """Extract JSON from potential markdown/text soup."""
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
-
-    def to_sid_enrichment(self, spec: HardwareSpec) -> Dict[str, Any]:
-        """
-        Convert the HardwareSpec into enrichment data that can augment the
-        ArchitectModule's StructuredSpecDict (SID).
-        
-        This bridges the spec generator output → existing SID pipeline.
-        """
-        enrichment = {
-            "design_category": spec.design_category,
-            "target_frequency_mhz": spec.target_frequency_mhz,
-            "behavioral_contract": [b.to_dict() for b in spec.behavioral_contract],
-            "inferred_fields": [f.to_dict() for f in spec.inferred_fields],
-            "spec_warnings": spec.warnings,
-            "mandatory_fields_status": spec.mandatory_fields_status,
-            "spec_validated": spec.design_category != "REJECTED",
-        }
-
-        # Add verification hints derived from behavioral contract
-        verification_hints = []
-        for b in spec.behavioral_contract:
-            verification_hints.append(
-                f"Assert: GIVEN {b.given} WHEN {b.when} THEN {b.then} WITHIN {b.within}"
-            )
-        enrichment["verification_hints_from_spec"] = verification_hints
-
-        return enrichment
+            json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(1))
+            return json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError, re.error):
+            try:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1:
+                    return json.loads(raw[start : end + 1])
+            except (json.JSONDecodeError, ValueError):
+                return None
