@@ -60,6 +60,14 @@ jobs:
 
       - name: Sync files to Oracle VM via rsync
         run: |
+          # Enable SSH multiplexing to prevent connection issues
+          mkdir -p ~/.ssh
+          echo "Host *" > ~/.ssh/config
+          echo "    ControlMaster auto" >> ~/.ssh/config
+          echo "    ControlPath ~/.ssh/sockets/%r@%h-%p" >> ~/.ssh/config
+          echo "    ControlPersist 600" >> ~/.ssh/config
+          mkdir -p ~/.ssh/sockets
+          
           rsync -rlptzv --delete \
             --no-owner --no-group \
             --exclude '.git/' \
@@ -104,8 +112,12 @@ jobs:
               fi
             done
 
-            # Use docker compose v2 plugin (docker compose, not docker-compose)
-            sudo docker compose config > /dev/null 2>&1 || true
+            # Use docker compose v2 plugin - ensure plugin is available
+            DOCKER_COMPOSE="docker compose"
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              DOCKER_COMPOSE="docker-compose"
+            fi
+            sudo $DOCKER_COMPOSE config > /dev/null 2>&1 || true
 
             # ── Clean up legacy containers if using old docker-compose v1 ────
             compose_version=$(sudo docker compose version --short 2>/dev/null || sudo docker-compose version --short 2>/dev/null || echo unknown)
@@ -127,7 +139,7 @@ jobs:
             # ── Phase 1: Bring up CORE services only (no observability) ──────
             # This prevents prometheus from failing because api isn't ready yet
             echo "Starting core services..."
-            sudo docker compose up -d --build --remove-orphans \
+            sudo $DOCKER_COMPOSE up -d --build --remove-orphans \
               api worker db redis minio minio-setup
 
             # ── Wait for core services to be healthy ─────────────────────────
@@ -148,7 +160,7 @@ jobs:
             # Prometheus depends_on api healthy — now it will succeed
             echo "Starting observability stack (prometheus + grafana)..."
             sudo env COMPOSE_PROFILES=observability \
-              docker compose up -d --remove-orphans prometheus grafana || \
+              $DOCKER_COMPOSE up -d --remove-orphans prometheus grafana || \
               echo "WARNING: Observability stack failed to start — core services are still running"
 
             # ── Final health check ────────────────────────────────────────────
@@ -159,7 +171,7 @@ jobs:
                  curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1 && \
                  curl -fsS http://127.0.0.1:7860/readyz >/dev/null 2>&1; then
                 echo "AgentIC backend is fully healthy — deploy complete!"
-                sudo docker compose ps
+                sudo $DOCKER_COMPOSE ps
                 exit 0
               fi
               echo "Waiting for final health check... api=${api_health} worker=${worker_health}"
@@ -167,6 +179,6 @@ jobs:
             done
 
             echo "AgentIC backend failed health checks after deploy"
-            sudo docker compose ps
-            sudo docker compose logs --tail=100 api worker
+            sudo $DOCKER_COMPOSE ps
+            sudo $DOCKER_COMPOSE logs --tail=100 api worker
             exit 1
