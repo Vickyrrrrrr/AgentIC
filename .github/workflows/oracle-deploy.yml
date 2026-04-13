@@ -62,22 +62,21 @@ jobs:
         run: |
           rsync -rlptzv --delete \
             --no-owner --no-group \
-            --exclude '.git' \
+            --exclude '.git/' \
             --exclude '.env' \
-            --exclude 'node_modules' \
-            --exclude '__pycache__' \
-            --exclude '.venv-agentic' \
-            --exclude '.pytest_cache' \
-            --exclude '.mypy_cache' \
+            --exclude '**/node_modules/' \
+            --exclude '**/__pycache__/' \
+            --exclude '**/.venv*/' \
+            --exclude '**/.pytest_cache/' \
+            --exclude '**/.mypy_cache/' \
             --exclude '.codex' \
-            --exclude 'artifacts' \
-            --exclude 'designs' \
-            --exclude 'designs_root_owned' \
-            --exclude 'metrics' \
-            --exclude 'notebooks' \
+            --exclude 'artifacts/' \
+            --exclude '**/designs/' \
+            --exclude 'metrics/' \
+            --exclude 'notebooks/' \
             --exclude 'agentic_jobs.db' \
             --exclude 'build.log' \
-            --exclude 'agentic_npu_tapeout' \
+            --exclude 'agentic_npu_tapeout/' \
             ./ ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:~/AgentIC/
 
       - name: Rebuild & Restart Docker Containers
