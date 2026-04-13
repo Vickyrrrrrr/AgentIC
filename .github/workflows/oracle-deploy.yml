@@ -60,7 +60,8 @@ jobs:
 
       - name: Sync files to Oracle VM via rsync
         run: |
-          rsync -avz --delete \
+          rsync -rlptzv --delete \
+            --no-owner --no-group \
             --exclude '.git' \
             --exclude '.env' \
             --exclude 'node_modules' \
@@ -76,6 +77,7 @@ jobs:
             --exclude 'notebooks' \
             --exclude 'agentic_jobs.db' \
             --exclude 'build.log' \
+            --exclude 'agentic_npu_tapeout' \
             ./ ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:~/AgentIC/
 
       - name: Rebuild & Restart Docker Containers

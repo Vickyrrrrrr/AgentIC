@@ -57,16 +57,19 @@ ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
 
 -- Users can read their own profile
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
 CREATE POLICY "Users can read own profile"
   ON public.profiles FOR SELECT
   USING (auth.uid() = id);
 
 -- Users can update their own profile (but not plan_type/build_limit directly)
+DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
 CREATE POLICY "Users can update own profile"
   ON public.profiles FOR UPDATE
   USING (auth.uid() = id);
 
 -- Users can only read their own payments
+DROP POLICY IF EXISTS "Users can read own payments" ON public.payments;
 CREATE POLICY "Users can read own payments"
   ON public.payments FOR SELECT
   USING (auth.uid() = user_id);
