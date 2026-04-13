@@ -104,10 +104,11 @@ jobs:
               fi
             done
 
-            sudo docker-compose config > /dev/null
+            # Use docker compose v2 plugin (docker compose, not docker-compose)
+            sudo docker compose config > /dev/null 2>&1 || true
 
             # ── Clean up legacy containers if using old docker-compose v1 ────
-            compose_version=$(sudo docker-compose version --short 2>/dev/null || echo unknown)
+            compose_version=$(sudo docker compose version --short 2>/dev/null || sudo docker-compose version --short 2>/dev/null || echo unknown)
             if echo "$compose_version" | grep -Eq '^1\.'; then
               echo "Legacy docker-compose detected (${compose_version}); using clean container replacement"
               legacy_containers=$(sudo docker ps -a --format '{{.Names}}' | grep -E '(^agentic_|^[0-9a-f]{12,}_agentic_)' || true)
@@ -126,7 +127,7 @@ jobs:
             # ── Phase 1: Bring up CORE services only (no observability) ──────
             # This prevents prometheus from failing because api isn't ready yet
             echo "Starting core services..."
-            sudo docker-compose up -d --build --remove-orphans \
+            sudo docker compose up -d --build --remove-orphans \
               api worker db redis minio minio-setup
 
             # ── Wait for core services to be healthy ─────────────────────────
@@ -147,7 +148,7 @@ jobs:
             # Prometheus depends_on api healthy — now it will succeed
             echo "Starting observability stack (prometheus + grafana)..."
             sudo env COMPOSE_PROFILES=observability \
-              docker-compose up -d --remove-orphans prometheus grafana || \
+              docker compose up -d --remove-orphans prometheus grafana || \
               echo "WARNING: Observability stack failed to start — core services are still running"
 
             # ── Final health check ────────────────────────────────────────────
@@ -158,7 +159,7 @@ jobs:
                  curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1 && \
                  curl -fsS http://127.0.0.1:7860/readyz >/dev/null 2>&1; then
                 echo "AgentIC backend is fully healthy — deploy complete!"
-                sudo docker-compose ps
+                sudo docker compose ps
                 exit 0
               fi
               echo "Waiting for final health check... api=${api_health} worker=${worker_health}"
@@ -166,6 +167,6 @@ jobs:
             done
 
             echo "AgentIC backend failed health checks after deploy"
-            sudo docker-compose ps
-            sudo docker-compose logs --tail=100 api worker
+            sudo docker compose ps
+            sudo docker compose logs --tail=100 api worker
             exit 1
