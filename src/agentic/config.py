@@ -226,6 +226,25 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     }
 
 
+# =============================================================================
+# PDK Profiles
+# =============================================================================
+# Each profile defines the PDK variant name, the standard cell library to use,
+# timing/voltage parameters for OpenLane config generation, and a human-readable
+# description shown in the CLI.
+#
+# Cell library sources:
+#   sky130   / gf180mcu  — managed by Volare/Ciel, installed automatically.
+#   asap7                — https://github.com/The-OpenROAD-Project/asap7 (Apache 2.0)
+#   nangate45            — NanGate 45nm Open Cell Library via Si2 (Apache 2.0)
+#   freepdk45            — FreePDK45 + NangateOpenCellLibrary (NC State / Si2)
+#   osu018 / osu035      — Oklahoma State University educational libs (limited cells)
+#
+# NOTE: efly45 was removed — it had no publicly available cell library and its
+# original entry incorrectly mapped a 45nm node to sky130 (130nm) cells, which
+# produces completely wrong timing, area, and DRC results.  If a real efly45 PDK
+# becomes available in the future, add it here with its correct lib name.
+
 PDK_PROFILES: Dict[str, Dict[str, Any]] = {
     "sky130": {
         "pdk": "sky130A",
@@ -249,7 +268,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "5.0",
         "voltage_vdd": "0.7",
         "min_cell_height": "0.144",
-        "description": "ASAP 7nm — cutting-edge predictive PDK, high density",
+        "description": "ASAP 7nm predictive PDK — research/academic, not a real foundry",
     },
     "nangate45": {
         "pdk": "nangate45",
@@ -257,7 +276,20 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
-        "description": "NanGate 45nm — academic/research, clean and simple",
+        "description": "NanGate 45nm Open Cell Library — academic/research, Apache 2.0",
+    },
+    "freepdk45": {
+        # FreePDK45 is the NC State 45nm predictive PDK.  Its standard cell
+        # library is the same NangateOpenCellLibrary used by nangate45, but
+        # accessed via the FreePDK45 PDK stack (different tech files / LEF rules).
+        # Install: follow https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts
+        #          or place under $PDK_ROOT/FreePDK45/
+        "pdk": "FreePDK45",
+        "std_cell_library": "NangateOpenCellLibrary",
+        "default_clock_period": "10.0",
+        "voltage_vdd": "1.1",
+        "min_cell_height": "0.4",
+        "description": "FreePDK45 (NC State 45nm) + NanGate Open Cell Library — academic/research",
     },
     "osu018": {
         "pdk": "osu018",
@@ -265,7 +297,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "12.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.5",
-        "description": "Oklahoma State 180nm — educational/research focus",
+        "description": "Oklahoma State 180nm — educational/research, limited cell set",
     },
     "osu035": {
         "pdk": "osu035",
@@ -273,15 +305,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "15.0",
         "voltage_vdd": "3.3",
         "min_cell_height": "0.6",
-        "description": "Oklahoma State 350nm — high voltage, easy to probe",
-    },
-    "efly45": {
-        "pdk": "efly45",
-        "std_cell_library": "sky130_fd_sc_hd",
-        "default_clock_period": "10.0",
-        "voltage_vdd": "1.8",
-        "min_cell_height": "0.46",
-        "description": "EFLY 45nm — emerging foundry, compatible with sky130 libs",
+        "description": "Oklahoma State 350nm — high voltage, easy to probe, educational",
     },
 }
 
@@ -398,10 +422,10 @@ _PDK_ALIASES = {
     "gf180": "gf180mcu",
     "asap7": "asap7",
     "nangate45": "nangate45",
+    "freepdk45": "freepdk45",
     "osu018": "osu018",
     "osu035": "osu035",
     "sky130": "sky130",
-    "efly45": "efly45",
 }
 if DEFAULT_PDK_PROFILE not in PDK_PROFILES:
     DEFAULT_PDK_PROFILE = _PDK_ALIASES.get(DEFAULT_PDK_PROFILE, "sky130")
