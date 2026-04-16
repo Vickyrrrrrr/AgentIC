@@ -31,7 +31,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..config import YOSYS_BIN, WORKSPACE_ROOT
+from ..config import YOSYS_BIN, WORKSPACE_ROOT, get_pdk_tool_config, get_pdk_profile
 
 
 @dataclass
@@ -185,9 +185,7 @@ def run_yosys_synth(
         area_um2=area_um2,
         dff_count=dff_count,
         lut_count=lut_count,
-        frequency_mhz=_freq_from_period_ns(clk_constraint)
-        if clk_constraint > 0
-        else 0.0,
+        frequency_mhz=_freq_from_period_ns(clk_constraint) if clk_constraint > 0 else 0.0,
         warnings=warnings,
         errors=errors,
         diagnostics=diagnostics,
@@ -251,12 +249,12 @@ def _build_yosys_script(
     if ungroup_cells and not flatten_hierarchy:
         lines.append("opt_expr -fine")
         lines.append("opt_clean")
-        lines.append("stat -tech sky130  # report technology-specific stats")
+        tool_config = get_pdk_tool_config(pdk)
+        lines.append(f"# Technology stats for {tool_config['pdk_dir']}")
+        lines.append("stat")
 
     if clk_constraint > 0:
-        lines.append(
-            f"# Clock constraint: {clk_constraint} ns ({1000.0 / clk_constraint:.1f} MHz)"
-        )
+        lines.append(f"# Clock constraint: {clk_constraint} ns ({1000.0 / clk_constraint:.1f} MHz)")
         lines.append(f"clk constraint [get_ports clk] {clk_constraint}")
 
     if buffer_insertion:
@@ -317,7 +315,8 @@ def _parse_stat_area(stdout: str, pdk: str) -> float:
     m2 = re.search(r"Estimated number of LCs:\s*(\d+)", stdout, re.IGNORECASE)
     if m2:
         lc_count = int(m2.group(1))
-        lc_area = {"sky130": 0.054, "gf180mcu": 0.036}.get(pdk.lower(), 0.054)
+        tool_config = get_pdk_tool_config(pdk)
+        lc_area = tool_config.get("lc_area_um2", 0.054)
         return lc_count * lc_area
     return 0.0
 
@@ -330,9 +329,7 @@ def _freq_from_period_ns(ns: float) -> float:
     return round(1000.0 / ns, 2) if ns > 0 else 0.0
 
 
-def _error_result(
-    errors: List[str], netlist_path: str, report_path: str
-) -> SynthesisResult:
+def _error_result(errors: List[str], netlist_path: str, report_path: str) -> SynthesisResult:
     return SynthesisResult(
         ok=False,
         netlist_path=netlist_path,
@@ -369,9 +366,7 @@ def parse_yosys_timing_report(report_text: str) -> Dict[str, Any]:
         "unconstrained_paths": 0,
     }
 
-    slack_pattern = re.compile(
-        r"(?:slack|setup|hold)\s*[=\-:]?\s*([+-]?\d+\.?\d*)", re.IGNORECASE
-    )
+    slack_pattern = re.compile(r"(?:slack|setup|hold)\s*[=\-:]?\s*([+-]?\d+\.?\d*)", re.IGNORECASE)
     for line in report_text.splitlines():
         m = slack_pattern.search(line)
         if m:
@@ -467,17 +462,14 @@ def sta_from_synth(
     os.makedirs(output_dir, exist_ok=True)
     report_path = os.path.join(output_dir, "pre_sta_report.txt")
 
-    pdk_lib = {
-        "sky130": "sky130_fd_sc_hd",
-        "gf180mcu": "gf180mcu_fd_sc_mcu7t5v0",
-    }.get(pdk.lower(), "sky130_fd_sc_hd")
+    tool_config = get_pdk_tool_config(pdk)
 
     script_lines = [
         f"read_verilog {netlist_path}",
         f"synth_xilinx -top design  # just for hierarchy",
         "flatten",
         "opt_clean",
-        f"# Load timing library for {pdk}",
+        f"# Library: {tool_config['std_cell_library']} for PDK: {pdk}",
         "stat",
         f"# Pre-PnR STA report (basic) - use OpenSTA for full signoff",
     ]

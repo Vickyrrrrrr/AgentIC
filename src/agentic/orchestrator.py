@@ -198,27 +198,77 @@ _PROSE_START_WORDS = re.compile(
 )
 
 
-def validate_llm_code_output(raw: str) -> bool:
-    """Return True if *raw* looks like valid Verilog/SystemVerilog code.
+def extract_verilog_safely(raw_llm_text: str) -> str:
+    """Universal Verilog Extractor - robust extraction from chatty LLMs.
 
-    Checks:
-    1. Contains both ``module`` and ``endmodule`` keywords.
-    2. Does NOT start with an English prose word (after stripping markdown
-       fences and think-tags).
+    Strips think tags first, then tries fenced code blocks, then falls back
+    to finding the first module...endmodule block. Returns cleaned code.
     """
-    # Strip markdown fences and <think> tags for inspection
-    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    cleaned = re.sub(r"```(?:verilog|systemverilog|sv|v)?\s*", "", cleaned)
-    cleaned = re.sub(r"```", "", cleaned)
-    cleaned = cleaned.strip()
+    if raw_llm_text is None:
+        return ""
+    if not raw_llm_text.strip():
+        return ""
 
-    if "module" not in cleaned or "endmodule" not in cleaned:
+    text = raw_llm_text
+
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    fences = [
+        (r"```(?:verilog|systemverilog|sv)\s*\n(.*?)\n```", re.DOTALL),
+        (r"```(?:verilog|systemverilog|sv)\s*(.*?)```", re.DOTALL),
+        (r"```v\s*\n(.*?)\n```", re.DOTALL),
+        (r"```v\s*(.*?)```", re.DOTALL),
+    ]
+    for pattern, flags in fences:
+        m = re.search(pattern, text, flags)
+        if m:
+            code = m.group(1)
+            if "module" in code and "endmodule" in code:
+                return code.strip()
+
+    module_match = re.search(
+        r"\bmodule\s+\w+.*?\bendmodule\b",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if module_match:
+        return module_match.group(0).strip()
+
+    return text.strip()
+
+
+def validate_llm_code_output(raw: str) -> bool:
+    """Return True if *raw* looks like valid Verilog/SystemVerilog code."""
+    extracted = extract_verilog_safely(raw)
+    if not extracted:
         return False
 
-    if _PROSE_START_WORDS.match(cleaned):
+    if "module" not in extracted or "endmodule" not in extracted:
+        return False
+
+    if _PROSE_START_WORDS.match(extracted):
         return False
 
     return True
+
+
+def extract_and_validate_llm_code(raw: str) -> Tuple[bool, str]:
+    """Extract Verilog from raw LLM output and validate it.
+
+    Returns:
+        Tuple of (is_valid, extracted_code)
+    """
+    if raw is None:
+        return False, ""
+
+    extracted = extract_verilog_safely(raw)
+    is_valid = False
+
+    if extracted and "module" in extracted and "endmodule" in extracted:
+        if not _PROSE_START_WORDS.match(extracted):
+            is_valid = True
+
+    return is_valid, extracted
 
 
 class BuildStrategy(enum.Enum):
@@ -489,6 +539,11 @@ class BuildOrchestrator:
             )
             self.log(err, refined=True)
             self.logger.error(err)
+        elif not result.ok:
+            # Log non-rate-limit errors so we can debug failures
+            error_msgs = "; ".join(result.errors) if result.errors else "Unknown error"
+            self.logger.error(f"CrewAI call failed: {error_msgs}")
+            self.log(f"CrewAI call failed: {error_msgs}", refined=True)
 
         return result.result  # raw CrewOutput; caller does str() conversion
 
@@ -3102,25 +3157,56 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                             tasks=[rtl_task, review_task],
                         )
                     )
-                    rtl_code = str(result)
-                    # --- Universal code output validation (RTL gen) ---
-                    if not validate_llm_code_output(rtl_code):
-                        self.log(
-                            "RTL generation returned prose instead of code. Retrying once.",
-                            refined=True,
-                        )
-                        self.logger.warning(
-                            f"RTL VALIDATION FAIL (prose detected):\n{rtl_code[:500]}"
-                        )
-                        rtl_code = str(
-                            self._crew_kickoff(
+                    if result is None:
+                        self.logger.warning("CrewAI result is None, retrying...")
+                        rtl_code = None
+                    else:
+                        rtl_code = str(result) if result else None
+
+                    # --- Universal Verilog extraction + validation (RTL gen) ---
+                    if rtl_code and rtl_code != "None":
+                        is_valid, extracted = extract_and_validate_llm_code(rtl_code)
+                        if is_valid:
+                            rtl_code = extracted
+                        elif extracted:
+                            self.log(
+                                "Extracted Verilog from prose, proceeding with extracted code.",
+                                refined=True,
+                            )
+                            rtl_code = extracted
+                        else:
+                            self.log(
+                                "RTL generation failed to produce Verilog. Retrying once.",
+                                refined=True,
+                            )
+                            self.logger.warning(
+                                f"RTL VALIDATION FAIL (no Verilog extracted):\n{rtl_code[:500]}"
+                            )
+                            result = self._crew_kickoff(
                                 Crew(
                                     verbose=False,
                                     agents=[rtl_agent, reviewer],
                                     tasks=[rtl_task, review_task],
                                 )
                             )
+                            rtl_code = str(result) if result else None
+                            if rtl_code:
+                                is_valid, extracted = extract_and_validate_llm_code(rtl_code)
+                                if is_valid or extracted:
+                                    rtl_code = extracted if extracted else rtl_code
+                    else:
+                        self.log(
+                            "RTL generation returned empty/None result. Retrying once.",
+                            refined=True,
                         )
+                        result = self._crew_kickoff(
+                            Crew(
+                                verbose=False,
+                                agents=[rtl_agent, reviewer],
+                                tasks=[rtl_task, review_task],
+                            )
+                        )
+                        rtl_code = str(result) if result else None
                 except Exception as crew_exc:
                     self.log(f"CrewAI RTL generation error: {crew_exc}", refined=True)
                     self.logger.warning(f"CrewAI kickoff exception in do_rtl_gen: {crew_exc}")
@@ -3140,7 +3226,12 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                         self.state = BuildState.FAIL
                     return
 
-            self.logger.info(f"GENERATED RTL ({self.strategy.name}):\n{rtl_code}")
+            if rtl_code is None or rtl_code == "None" or not rtl_code.strip():
+                self.log("RTL generation produced no output. Build Failed.", refined=True)
+                self.state = BuildState.FAIL
+                return
+
+            self.logger.info(f"GENERATED RTL ({self.strategy.name}):\n{rtl_code[:500]}...")
 
         # Save file (write_verilog cleans LLM output: strips markdown, think tags, etc.)
         path = write_verilog(self.name, rtl_code)
@@ -4296,24 +4387,43 @@ CRITICAL RULES:
                         tasks=[fix_task],
                     )
                 )
-            fixed_code = str(result)
-            # --- Universal code output validation (verification fix) ---
-            if not validate_llm_code_output(fixed_code):
-                self.log(
-                    "Fix generation returned prose instead of code. Retrying once.",
-                    refined=True,
-                )
-                self.logger.warning(f"FIX VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
-                fixed_code = str(
-                    self._crew_kickoff(
+            fixed_code = str(result) if result else None
+            # --- Universal Verilog extraction + validation (fix) ---
+            if fixed_code and fixed_code != "None":
+                is_valid, extracted = extract_and_validate_llm_code(fixed_code)
+                if is_valid:
+                    fixed_code = extracted
+                elif extracted:
+                    self.log("Extracted Verilog from fix output, proceeding.", refined=True)
+                    fixed_code = extracted
+                else:
+                    self.log(
+                        "Fix generation failed to produce Verilog. Retrying once.", refined=True
+                    )
+                    self.logger.warning(
+                        f"FIX VALIDATION FAIL (no Verilog extracted):\n{fixed_code[:500]}"
+                    )
+                    result = self._crew_kickoff(
                         Crew(
                             verbose=False,
                             agents=[fixer],
                             tasks=[fix_task],
                         )
                     )
+                    fixed_code = str(result) if result else None
+            else:
+                self.log("Fix generation returned empty/None result. Retrying once.", refined=True)
+                result = self._crew_kickoff(
+                    Crew(
+                        verbose=False,
+                        agents=[fixer],
+                        tasks=[fix_task],
+                    )
                 )
-            self.logger.info(f"FIXED CODE:\n{fixed_code}")
+                fixed_code = str(result) if result else None
+
+            if fixed_code and fixed_code != "None":
+                self.logger.info(f"FIXED CODE:\n{fixed_code[:500]}...")
 
             if not is_tb_issue:
                 # RTL Fix — diff check to reject full rewrites

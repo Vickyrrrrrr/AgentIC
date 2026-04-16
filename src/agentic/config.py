@@ -2,7 +2,7 @@ import json
 import os
 import platform as _platform
 import tempfile
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
 
 # Project Paths
@@ -282,6 +282,9 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
+        "lc_area_um2": 0.054,
+        "max_reliable_mhz": 150,
+        "upper_limit_mhz": 200,
         "description": "SkyWater 130nm — most mature open PDK, best tool support",
     },
     "gf180mcu": {
@@ -290,6 +293,9 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "15.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.54",
+        "lc_area_um2": 0.036,
+        "max_reliable_mhz": 100,
+        "upper_limit_mhz": 125,
         "description": "GlobalFoundries 180nm — automotive grade, high voltage options",
     },
     "asap7": {
@@ -298,6 +304,9 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "5.0",
         "voltage_vdd": "0.7",
         "min_cell_height": "0.144",
+        "lc_area_um2": 0.005,
+        "max_reliable_mhz": 1000,
+        "upper_limit_mhz": 1200,
         "description": "ASAP 7nm predictive PDK — research/academic, not a real foundry",
     },
     "nangate45": {
@@ -306,19 +315,20 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
+        "lc_area_um2": 0.028,
+        "max_reliable_mhz": 500,
+        "upper_limit_mhz": 600,
         "description": "NanGate 45nm Open Cell Library — academic/research, Apache 2.0",
     },
     "freepdk45": {
-        # FreePDK45 is the NC State 45nm predictive PDK.  Its standard cell
-        # library is the same NangateOpenCellLibrary used by nangate45, but
-        # accessed via the FreePDK45 PDK stack (different tech files / LEF rules).
-        # Install: follow https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts
-        #          or place under $PDK_ROOT/FreePDK45/
         "pdk": "FreePDK45",
         "std_cell_library": "NangateOpenCellLibrary",
         "default_clock_period": "10.0",
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
+        "lc_area_um2": 0.028,
+        "max_reliable_mhz": 500,
+        "upper_limit_mhz": 600,
         "description": "FreePDK45 (NC State 45nm) + NanGate Open Cell Library — academic/research",
     },
     "osu018": {
@@ -327,6 +337,9 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "12.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.5",
+        "lc_area_um2": 0.036,
+        "max_reliable_mhz": 100,
+        "upper_limit_mhz": 125,
         "description": "Oklahoma State 180nm — educational/research, limited cell set",
     },
     "osu035": {
@@ -335,6 +348,9 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "15.0",
         "voltage_vdd": "3.3",
         "min_cell_height": "0.6",
+        "lc_area_um2": 0.064,
+        "max_reliable_mhz": 50,
+        "upper_limit_mhz": 75,
         "description": "Oklahoma State 350nm — high voltage, easy to probe, educational",
     },
 }
@@ -541,9 +557,160 @@ def get_pdk_profile(profile: Optional[str]) -> Dict[str, Any]:
     return data
 
 
+def get_pdk_tool_config(profile: Optional[str] = None) -> Dict[str, Any]:
+    """Get tool-specific configuration values for a PDK.
+
+    This function provides a unified way to get all tool-specific values
+    needed by synthesis, DRC, LVS, and other tools. Falls back to
+    sky130 defaults if the PDK doesn't specify a value.
+
+    Args:
+        profile: PDK profile name (e.g., 'sky130', 'gf180mcu'). Uses default if None.
+
+    Returns:
+        Dict with keys:
+        - lc_area_um2: Logic cell area in square micrometers
+        - max_reliable_mhz: Maximum reliable clock frequency
+        - upper_limit_mhz: Upper frequency limit (warning threshold)
+        - std_cell_library: Standard cell library name
+        - pdk_dir: PDK directory name (for tool paths)
+    """
+    pdk_data = get_pdk_profile(profile)
+    return {
+        "lc_area_um2": pdk_data.get("lc_area_um2", 0.054),
+        "max_reliable_mhz": pdk_data.get("max_reliable_mhz", 150),
+        "upper_limit_mhz": pdk_data.get("upper_limit_mhz", 200),
+        "std_cell_library": pdk_data.get("std_cell_library", "sky130_fd_sc_hd"),
+        "pdk_dir": pdk_data.get("pdk", "sky130A"),
+        "voltage_vdd": pdk_data.get("voltage_vdd", "1.8"),
+    }
+
+
 def list_pdk_profiles() -> Dict[str, Dict[str, Any]]:
     """Return all known PDK profile definitions (metadata only, no filesystem check)."""
     return {k: {kk: vv for kk, vv in v.items()} for k, v in PDK_PROFILES.items()}
+
+
+class PDKError(Exception):
+    """Base exception for PDK-related errors."""
+
+    def __init__(self, message: str, suggested_action: str = "", available_pdks: List[str] = None):
+        self.message = message
+        self.suggested_action = suggested_action
+        self.available_pdks = available_pdks or []
+        super().__init__(message)
+
+
+class PDKNotInstalledError(PDKError):
+    """Raised when a requested PDK is not installed on the system."""
+
+    pass
+
+
+class PDKNotFoundError(PDKError):
+    """Raised when no PDK is available on the system."""
+
+    pass
+
+
+def resolve_pdk(
+    requested_pdk: Optional[str] = None,
+    design_path: Optional[str] = None,
+    pdk_root: Optional[str] = None,
+    required: bool = True,
+) -> Tuple[str, Dict[str, Any], str]:
+    """Resolve PDK with smart auto-detection.
+
+    Resolution order:
+    1. Use explicitly requested PDK (--pdk flag)
+    2. Detect from design path (designs/sky130_design/ → sky130)
+    3. Use first available installed PDK
+    4. Error with helpful message
+
+    Args:
+        requested_pdk: Explicitly requested PDK name (from --pdk flag)
+        design_path: Path to design file (to auto-detect from path)
+        pdk_root: Explicit pdk_root path
+        required: If True, raises error when no PDK available. If False, returns defaults.
+
+    Returns:
+        Tuple of (profile_name, profile_dict, pdk_root_path)
+
+    Raises:
+        PDKNotInstalledError: When requested PDK is not installed
+        PDKNotFoundError: When no PDK is available and required=True
+    """
+    detected = detect_available_pdks()
+    resolved_pdk_root = pdk_root or _find_pdk_root() or ""
+
+    # Case 1: User specified --pdk
+    if requested_pdk:
+        requested = requested_pdk.strip().lower()
+        profile = get_pdk_profile(requested)["profile"]
+
+        if profile not in detected:
+            if required:
+                raise PDKNotInstalledError(
+                    message=f"PDK '{requested_pdk}' is not installed on this system.",
+                    suggested_action=f"Run: agentic install-pdk {requested_pdk}",
+                    available_pdks=list(detected.keys()),
+                )
+            else:
+                # Return default profile if not required
+                return profile, get_pdk_profile(profile), resolved_pdk_root
+
+        return profile, detected[profile], detected[profile].get("root_path", "")
+
+    # Case 2: Detect from design path
+    if design_path:
+        design_lower = design_path.lower()
+        for profile_name in detected.keys():
+            if profile_name in design_lower:
+                return (
+                    profile_name,
+                    detected[profile_name],
+                    detected[profile_name].get("root_path", ""),
+                )
+
+    # Case 3: Use first available
+    if detected:
+        first = list(detected.keys())[0]
+        return first, detected[first], detected[first].get("root_path", "")
+
+    # Case 4: No PDK available
+    if required:
+        raise PDKNotFoundError(
+            message="No PDK installed on this system.",
+            suggested_action="Run: agentic install-pdk sky130",
+            available_pdks=[],
+        )
+
+    # Case 5: Not required, return defaults
+    return "sky130", get_pdk_profile("sky130"), ""
+
+
+def _find_pdk_root() -> Optional[str]:
+    """Find PDK root directory from environment or common locations."""
+    import glob
+
+    # Check environment variable
+    env_root = os.environ.get("PDK_ROOT", "").strip()
+    if env_root and os.path.isdir(env_root):
+        return env_root
+
+    # Check common locations
+    common_locations = [
+        os.path.expanduser("~/.ciel"),
+        os.path.expanduser("~/.volare"),
+        "/usr/local/pdk",
+        "/opt/pdk",
+    ]
+
+    for loc in common_locations:
+        if os.path.isdir(loc):
+            return loc
+
+    return None
 
 
 def get_toolchain_diagnostics() -> Dict[str, Any]:

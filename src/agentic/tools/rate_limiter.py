@@ -118,6 +118,14 @@ _PROVIDER_STRATEGIES: Dict[str, RateLimitStrategy] = {
         max_retries=3,
         exponential_base=2.0,
     ),
+    "z_ai": RateLimitStrategy(
+        name="z_ai",
+        base_delay_s=3.0,
+        max_delay_s=180.0,
+        max_retries=5,
+        exponential_base=2.0,
+        respect_retry_after=True,
+    ),
     "generic": RateLimitStrategy(
         name="generic",
         base_delay_s=2.0,
@@ -175,6 +183,8 @@ def _detect_provider(base_url: str, model: str) -> str:
         return "azure"
     if "generativelanguage" in url_lower or "gemini" in url_lower:
         return "gemini"
+    if "z.ai" in url_lower or "bigmodel.cn" in url_lower:
+        return "z_ai"
     return "generic"
 
 
@@ -274,9 +284,7 @@ def rate_limited_call(
     """
     provider = _detect_provider(base_url, model)
     strategy = _PROVIDER_STRATEGIES.get(provider, _PROVIDER_STRATEGIES["generic"])
-    effective_max_retries = (
-        max_retries if max_retries is not None else strategy.max_retries
-    )
+    effective_max_retries = max_retries if max_retries is not None else strategy.max_retries
 
     limiter = _get_limiter(base_url, model)
     total_wait = 0.0
@@ -361,19 +369,17 @@ def rate_limited_call(
                     wait_time = retry_after
                 else:
                     wait_time = min(
-                        strategy.base_delay_s
-                        * (strategy.exponential_base ** (attempt - 1)),
+                        strategy.base_delay_s * (strategy.exponential_base ** (attempt - 1)),
                         strategy.max_delay_s,
                     )
             else:
                 wait_time = min(
-                    strategy.base_delay_s
-                    * (strategy.exponential_base ** (attempt - 1)),
+                    strategy.base_delay_s * (strategy.exponential_base ** (attempt - 1)),
                     strategy.max_delay_s,
                 )
 
             # Add jitter
-            jitter = random.uniform(*strategy.jitter_range)
+            jitter = random.uniform(*strategy.jitter_range_s)
             wait_time = wait_time * jitter
 
             total_wait += wait_time
@@ -427,9 +433,7 @@ def rate_limited_crew_kickoff(
     )
 
 
-def set_provider_rate(
-    requests_per_minute: int, base_url: str = "", model: str = ""
-) -> None:
+def set_provider_rate(requests_per_minute: int, base_url: str = "", model: str = "") -> None:
     """Override the per-call rate limit for a provider."""
     limiter = _get_limiter(base_url, model)
     limiter.set_rate(requests_per_minute)

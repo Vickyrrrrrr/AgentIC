@@ -25,6 +25,7 @@ from ..config import (
     COVERAGE_PROFILE_DEFAULT,
     WORKSPACE_ROOT,
     get_pdk_profile,
+    get_pdk_tool_config,
 )
 
 
@@ -136,12 +137,8 @@ def _stage_path(path: str, staged_map: Dict[str, str]) -> str:
 def _temp_roots_from_stage_map(staged_map: Dict[str, str]) -> Tuple[str, str]:
     if not staged_map:
         return "", ""
-    temp_root = os.path.commonpath(
-        [os.path.dirname(path) for path in staged_map.values()]
-    )
-    original_root = os.path.commonpath(
-        [os.path.dirname(path) for path in staged_map.keys()]
-    )
+    temp_root = os.path.commonpath([os.path.dirname(path) for path in staged_map.values()])
+    original_root = os.path.commonpath([os.path.dirname(path) for path in staged_map.keys()])
     return temp_root, original_root
 
 
@@ -152,9 +149,7 @@ def _rewrite_temp_paths(text: str, staged_map: Dict[str, str]) -> str:
 
     rewritten = text
     # Exact staged path replacement first.
-    for original, staged in sorted(
-        staged_map.items(), key=lambda item: len(item[1]), reverse=True
-    ):
+    for original, staged in sorted(staged_map.items(), key=lambda item: len(item[1]), reverse=True):
         rewritten = rewritten.replace(staged, original)
         staged_norm = os.path.normpath(staged)
         if staged_norm != staged:
@@ -162,9 +157,7 @@ def _rewrite_temp_paths(text: str, staged_map: Dict[str, str]) -> str:
         basename = os.path.basename(staged)
         original_base = os.path.basename(original)
         if basename == original_base:
-            basename_re = re.compile(
-                rf"(?<![\w./-]){re.escape(basename)}(?=(?::\d)|\b)"
-            )
+            basename_re = re.compile(rf"(?<![\w./-]){re.escape(basename)}(?=(?::\d)|\b)")
             rewritten = basename_re.sub(original, rewritten)
 
     temp_root, original_root = _temp_roots_from_stage_map(staged_map)
@@ -178,9 +171,7 @@ def _rewrite_temp_paths(text: str, staged_map: Dict[str, str]) -> str:
 def _assert_no_temp_paths(text: str, staged_map: Dict[str, str]):
     temp_root, _ = _temp_roots_from_stage_map(staged_map)
     if temp_root and text and temp_root in text:
-        raise AssertionError(
-            f"Temp path leak detected in tool diagnostics: {temp_root}"
-        )
+        raise AssertionError(f"Temp path leak detected in tool diagnostics: {temp_root}")
 
 
 def _rewrite_result_paths(
@@ -259,11 +250,7 @@ def startup_self_check() -> Dict[str, Any]:
         resolved = _resolve_binary(hint)
         exists = bool(
             resolved
-            and (
-                os.path.isabs(resolved)
-                and os.path.exists(resolved)
-                or shutil.which(resolved)
-            )
+            and (os.path.isabs(resolved) and os.path.exists(resolved) or shutil.which(resolved))
         )
         checks.append(
             {
@@ -280,11 +267,7 @@ def startup_self_check() -> Dict[str, Any]:
         resolved = _resolve_binary(hint)
         exists = bool(
             resolved
-            and (
-                os.path.isabs(resolved)
-                and os.path.exists(resolved)
-                or shutil.which(resolved)
-            )
+            and (os.path.isabs(resolved) and os.path.exists(resolved) or shutil.which(resolved))
         )
         checks.append(
             {
@@ -343,9 +326,7 @@ def write_config(design_name: str, code: str) -> str:
         clean_code = re.sub(r"<think>.*?</think>", "", clean_code, flags=re.DOTALL)
 
     # Extract code from markdown fences robustly
-    blocks = re.findall(
-        r"```(?:tcl)?\s*(.*?)```", clean_code, re.DOTALL | re.IGNORECASE
-    )
+    blocks = re.findall(r"```(?:tcl)?\s*(.*?)```", clean_code, re.DOTALL | re.IGNORECASE)
     if blocks:
         # Use the first block that looks like tcl, or the first block if none are identifiable
         valid_blocks = [b.strip() for b in blocks if "set ::env" in b]
@@ -355,9 +336,7 @@ def write_config(design_name: str, code: str) -> str:
             clean_code = blocks[0].strip()
 
     # Remove "Thought:" lines
-    clean_code = re.sub(
-        r"^(Thought|Action|Observation):.*$", "", clean_code, flags=re.MULTILINE
-    )
+    clean_code = re.sub(r"^(Thought|Action|Observation):.*$", "", clean_code, flags=re.MULTILINE)
 
     try:
         with open(path, "w") as f:
@@ -419,9 +398,7 @@ def write_verilog(
 
     # Remove other reasoning markers LLMs sometimes emit
     clean_code = re.sub(r"<reasoning>.*?</reasoning>", "", clean_code, flags=re.DOTALL)
-    clean_code = re.sub(
-        r"<explanation>.*?</explanation>", "", clean_code, flags=re.DOTALL
-    )
+    clean_code = re.sub(r"<explanation>.*?</explanation>", "", clean_code, flags=re.DOTALL)
 
     # Extract code from markdown fences robustly — try multiple fence formats
     blocks = re.findall(
@@ -558,9 +535,7 @@ def write_verilog(
         clean_code = clean_code.replace(" end ", "\nend ")
 
     # 5. Fix common LLM hallucination: semicolons instead of commas in module parameter lists
-    header_match = re.search(
-        r"(module\s+[a-zA-Z0-9_]+\s*#\s*\([\s\S]*?\)\s*\()", clean_code
-    )
+    header_match = re.search(r"(module\s+[a-zA-Z0-9_]+\s*#\s*\([\s\S]*?\)\s*\()", clean_code)
     if header_match:
         header = header_match.group(1)
         fixed_header = re.sub(r"(parameter\s+[^;]+);", r"\1,", header)
@@ -587,9 +562,7 @@ def write_verilog(
                         pass
 
             # Find all modules
-            modules = re.findall(
-                r"(module\s+([a-zA-Z0-9_]+).*?endmodule)", clean_code, re.DOTALL
-            )
+            modules = re.findall(r"(module\s+([a-zA-Z0-9_]+).*?endmodule)", clean_code, re.DOTALL)
             if len(modules) > 1:
                 # If multiple modules exist, write them to separate files
                 for mod_code, mod_name in modules:
@@ -600,9 +573,7 @@ def write_verilog(
                 # Make sure the requested path exists so syntax check doesn't fail
                 if not os.path.exists(path):
                     with open(path, "w") as f:
-                        f.write(
-                            f"// Main module {design_name} likely defined in other files\n"
-                        )
+                        f.write(f"// Main module {design_name} likely defined in other files\n")
             else:
                 with open(path, "w") as f:
                     f.write(clean_code)
@@ -670,9 +641,7 @@ def run_syntax_check(file_path: str) -> tuple:
             os.path.basename(_stage_path(path, staged_map)) for path in rtl_files
         ]
         try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir
-            )
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
             tool_result = _build_tool_result(
                 "verilator",
                 ok=completed.returncode == 0,
@@ -730,9 +699,7 @@ def run_lint_check(file_path: str) -> tuple:
         ] + [os.path.basename(_stage_path(path, staged_map)) for path in rtl_files]
 
         try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir
-            )
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir)
             tool_result = _build_tool_result(
                 "verilator",
                 ok=completed.returncode == 0,
@@ -802,9 +769,7 @@ def run_iverilog_lint(file_path: str) -> tuple:
             os.path.basename(_stage_path(path, staged_map)) for path in rtl_files
         ]
         try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir
-            )
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir)
             tool_result = _build_tool_result(
                 "iverilog",
                 ok=completed.returncode == 0,
@@ -858,14 +823,10 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
 
     # --- Port shadowing detection ---
     port_names = set()
-    module_match = re.search(
-        r"module\s+\w+\s*(?:#\s*\(.*?\))?\s*\((.*?)\)\s*;", code, re.DOTALL
-    )
+    module_match = re.search(r"module\s+\w+\s*(?:#\s*\(.*?\))?\s*\((.*?)\)\s*;", code, re.DOTALL)
     if module_match:
         port_block = module_match.group(1)
-        for m in re.finditer(
-            r"\b(?:input|output|inout)\b[^;,\)]*\b([A-Za-z_]\w*)\b", port_block
-        ):
+        for m in re.finditer(r"\b(?:input|output|inout)\b[^;,\)]*\b([A-Za-z_]\w*)\b", port_block):
             port_names.add(m.group(1))
 
     shadowing = []
@@ -901,9 +862,7 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
             os.path.basename(staged_file),
         ]
         try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir
-            )
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
             tool_result = _build_tool_result(
                 "verilator",
                 ok=completed.returncode == 0,
@@ -1059,9 +1018,7 @@ def _collect_width_warnings(file_path: str) -> List[str]:
             os.path.basename(staged_file),
         ]
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
             stderr = _rewrite_temp_paths(result.stderr or "", staged_map)
             _assert_no_temp_paths(stderr, staged_map)
         except Exception:
@@ -1314,9 +1271,7 @@ def validate_rtl_for_synthesis(file_path: str) -> tuple:
     with open(file_path, "w") as f:
         f.write(code)
 
-    report = f"Pre-synthesis: fixed {len(undriven)} undriven signal(s):\n" + "\n".join(
-        fixes
-    )
+    report = f"Pre-synthesis: fixed {len(undriven)} undriven signal(s):\n" + "\n".join(fixes)
     return True, report
 
 
@@ -1490,14 +1445,10 @@ def convert_sva_to_yosys(sva_content: str, module_name: str) -> str:
         return ""
 
     # --- Extract named properties (property ... endproperty) ---
-    raw_properties = re.findall(
-        r"property\s+(\w+)\s*;(.*?)endproperty", sva_content, re.DOTALL
-    )
+    raw_properties = re.findall(r"property\s+(\w+)\s*;(.*?)endproperty", sva_content, re.DOTALL)
     properties = []
     for prop_name, body in raw_properties:
-        body_match = re.search(
-            r"@\(posedge\s+(\w+)\)\s*(.+?);", body.strip(), re.DOTALL
-        )
+        body_match = re.search(r"@\(posedge\s+(\w+)\)\s*(.+?);", body.strip(), re.DOTALL)
         if body_match:
             clk = body_match.group(1).strip()
             condition = body_match.group(2).strip()
@@ -1651,9 +1602,7 @@ module {module_name}_sby_check (
             extra_delay, consequent_expr = _consume_delay_prefix(consequent)
             total_delay = base_delay + extra_delay
             antecedent_expr = _balance_parens(antecedent) if antecedent else "1'b1"
-            consequent_expr = (
-                _balance_parens(consequent_expr) if consequent_expr else "1'b1"
-            )
+            consequent_expr = _balance_parens(consequent_expr) if consequent_expr else "1'b1"
 
             if total_delay == 0:
                 if disable_cond:
@@ -1671,9 +1620,7 @@ module {module_name}_sby_check (
                     block_lines.append(f"        if ({disable_cond}) begin")
                     block_lines.append(f"            {trig_name} <= '0;")
                     block_lines.append("        end else begin")
-                    block_lines.append(
-                        f"            {trig_name}[0] <= ({antecedent_expr});"
-                    )
+                    block_lines.append(f"            {trig_name}[0] <= ({antecedent_expr});")
                     for stage in range(total_delay):
                         block_lines.append(
                             f"            {trig_name}[{stage + 1}] <= {trig_name}[{stage}];"
@@ -1683,9 +1630,7 @@ module {module_name}_sby_check (
                     )
                     block_lines.append("        end")
                 else:
-                    block_lines.append(
-                        f"        {trig_name}[0] <= ({antecedent_expr});"
-                    )
+                    block_lines.append(f"        {trig_name}[0] <= ({antecedent_expr});")
                     for stage in range(total_delay):
                         block_lines.append(
                             f"        {trig_name}[{stage + 1}] <= {trig_name}[{stage}];"
@@ -1694,9 +1639,7 @@ module {module_name}_sby_check (
                         f"        if (init_done && {trig_name}[{total_delay}]) assert({consequent_expr});"
                     )
         else:
-            delayed_match = re.match(
-                r"^\(?\s*(.+?)\s*##\s*(\d+)\s*(.+?)\s*\)?$", cond, re.DOTALL
-            )
+            delayed_match = re.match(r"^\(?\s*(.+?)\s*##\s*(\d+)\s*(.+?)\s*\)?$", cond, re.DOTALL)
             if delayed_match:
                 antecedent_expr = _balance_parens(delayed_match.group(1).strip())
                 total_delay = int(delayed_match.group(2))
@@ -1707,9 +1650,7 @@ module {module_name}_sby_check (
                     block_lines.append(f"        if ({disable_cond}) begin")
                     block_lines.append(f"            {trig_name} <= '0;")
                     block_lines.append("        end else begin")
-                    block_lines.append(
-                        f"            {trig_name}[0] <= ({antecedent_expr});"
-                    )
+                    block_lines.append(f"            {trig_name}[0] <= ({antecedent_expr});")
                     for stage in range(total_delay):
                         block_lines.append(
                             f"            {trig_name}[{stage + 1}] <= {trig_name}[{stage}];"
@@ -1719,9 +1660,7 @@ module {module_name}_sby_check (
                     )
                     block_lines.append("        end")
                 else:
-                    block_lines.append(
-                        f"        {trig_name}[0] <= ({antecedent_expr});"
-                    )
+                    block_lines.append(f"        {trig_name}[0] <= ({antecedent_expr});")
                     for stage in range(total_delay):
                         block_lines.append(
                             f"        {trig_name}[{stage + 1}] <= {trig_name}[{stage}];"
@@ -1756,9 +1695,7 @@ module {module_name}_sby_check (
             yosys_code += f"\n    // Cover: inline_cover_{idx}\n"
             if disable_cond:
                 yosys_code += f"    always @(posedge {clk}) begin\n"
-                yosys_code += (
-                    f"        if (!({disable_cond}) && init_done) cover({cond});\n"
-                )
+                yosys_code += f"        if (!({disable_cond}) && init_done) cover({cond});\n"
                 yosys_code += "    end\n"
             else:
                 yosys_code += f"    always @(posedge {clk}) begin\n"
@@ -1773,18 +1710,12 @@ bind {module_name} {module_name}_sby_check sby_inst (.*);
     return yosys_code
 
 
-def _render_sby_config(
-    design_name: str, use_sby_check: bool = True
-) -> Tuple[str, List[str]]:
+def _render_sby_config(design_name: str, use_sby_check: bool = True) -> Tuple[str, List[str]]:
     src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
-    sva_file = (
-        f"{design_name}_sby_check.sv" if use_sby_check else f"{design_name}_sva.sv"
-    )
+    sva_file = f"{design_name}_sby_check.sv" if use_sby_check else f"{design_name}_sva.sv"
     sva_abs = f"{src_dir}/{sva_file}"
     sva_raw = f"{src_dir}/{design_name}_sva.sv"
-    rtl_files = sorted(
-        f for f in _collect_design_rtl(src_dir) if f != sva_abs and f != sva_raw
-    )
+    rtl_files = sorted(f for f in _collect_design_rtl(src_dir) if f != sva_abs and f != sva_raw)
     if os.path.exists(sva_abs):
         rtl_files.append(sva_abs)
 
@@ -1894,18 +1825,14 @@ def check_physical_metrics(design_name):
     """
     import csv
 
-    metrics_path = (
-        f"{OPENLANE_ROOT}/designs/{design_name}/runs/agentrun/reports/metrics.csv"
-    )
+    metrics_path = f"{OPENLANE_ROOT}/designs/{design_name}/runs/agentrun/reports/metrics.csv"
 
     if not os.path.exists(metrics_path):
         # Fallback: Find latest run
         runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
         if os.path.exists(runs_dir):
             runs_dirs = [
-                d
-                for d in os.listdir(runs_dir)
-                if os.path.isdir(os.path.join(runs_dir, d))
+                d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))
             ]
             if runs_dirs:
                 latest_run = max(
@@ -1922,9 +1849,7 @@ def check_physical_metrics(design_name):
             data = next(reader)  # Only one row usually
 
             # Extract key metrics safely handling both OpenLane 1 and 2 keys
-            area = float(
-                data.get("Total_Physical_Cells", data.get("synth_cell_count", 0))
-            )
+            area = float(data.get("Total_Physical_Cells", data.get("synth_cell_count", 0)))
             chip_area_mm2 = float(data.get("DieArea_mm^2", data.get("DIEAREA_mm^2", 0)))
             chip_area_um2 = chip_area_mm2 * 1e6
 
@@ -1974,9 +1899,7 @@ def signoff_check_tool(design_name: str):
     # Timing Check: WNS (Worst Negative Slack) must be >= 0
     # Negative slack means the signal didn't arrive in time.
     if metrics["timing_wns"] < 0:
-        violations.append(
-            f"TIMING VIOLATION: WNS = {metrics['timing_wns']} ns (Must be >= 0)"
-        )
+        violations.append(f"TIMING VIOLATION: WNS = {metrics['timing_wns']} ns (Must be >= 0)")
 
     # Check for excessive area or utilization if needed (optional)
     if metrics["utilization"] > 95:
@@ -2057,8 +1980,7 @@ def run_tb_static_contract_check(
             )
             is not None
             # Generic parameterized: module_name #(...) any_instance_name (
-            or re.search(rf"\b\w+\s*{_param_block}\s*\w+\s*\(", text, re.DOTALL)
-            is not None
+            or re.search(rf"\b\w+\s*{_param_block}\s*\w+\s*\(", text, re.DOTALL) is not None
         )
         has_stimulus = bool(re.search(r"\$urandom|\$random|initial\s+begin", text))
         has_checking = bool(re.search(r"if\s*\(|assert\s*\(", text))
@@ -2106,9 +2028,7 @@ def run_tb_static_contract_check(
         if m:
             _add_issue(code, msg, idx=m.start())
 
-    interface_names = set(
-        re.findall(r"^\s*interface\s+([A-Za-z_]\w*)\b", text, re.MULTILINE)
-    )
+    interface_names = set(re.findall(r"^\s*interface\s+([A-Za-z_]\w*)\b", text, re.MULTILINE))
     interface_names.update(re.findall(r"\b([A-Za-z_]\w*_if)\b", text))
     interface_names = {n for n in interface_names if n}
 
@@ -2216,9 +2136,7 @@ def run_tb_compile_gate(
         report["command"] = cmd
 
         try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120, cwd=tmpdir
-            )
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=tmpdir)
         except subprocess.TimeoutExpired:
             report["timeout"] = True
             report["compile_output"] = "TB compile gate timed out (>120s)."
@@ -2266,10 +2184,9 @@ def run_tb_compile_gate(
                 categories.add("parser_internal_state_error")
             if "syntax error" in low:
                 categories.add("syntax_error")
-            if (
-                "_if" in raw
-                and ("unexpected IDENTIFIER" in raw or "expecting ')'" in raw)
-            ) or ("unexpected identifier" in low and "expecting ')'" in low):
+            if ("_if" in raw and ("unexpected IDENTIFIER" in raw or "expecting ')'" in raw)) or (
+                "unexpected identifier" in low and "expecting ')'" in low
+            ):
                 categories.add("interface_typing_error")
             if "function new" in low and "_if" in low:
                 categories.add("constructor_interface_type_error")
@@ -2287,11 +2204,7 @@ def run_tb_compile_gate(
                 categories.add("compile_error")
         report["issue_categories"] = sorted(categories)
 
-        fp_base = (
-            "|".join(report["issue_categories"])
-            + "|"
-            + "\n".join(report["diagnostics"][:6])
-        )
+        fp_base = "|".join(report["issue_categories"]) + "|" + "\n".join(report["diagnostics"][:6])
         report["fingerprint"] = hashlib.sha256(
             fp_base.encode("utf-8", errors="ignore")
         ).hexdigest()[:16]
@@ -2310,9 +2223,7 @@ def run_tb_compile_gate(
             "unsupported_class_construct",
         }
         if verilator_only_cats & set(report["issue_categories"]):
-            iverilog_ok, iverilog_msg = _iverilog_compile_tb(
-                tb_path, rtl_path, design_name
-            )
+            iverilog_ok, iverilog_msg = _iverilog_compile_tb(tb_path, rtl_path, design_name)
             report["iverilog_fallback_ok"] = iverilog_ok
             report["iverilog_fallback_msg"] = iverilog_msg
             if iverilog_ok:
@@ -2322,9 +2233,7 @@ def run_tb_compile_gate(
     return report["ok"], report
 
 
-def _iverilog_compile_tb(
-    tb_path: str, rtl_path: str, design_name: str
-) -> Tuple[bool, str]:
+def _iverilog_compile_tb(tb_path: str, rtl_path: str, design_name: str) -> Tuple[bool, str]:
     """Try compiling TB + RTL with iverilog as a Verilator fallback."""
     src_dir = os.path.dirname(rtl_path)
     all_rtl = _collect_design_rtl(src_dir)
@@ -2343,9 +2252,7 @@ def _iverilog_compile_tb(
             os.path.basename(_stage_path(tb_path, staged_map)),
         ]
         try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir
-            )
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
             tool_result = _build_tool_result(
                 "iverilog",
                 ok=completed.returncode == 0,
@@ -2365,9 +2272,7 @@ def _iverilog_compile_tb(
             if tool_result["ok"]:
                 return (
                     True,
-                    f"iverilog compile OK: {combined[:500]}"
-                    if combined
-                    else "iverilog compile OK",
+                    f"iverilog compile OK: {combined[:500]}" if combined else "iverilog compile OK",
                 )
             return False, f"iverilog compile failed:\n{combined[:2000]}"
         except FileNotFoundError:
@@ -2407,9 +2312,7 @@ def classify_compile_errors(compile_report: Dict[str, Any]) -> List[Dict[str, An
     # %Error: file.v:17:33: syntax error, unexpected ';'
     # %Error-<tag>: file.v:10: ...
     # %Warning-<tag>: file.v:15: ...
-    loc_pat = re.compile(
-        r"^%(?:Error|Warning)(?:-\w+)?:\s*([^:]+):(\d+)(?::\d+)?:\s*(.+)$"
-    )
+    loc_pat = re.compile(r"^%(?:Error|Warning)(?:-\w+)?:\s*([^:]+):(\d+)(?::\d+)?:\s*(.+)$")
     # Some messages lack a file:line prefix
     generic_pat = re.compile(r"^%(?:Error|Warning)(?:-\w+)?:\s*(.+)$")
 
@@ -2470,9 +2373,7 @@ def _classify_single_error(msg: str, fname: str, lineno: int) -> tuple:
         return ("missing_interface", "regenerate")
 
     # ---- dotted reference to missing module/interface (cascade from missing interface) ----
-    if "dotted reference" in low and (
-        "missing module" in low or "missing interface" in low
-    ):
+    if "dotted reference" in low and ("missing module" in low or "missing interface" in low):
         return ("dotted_ref_missing_interface", "rewrite")
 
     # ---- can't find definition in dotted variable (e.g. vif.clk) ----
@@ -2492,11 +2393,7 @@ def _classify_single_error(msg: str, fname: str, lineno: int) -> tuple:
         return ("covergroup_unsupported", "strip_block")
 
     # ---- port/pin mismatch ----
-    if (
-        "pin not found" in low
-        or "pinnotfound" in low
-        or ("port" in low and "not found" in low)
-    ):
+    if "pin not found" in low or "pinnotfound" in low or ("port" in low and "not found" in low):
         return ("port_mismatch", "regenerate")
 
     # ---- undeclared identifier ----
@@ -2603,9 +2500,7 @@ def repair_tb_for_verilator(tb_code: str, compile_report: Dict[str, Any]) -> str
         r"^\s*\w+_if\s+\w+\s*\(\s*\)\s*;", fixed, re.MULTILINE
     ):
         # Find all interface instance names: ``<if_type> <inst_name>();``
-        if_instances = re.findall(
-            r"^\s*(\w+_if)\s+(\w+)\s*\(\s*\)\s*;", fixed, re.MULTILINE
-        )
+        if_instances = re.findall(r"^\s*(\w+_if)\s+(\w+)\s*\(\s*\)\s*;", fixed, re.MULTILINE)
         for if_type, inst_name in if_instances:
             # Remove the interface instantiation line
             fixed = re.sub(
@@ -2660,9 +2555,7 @@ def repair_tb_for_verilator(tb_code: str, compile_report: Dict[str, Any]) -> str
         result: List[str] = []
         # Stack of (begin_line_index, has_procedural_stmt)
         block_stack: List[List[Any]] = []
-        deferred: List[
-            tuple
-        ] = []  # (original_index, declaration_line, insert_after_index)
+        deferred: List[tuple] = []  # (original_index, declaration_line, insert_after_index)
 
         for i, line in enumerate(lines):
             stripped = line.strip()
@@ -2852,9 +2745,7 @@ def repair_tb_for_verilator(tb_code: str, compile_report: Dict[str, Any]) -> str
     fixed = re.sub(r"^\s*[A-Za-z_]\w*\s+cov\s*;.*$", "", fixed, flags=re.MULTILINE)
     fixed = re.sub(r"^\s*cov\s*=\s*new\s*;.*$", "", fixed, flags=re.MULTILINE)
     fixed = re.sub(r"^\s*cov\.sample\s*\(\s*\)\s*;.*$", "", fixed, flags=re.MULTILINE)
-    fixed = re.sub(
-        r"^\s*[A-Za-z_]\w*\.cov\.sample\s*\(\s*\)\s*;.*$", "", fixed, flags=re.MULTILINE
-    )
+    fixed = re.sub(r"^\s*[A-Za-z_]\w*\.cov\.sample\s*\(\s*\)\s*;.*$", "", fixed, flags=re.MULTILINE)
 
     # Normalize inline object creation declarations in procedural blocks.
     fixed = re.sub(
@@ -3029,9 +2920,7 @@ def run_simulation(design_name: str) -> tuple:
                 stdout=run_result.stdout,
                 stderr=run_result.stderr,
                 diagnostics=_collect_diag_lines(
-                    (
-                        (run_result.stdout or "") + "\n" + (run_result.stderr or "")
-                    ).strip(),
+                    ((run_result.stdout or "") + "\n" + (run_result.stderr or "")).strip(),
                     limit=20,
                 ),
                 metrics={
@@ -3145,9 +3034,7 @@ def run_openlane(
         log_file_path = os.path.join(design_dir, "harden.log")
         try:
             with open(log_file_path, "w") as f:
-                subprocess.Popen(
-                    cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True
-                )
+                subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
             return True, f"Background task started. Logs: {log_file_path}"
         except Exception as e:
             return False, f"Failed to start background process: {str(e)}"
@@ -3161,7 +3048,9 @@ def run_openlane(
         return False, f"OpenLane command failed (tool not found or OS error): {str(e)}."
 
     # Check if GDS was created
-    gds_path = f"{OPENLANE_ROOT}/designs/{design_name}/runs/{run_tag}/results/final/gds/{design_name}.gds"
+    gds_path = (
+        f"{OPENLANE_ROOT}/designs/{design_name}/runs/{run_tag}/results/final/gds/{design_name}.gds"
+    )
     success = os.path.exists(gds_path)
 
     if success:
@@ -3217,9 +3106,7 @@ def run_gls_simulation(design_name: str) -> tuple:
         runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
         if os.path.exists(runs_dir):
             runs_dirs = [
-                d
-                for d in os.listdir(runs_dir)
-                if os.path.isdir(os.path.join(runs_dir, d))
+                d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))
             ]
             if runs_dirs:
                 latest_run = max(
@@ -3241,20 +3128,16 @@ def run_gls_simulation(design_name: str) -> tuple:
     # Finding PDK Verilog models
     pdk_v_path = None
 
-    # Determine lib name based on PDK (naive mapping for now)
-    # TODO: Make this part of config or read from PDK config
-    if "sky130" in PDK:
-        lib_name = "sky130_fd_sc_hd"
-    elif "gf180" in PDK:
-        lib_name = "gf180mcu_fd_sc_mcu7t5v0"  # Example
-    else:
-        lib_name = "sky130_fd_sc_hd"  # Fallback
+    tool_config = get_pdk_tool_config(PDK)
+    lib_name = tool_config.get("std_cell_library", "sky130_fd_sc_hd")
+    pdk_dir = tool_config.get("pdk_dir", PDK)
 
     common_pdk_paths = [
         os.path.join(PDK_ROOT, PDK, f"libs.ref/{lib_name}/verilog/{lib_name}.v"),
+        os.path.join(PDK_ROOT, pdk_dir, f"libs.ref/{lib_name}/verilog/{lib_name}.v"),
         os.path.join(
             PDK_ROOT,
-            f"ciel/sky130/versions/*/sky130A/libs.ref/{lib_name}/verilog/{lib_name}.v",
+            f"ciel/{pdk_dir}/versions/*/{pdk_dir}/libs.ref/{lib_name}/verilog/{lib_name}.v",
         ),
     ]
 
@@ -3266,7 +3149,7 @@ def run_gls_simulation(design_name: str) -> tuple:
     if not pdk_v_path:
         return (
             False,
-            "Could not locate sky130 standard cell Verilog models. GLS aborted.",
+            f"Could not locate {lib_name} standard cell Verilog models for PDK {PDK}. GLS aborted.",
         )
 
     primitives_v = os.path.join(os.path.dirname(pdk_v_path), "primitives.v")
@@ -3304,9 +3187,7 @@ def run_gls_simulation(design_name: str) -> tuple:
                     stderr=compile_result.stderr,
                     diagnostics=_collect_diag_lines(
                         (
-                            (compile_result.stdout or "")
-                            + "\n"
-                            + (compile_result.stderr or "")
+                            (compile_result.stdout or "") + "\n" + (compile_result.stderr or "")
                         ).strip()
                     ),
                     metrics={"mode": "gls_compile"},
@@ -3336,9 +3217,7 @@ def run_gls_simulation(design_name: str) -> tuple:
                     stdout=run_result.stdout,
                     stderr=run_result.stderr,
                     diagnostics=_collect_diag_lines(
-                        (
-                            (run_result.stdout or "") + "\n" + (run_result.stderr or "")
-                        ).strip(),
+                        ((run_result.stdout or "") + "\n" + (run_result.stderr or "")).strip(),
                         limit=20,
                     ),
                     metrics={"mode": "gls_run"},
@@ -3446,9 +3325,7 @@ def parse_eda_log_summary(log_path: str, kind: str, top_n: int = 10) -> Dict[str
     return summary
 
 
-def extract_top_sta_paths(
-    sta_report_path: str, top_n: int = 10
-) -> List[Dict[str, Any]]:
+def extract_top_sta_paths(sta_report_path: str, top_n: int = 10) -> List[Dict[str, Any]]:
     """Extract top failing paths/endpoints from STA report text."""
     results: List[Dict[str, Any]] = []
     if not os.path.exists(sta_report_path):
@@ -3482,9 +3359,7 @@ def extract_top_sta_paths(
     return results[:top_n]
 
 
-def parse_congestion_metrics(
-    design_name: str, run_tag: str = "agentrun"
-) -> Dict[str, Any]:
+def parse_congestion_metrics(design_name: str, run_tag: str = "agentrun") -> Dict[str, Any]:
     """Parse global routing congestion from OpenLane routing logs."""
     log_path = os.path.join(
         OPENLANE_ROOT,
@@ -3587,9 +3462,7 @@ prep -top {top}
         return False, "EQY binary not executable"
 
     text = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
-    if result.returncode == 0 and re.search(
-        r"PASS|equivalent|success", text, re.IGNORECASE
-    ):
+    if result.returncode == 0 and re.search(r"PASS|equivalent|success", text, re.IGNORECASE):
         return True, text[-2000:]
     return False, text[-4000:]
 
@@ -3666,18 +3539,14 @@ def _coverage_shell(
 
 
 def _count_signal_decls(rtl_content: str) -> List[str]:
-    return re.findall(
-        r"\b(?:reg|wire|logic|output|input)\s+(?:\[[^\]]+\])?\s*(\w+)", rtl_content
-    )
+    return re.findall(r"\b(?:reg|wire|logic|output|input)\s+(?:\[[^\]]+\])?\s*(\w+)", rtl_content)
 
 
 def _read_rtl_signal_stats(rtl_file: str) -> Tuple[List[str], int]:
     with open(rtl_file, "r") as f:
         rtl_content = f.read()
     rtl_lines = [
-        l.strip()
-        for l in rtl_content.splitlines()
-        if l.strip() and not l.strip().startswith("//")
+        l.strip() for l in rtl_content.splitlines() if l.strip() and not l.strip().startswith("//")
     ]
     return _count_signal_decls(rtl_content), len(rtl_lines)
 
@@ -3752,12 +3621,8 @@ def _parse_verilator_coverage_dat(cov_dat: str, src_dir: str) -> Dict[str, float
     if toggle_points > 0:
         data["toggle_pct"] = round((toggle_hit / toggle_points) * 100.0, 2)
     if data["toggle_pct"] <= 0.0:
-        data["toggle_pct"] = (
-            round(data["line_pct"] * 0.85, 2) if data["line_pct"] > 0 else 0.0
-        )
-    data["branch_pct"] = (
-        round(data["line_pct"] * 0.9, 2) if data["line_pct"] > 0 else 0.0
-    )
+        data["toggle_pct"] = round(data["line_pct"] * 0.85, 2) if data["line_pct"] > 0 else 0.0
+    data["branch_pct"] = round(data["line_pct"] * 0.9, 2) if data["line_pct"] > 0 else 0.0
     data["overall_pct"] = round((data["line_pct"] + data["toggle_pct"]) / 2.0, 2)
     return data
 
@@ -3767,9 +3632,7 @@ def run_verilator_coverage(
 ) -> Tuple[bool, str, Dict[str, Any]]:
     src_dir = os.path.dirname(rtl_file)
     sim_exec = "sim_cov_exec"
-    result = _coverage_shell(
-        design_name, backend="verilator", coverage_mode=coverage_mode
-    )
+    result = _coverage_shell(design_name, backend="verilator", coverage_mode=coverage_mode)
     result["raw_diag_path"] = ""
 
     if not os.path.exists(rtl_file):
@@ -3835,9 +3698,7 @@ def run_verilator_coverage(
                 returncode=comp.returncode,
                 stdout=comp.stdout,
                 stderr=comp.stderr,
-                diagnostics=_collect_diag_lines(
-                    (comp.stderr or comp.stdout or "").strip()
-                ),
+                diagnostics=_collect_diag_lines((comp.stderr or comp.stdout or "").strip()),
                 metrics={"mode": "coverage_compile"},
             ),
             staged_map,
@@ -3859,20 +3720,12 @@ def run_verilator_coverage(
             result["diagnostics"] = list(comp_tool["diagnostics"])[:12]
             return (
                 False,
-                (
-                    (
-                        comp_tool["stderr"]
-                        or comp_tool["stdout"]
-                        or "Verilator compile failed"
-                    )[:1200]
-                ),
+                ((comp_tool["stderr"] or comp_tool["stdout"] or "Verilator compile failed")[:1200]),
                 result,
             )
 
         try:
-            run = subprocess.run(
-                run_cmd, capture_output=True, text=True, timeout=300, cwd=tmpdir
-            )
+            run = subprocess.run(run_cmd, capture_output=True, text=True, timeout=300, cwd=tmpdir)
         except subprocess.TimeoutExpired:
             result["infra_failure"] = True
             result["error_kind"] = "run_timeout"
@@ -3908,9 +3761,7 @@ def run_verilator_coverage(
                 "returncode": run_tool["returncode"],
                 "stdout": run_tool["stdout"],
                 "stderr": run_tool["stderr"],
-                "result": "PASS"
-                if sim_passed
-                else ("FAIL" if run.returncode != 0 else "ERROR"),
+                "result": "PASS" if sim_passed else ("FAIL" if run.returncode != 0 else "ERROR"),
                 "metrics": dict(run_tool["metrics"]),
                 "coverage_metrics_valid": False,
             }
@@ -3961,16 +3812,12 @@ def run_verilator_coverage(
             result["ok"] = False
             result["infra_failure"] = True
             result["error_kind"] = "run_error"
-            result["diagnostics"] = [
-                x.strip() for x in sim_text.splitlines() if x.strip()
-            ][:10]
+            result["diagnostics"] = [x.strip() for x in sim_text.splitlines() if x.strip()][:10]
         elif rtl_line_count > 0 and result["line_pct"] <= 0.0 and sim_passed:
             result["ok"] = False
             result["infra_failure"] = True
             result["error_kind"] = "parse_error"
-            result["diagnostics"] = [
-                "Coverage metrics are empty despite passing simulation."
-            ]
+            result["diagnostics"] = ["Coverage metrics are empty despite passing simulation."]
         else:
             result["coverage_metrics_valid"] = True
         return sim_passed, sim_text, result
@@ -3980,9 +3827,7 @@ def run_iverilog_coverage(
     design_name: str, rtl_file: str, tb_file: str, coverage_mode: str = "full_oss"
 ) -> Tuple[bool, str, Dict[str, Any]]:
     src_dir = os.path.dirname(rtl_file)
-    result = _coverage_shell(
-        design_name, backend="iverilog", coverage_mode=coverage_mode
-    )
+    result = _coverage_shell(design_name, backend="iverilog", coverage_mode=coverage_mode)
     result["raw_diag_path"] = ""
 
     with open(tb_file, "r", errors="ignore") as f:
@@ -4058,13 +3903,7 @@ def run_iverilog_coverage(
                 )
             return (
                 False,
-                (
-                    (
-                        comp_tool["stderr"]
-                        or comp_tool["stdout"]
-                        or "Icarus compile failed"
-                    )[:1200]
-                ),
+                ((comp_tool["stderr"] or comp_tool["stdout"] or "Icarus compile failed")[:1200]),
                 result,
             )
 
@@ -4116,18 +3955,14 @@ def run_iverilog_coverage(
                 "returncode": run_tool["returncode"],
                 "stdout": run_tool["stdout"],
                 "stderr": run_tool["stderr"],
-                "result": "PASS"
-                if sim_passed
-                else ("FAIL" if run.returncode != 0 else "ERROR"),
+                "result": "PASS" if sim_passed else ("FAIL" if run.returncode != 0 else "ERROR"),
                 "metrics": dict(run_tool["metrics"]),
                 "coverage_metrics_valid": False,
             }
         )
 
         toggled = 0
-        displayed_signals = set(
-            re.findall(r"(\w+)\s*=\s*[0-9a-fxzXZhHbB_\']+", sim_text)
-        )
+        displayed_signals = set(re.findall(r"(\w+)\s*=\s*[0-9a-fxzXZhHbB_\']+", sim_text))
         toggled = len(displayed_signals.intersection(signal_set))
         vcd_candidates = [
             os.path.join(src_dir, f"{design_name}_cov.vcd"),
@@ -4180,9 +4015,7 @@ def run_iverilog_coverage(
             result["ok"] = False
             result["infra_failure"] = True
             result["error_kind"] = "run_error"
-            result["diagnostics"] = [
-                x.strip() for x in sim_text.splitlines() if x.strip()
-            ][:10]
+            result["diagnostics"] = [x.strip() for x in sim_text.splitlines() if x.strip()][:10]
         return sim_passed, sim_text, result
 
 
@@ -4234,9 +4067,7 @@ def run_simulation_with_coverage(
     alt = "iverilog" if primary == "verilator" else "verilator"
 
     runner = run_verilator_coverage if primary == "verilator" else run_iverilog_coverage
-    sim_passed, sim_output, cov = runner(
-        design_name, rtl_file, tb_file, coverage_mode="full_oss"
-    )
+    sim_passed, sim_output, cov = runner(design_name, rtl_file, tb_file, coverage_mode="full_oss")
     cov["tb_style"] = tb_style
     cov["selected_backend"] = primary
     cov["fallback_policy"] = policy
@@ -4261,9 +4092,7 @@ def run_simulation_with_coverage(
         return sim_passed, sim_output, skipped
 
     if policy == "fallback_oss":
-        alt_runner = (
-            run_verilator_coverage if alt == "verilator" else run_iverilog_coverage
-        )
+        alt_runner = run_verilator_coverage if alt == "verilator" else run_iverilog_coverage
         alt_passed, alt_output, alt_cov = alt_runner(
             design_name, rtl_file, tb_file, coverage_mode="fallback_oss"
         )
@@ -4352,9 +4181,7 @@ def parse_drc_lvs_reports(design_name: str) -> tuple:
         runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
         if os.path.exists(runs_dir):
             runs_dirs = [
-                d
-                for d in os.listdir(runs_dir)
-                if os.path.isdir(os.path.join(runs_dir, d))
+                d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))
             ]
             if runs_dirs:
                 latest_run = max(
@@ -4446,9 +4273,7 @@ def parse_drc_lvs_reports(design_name: str) -> tuple:
             details["lvs_report"] = lvs_content[:2000]
 
             # Prefer explicit numeric result when available.
-            total_err_match = re.search(
-                r"total\s+errors?\s*=\s*(\d+)", lvs_content, re.IGNORECASE
-            )
+            total_err_match = re.search(r"total\s+errors?\s*=\s*(\d+)", lvs_content, re.IGNORECASE)
             if total_err_match:
                 details["lvs_errors"] = int(total_err_match.group(1))
             # Check common clean-match phrases
@@ -4473,9 +4298,7 @@ def parse_drc_lvs_reports(design_name: str) -> tuple:
                         low = line.lower()
                         if "no mismatch" in low or "no mismatches" in low:
                             continue
-                        if any(
-                            tok in low for tok in ["error", "mismatch", "discrepancy"]
-                        ):
+                        if any(tok in low for tok in ["error", "mismatch", "discrepancy"]):
                             issue_lines.append(line)
                     details["lvs_errors"] = len(issue_lines)
         except Exception as e:
@@ -4495,9 +4318,7 @@ def parse_drc_lvs_reports(design_name: str) -> tuple:
                 ant_content = f.read()
             details["antenna_report"] = ant_content[:1000]
 
-            viol_match = re.search(
-                r"(\d+)\s*(?:violation|pin)", ant_content, re.IGNORECASE
-            )
+            viol_match = re.search(r"(\d+)\s*(?:violation|pin)", ant_content, re.IGNORECASE)
             if viol_match:
                 details["antenna_violations"] = int(viol_match.group(1))
             else:
@@ -4662,9 +4483,7 @@ def generate_design_doc(design_name: str, spec: str = "", metrics: dict = None) 
             # Calculate bit width
             width_match = re.match(r"\[(\d+):(\d+)\]", width)
             if width_match:
-                bit_width = (
-                    abs(int(width_match.group(1)) - int(width_match.group(2))) + 1
-                )
+                bit_width = abs(int(width_match.group(1)) - int(width_match.group(2))) + 1
             else:
                 bit_width = 1
 
@@ -4680,23 +4499,17 @@ def generate_design_doc(design_name: str, spec: str = "", metrics: dict = None) 
         module_name = design_name
 
     # Parse parameters
-    param_pattern = re.compile(
-        r"(?:parameter|localparam)\s+(?:\[[\d:]+\]\s*)?(\w+)\s*=\s*([^;,]+)"
-    )
+    param_pattern = re.compile(r"(?:parameter|localparam)\s+(?:\[[\d:]+\]\s*)?(\w+)\s*=\s*([^;,]+)")
     for m in param_pattern.finditer(rtl_content):
         parameters.append({"name": m.group(1), "value": m.group(2).strip()})
 
     # Parse FSM states
     fsm_states = []
     # Check for enum-based FSM
-    enum_match = re.search(
-        r"typedef\s+enum\s+(?:logic\s*\[[\d:]+\]\s*)?\{([^}]+)\}", rtl_content
-    )
+    enum_match = re.search(r"typedef\s+enum\s+(?:logic\s*\[[\d:]+\]\s*)?\{([^}]+)\}", rtl_content)
     if enum_match:
         states_str = enum_match.group(1)
-        fsm_states = [
-            s.strip().split("=")[0].strip() for s in states_str.split(",") if s.strip()
-        ]
+        fsm_states = [s.strip().split("=")[0].strip() for s in states_str.split(",") if s.strip()]
     else:
         # Check for localparam-based FSM
         state_params = re.findall(
@@ -4734,9 +4547,7 @@ def generate_design_doc(design_name: str, spec: str = "", metrics: dict = None) 
     doc += "| Pin Name | Direction | Width | Type |\n"
     doc += "|----------|-----------|-------|------|\n"
     for p in ports:
-        doc += (
-            f"| `{p['name']}` | {p['direction']} | {p['width']}-bit | {p['type']} |\n"
-        )
+        doc += f"| `{p['name']}` | {p['direction']} | {p['width']}-bit | {p['type']} |\n"
 
     if not ports:
         doc += "| *No ports parsed* | — | — | — |\n"
@@ -4806,11 +4617,7 @@ def parse_sta_signoff(design_name: str) -> dict:
             return {"error": "No runs directory found", "timing_met": False}
 
         latest_run = sorted(
-            [
-                d
-                for d in os.listdir(runs_dir)
-                if os.path.isdir(os.path.join(runs_dir, d))
-            ]
+            [d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))]
         )[-1]
         signoff_dir = os.path.join(runs_dir, latest_run, "reports", "signoff")
         if not os.path.exists(signoff_dir):
@@ -4887,8 +4694,7 @@ def parse_sta_signoff(design_name: str) -> dict:
             worst_hold = 0.0
 
         timing_met = all(
-            (float(c["setup_slack"]) >= 0.0 and float(c["hold_slack"]) >= 0.0)
-            for c in corners
+            (float(c["setup_slack"]) >= 0.0 and float(c["hold_slack"]) >= 0.0) for c in corners
         )  # type: ignore
         top_paths = sorted(top_paths, key=lambda x: x.get("slack", 0.0))[:10]
 
@@ -4932,11 +4738,7 @@ def parse_power_signoff(design_name: str) -> dict:
             return result
 
         latest_run = sorted(
-            [
-                d
-                for d in os.listdir(runs_dir)
-                if os.path.isdir(os.path.join(runs_dir, d))
-            ]
+            [d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))]
         )[-1]
         report_dir = os.path.join(runs_dir, latest_run, "reports", "signoff")
         if not os.path.exists(report_dir):
@@ -4966,9 +4768,7 @@ def parse_power_signoff(design_name: str) -> dict:
                 result["leakage_power_w"] = float(total_match.group(3))
                 result["total_power_w"] = float(total_match.group(4))
             else:
-                total_match = re.search(
-                    r"Total\\s+Power.*?([\\d.eE+\\-]+)", content, re.IGNORECASE
-                )
+                total_match = re.search(r"Total\\s+Power.*?([\\d.eE+\\-]+)", content, re.IGNORECASE)
                 if total_match:
                     result["total_power_w"] = float(total_match.group(1))
 
@@ -5009,8 +4809,7 @@ def parse_power_signoff(design_name: str) -> dict:
 
         # 5% of 1.8V ~= 90mV
         result["power_ok"] = (
-            float(result["irdrop_max_vpwr"]) <= 0.09
-            and float(result["irdrop_max_vgnd"]) <= 0.09
+            float(result["irdrop_max_vpwr"]) <= 0.09 and float(result["irdrop_max_vgnd"]) <= 0.09
         )  # type: ignore
         return result
     except Exception:

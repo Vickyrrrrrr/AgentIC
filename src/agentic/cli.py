@@ -1529,8 +1529,16 @@ def get_llm(
             timeout=300,
             extra_body=extra_body if extra_body else None,
         )
-        # Test the connection
-        llm.call([{"role": "user", "content": "Hi"}])
+
+        # Test the connection with rate limiting for Z.AI
+        from .tools.rate_limiter import rate_limited_call
+
+        rate_limited_call(
+            llm.call,
+            [{"role": "user", "content": "Hi"}],
+            model=model,
+            base_url=base_url,
+        )
         sys.stdout = _original_stdout
         sys.stderr = _original_stderr
 
@@ -2220,10 +2228,17 @@ def verify(name: str = typer.Argument(..., help="Design name to verify")):
 
 @app.command("synth")
 def synth(
-    rtl_file: str = typer.Option(..., "--rtl", "-r", help="RTL Verilog source file"),
+    rtl_file: str = typer.Option(
+        ...,
+        "--rtl",
+        "-r",
+        help="RTL Verilog source file (must be exact path, e.g., designs/my_design/src/my_design.v)",
+    ),
     top: str = typer.Option(..., "--top", "-t", help="Top-level module name"),
     output_dir: str = typer.Option("./synth_out", "--out", "-o", help="Output directory"),
-    pdk: str = typer.Option("sky130", "--pdk", help="PDK: sky130, gf180mcu"),
+    pdk: str = typer.Option(
+        "", "--pdk", help="PDK for area estimation (optional, e.g., sky130, gf180mcu)"
+    ),
     clk_ns: float = typer.Option(
         10.0, "--clk", help="Clock constraint in ns (e.g., 10.0 = 100MHz)"
     ),
@@ -2235,16 +2250,30 @@ def synth(
     - Gate-level netlist for formal verification
     - Pre-route timing estimates
     - Cell count and area metrics
+
+    Note: PDK is optional for synthesis (Yosys is PDK-agnostic).
+    If not specified, uses sky130 defaults for area estimation.
     """
     verify_license()
+
+    # Resolve PDK - use auto-detection or default (synth doesn't require PDK)
+    from .config import resolve_pdk, PDK_ROOT, WORKSPACE_ROOT
+
+    resolved_pdk, pdk_profile, detected_root = resolve_pdk(
+        requested_pdk=pdk if pdk else None,
+        design_path=rtl_file,
+        required=False,  # Synth doesn't require PDK
+    )
+    effective_pdk = resolved_pdk
+    effective_pdk_root = detected_root or PDK_ROOT
+
     console.print(
         Panel(
             f"[accent]Yosys Synthesis[/accent]\n"
-            f"RTL: {rtl_file}\nTop: {top}\nPDK: {pdk}\nClock: {clk_ns}ns",
+            f"RTL: {rtl_file}\nTop: {top}\nPDK: {effective_pdk} (for area estimation)\nClock: {clk_ns}ns",
             title="🛠️ Synthesis",
         )
     )
-    from .config import WORKSPACE_ROOT, PDK_ROOT, PDK
 
     _output_dir = os.path.join(output_dir, f"synth_{top}")
 
@@ -2252,8 +2281,8 @@ def synth(
         rtl_files=[rtl_file],
         top_module=top,
         output_dir=_output_dir,
-        pdk=pdk,
-        pdk_root=PDK_ROOT,
+        pdk=effective_pdk,
+        pdk_root=effective_pdk_root,
         clk_constraint=clk_ns,
     )
 
@@ -2284,6 +2313,7 @@ def synth(
                 "lut_count": result.lut_count,
                 "gate_count": result.gate_count,
                 "area_um2": result.area_um2,
+                "pdk": effective_pdk,
                 "warnings": result.warnings,
             }
         )
@@ -2291,14 +2321,18 @@ def synth(
 
 @app.command("sta")
 def sta(
-    netlist: str = typer.Option(..., "--netlist", "-n", help="Gate-level Verilog netlist"),
-    sdc: str = typer.Option(..., "--sdc", help="SDC timing constraints file"),
-    lib: str = typer.Option(..., "--lib", "-l", help="Liberty timing library (.lib) file"),
+    netlist: str = typer.Option(
+        ..., "--netlist", "-n", help="Gate-level Verilog netlist (must be exact path)"
+    ),
+    sdc: str = typer.Option(..., "--sdc", help="SDC timing constraints file (must be exact path)"),
+    lib: str = typer.Option(
+        ..., "--lib", "-l", help="Liberty timing library (.lib) file (must be exact path)"
+    ),
     output_dir: str = typer.Option("./sta_out", "--out", "-o", help="Output directory"),
     corner: str = typer.Option("tt", "--corner", "-c", help="Corner: tt, ss, ff"),
     multi_corner: bool = typer.Option(False, "--multi-corner", help="Run all corners (ss/tt/ff)"),
     min_period_ns: float = typer.Option(10.0, "--period", help="Clock period constraint in ns"),
-    pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
+    pdk: str = typer.Option("", "--pdk", help="PDK name (auto-detected if omitted)"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
     """Run OpenSTA static timing analysis (pre or post PnR).
@@ -2309,10 +2343,22 @@ def sta(
     - FF (fast-fast): worst hold
     """
     verify_license()
+
+    # Resolve PDK - auto-detect or error
+    from .config import resolve_pdk, PDK_ROOT
+
+    resolved_pdk, pdk_profile, detected_root = resolve_pdk(
+        requested_pdk=pdk if pdk else None,
+        design_path=netlist,
+        required=True,  # STA needs PDK for proper timing analysis
+    )
+    effective_pdk = resolved_pdk
+    effective_pdk_root = detected_root or PDK_ROOT
+
     console.print(
         Panel(
             f"[accent]OpenSTA Static Timing Analysis[/accent]\n"
-            f"Netlist: {netlist}\nCorner: {corner} | Multi-corner: {multi_corner}",
+            f"Netlist: {netlist}\nPDK: {effective_pdk}\nCorner: {corner} | Multi-corner: {multi_corner}",
             title="⏱️ Timing Analysis",
         )
     )
@@ -2328,7 +2374,8 @@ def sta(
             output_dir=output_dir,
             corners=["ss", "tt", "ff"],
             min_period_ns=min_period_ns,
-            pdk=pdk,
+            pdk=effective_pdk,
+            pdk_root=effective_pdk_root,
         )
         for key, report in result.corners.items():
             icon = "✓" if report.ok else "✗"
@@ -2353,7 +2400,8 @@ def sta(
             output_dir=output_dir,
             corner=corner,
             min_period_ns=min_period_ns,
-            pdk=pdk,
+            pdk=effective_pdk,
+            pdk_root=effective_pdk_root,
         )
         if result.ok:
             console.print(f"  [success]✓ STA PASS [{corner}][/success]")
@@ -2381,14 +2429,19 @@ def sta(
 
 @app.command("dft")
 def dft(
-    rtl_file: str = typer.Option(..., "--rtl", "-r", help="RTL Verilog source file"),
+    rtl_file: str = typer.Option(
+        ...,
+        "--rtl",
+        "-r",
+        help="RTL Verilog source file (must be exact path, e.g., designs/my_design/src/my_design.v)",
+    ),
     top: str = typer.Option(..., "--top", "-t", help="Top-level module name"),
     output_dir: str = typer.Option("./dft_out", "--out", "-o", help="Output directory"),
     scan_chains: int = typer.Option(4, "--chains", help="Number of scan chains"),
     testability: bool = typer.Option(
         False, "--testability", help="Run RTL testability analysis only"
     ),
-    pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
+    pdk: str = typer.Option("", "--pdk", help="PDK name (auto-detected if omitted)"),
 ):
     """Run DFT scan insertion and ATPG pattern generation.
 
@@ -2397,12 +2450,26 @@ def dft(
     - ATPG pattern generation
     - MBIST wrapper generation
     - JTAG infrastructure
+
+    Note: --pdk is optional. If not provided, AgentIC will auto-detect.
     """
     verify_license()
+
+    # Resolve PDK - auto-detect or use default for DFT
+    from .config import resolve_pdk, PDK_ROOT
+
+    resolved_pdk, pdk_profile, detected_root = resolve_pdk(
+        requested_pdk=pdk if pdk else None,
+        design_path=rtl_file,
+        required=False,  # DFT doesn't strictly require PDK
+    )
+    effective_pdk = resolved_pdk
+    effective_pdk_root = detected_root or PDK_ROOT
+
     console.print(
         Panel(
             f"[accent]DFT Scan Insertion[/accent]\n"
-            f"RTL: {rtl_file}\nTop: {top}\nChains: {scan_chains}",
+            f"RTL: {rtl_file}\nTop: {top}\nChains: {scan_chains}\nPDK: {effective_pdk}",
             title="🔬 Design for Test",
         )
     )
@@ -2422,6 +2489,8 @@ def dft(
         top_module=top,
         output_dir=output_dir,
         scan_chain_count=scan_chains,
+        pdk=effective_pdk,
+        pdk_root=effective_pdk_root,
     )
 
     if result.ok:
@@ -2440,19 +2509,43 @@ def dft(
 
 @app.command("power")
 def power(
-    netlist: str = typer.Option(..., "--netlist", "-n", help="Gate-level Verilog netlist"),
+    netlist: str = typer.Option(
+        ..., "--netlist", "-n", help="Gate-level Verilog netlist (must be exact path)"
+    ),
     output_dir: str = typer.Option("./power_out", "--out", "-o", help="Output directory"),
-    vdd: float = typer.Option(1.8, "--vdd", help="Supply voltage in volts"),
+    vdd: float = typer.Option(
+        0.0, "--vdd", help="Supply voltage in volts (auto-detected from PDK if 0)"
+    ),
     freq_mhz: float = typer.Option(50.0, "--freq", help="Clock frequency in MHz"),
     spef: str = typer.Option("", "--spef", help="SPEF parasitic file for accurate power"),
-    pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
+    pdk: str = typer.Option("", "--pdk", help="PDK name (auto-detected if omitted)"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
-    """Run power analysis with dynamic/leakage breakdown and IR-drop check."""
+    """Run power analysis with dynamic/leakage breakdown and IR-drop check.
+
+    Note: --vdd and --pdk are optional. If not provided, AgentIC will
+    auto-detect the PDK and use its voltage settings.
+    """
     verify_license()
+
+    # Resolve PDK - auto-detect or error
+    from .config import resolve_pdk, PDK_ROOT, get_pdk_tool_config
+
+    resolved_pdk, pdk_profile, detected_root = resolve_pdk(
+        requested_pdk=pdk if pdk else None,
+        design_path=netlist,
+        required=True,  # Power analysis needs PDK for voltage
+    )
+    effective_pdk = resolved_pdk
+    effective_pdk_root = detected_root or PDK_ROOT
+
+    # Auto-detect voltage from PDK if not specified
+    tool_config = get_pdk_tool_config(effective_pdk)
+    effective_vdd = vdd if vdd > 0 else float(tool_config.get("voltage_vdd", "1.8"))
+
     console.print(
         Panel(
-            f"[accent]Power Analysis[/accent]\nVDD: {vdd}V | Freq: {freq_mhz}MHz | PDK: {pdk}",
+            f"[accent]Power Analysis[/accent]\nVDD: {effective_vdd}V | Freq: {freq_mhz}MHz\nPDK: {effective_pdk}",
             title="⚡ Power Analysis",
         )
     )
@@ -2464,10 +2557,11 @@ def power(
         sdc="",
         spef_file=spef_file,
         output_dir=output_dir,
-        vdd_voltage=vdd,
+        vdd_voltage=effective_vdd,
         clock_frequency_mhz=freq_mhz,
         enable_ir_drop=True,
-        pdk=pdk,
+        pdk=effective_pdk,
+        pdk_root=effective_pdk_root,
     )
 
     if result.ok:
@@ -2504,20 +2598,37 @@ def power(
 
 @app.command("drc")
 def drc(
-    gds: str = typer.Option(..., "--gds", "-g", help="GDSII layout file"),
-    tech: str = typer.Option(..., "--tech", "-t", help="Magic technology file (.tech)"),
+    gds: str = typer.Option(..., "--gds", "-g", help="GDSII layout file (must be exact path)"),
+    tech: str = typer.Option(
+        "", "--tech", "-t", help="Magic technology file (.tech) (auto-located if omitted)"
+    ),
     output_dir: str = typer.Option("./drc_out", "--out", "-o", help="Output directory"),
-    pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
+    pdk: str = typer.Option("", "--pdk", help="PDK name (auto-detected if omitted)"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
     """Run independent Magic DRC on GDSII layout.
 
     PRODUCTION REQUIRED: 0 DRC violations before tapeout.
+
+    Note: --tech and --pdk are optional. If not provided, AgentIC will
+    auto-detect the PDK and locate the tech file.
     """
     verify_license()
+
+    # Resolve PDK - auto-detect or error
+    from .config import resolve_pdk, PDK_ROOT
+
+    resolved_pdk, pdk_profile, detected_root = resolve_pdk(
+        requested_pdk=pdk if pdk else None,
+        design_path=gds,
+        required=True,  # DRC needs PDK to find tech file
+    )
+    effective_pdk = resolved_pdk
+    effective_pdk_root = detected_root or PDK_ROOT
+
     console.print(
         Panel(
-            f"[accent]Magic DRC[/accent]\nGDS: {gds}\nTech: {tech}",
+            f"[accent]Magic DRC[/accent]\nGDS: {gds}\nPDK: {effective_pdk}",
             title="🔍 Physical Verification",
         )
     )
@@ -2525,9 +2636,10 @@ def drc(
 
     result = run_magic_drc(
         gds_path=gds,
-        tech_file=tech,
+        tech_file=tech,  # Empty string triggers auto-detection
         output_dir=output_dir,
-        pdk=pdk,
+        pdk=effective_pdk,
+        pdk_root=effective_pdk_root,
     )
 
     if result.ok:
@@ -2553,21 +2665,42 @@ def drc(
 
 @app.command("lvs")
 def lvs(
-    schematic: str = typer.Option(..., "--sch", "-s", help="Schematic netlist (Verilog)"),
-    layout_gds: str = typer.Option(..., "--gds", "-g", help="Layout GDSII file"),
-    tech_setup: str = typer.Option(..., "--setup", help="Netgen tech setup file"),
+    schematic: str = typer.Option(
+        ..., "--sch", "-s", help="Schematic netlist (Verilog) (must be exact path)"
+    ),
+    layout_gds: str = typer.Option(
+        ..., "--gds", "-g", help="Layout GDSII file (must be exact path)"
+    ),
+    tech_setup: str = typer.Option(
+        "", "--setup", help="Netgen tech setup file (auto-located if omitted)"
+    ),
     output_dir: str = typer.Option("./lvs_out", "--out", "-o", help="Output directory"),
-    pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
+    pdk: str = typer.Option("", "--pdk", help="PDK name (auto-detected if omitted)"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
     """Run Netgen LVS (Layout vs Schematic) equivalence check.
 
     PRODUCTION REQUIRED: Schematic must be equivalent to layout.
+
+    Note: --setup and --pdk are optional. If not provided, AgentIC will
+    auto-detect the PDK and locate the setup file.
     """
     verify_license()
+
+    # Resolve PDK - auto-detect or error
+    from .config import resolve_pdk, PDK_ROOT
+
+    resolved_pdk, pdk_profile, detected_root = resolve_pdk(
+        requested_pdk=pdk if pdk else None,
+        design_path=schematic,
+        required=True,  # LVS needs PDK to find setup file
+    )
+    effective_pdk = resolved_pdk
+    effective_pdk_root = detected_root or PDK_ROOT
+
     console.print(
         Panel(
-            f"[accent]Netgen LVS[/accent]\nSchematic: {schematic}\nLayout: {layout_gds}",
+            f"[accent]Netgen LVS[/accent]\nSchematic: {schematic}\nLayout: {layout_gds}\nPDK: {effective_pdk}",
             title="🔍 Layout vs Schematic",
         )
     )
@@ -2577,8 +2710,9 @@ def lvs(
         schematic_verilog=schematic,
         layout_gds=layout_gds,
         output_dir=output_dir,
-        tech_setup=tech_setup,
-        pdk=pdk,
+        tech_setup=tech_setup,  # Empty string triggers auto-detection
+        pdk=effective_pdk,
+        pdk_root=effective_pdk_root,
     )
 
     if result.equivalent:

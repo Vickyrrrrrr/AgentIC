@@ -1,17 +1,17 @@
 """
 Feasibility Checker — Phase 3 of the Spec Pipeline
-====================================================
+===================================================
 
 Receives a fully expanded hierarchical hardware specification and evaluates
-whether the design is physically realizable on Sky130 within the OpenLane
-RTL-to-GDS flow — before a single line of RTL is written.
+whether the design is physically realizable on the selected PDK within the
+OpenLane RTL-to-GDS flow — before a single line of RTL is written.
 
 Pipeline Steps:
-  1. FREQUENCY  — Clock target vs. Sky130 achievable limits
+  1. FREQUENCY  — Clock target vs. PDK achievable limits
   2. MEMORY     — Storage structures vs. register / OpenRAM thresholds
-  3. ARITHMETIC — Multiplier / divider / FPU gate-cost on Sky130
+  3. ARITHMETIC — Multiplier / divider / FPU gate-cost per PDK
   4. AREA       — Total gate-equivalent budget and floorplan sizing
-  5. SKY130     — PDK-specific incompatibility scan
+  5. PDK_CHECK  — PDK-specific incompatibility scan
   6. OUTPUT     — Annotated spec with feasibility verdict
 """
 
@@ -21,6 +21,8 @@ import math
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+from ..config import get_pdk_tool_config
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +113,11 @@ _GE_KEYWORD_MAP: List[Tuple[List[str], int, str]] = [
 
 # ─── Output Dataclasses ─────────────────────────────────────────────
 
+
 @dataclass
 class MacroRequirement:
     """OpenRAM macro specification for large memories."""
+
     submodule_name: str
     width_bits: int
     depth_words: int
@@ -128,6 +132,7 @@ class MacroRequirement:
 @dataclass
 class FeasibilityResult:
     """Output of the FeasibilityChecker."""
+
     feasibility_status: str  # "PASS" | "WARN" | "REJECT"
     estimated_gate_equivalents: int = 0
     recommended_floorplan_size_um: str = ""
@@ -155,6 +160,7 @@ class FeasibilityResult:
 
 
 # ─── Main Class ──────────────────────────────────────────────────────
+
 
 class FeasibilityChecker:
     """
@@ -196,14 +202,11 @@ class FeasibilityChecker:
         if not target_freq or target_freq <= 0:
             target_freq = 50
             warnings.append(
-                "INFERRED: target_frequency_mhz was 0 or unspecified — "
-                "defaulting to 50 MHz."
+                "INFERRED: target_frequency_mhz was 0 or unspecified — defaulting to 50 MHz."
             )
 
         # Collect all submodule specs (top-level + nested from hierarchy)
-        all_submodules = self._collect_all_submodules(
-            hw_spec_dict, hierarchy_result_dict
-        )
+        all_submodules = self._collect_all_submodules(hw_spec_dict, hierarchy_result_dict)
         all_ports = hw_spec_dict.get("ports", [])
         all_contracts = hw_spec_dict.get("behavioral_contract", [])
         design_category = hw_spec_dict.get("design_category", "CONTROL")
@@ -222,9 +225,7 @@ class FeasibilityChecker:
         rejections.extend(mem_rejections)
 
         # Step 3: Arithmetic feasibility
-        arith_warnings = self._check_arithmetic(
-            all_submodules, all_contracts, design_desc
-        )
+        arith_warnings = self._check_arithmetic(all_submodules, all_contracts, design_desc)
         warnings.extend(arith_warnings)
 
         # Step 4: Area estimation
@@ -272,9 +273,9 @@ class FeasibilityChecker:
         warnings: List[str] = []
         rejections: List[str] = []
 
-        is_gf180 = "gf180" in self.pdk.lower()
-        max_reliable_mhz = 150 if not is_gf180 else 100
-        upper_limit_mhz = 200 if not is_gf180 else 125
+        tool_config = get_pdk_tool_config(self.pdk)
+        max_reliable_mhz = tool_config.get("max_reliable_mhz", 150)
+        upper_limit_mhz = tool_config.get("upper_limit_mhz", 200)
 
         if target_mhz > upper_limit_mhz:
             rejections.append(
@@ -293,10 +294,18 @@ class FeasibilityChecker:
             # Flag submodules with likely deep logic
             for sm in submodules:
                 combined = f"{sm.get('name', '')} {sm.get('description', '')}".lower()
-                if any(kw in combined for kw in [
-                    "alu", "multiplier", "divider", "decode", "arbiter",
-                    "cache", "branch_predict",
-                ]):
+                if any(
+                    kw in combined
+                    for kw in [
+                        "alu",
+                        "multiplier",
+                        "divider",
+                        "decode",
+                        "arbiter",
+                        "cache",
+                        "branch_predict",
+                    ]
+                ):
                     warnings.append(
                         f"HIGH_RISK: Submodule '{sm.get('name')}' likely has deep "
                         f"combinational paths incompatible with {target_mhz} MHz."
@@ -312,8 +321,15 @@ class FeasibilityChecker:
             for sm in submodules:
                 combined = f"{sm.get('name', '')} {sm.get('description', '')}".lower()
                 deep_logic_keywords = [
-                    "multiplier", "multiply", "divider", "divide",
-                    "alu", "decode", "cache", "arbiter", "out-of-order",
+                    "multiplier",
+                    "multiply",
+                    "divider",
+                    "divide",
+                    "alu",
+                    "decode",
+                    "cache",
+                    "arbiter",
+                    "out-of-order",
                     "branch_predict",
                 ]
                 if any(kw in combined for kw in deep_logic_keywords):
@@ -327,16 +343,13 @@ class FeasibilityChecker:
             for sm in submodules:
                 combined = f"{sm.get('name', '')} {sm.get('description', '')}".lower()
                 has_wide_mult = (
-                    ("multiplier" in combined or "multiply" in combined)
-                    and self._extract_bit_width(combined) > 8
-                )
+                    "multiplier" in combined or "multiply" in combined
+                ) and self._extract_bit_width(combined) > 8
                 has_deep_pipeline = (
-                    "pipeline" in combined
-                    and self._count_pipeline_stages(combined) > 4
+                    "pipeline" in combined and self._count_pipeline_stages(combined) > 4
                 )
                 has_deep_logic = any(
-                    kw in combined
-                    for kw in ["deep logic", "long combinational", "barrel"]
+                    kw in combined for kw in ["deep logic", "long combinational", "barrel"]
                 )
                 if has_wide_mult:
                     warnings.append(
@@ -373,9 +386,18 @@ class FeasibilityChecker:
 
             # Skip non-memory submodules
             mem_keywords = [
-                "memory", "ram", "sram", "rom", "fifo", "cache",
-                "register_file", "regfile", "register file", "buffer",
-                "stack", "queue",
+                "memory",
+                "ram",
+                "sram",
+                "rom",
+                "fifo",
+                "cache",
+                "register_file",
+                "regfile",
+                "register file",
+                "buffer",
+                "stack",
+                "queue",
             ]
             if not any(kw in combined for kw in mem_keywords):
                 continue
@@ -406,17 +428,19 @@ class FeasibilityChecker:
                     rports = 2
                 if "dual write" in combined or "2 write" in combined:
                     wports = 2
-                macros.append(MacroRequirement(
-                    submodule_name=name,
-                    width_bits=width,
-                    depth_words=depth,
-                    read_ports=rports,
-                    write_ports=wports,
-                    size_bits=size_bits,
-                ))
+                macros.append(
+                    MacroRequirement(
+                        submodule_name=name,
+                        width_bits=width,
+                        depth_words=depth,
+                        read_ports=rports,
+                        write_ports=wports,
+                        size_bits=size_bits,
+                    )
+                )
 
             elif size_bits > 2048:  # 256B–2KB
-                ge_estimate = (width * depth * 6)  # rough: each bit ≈ 6 GE
+                ge_estimate = width * depth * 6  # rough: each bit ≈ 6 GE
                 warnings.append(
                     f"MEMORY_WARN: '{name}' requires {size_bits} bits "
                     f"({size_bits // 8} bytes). Will synthesize as registers but "
@@ -442,7 +466,9 @@ class FeasibilityChecker:
         for sm in submodules:
             combined_text += f" {sm.get('name', '')} {sm.get('description', '')}".lower()
         for c in contracts:
-            combined_text += f" {c.get('given', '')} {c.get('when', '')} {c.get('then', '')}".lower()
+            combined_text += (
+                f" {c.get('given', '')} {c.get('when', '')} {c.get('then', '')}".lower()
+            )
 
         # Check for multiplication
         mult_patterns = [
@@ -514,9 +540,7 @@ class FeasibilityChecker:
 
     # ── Step 4: Area Estimation ──────────────────────────────────────
 
-    def _estimate_area(
-        self, submodules: List[Dict[str, Any]]
-    ) -> Tuple[int, Dict[str, int]]:
+    def _estimate_area(self, submodules: List[Dict[str, Any]]) -> Tuple[int, Dict[str, int]]:
         total_ge = 0
         breakdown: Dict[str, int] = {}
 
@@ -535,9 +559,7 @@ class FeasibilityChecker:
 
         return total_ge, breakdown
 
-    def _estimate_submodule_ge(
-        self, combined_text: str, sm: Dict[str, Any]
-    ) -> int:
+    def _estimate_submodule_ge(self, combined_text: str, sm: Dict[str, Any]) -> int:
         """Estimate gate equivalents for a single submodule."""
         best_ge = 0
         matched = False
@@ -548,8 +570,12 @@ class FeasibilityChecker:
                     # Scale by apparent data width if detectable
                     width = self._extract_bit_width(combined_text)
                     if width > 0 and kw in (
-                        "adder", "counter", "comparator", "shift_register",
-                        "barrel_shifter", "register",
+                        "adder",
+                        "counter",
+                        "comparator",
+                        "shift_register",
+                        "barrel_shifter",
+                        "register",
                     ):
                         scaled = int(base_ge * (width / 32.0)) if width != 32 else base_ge
                         best_ge = max(best_ge, max(scaled, base_ge // 4))
@@ -604,7 +630,9 @@ class FeasibilityChecker:
         for sm in submodules:
             combined_text += f" {sm.get('name', '')} {sm.get('description', '')}".lower()
         for c in contracts:
-            combined_text += f" {c.get('given', '')} {c.get('when', '')} {c.get('then', '')}".lower()
+            combined_text += (
+                f" {c.get('given', '')} {c.get('when', '')} {c.get('then', '')}".lower()
+            )
 
         # Rule 1: Internal tri-state buses
         top_level_port_names = {p.get("name", "") for p in top_ports}
@@ -622,8 +650,12 @@ class FeasibilityChecker:
 
         # Rule 2: Async reset with > 2 clock domains
         clock_domain_keywords = [
-            "clock domain", "clk_domain", "cdc", "multi-clock",
-            "clock crossing", "dual clock",
+            "clock domain",
+            "clk_domain",
+            "cdc",
+            "multi-clock",
+            "clock crossing",
+            "dual clock",
         ]
         has_multi_clock = any(kw in combined_text for kw in clock_domain_keywords)
 
@@ -651,8 +683,15 @@ class FeasibilityChecker:
 
         # Rule 3: PLL or analog blocks
         analog_keywords = [
-            "pll", "phase-locked loop", "dac", "adc", "analog",
-            "voltage reference", "bandgap", "ldo", "oscillator",
+            "pll",
+            "phase-locked loop",
+            "dac",
+            "adc",
+            "analog",
+            "voltage reference",
+            "bandgap",
+            "ldo",
+            "oscillator",
         ]
         for kw in analog_keywords:
             if kw in combined_text:
@@ -663,8 +702,11 @@ class FeasibilityChecker:
 
         # Rule 4: Negative-edge triggered flip-flops
         negedge_keywords = [
-            "negedge", "negative edge", "falling edge triggered",
-            "neg-edge", "negative-edge",
+            "negedge",
+            "negative edge",
+            "falling edge triggered",
+            "neg-edge",
+            "negative-edge",
         ]
         for kw in negedge_keywords:
             if kw in combined_text:
@@ -712,9 +754,7 @@ class FeasibilityChecker:
 
         return all_subs
 
-    def _collect_nested_subs(
-        self, spec_dict: Dict[str, Any], out: List[Dict[str, Any]]
-    ) -> None:
+    def _collect_nested_subs(self, spec_dict: Dict[str, Any], out: List[Dict[str, Any]]) -> None:
         """Recursively collect submodules from nested specs."""
         for sm in spec_dict.get("submodules", []):
             out.append(sm)
@@ -744,9 +784,7 @@ class FeasibilityChecker:
                     pass
         return best
 
-    def _extract_memory_dimensions(
-        self, text: str
-    ) -> Tuple[int, int]:
+    def _extract_memory_dimensions(self, text: str) -> Tuple[int, int]:
         """Extract width × depth from memory description text."""
         # Patterns: "32x1024", "32-bit × 256-deep", "width 32 depth 256"
         patterns = [
@@ -779,9 +817,7 @@ class FeasibilityChecker:
 
         return 0, 0
 
-    def _infer_memory_from_ports(
-        self, ports: List[Dict[str, Any]]
-    ) -> Tuple[int, int]:
+    def _infer_memory_from_ports(self, ports: List[Dict[str, Any]]) -> Tuple[int, int]:
         """Infer memory width/depth from port data types."""
         data_width = 0
         addr_width = 0
@@ -800,7 +836,7 @@ class FeasibilityChecker:
                 addr_width = max(addr_width, bus_width)
 
         if data_width > 0 and addr_width > 0:
-            depth = 2 ** addr_width
+            depth = 2**addr_width
             return data_width, depth
 
         return 0, 0
@@ -814,9 +850,7 @@ class FeasibilityChecker:
 
     # ── Enrichment for Downstream Stages ─────────────────────────────
 
-    def to_feasibility_enrichment(
-        self, result: FeasibilityResult
-    ) -> Dict[str, Any]:
+    def to_feasibility_enrichment(self, result: FeasibilityResult) -> Dict[str, Any]:
         """Convert FeasibilityResult to enrichment dict for the spec artifact."""
         return {
             "feasibility_status": result.feasibility_status,

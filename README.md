@@ -37,7 +37,238 @@ agentic install-pdk sky130
 agentic install-pdk gf180mcu
 ```
 
-Supported PDKs: `sky130`, `gf180mcu`, `asap7`, `nangate45`, `freepdk45`, `osu018`, `osu035`
+**Supported PDKs:** `sky130`, `gf180mcu`, `asap7`, `nangate45`, `freepdk45`, `osu018`, `osu035`
+
+---
+
+## PDK Comparison Guide
+
+| PDK | Node | Voltage | Max Freq | Maturity | Use Case |
+|-----|------|---------|----------|----------|----------|
+| **sky130** | 130nm | 1.8V | 150 MHz | ⭐⭐⭐ Production | **Best choice** - Complete tool support, real tapeouts |
+| **gf180mcu** | 180nm | 1.8V | 100 MHz | ⭐⭐ Production | Automotive grade, high voltage options |
+| **asap7** | 7nm | 0.7V | 1000 MHz | ⭐ Research | Research/learning 7nm flows |
+| **nangate45** | 45nm | 1.1V | 500 MHz | ⭐ Research | Academic, single corner |
+| **freepdk45** | 45nm | 1.1V | 500 MHz | ⭐ Research | NC State, educational |
+| **osu018** | 180nm | 1.8V | 100 MHz | ⭐ Educational | Limited cells, easy setup |
+| **osu035** | 350nm | 3.3V | 50 MHz | ⭐ Educational | High voltage, easy probing |
+
+### What Each PDK Supports
+
+| PDK | Synthesis | Place&Route | DRC/LVS | Real Tapeout |
+|-----|-----------|-------------|---------|--------------|
+| sky130 | ✅ | ✅ | ✅ Complete | ✅ Yes |
+| gf180mcu | ✅ | ✅ | ✅ Complete | ✅ Yes |
+| asap7 | ✅ | ✅ | ⚠️ Limited | ❌ No |
+| nangate45 | ✅ | ✅ | ⚠️ Limited | ❌ No |
+| freepdk45 | ✅ | ✅ | ⚠️ Limited | ❌ No |
+| osu018 | ✅ | ❌ | ⚠️ Limited | ❌ No |
+| osu035 | ✅ | ❌ | ⚠️ Limited | ❌ No |
+
+### Which PDK Should You Choose?
+
+**For beginners:** Use `sky130` - everything works, lots of examples, real chip fabrication possible.
+
+**For research/learning 7nm:** Use `asap7` - simulates 7nm FinFET technology.
+
+**For automotive/industrial:** Use `gf180mcu` - higher voltage, automotive grade.
+
+---
+
+## PDK Installation Guide
+
+### Sky130 (Recommended - Auto Install)
+
+```bash
+# One-command installation
+agentic install-pdk sky130
+
+# Or use volare (recommended for full control)
+volare enable --pdk sky130
+volare add --pdk sky130 --tag 2024.12.2_01.51
+```
+
+**What gets installed:**
+```
+~/.ciel/
+└── sky130A/                    # Main PDK directory
+    ├── libs.ref/                # Cell libraries
+    │   ├── sky130_fd_sc_hd/     # High-density standard cells
+    │   │   ├── verilog/         # Verilog models (for Yosys)
+    │   │   ├── lib/            # Liberty timing files
+    │   │   └── gds/            # GDS layouts
+    │   └── sky130_sram/         # SRAM memories
+    └── libs.tech/               # Tool-specific files
+        ├── magic/              # Magic DRC tech files
+        ├── netgen/             # Netgen LVS setup
+        └── klayout/            # KLayout DRC/LVS rules
+```
+
+### GF180MCU (Auto Install)
+
+```bash
+# One-command installation
+agentic install-pdk gf180mcu
+
+# Or use volare
+volare enable --pdk gf180mcu
+volare add --pdk gf180mcu --tag 2024.06.2_01.00
+```
+
+**What gets installed:**
+```
+~/.ciel/
+└── gf180mcuC/                  # 5-metal stack variant
+    ├── libs.ref/
+    │   ├── gf180mcu_fd_sc_mcu7t5v0/  # 7-track standard cells
+    │   └── gf180mcu_fd_io/    # I/O cells
+    └── libs.tech/
+        ├── magic/
+        ├── netgen/
+        └── klayout/
+```
+
+### ASAP7 (Manual Installation Required)
+
+ASAP7 is a **predictive** 7nm PDK - it cannot be fabricated but works with open-source tools.
+
+```bash
+# 1. Clone OpenROAD-flow-scripts (has ASAP7 support)
+git clone https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git
+cd OpenROAD-flow-scripts
+
+# 2. Download ASAP7 PDK files
+make setup-asap7
+
+# 3. Set environment
+export PDK_ROOT=$(pwd)/pdks
+```
+
+**Expected structure:**
+```
+pdks/
+└── asap7/
+    ├── asap7sc7p5t/            # Standard cells
+    │   ├── lib/                # Liberty files
+    │   ├── lef/                # LEF for place&route
+    │   └── verilog/            # Verilog for Yosys
+    └── asap7/                  # OpenROAD platform
+```
+
+### Nangate45/FreePDK45 (Manual Installation)
+
+```bash
+# 1. Clone OpenROAD-flow-scripts
+git clone https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git
+cd OpenROAD-flow-scripts
+
+# 2. Download PDK files
+make setup-freepdk45   # or make setup-nangate45
+
+# 3. Set environment
+export PDK_ROOT=$(pwd)/pdks
+```
+
+### OSU018/OSU035 (Manual Installation)
+
+Oklahoma State University educational PDKs:
+
+```bash
+# 1. Get files from OSU website or GitHub
+# Visit: https://github.com/osu-icssr?tab=repositories&q=pdk
+
+# 2. Create directory structure
+mkdir -p $PDK_ROOT/osu018
+# Copy PDK files here
+
+mkdir -p $PDK_ROOT/osu035
+# Copy PDK files here
+```
+
+---
+
+## Where to Place PDK Files (Simple Explanation)
+
+### The Short Answer
+
+```
+PDK_ROOT/           ← Set this in your environment
+└── {pdk_name}/    ← e.g., sky130A, gf180mcuC, asap7
+    ├── libs.ref/  ← Cell libraries (standard cells, SRAM)
+    └── libs.tech/ ← Tool files (DRC, LVS, timing)
+```
+
+### What Each Folder Contains (Simple Terms)
+
+```
+libs.ref/           "Reference Libraries" - What cells exist
+├── {std_cell_lib}/   Your standard cell library
+│   ├── verilog/      Cell behavior in Verilog (for synthesis)
+│   ├── lib/          Cell timing in Liberty format (for timing analysis)
+│   └── gds/          Cell layouts in GDS format (for final chip)
+└── {sram_lib}/       Memory blocks (optional)
+
+libs.tech/          "Technology files" - How tools work with the PDK
+├── magic/            Files for Magic DRC tool
+├── netgen/           Files for Netgen LVS tool
+└── klayout/          Files for KLayout DRC/LVS tool
+```
+
+### Example: Sky130 Structure
+
+```
+~/.ciel/                    ← PDK_ROOT
+└── sky130A/                ← PDK variant
+    ├── libs.ref/
+    │   ├── sky130_fd_sc_hd/     ← Standard cells (HD = High Density)
+    │   │   ├── verilog/
+    │   │   │   └── sky130_fd_sc_hd.v
+    │   │   ├── lib/
+    │   │   │   └── sky130_tt.lib
+    │   │   └── gds/
+    │   │       └── sky130_fd_sc_hd.gds
+    │   └── sky130_sram/         ← Memories
+    └── libs.tech/
+        ├── magic/
+        │   └── sky130A.tech     ← Magic DRC rules
+        ├── netgen/
+        │   └── sky130_setup.tcl ← Netgen LVS rules
+        └── klayout/
+            └── sky130.lydrc    ← KLayout DRC rules
+```
+
+### Common Mistakes
+
+❌ **Wrong:** Putting files in random locations
+```
+~/downloads/asap7/...      ← Tools won't find this
+~/my_pdk_files/...         ← Tools won't find this
+```
+
+✅ **Correct:** Set PDK_ROOT and put files there
+```
+export PDK_ROOT=~/.ciel    ← Define this
+~/.ciel/sky130A/...        ← Tools will find files here
+~/.ciel/asap7/...          ← Tools will find files here
+```
+
+---
+
+## Verifying PDK Installation
+
+```bash
+# Check what PDKs are installed
+ls -la $PDK_ROOT/
+
+# Verify sky130 installation
+ls $PDK_ROOT/sky130A/libs.tech/
+
+# Check for required files
+find $PDK_ROOT/sky130A -name "*.v" -o -name "*.lib" -o -name "*.tech" | head -20
+
+# Test with AgentIC
+agentic doctor
+```
 
 After installation, add to your shell profile:
 
@@ -90,19 +321,19 @@ agentic build \
 | `agentic login` | Interactive setup wizard (first run) |
 | `agentic configure` | Reconfigure LLM API keys |
 | `agentic build --name X --desc "..."` | Build a chip from natural language |
-| `agentic build --dry-run ...` | Validate spec without running build |
-| `agentic build --skip-openlane ...` | Skip GDSII hardening (faster) |
-| `agentic synth --rtl X.v --top Y` | Run Yosys synthesis |
-| `agentic sta --rtl X.v --sdc Y.sdc` | Run OpenSTA timing analysis |
-| `agentic dft --rtl X.v --top Y` | Run DFT scan insertion |
-| `agentic power --rtl X.v --sdc Y.sdc` | Run power analysis |
-| `agentic drc --gds X.gds --pdk Y` | Run DRC checks |
-| `agentic lvs --sch X.v --gds Y.gds --setup Z` | Run LVS checks |
-| `agentic report --design X --pdk Y` | Generate QOR report |
-| `agentic power --netlist X.v` | Run power analysis |
-| `agentic drc --gds X.gds --tech Y.tech` | Run Magic DRC |
-| `agentic lvs --sch X.v --gds Y.gds --setup Z.setup` | Run Netgen LVS |
-| `agentic report --design X` | Generate QOR signoff report |
+| `agentic synth --rtl <path> --top <name>` | Run Yosys synthesis |
+| `agentic sta --netlist <path> --sdc <path> --lib <path>` | Run OpenSTA timing analysis |
+| `agentic power --netlist <path>` | Run power analysis |
+| `agentic dft --rtl <path> --top <name>` | Run DFT scan insertion |
+| `agentic drc --gds <path> --tech <path>` | Run Magic DRC |
+| `agentic lvs --sch <path> --gds <path> --setup <path>` | Run Netgen LVS |
+| `agentic report --design <name>` | Generate QOR report |
+| `agentic harden --name <name>` | Run OpenLane hardening |
+| `agentic simulate --name <name>` | Run simulation with auto-fix |
+
+> **Important:** All file paths must be **exact paths** (e.g., `designs/my_design/src/my_design.v`). Relative paths like `tiny_alu.v` are not auto-resolved.
+
+**For complete CLI documentation with all options, see: [docs/CLI_COMMANDS.md](docs/CLI_COMMANDS.md)**
 
 ---
 

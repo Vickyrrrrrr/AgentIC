@@ -24,7 +24,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..config import WORKSPACE_ROOT, OPENLANE_ROOT
+from ..config import WORKSPACE_ROOT, OPENLANE_ROOT, get_pdk_tool_config, get_pdk_profile
 
 
 MAGIC_BIN = os.environ.get("MAGIC_BIN", "magic")
@@ -116,6 +116,7 @@ def run_magic_drc(
         tech_file: Path to Magic technology file (.mag technology field)
         output_dir: Output directory for DRC reports
         pdk: PDK name
+        pdk_root: PDK root directory (for auto-locating tech file)
         extra_drc_rules: Additional DRC rule files
         enable_pdf_output: Generate PDF layout with violations highlighted
         timeout: Timeout in seconds
@@ -135,9 +136,11 @@ def run_magic_drc(
         errors.append(f"GDS file not found: {gds_path}")
         return _error_drc_result(errors, drc_report)
     if not os.path.exists(tech_file):
-        tech_file = _find_tech_file(tech_file, pdk)
+        tech_file = _find_tech_file(tech_file, pdk, pdk_root or "")
         if not tech_file:
-            errors.append(f"Tech file not found: {tech_file}")
+            errors.append(
+                f"Tech file not found for PDK '{pdk}'. Set --pdk or specify --tech directly."
+            )
             return _error_drc_result(errors, drc_report)
 
     tcl_script = _build_magic_drc_tcl(
@@ -147,6 +150,7 @@ def run_magic_drc(
         design_name=design_name,
         extra_rules=extra_drc_rules,
         pdf=enable_pdf_output,
+        pdk=pdk,
     )
 
     tcl_path = os.path.join(output_dir, f"{design_name}_drc.tcl")
@@ -172,9 +176,7 @@ def run_magic_drc(
         errors.append("Magic DRC timed out")
         return _error_drc_result(errors, drc_report, runtime)
     except OSError:
-        errors.append(
-            f"Magic binary not found. Install Magic or set MAGIC_BIN env var."
-        )
+        errors.append(f"Magic binary not found. Install Magic or set MAGIC_BIN env var.")
         return _error_drc_result(errors, drc_report)
 
     violations = _parse_magic_drc_output(stdout + stderr, drc_report)
@@ -215,9 +217,12 @@ def _build_magic_drc_tcl(
     design_name: str,
     extra_rules: Optional[List[str]],
     pdf: bool,
+    pdk: str = "sky130",
 ) -> List[str]:
+    tool_config = get_pdk_tool_config(pdk)
+    pdk_dir = tool_config.get("pdk_dir", pdk)
     tcl: List[str] = [
-        f"# Magic DRC script for {design_name}",
+        f"# Magic DRC script for {design_name} (PDK: {pdk_dir})",
         f"tech load {tech_file}",
         f"gds read {gds_path}",
         f"load {design_name}",
@@ -227,7 +232,7 @@ def _build_magic_drc_tcl(
         "drc check",
         "",
         f"# Report DRC violations to {drc_report}",
-        "drc style sky130",
+        "drc style " + pdk_dir,
         "drc exist",
         "puts [open [list {drc_report}] w] [drc listall]",
         "",
@@ -297,15 +302,17 @@ def run_netgen_lvs(
         return _error_lvs_result(errors, lvs_report)
 
     if not os.path.exists(tech_setup):
-        tech_setup = _find_netgen_setup(tech_setup, pdk)
+        tech_setup = _find_netgen_setup(tech_setup, pdk, pdk_root or "")
 
     import time
 
     start = time.time()
+    tool_config = get_pdk_tool_config(pdk)
+    pdk_dir = tool_config.get("pdk_dir", pdk)
 
     lvs_script = [
-        f"# Netgen LVS script for {design_name}",
-        f"set spicedevs sky130",
+        f"# Netgen LVS script for {design_name} (PDK: {pdk_dir})",
+        f"set spicedevs " + pdk_dir,
         f'lvs "read_netlist {schematic_verilog} {design_name}" \\',
         f'     "gds read {layout_gds} {design_name}" \\',
         f"     {tech_setup} \\",
@@ -332,9 +339,7 @@ def run_netgen_lvs(
         errors.append("Netgen LVS timed out")
         return _error_lvs_result(errors, lvs_report, runtime)
     except OSError:
-        errors.append(
-            "Netgen binary not found. Install Netgen or set NETGEN_BIN env var."
-        )
+        errors.append("Netgen binary not found. Install Netgen or set NETGEN_BIN env var.")
         return _error_lvs_result(errors, lvs_report)
 
     equiv, net_mismatches, pin_mismatches, unconn = _parse_netgen_output(stdout)
@@ -541,24 +546,62 @@ def _parse_netgen_output(stdout: str) -> Tuple[bool, int, int, int]:
     return equiv, net_mismatches, pin_mismatches, unconnected
 
 
-def _find_tech_file(tech_file: str, pdk: str) -> str:
-    candidates = [
-        tech_file,
-        f"{OPENLANE_ROOT}/pdks/{pdk}/libs.tech/magic/{pdk}.tech",
-        f"/usr/share/magic/{pdk}.tech",
-    ]
+def _find_tech_file(tech_file: str, pdk: str, pdk_root: str = "") -> str:
+    """Find Magic tech file with explicit pdk_root."""
+    if tech_file and os.path.exists(tech_file):
+        return tech_file
+
+    # Common locations to search
+    candidates = []
+
+    if pdk_root:
+        candidates.extend(
+            [
+                f"{pdk_root}/{pdk}/libs.tech/magic/{pdk}.tech",
+                f"{pdk_root}/{pdk}/libs.tech/magic/{pdk}A.tech",  # e.g., sky130A
+            ]
+        )
+
+    candidates.extend(
+        [
+            f"{OPENLANE_ROOT}/pdks/{pdk}/libs.tech/magic/{pdk}.tech",
+            f"{OPENLANE_ROOT}/pdks/{pdk}/libs.tech/magic/{pdk}A.tech",
+            f"/usr/share/magic/{pdk}.tech",
+            f"/usr/share/magic/{pdk}A.tech",
+        ]
+    )
+
     for c in candidates:
         if os.path.exists(c):
             return c
     return ""
 
 
-def _find_netgen_setup(setup: str, pdk: str) -> str:
-    candidates = [
-        setup,
-        f"{OPENLANE_ROOT}/pdks/{pdk}/libs.tech/netgen/{pdk}_tech.setup",
-        f"/usr/share/netgen/{pdk}_setup.tcl",
-    ]
+def _find_netgen_setup(setup: str, pdk: str, pdk_root: str = "") -> str:
+    """Find Netgen setup file with explicit pdk_root."""
+    if setup and os.path.exists(setup):
+        return setup
+
+    candidates = []
+
+    if pdk_root:
+        candidates.extend(
+            [
+                f"{pdk_root}/{pdk}/libs.tech/netgen/{pdk}_setup.tcl",
+                f"{pdk_root}/{pdk}/libs.tech/netgen/{pdk}A_setup.tcl",
+                f"{pdk_root}/{pdk}/libs.tech/netgen/setup.tcl",
+            ]
+        )
+
+    candidates.extend(
+        [
+            f"{OPENLANE_ROOT}/pdks/{pdk}/libs.tech/netgen/{pdk}_tech.setup",
+            f"{OPENLANE_ROOT}/pdks/{pdk}/libs.tech/netgen/setup.tcl",
+            f"/usr/share/netgen/{pdk}_setup.tcl",
+            f"/usr/share/netgen/{pdk}A_setup.tcl",
+        ]
+    )
+
     for c in candidates:
         if os.path.exists(c):
             return c
