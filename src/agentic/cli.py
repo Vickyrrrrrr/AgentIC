@@ -8,15 +8,55 @@ Usage:
 """
 
 import json
+import logging
 import os
 import re
 import sys
+from typing import Optional
+
+os.environ.setdefault("FORCE_COLOR", "1")
+
+os.environ.setdefault("LITELLM_LOG", "ERROR")
+os.environ.setdefault("LITELLM_SUPPRESS_DEBUG_INFO", "True")
+os.environ.setdefault("JSON_LOGS", "False")
+
 from datetime import datetime, timedelta, timezone
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from crewai import Agent, Task, Crew, LLM
+
+
+def _suppress_external_logging():
+    """Suppress noisy external library logging to console."""
+    suppress_loggers = [
+        "",
+        "LiteLLM",
+        "LiteLLM Proxy",
+        "LiteLLM Router",
+        "crewai",
+        "crewai.A2A",
+        "httpx",
+        "openai",
+        "httpcore",
+        "urllib3",
+    ]
+    for logger_name in suppress_loggers:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.ERROR)
+        for handler in logger.handlers[:]:
+            if isinstance(handler, logging.StreamHandler):
+                logger.removeHandler(handler)
+
+    root = logging.getLogger()
+    for handler in root.handlers[:]:
+        if isinstance(handler, logging.StreamHandler):
+            root.removeHandler(handler)
+
+
+_suppress_external_logging()
 
 # Local imports
 from .config import (
@@ -31,6 +71,7 @@ from .config import (
     SIM_BACKEND_DEFAULT,
     COVERAGE_FALLBACK_POLICY_DEFAULT,
     COVERAGE_PROFILE_DEFAULT,
+    CREDENTIALS_PATH,
     detect_available_pdks,
     get_pdk_profile,
     list_pdk_profiles,
@@ -67,6 +108,7 @@ from .tools.signoff_reporter import generate_qor_report, SignoffReporter
 # --- INITIALIZE ---
 app = typer.Typer()
 from rich.theme import Theme
+from rich.ansi import AnsiDecoder
 
 claude_theme = Theme(
     {
@@ -80,9 +122,155 @@ claude_theme = Theme(
         "spinner": "#d97757",
     }
 )
-console = Console(theme=claude_theme)
+console = Console(theme=claude_theme, force_terminal=True, color_system="256")
 # Legacy path for license-based credentials (packaged binary)
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic/credentials.json")
+
+__version__ = "1.0.0"
+
+BANNER = """[cyan]
+   █████╗ ██╗     ███████╗██╗  ██╗    ███████╗██╗  ██╗███████╗
+  ██╔══██╗██║     ██╔════╝╚██╗██╔╝    ██╔════╝╚██╗██╔╝██╔════╝
+  ███████║██║     █████╗   ╚███╔╝     █████╗   ╚███╔╝ █████╗  
+  ██╔══██║██║     ██╔══╝   ██╔██╗     ██╔══╝   ██╔██╗ ██╔══╝  
+  ██║  ██║███████╗███████╗██╔╝ ██╗    ███████╗██╔╝ ██╗███████╗
+  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═╝╚══════╝
+[/cyan]"""
+
+
+def _print_banner():
+    """Print the AgentIC startup banner."""
+    console.print()
+    console.print(BANNER, highlight=False)
+    console.print(
+        Panel(
+            f"[dim]The Autonomous Silicon Compiler[/dim]\n"
+            f"[accent]v{__version__} | Natural Language to GDSII[/accent]",
+            border_style="#8f8a80",
+            padding=(0, 2),
+        )
+    )
+    console.print()
+
+
+def _is_toolchain_present() -> bool:
+    """Check if the EDA toolchain (OSS CAD Suite) is available."""
+    import shutil
+    from .config import YOSYS_BIN, VERILATOR_BIN, IVERILOG_BIN, VVP_BIN
+
+    def _present(binary: str) -> bool:
+        if os.path.isabs(binary):
+            return os.path.exists(binary)
+        return bool(shutil.which(binary))
+
+    return all(_present(b) for b in (YOSYS_BIN, VERILATOR_BIN, IVERILOG_BIN, VVP_BIN))
+
+
+def _prompt_toolchain_install() -> bool:
+    """Prompt user to install OSS CAD Suite. Returns True if installed."""
+    from .install_tools import install_oss_cad_suite
+    from .config import OSS_CAD_SUITE_ROOT, WORKSPACE_ROOT
+
+    console.print(
+        Panel(
+            "[accent]OSS CAD Suite Required[/accent]\n\n"
+            "AgentIC needs the Open Source CAD Suite (Yosys, Verilator, Icarus) "
+            "to synthesize and simulate your RTL designs.\n\n"
+            "[info]What this installs:[/info]\n"
+            "  • Yosys    — RTL synthesis and formal verification\n"
+            "  • Verilator — Fast SystemVerilog simulator\n"
+            "  • Icarus   — IEEE 1364-2005 Verilog simulator\n"
+            "  • SBY      — SymbiYosys formal verification runner\n\n"
+            "[dim]Download size: ~200MB | Install time: 1-3 minutes[/dim]",
+            title="[bold #e0b04a]Missing EDA Toolchain[/bold #e0b04a]",
+            border_style="#e0b04a",
+        )
+    )
+
+    from rich.prompt import Confirm
+
+    if Confirm.ask("\n[accent]Download and install OSS CAD Suite now?[/accent]", default=True):
+        target = os.environ.get("OSS_CAD_SUITE_HOME", os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
+        console.print(f"\n[accent]Installing to:[/accent] {target}\n")
+
+        ok = install_oss_cad_suite(target)
+        if ok:
+            console.print(
+                Panel(
+                    "[success]OSS CAD Suite installed![/success]\n\n"
+                    f"Add this to your shell profile to persist the toolchain path:\n\n"
+                    f"  [accent]export OSS_CAD_SUITE_HOME={target}[/accent]\n\n"
+                    "AgentIC will automatically detect it on the next run.",
+                    title="[bold #32997b]Installation Complete[/bold #32997b]",
+                    border_style="#32997b",
+                )
+            )
+            os.environ["OSS_CAD_SUITE_HOME"] = target
+            return True
+        else:
+            console.print(
+                Panel(
+                    "[error]Automatic installation failed.[/error]\n\n"
+                    "Please install manually:\n\n"
+                    "  [accent]https://github.com/YosysHQ/oss-cad-suite-build/releases[/accent]\n\n"
+                    "Then set: export OSS_CAD_SUITE_HOME=/path/to/oss-cad-suite",
+                    title="[bold red]Installation Failed[/bold red]",
+                    border_style="#d45851",
+                )
+            )
+            return False
+    return False
+
+
+def _ensure_setup(skip_toolchain_prompt: bool = False) -> bool:
+    """Zero-friction first-run setup wizard.
+
+    Checks:
+      1. Credentials exist → if not, run login wizard
+      2. EDA toolchain present → if not, prompt to install
+
+    Returns True if setup is complete (or was completed interactively).
+    Raises typer.Exit if user cancels or setup cannot proceed.
+    """
+    from .config import CREDENTIALS_PATH, _load_user_credentials
+
+    setup_needed = False
+
+    if not os.path.exists(CREDENTIALS_PATH):
+        console.print(
+            Panel(
+                "[accent]Welcome to AgentIC![/accent]\n\n"
+                "You're moments away from compiling silicon from natural language.\n"
+                "Let's get your environment set up.\n\n"
+                "[info]What's needed:[/info]\n"
+                "  • LLM API Key    — For AI-powered RTL generation\n"
+                "  • License Key    — Activate AgentIC features\n"
+                "  • OSS CAD Suite  — EDA tools for synthesis & simulation",
+                title="[bold #d97757]First-Run Setup[/bold #d97757]",
+                border_style="#d97757",
+            )
+        )
+        console.print()
+        setup_needed = True
+
+    if not _is_toolchain_present():
+        if not skip_toolchain_prompt:
+            if _prompt_toolchain_install():
+                if not os.path.exists(CREDENTIALS_PATH):
+                    console.print()
+                    login()
+                return True
+            console.print("[warning]Cannot proceed without EDA toolchain.[/warning]")
+            raise typer.Exit(1)
+        else:
+            return False
+
+    if setup_needed or not os.path.exists(CREDENTIALS_PATH):
+        login()
+
+    return True
+
+
 LICENSE_VERIFY_URL = "https://api.lemonsqueezy.com/v1/licenses/validate"
 LICENSE_TIMEOUT_SECONDS = 20
 LICENSE_OFFLINE_GRACE_HOURS = max(
@@ -304,9 +492,7 @@ def _prompt_secret(label: str, existing_value: str = "", optional: bool = False)
             value = typer.prompt(label, hide_input=True).strip()
         if value or optional:
             return value
-        console.print(
-            "[warning]This key is required for the packaged multi-agent flow.[/warning]"
-        )
+        console.print("[warning]This key is required for the packaged multi-agent flow.[/warning]")
 
 
 def verify_license():
@@ -364,115 +550,149 @@ def verify_license():
 
 
 @app.command()
-def login(
-    key: str = typer.Argument(..., help="Your AgentIC (Lemon Squeezy) License Key"),
-):
-    """Authenticate this computer and setup LLM API keys for multi-agent capabilities."""
-    key = key.strip()
-    console.print(
-        "[accent]Verifying your AgentIC license with Lemon Squeezy...[/accent]"
+def login():
+    """Authenticate and configure AgentIC credentials interactively."""
+    from .config import (
+        CREDENTIALS_PATH,
+        save_user_credentials,
+        _load_user_credentials,
+        _normalize_base_url,
     )
 
-    if _allow_dev_bypass() and key.startswith("sk_test_dev_bypass"):
-        console.print(
-            "[warning]Developer bypass active for local non-packaged testing.[/warning]"
-        )
-    else:
-        try:
-            valid, error_msg = _validate_license_with_server(key)
-        except Exception:
-            console.print(
-                "[error]✗ Could not reach the license verification server. Check your connection.[/error]"
-            )
-            raise typer.Exit(1)
-        if not valid:
-            console.print(f"[error]✗ Invalid License Key: {error_msg}[/error]")
-            raise typer.Exit(1)
+    existing = _load_user_credentials()
 
-    existing = _load_credentials(required=False)
     console.print(
         Panel(
-            "[success]Authentication Successful![/success]\n"
-            f"License key: [accent]{_mask_secret(key)}[/accent]\n"
-            "Stored at: ~/.agentic/credentials.json\n\n"
-            "Now configure the provider keys used by each agent class.\n\n"
-            "[heading]Role Map[/heading]\n"
-            "GLM / ZhipuAI: architect, designer, verifier, manager, physical\n"
-            "NVIDIA / DeepSeek-style routing: fixer, debugger, reasoner\n"
-            "Groq: documenter and reporting flows",
-            title="🔒 Login Complete",
+            "[accent]Welcome to AgentIC[/accent]\n\n"
+            "Let's get you set up with the credentials needed to run the VLSI pipeline.\n\n"
+            "[info]Required:[/info] LLM API Key (OpenAI, Anthropic, Groq, etc.)\n"
+            "[info]Optional:[/info] License Key and Supabase URL for cloud features\n"
+            "[info]Advanced:[/info] Custom Base URL for self-hosted or corporate proxies",
+            title="[bold #d97757]AgentIC Onboarding[/bold #d97757]",
+            border_style="#8f8a80",
         )
     )
+    console.print()
 
-    def _env_first(*names: str) -> tuple[str, str]:
-        for name in names:
-            value = (os.environ.get(name) or "").strip()
-            if value:
-                return name, value
-        return "", ""
+    from rich.prompt import Prompt
+    from rich.table import Table
 
-    def _resolve_key(
-        label: str, stored_value: str, optional: bool, env_names: tuple[str, ...]
-    ) -> str:
-        stored_value = (stored_value or "").strip()
-        if stored_value:
-            console.print(f"[info]Using stored key for {label}.[/info]")
-            return stored_value
-        env_name, env_value = _env_first(*env_names)
-        if env_value:
-            console.print(
-                f"[info]Using {env_name} from environment for {label}.[/info]"
-            )
-            return env_value
-        return _prompt_secret(label, "", optional=optional)
-
-    glm_key = _resolve_key(
-        "GLM / ZhipuAI API key for core build agents",
-        existing.get("glm_api_key", ""),
-        optional=True,
-        env_names=("GLM_API_KEY", "DEEPSEEK_API_KEY", "LLM_API_KEY"),
+    provider_table = Table(
+        title="Supported Providers", header_style="bold #d97757", show_lines=False
     )
-    nvidia_key = _resolve_key(
-        "NVIDIA API key for fixer and debugger agents",
-        existing.get("nvidia_api_key", ""),
-        optional=False,
-        env_names=("NVIDIA_API_KEY", "DEEPSEEK_API_KEY", "LLM_API_KEY"),
-    )
-    groq_key = _resolve_key(
-        "Groq API key for report and documentation agents",
-        existing.get("groq_api_key", ""),
-        optional=False,
-        env_names=("GROQ_API_KEY", "LLM_API_KEY"),
+    provider_table.add_column("Provider", style="#d97757 bold", width=18)
+    provider_table.add_column("Base URL (if custom)", style="info")
+    provider_table.add_column("Example Model", style="dim")
+    provider_table.add_row("OpenAI", "api.openai.com/v1", "gpt-4o")
+    provider_table.add_row("Anthropic", "(none needed)", "claude-3-5-sonnet")
+    provider_table.add_row("Groq", "api.groq.com/openai/v1", "llama-3.3-70b")
+    provider_table.add_row("Ollama", "localhost:11434", "qwen2.5-coder:7b")
+    provider_table.add_row("LM Studio", "localhost:1234", "any local model")
+    provider_table.add_row("vLLM / Zai", "your-endpoint.com/v1", "meta-llama-3.1-70b")
+    console.print(provider_table)
+    console.print()
+
+    llm_api_key = typer.prompt(
+        "[accent]LLM API Key[/accent]\n"
+        "[dim]OpenAI, Anthropic, Groq, or any OpenAI-compatible endpoint[/dim]",
+        default=existing.get("llm_api_key", ""),
+        hide_input=True,
     )
 
-    # Preserve any existing group/provider configuration while refreshing
-    # license-gated credentials collected by login.
-    data = dict(existing)
-    data.update(
-        {
-            "license_key": key,
-            "nvidia_api_key": nvidia_key,
-            "groq_api_key": groq_key,
-            "glm_api_key": glm_key,
-        }
+    base_url = Prompt.ask(
+        "\n[accent]Custom Base URL[/accent]\n"
+        "[dim]Press Enter for default (OpenAI) or type your custom endpoint[/dim]",
+        default=existing.get("base_url", ""),
     )
-    _remember_verified_license(data)
-    _apply_runtime_keys(data)
+    if base_url.strip():
+        base_url = _normalize_base_url(base_url.strip())
+    else:
+        base_url = ""
+
+    model = Prompt.ask(
+        "\n[accent]Default Model[/accent]\n"
+        "[dim]Press Enter for default (gpt-4o) or specify your model[/dim]",
+        default=existing.get("model", "gpt-4o"),
+    )
+
+    license_key = Prompt.ask(
+        "\n[accent]AgentIC License Key[/accent]\n"
+        "[dim]Required for production builds (leave blank to skip)[/dim]",
+        default=existing.get("license_key", ""),
+    )
+
+    supabase_url = Prompt.ask(
+        "\n[accent]Supabase URL[/accent]\n"
+        "[dim]For cloud features like live build streaming (leave blank to skip)[/dim]",
+        default=existing.get("supabase_url", ""),
+    )
+
+    credentials = {
+        "llm_api_key": llm_api_key.strip(),
+        "license_key": license_key.strip() if license_key.strip() else None,
+        "supabase_url": supabase_url.strip() if supabase_url.strip() else None,
+    }
+
+    if credentials["license_key"]:
+        console.print(f"\n[info]Verifying license with Lemon Squeezy...[/info]")
+        if not _allow_dev_bypass() and not credentials["license_key"].startswith(
+            "sk_test_dev_bypass"
+        ):
+            try:
+                valid, error_msg = _validate_license_with_server(credentials["license_key"])
+            except Exception:
+                console.print(
+                    "[warning]Could not reach license server. Proceeding anyway.[/warning]"
+                )
+            else:
+                if not valid:
+                    console.print(f"[error]Invalid License Key: {error_msg}[/error]")
+                    raise typer.Exit(1)
+
+    credentials = {k: v for k, v in credentials.items() if v is not None}
+
+    build_group = {
+        "model": model.strip() or "gpt-4o",
+        "base_url": base_url or "https://api.openai.com/v1",
+        "api_key": credentials.get("llm_api_key", ""),
+    }
+    existing["build"] = build_group
+
+    if "license_key" in credentials:
+        existing["license_key"] = credentials["license_key"]
+    if "supabase_url" in credentials:
+        existing["supabase_url"] = credentials["supabase_url"]
+
+    save_user_credentials(existing)
+    _apply_runtime_keys(existing)
+
+    provider_info = f"Model: [accent]{model or 'gpt-4o'}[/accent]"
+    if base_url:
+        provider_info += f" | Endpoint: [accent]{base_url}[/accent]"
+    else:
+        provider_info += " | Endpoint: [dim]api.openai.com (default)[/dim]"
+
     console.print(
-        f"\n[success]✅ Credentials saved locally in {CREDENTIALS_FILE}[/success]"
+        Panel(
+            "[success]Setup Complete![/success]\n\n"
+            f"Credentials saved to: [dim]{CREDENTIALS_PATH}[/dim]\n\n"
+            f"{provider_info}\n\n"
+            "[info]Next steps:[/info]\n"
+            '  agentic build --name my_chip --desc "8-bit counter"\n'
+            "  agentic status\n"
+            "  agentic docs",
+            title="[bold #32997b]AgentIC Ready[/bold #32997b]",
+            border_style="#32997b",
+        )
     )
 
     # Now trigger diagnostics to ensure they have the compilers installed
-    console.print(
-        "\n[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]"
-    )
+    console.print("\n[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
     from .tools.vlsi_tools import startup_self_check
 
     status = startup_self_check()
     if not status["ok"]:
-        console.print(
-            "[warning]Some system compiler dependencies are missing.[/warning]"
-        )
+        console.print("[warning]Some system compiler dependencies are missing.[/warning]")
         if typer.confirm(
             "Would you like AgentIC to attempt an automatic environment installation now?"
         ):
@@ -535,9 +755,7 @@ def configure(
     # Show model suggestions table
     from rich.table import Table
 
-    table = Table(
-        title="Smart Model Suggestions", header_style="bold #d97757", show_lines=True
-    )
+    table = Table(title="Smart Model Suggestions", header_style="bold #d97757", show_lines=True)
     table.add_column("Role / Agent", style="#d97757 bold")
     table.add_column("Suggested Model", style="info")
     table.add_column("Best For", style="dim")
@@ -594,9 +812,7 @@ def configure(
                 )
             ):
                 model_name = f"openai/{model_name}"
-            kwargs = dict(
-                model=model_name, api_key=api_key, temperature=0.1, max_tokens=8
-            )
+            kwargs = dict(model=model_name, api_key=api_key, temperature=0.1, max_tokens=8)
             if base_url:
                 kwargs["base_url"] = base_url
             test_llm = LLM(**kwargs)
@@ -616,9 +832,7 @@ def configure(
         """Prompt for model + base_url + api_key. Returns (model, base_url, api_key)."""
         if existing_model:
             console.print(f"  Current model: [info]{existing_model}[/info]")
-        model = typer.prompt(
-            f"  {label} model", default=existing_model or "gpt-4o"
-        ).strip()
+        model = typer.prompt(f"  {label} model", default=existing_model or "gpt-4o").strip()
 
         console.print("  Base URL (blank for OpenAI/Anthropic/Groq):")
         base_url = typer.prompt("  >", default=existing_base or "").strip()
@@ -628,9 +842,7 @@ def configure(
         else:
             if existing_key:
                 masked = (
-                    f"{existing_key[:4]}...{existing_key[-4:]}"
-                    if len(existing_key) > 8
-                    else "****"
+                    f"{existing_key[:4]}...{existing_key[-4:]}" if len(existing_key) > 8 else "****"
                 )
                 keep = typer.confirm(f"  Keep saved API key ({masked})?", default=True)
                 if keep:
@@ -748,18 +960,12 @@ def configure(
 
             if not skip_key:
                 if ex_key:
-                    masked = (
-                        f"{ex_key[:4]}...{ex_key[-4:]}" if len(ex_key) > 8 else "****"
-                    )
-                    keep = typer.confirm(
-                        f"  {role} API key ({masked}) — keep?", default=True
-                    )
+                    masked = f"{ex_key[:4]}...{ex_key[-4:]}" if len(ex_key) > 8 else "****"
+                    keep = typer.confirm(f"  {role} API key ({masked}) — keep?", default=True)
                     if keep:
                         api_key = ex_key
                     else:
-                        api_key = typer.prompt(
-                            f"  {role} API Key", hide_input=True
-                        ).strip()
+                        api_key = typer.prompt(f"  {role} API Key", hide_input=True).strip()
                         if not api_key:
                             skip_key = True
                 else:
@@ -785,9 +991,7 @@ def configure(
 
         creds = {"roles": role_configs}
         # Also set group-level for backward compat
-        build_key = next(
-            (rc["api_key"] for rc in role_configs.values() if rc.get("api_key")), ""
-        )
+        build_key = next((rc["api_key"] for rc in role_configs.values() if rc.get("api_key")), "")
         if build_key:
             build_model = role_configs.get("designer", {}).get("model", "gpt-4o")
             creds["build"] = {
@@ -838,9 +1042,7 @@ def doctor():
             console.print(f"  [success]✓[/success] {tool}: [info]{resolved}[/info]")
         else:
             marker = "(optional)" if optional else "(required)"
-            console.print(
-                f"  [error]✗[/error] {tool} {marker}: [info]{resolved}[/info]"
-            )
+            console.print(f"  [error]✗[/error] {tool} {marker}: [info]{resolved}[/info]")
             if not optional:
                 required_failed = True
 
@@ -851,9 +1053,7 @@ def doctor():
                 f"\n[success]✓[/success] Credentials file found: [info]{CREDENTIALS_PATH}[/info]"
             )
             for group in groups:
-                model = (
-                    creds.get(group, {}).get("model") or ""
-                ).strip() or "(model not set)"
+                model = (creds.get(group, {}).get("model") or "").strip() or "(model not set)"
                 has_key = bool((creds.get(group, {}).get("api_key") or "").strip())
                 key_state = "key set" if has_key else "key missing"
                 console.print(f"  - {group}: {model} [{key_state}]")
@@ -870,9 +1070,7 @@ def doctor():
         raise typer.Exit(1)
 
     console.print("\n[success]Environment checks passed.[/success]")
-    console.print(
-        "\n[info]To install a PDK:[/info] [accent]agentic install-pdk list[/accent]"
-    )
+    console.print("\n[info]To install a PDK:[/info] [accent]agentic install-pdk list[/accent]")
 
 
 PDK_INSTALL_CONFIGS = {
@@ -1017,15 +1215,9 @@ def install_pdk(
         None,
         help="PDK name (e.g., sky130, gf180mcu). Use 'list' to see all available PDKs.",
     ),
-    version: str = typer.Option(
-        "", "--version", "-v", help="Specific version to install"
-    ),
-    list_installed: bool = typer.Option(
-        False, "--installed", help="List currently installed PDKs"
-    ),
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Reinstall even if already installed"
-    ),
+    version: str = typer.Option("", "--version", "-v", help="Specific version to install"),
+    list_installed: bool = typer.Option(False, "--installed", help="List currently installed PDKs"),
+    force: bool = typer.Option(False, "--force", "-f", help="Reinstall even if already installed"),
 ):
     """Install open-source PDKs for use with AgentIC.
 
@@ -1057,11 +1249,7 @@ def install_pdk(
 
         for key, cfg in PDK_INSTALL_CONFIGS.items():
             is_installed = key in installed
-            status = (
-                "[success]Installed[/success]"
-                if is_installed
-                else "[dim]Not installed[/dim]"
-            )
+            status = "[success]Installed[/success]" if is_installed else "[dim]Not installed[/dim]"
             install_method = "volare" if cfg.get("requires_volare") else "download"
             table.add_row(
                 key,
@@ -1073,12 +1261,8 @@ def install_pdk(
             )
 
         console.print(table)
-        console.print(
-            "\n[info]To install:[/info] [accent]agentic install-pdk <name>[/accent]"
-        )
-        console.print(
-            "[info]After install, verify with:[/info] [accent]agentic doctor[/accent]"
-        )
+        console.print("\n[info]To install:[/info] [accent]agentic install-pdk <name>[/accent]")
+        console.print("[info]After install, verify with:[/info] [accent]agentic doctor[/accent]")
         return
 
     pdk_key = pdk_name.strip().lower()
@@ -1132,9 +1316,7 @@ def install_pdk(
                 text=True,
             )
             if result.returncode != 0:
-                console.print(
-                    f"[error]Failed to install volare:[/error]\n{result.stderr}"
-                )
+                console.print(f"[error]Failed to install volare:[/error]\n{result.stderr}")
                 raise typer.Exit(1)
             console.print("[success]Volare installed successfully.[/success]")
 
@@ -1231,91 +1413,155 @@ def install_pdk(
             )
 
 
-# Setup Brain
-def get_llm():
-    """Returns the LLM instance from the best available provider:
-    1. NVIDIA Cloud (e.g. Llama 3.3, DeepSeek)
-    2. Local Compute Engine (VeriReason/Ollama)
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIVERSAL LLM INITIALIZATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _format_model_for_provider(model: str, base_url: str) -> str:
     """
+    Ensure the model string is compatible with the provider.
 
-    configs = [
-        ("Cloud Compute Engine", CLOUD_CONFIG),
-        ("Local Compute Engine", LOCAL_CONFIG),
-    ]
+    LiteLLM requires provider prefixes for non-OpenAI endpoints:
+      - openai/gpt-4o
+      - anthropic/claude-3-5-sonnet
+      - groq/llama-3.3-70b
+      - openai/llama-3.1-70b  (custom endpoint with OpenAI-compatible API)
 
-    for name, cfg in configs:
-        key = cfg.get("api_key", "")
-        # For Cloud, skip if no key.
-        if "Cloud" in name and (not key or key.strip() == "" or key == "mock-key"):
-            console.print(f"[dim]⏭ {name}: No valid API key set, skipping.[/dim]")
-            continue
+    If base_url is localhost/internal, assume OpenAI-compatible format.
+    """
+    model = (model or "").strip()
 
-        try:
-            console.print(f"[dim]Testing {name}...[/dim]")
-            # Add extra parameters for reasoning models
-            extra_t = {}
-            if "glm5" in cfg["model"].lower():
-                extra_t = {
-                    "chat_template_kwargs": {
-                        "enable_thinking": True,
-                        "clear_thinking": False,
-                    }
-                }
-            elif "deepseek-v3.2" in cfg["model"].lower():
-                extra_t = {"chat_template_kwargs": {"thinking": True}}
+    # Already has a provider prefix
+    if "/" in model:
+        return model
 
-            llm = LLM(
-                model=cfg["model"],
-                base_url=cfg["base_url"],
-                api_key=key
-                if key and key != "NA"
-                else "mock-key",  # Local LLMs might use mock-key
-                temperature=0.2,  # Standardized for RTL generation stability
-                top_p=0.7,  # Optimized for code output
-                max_tokens=16384,
-                timeout=300,
-                extra_body=extra_t,
-            )
-            # Make a lightweight API call to validate the endpoint
-            llm.call([{"role": "user", "content": "Hi"}])
-            console.print(
-                f"[success]✓ AgentIC is working on your chip using {name}[/success]"
-            )
-            return llm
-        except Exception as e:
-            console.print(f"[warning]⚠ {name} init failed[/warning]")
+    # Infer provider from base_url
+    base_lower = (base_url or "").lower()
 
-    # Critical Failure if both fail
-    console.print(
-        Panel(
-            "[error]CRITICAL: No AI API Key Found[/error]\n\n"
-            "AgentIC is a [warning]Bring-Your-Own-Key[/warning] application. "
-            "To build chips using cloud AI clusters, you must provide your own API key.\n\n"
-            "[accent]How to fix this:[/accent]\n"
-            "1. Create a file named [bold].env[/bold] in your current directory.\n"
-            "2. Add your provider's API key to the file. For example:\n"
-            '   [success]LLM_API_KEY="your-key-here"[/success]\n'
-            '   [success]LLM_BASE_URL="https://api.openai.com/v1"[/success]\n'
-            '   [success]LLM_MODEL="gpt-4o"[/success]\n\n'
-            "[dim]Alternatively, you can export these as environment variables before running AgentIC.[/dim]",
-            title="🔑 Missing API Key Setup",
-            border_style="red",
-        )
+    if "anthropic" in base_lower:
+        return f"anthropic/{model}"
+    if "groq" in base_lower:
+        return f"groq/{model}"
+    if "openai" in base_lower:
+        return f"openai/{model}"
+    if "together" in base_lower:
+        return f"together/{model}"
+    if "azure" in base_lower:
+        return f"azure/{model}"
+
+    # Default to openai/ prefix for custom endpoints
+    if base_lower and "openai.com" not in base_lower:
+        return f"openai/{model}"
+
+    return f"openai/{model}"
+
+
+def get_llm(
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    temperature: float = 0.2,
+    max_tokens: int = 16384,
+    show_verbose: bool = False,
+) -> "LLM":
+    """
+    Universally instantiate a CrewAI LLM for any OpenAI-compatible provider.
+
+    Priority order:
+      1. Explicit parameters passed to this function
+      2. Environment variables (LLM_MODEL, LLM_BASE_URL, LLM_API_KEY)
+      3. credentials.json (build group)
+
+    Args:
+        model: Override model name (e.g. "gpt-4o", "claude-3-5-sonnet")
+        base_url: Override endpoint (e.g. "https://api.groq.com/openai/v1")
+        api_key: Override API key
+        temperature: Sampling temperature (default 0.2)
+        max_tokens: Max output tokens (default 16384)
+        show_verbose: Print connection diagnostics
+
+    Returns:
+        Configured crewai.LLM instance
+    """
+    from .config import DEFAULT_LLM_CONFIG, resolve_llm_config
+
+    import io
+    import sys
+
+    _null_out = io.StringIO()
+    _original_stdout = sys.stdout
+    _original_stderr = sys.stderr
+    sys.stdout = _null_out
+    sys.stderr = _null_out
+
+    # Resolve config with priority: explicit > env > credentials > defaults
+    cfg = resolve_llm_config(
+        env_var_prefix="LLM",
+        credential_group="build",
+        fallback_model="openai/gpt-4o",
+        fallback_base_url="https://api.openai.com/v1",
     )
+
+    model = (model or "").strip() or cfg["model"]
+    base_url = (base_url or "").strip() or cfg["base_url"]
+    api_key = (api_key or "").strip() or cfg["api_key"]
+
+    # Format model string with provider prefix
+    model = _format_model_for_provider(model, base_url)
+
+    # Detect provider-specific extra_body
+    extra_body = {}
+    model_lower = model.lower()
+    if "glm5" in model_lower or "glm-5" in model_lower:
+        extra_body = {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
+    elif "deepseek-v3" in model_lower:
+        extra_body = {"chat_template_kwargs": {"thinking": True}}
+
+    try:
+        llm = LLM(
+            model=model,
+            base_url=base_url,
+            api_key=api_key if api_key and api_key != "NA" else "mock-key",
+            temperature=temperature,
+            top_p=0.7,
+            max_tokens=max_tokens,
+            timeout=300,
+            extra_body=extra_body if extra_body else None,
+        )
+        # Test the connection
+        llm.call([{"role": "user", "content": "Hi"}])
+        sys.stdout = _original_stdout
+        sys.stderr = _original_stderr
+
+        provider = model.split("/")[0] if "/" in model else "openai"
+        console.print(f"[green]✓[/green] LLM: {model} @ {base_url}")
+        return llm
+
+    except Exception as e:
+        sys.stdout = _original_stdout
+        sys.stderr = _original_stderr
+        if show_verbose:
+            console.print(f"[dim]  LLM connection failed: {str(e)[:120]}[/dim]")
+        raise
+
+    sys.stdout = _original_stdout
+    sys.stderr = _original_stderr
+
+    console.print(f"\n[red]✗[/red] Failed to connect to LLM")
+    console.print(f"  [dim]Set LLM_API_KEY in .env file[/dim]")
+    console.print(f"  [dim]See: agentic config --help[/dim]")
     raise typer.Exit(1)
 
 
 def run_startup_diagnostics(strict: bool = True):
     diag = startup_self_check()
     ok = bool(diag.get("ok", False))
-    status = "[success]PASS[/success]" if ok else "[error]FAIL[/error]"
-    console.print(Panel(f"Startup Toolchain Check: {status}", title="🔧 Environment"))
     if not ok:
+        console.print("[red]✗[/red] Toolchain check failed")
         for check in diag.get("checks", []):
             if not check.get("ok"):
-                console.print(
-                    f"  [error]✗ {check.get('tool')}[/error] -> {check.get('resolved')}"
-                )
+                console.print(f"  [red]✗[/red] {check.get('tool')} -> {check.get('resolved')}")
         if strict:
             raise typer.Exit(1)
 
@@ -1368,9 +1614,7 @@ def simulate(
             agent=fix_agent,
         )
         with console.status(f"[accent]AI is fixing ({agent_role})...[/accent]"):
-            result = str(
-                Crew(verbose=False, agents=[fix_agent], tasks=[fix_task]).kickoff()
-            )
+            result = str(Crew(verbose=False, agents=[fix_agent], tasks=[fix_task]).kickoff())
             return result
 
     sim_success, sim_output = run_simulation(name)
@@ -1378,15 +1622,10 @@ def simulate(
 
     while not sim_success and sim_tries < max_retries:
         sim_tries += 1
-        console.print(
-            f"[error]✗ SIMULATION FAILED (attempt {sim_tries}/{max_retries})[/error]"
-        )
+        console.print(f"[error]✗ SIMULATION FAILED (attempt {sim_tries}/{max_retries})[/error]")
         sim_output_text = sim_output or ""
         # 1) If compilation failed, fix TB first.
-        if (
-            "Compilation failed:" in sim_output_text
-            or "syntax error" in sim_output_text
-        ):
+        if "Compilation failed:" in sim_output_text or "syntax error" in sim_output_text:
             fix_tb_prompt = f"""Fix this SystemVerilog testbench so it compiles and avoids directionality errors.
 CRITICAL FIXING RULES:
 1. **Unresolved Wires**: If you see "Unable to assign to unresolved wires", it means you are driving a DUT OUTPUT. Stop driving it!
@@ -1576,8 +1815,7 @@ def harden(
     check_dependencies(skip_openlane=False)
     console.print(
         Panel(
-            f"[accent]AgentIC: Manual Hardening Mode[/accent]\n"
-            f"Design: [warning]{name}[/warning]",
+            f"[accent]AgentIC: Manual Hardening Mode[/accent]\nDesign: [warning]{name}[/warning]",
             title="🚀 Starting OpenLane",
         )
     )
@@ -1645,6 +1883,7 @@ def harden(
 def build(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
     desc: str = typer.Option(..., "--desc", "-d", help="Natural language description"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Run spec validation only"),
     max_retries: int = typer.Option(
         5,
         "--max-retries",
@@ -1702,42 +1941,31 @@ def build(
         3, "--tb-max-retries", min=1, help="Maximum TB gate recovery attempts"
     ),
     tb_fallback_template: str = typer.Option(
-        "uvm_lite",
-        "--tb-fallback-template",
-        help="TB fallback template: uvm_lite or classic",
+        "uvm_lite", "--tb-fallback-template", help="TB fallback template: uvm_lite or classic"
     ),
     coverage_backend: str = typer.Option(
-        SIM_BACKEND_DEFAULT,
-        "--coverage-backend",
-        help="Coverage backend: auto, verilator, iverilog",
+        "auto", "--coverage-backend", help="Coverage backend: auto, verilator, iverilog"
     ),
     coverage_fallback_policy: str = typer.Option(
-        COVERAGE_FALLBACK_POLICY_DEFAULT,
+        "fallback_oss",
         "--coverage-fallback-policy",
         help="Coverage fallback policy: fail_closed, fallback_oss, skip",
     ),
     coverage_profile: str = typer.Option(
-        COVERAGE_PROFILE_DEFAULT,
-        "--coverage-profile",
-        help="Coverage profile: balanced, aggressive, relaxed",
+        "balanced", "--coverage-profile", help="Coverage profile: balanced, aggressive, relaxed"
     ),
     no_golden_templates: bool = typer.Option(
         False,
         "--no-golden-templates",
-        help="Disable golden template matching in RTL_GEN; force LLM to generate RTL from scratch",
-    ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Validate spec and generate reports without running the full build",
+        help="Disable golden template matching; force LLM to generate RTL from scratch",
     ),
     json_output: bool = typer.Option(
-        False,
-        "--json",
-        help="Output machine-readable JSON results for CI/CD integration",
+        False, "--json", help="Output machine-readable JSON results for CI/CD integration"
     ),
 ):
     """Build a chip from natural language description (Autonomous Orchestrator 2.0)."""
+    _print_banner()
+    _ensure_setup(skip_toolchain_prompt=skip_openlane)
     verify_license()
     check_dependencies(skip_openlane)
 
@@ -1758,10 +1986,7 @@ def build(
         # Auto-detected — pick the first available unless there's a preference
         if len(detected) == 1:
             pdk_profile = next(iter(detected))
-            console.print(
-                f"[success]Auto-detected PDK: {pdk_profile} "
-                f"({detected[pdk_profile].get('description', '')})[/success]"
-            )
+            # Already shown in header, no need to repeat
         else:
             # Multiple PDKs — interactive selection
             from rich.table import Table
@@ -1791,10 +2016,7 @@ def build(
                 )
             console.print(table)
 
-            prompt = (
-                f"Select PDK [1-{len(pdk_options)}]"
-                f" (or press Enter for {pdk_options[0]}): "
-            )
+            prompt = f"Select PDK [1-{len(pdk_options)}] (or press Enter for {pdk_options[0]}): "
             choice = typer.prompt(prompt, default="1").strip()
             try:
                 idx = int(choice) - 1
@@ -1834,9 +2056,7 @@ def build(
     if dry_run:
         console.print(
             Panel(
-                f"[accent]DRY RUN — Spec Validation[/accent]\n"
-                f"Design: {name}\n"
-                f"Description: {desc}",
+                f"[accent]DRY RUN — Spec Validation[/accent]\nDesign: {name}\nDescription: {desc}",
                 title="🔍 Dry Run Mode",
             )
         )
@@ -1859,29 +2079,22 @@ def build(
 
     from .orchestrator import BuildOrchestrator
 
+    # Clean opencode-style header
+    console.print(f"\n[bold #d97757]AgentIC[/] • Building [warning]{name}[/warning]")
+    console.print(f"[dim]  {desc}[/dim]")
     console.print(
-        Panel(
-            f"[accent]AgentIC: Natural Language → GDSII[/accent]\n"
-            f"Design: [warning]{name}[/warning]\n"
-            f"Description: {desc}\n"
-            f"PDK: [success]{pdk_profile}[/success]  "
-            f"{'[success]Full Industry Signoff Enabled[/success]' if full_signoff else ''}",
-            title="🚀 Starting Autonomous Orchestrator",
-        )
+        f"[dim]  PDK: {pdk_profile} | {'Full Signoff' if full_signoff else 'RTL → GDSII'}[/dim]"
     )
+    console.print()
     tb_gate_mode = tb_gate_mode.lower().strip()
     if tb_gate_mode not in {"strict", "relaxed"}:
         raise typer.BadParameter("--tb-gate-mode must be one of: strict, relaxed")
     tb_fallback_template = tb_fallback_template.lower().strip()
     if tb_fallback_template not in {"uvm_lite", "classic"}:
-        raise typer.BadParameter(
-            "--tb-fallback-template must be one of: uvm_lite, classic"
-        )
+        raise typer.BadParameter("--tb-fallback-template must be one of: uvm_lite, classic")
     coverage_backend = coverage_backend.lower().strip()
     if coverage_backend not in {"auto", "verilator", "iverilog"}:
-        raise typer.BadParameter(
-            "--coverage-backend must be one of: auto, verilator, iverilog"
-        )
+        raise typer.BadParameter("--coverage-backend must be one of: auto, verilator, iverilog")
     coverage_fallback_policy = coverage_fallback_policy.lower().strip()
     if coverage_fallback_policy not in {"fail_closed", "fallback_oss", "skip"}:
         raise typer.BadParameter(
@@ -1889,16 +2102,12 @@ def build(
         )
     coverage_profile = coverage_profile.lower().strip()
     if coverage_profile not in {"balanced", "aggressive", "relaxed"}:
-        raise typer.BadParameter(
-            "--coverage-profile must be one of: balanced, aggressive, relaxed"
-        )
+        raise typer.BadParameter("--coverage-profile must be one of: balanced, aggressive, relaxed")
     thinking_level = thinking_level.lower().strip()
     if thinking_level not in {"minimal", "normal", "verbose"}:
-        raise typer.BadParameter(
-            "--thinking-level must be one of: minimal, normal, verbose"
-        )
+        raise typer.BadParameter("--thinking-level must be one of: minimal, normal, verbose")
     run_startup_diagnostics(strict=strict_gates)
-    llm = get_llm()
+    llm = get_llm(show_verbose=show_thinking)
 
     # Build Multi-LLM Role Map for the CLI
     from .config import get_role_llm_config
@@ -1918,7 +2127,16 @@ def build(
     ]
     role_llms = {}
 
-    print("\n--- 🤖 Local Compute Routing Map ---", flush=True)
+    # Suppress crewai output during role LLM creation
+    import io
+    import sys as _sys
+
+    _null = io.StringIO()
+    _old_out = _sys.stdout
+    _old_err = _sys.stderr
+    _sys.stdout = _null
+    _sys.stderr = _null
+
     for role in roles:
         cfg = get_role_llm_config(role)
         llm_kwargs = dict(
@@ -1932,12 +2150,13 @@ def build(
         if "extra_body" in cfg:
             llm_kwargs["extra_body"] = cfg["extra_body"]
 
-        print(f"[Router] {role.upper():<20} -> Model: {cfg['model']}", flush=True)
         try:
             role_llms[role] = LLM(**llm_kwargs)
         except Exception:
             role_llms[role] = llm
-    print("------------------------------------\n", flush=True)
+
+    _sys.stdout = _old_out
+    _sys.stderr = _old_err
 
     orchestrator = BuildOrchestrator(
         name=name,
@@ -2003,16 +2222,12 @@ def verify(name: str = typer.Argument(..., help="Design name to verify")):
 def synth(
     rtl_file: str = typer.Option(..., "--rtl", "-r", help="RTL Verilog source file"),
     top: str = typer.Option(..., "--top", "-t", help="Top-level module name"),
-    output_dir: str = typer.Option(
-        "./synth_out", "--out", "-o", help="Output directory"
-    ),
+    output_dir: str = typer.Option("./synth_out", "--out", "-o", help="Output directory"),
     pdk: str = typer.Option("sky130", "--pdk", help="PDK: sky130, gf180mcu"),
     clk_ns: float = typer.Option(
         10.0, "--clk", help="Clock constraint in ns (e.g., 10.0 = 100MHz)"
     ),
-    json_output: bool = typer.Option(
-        False, "--json", help="Output machine-readable JSON result"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON result"),
 ):
     """Run Yosys RTL synthesis to produce a gate-level netlist.
 
@@ -2047,9 +2262,7 @@ def synth(
         console.print(
             f"  Cells: {result.cell_count:,} | DFFs: {result.dff_count:,} | LUTs: {result.lut_count:,}"
         )
-        console.print(
-            f"  Gate equiv: {result.gate_count:,.0f} | Area: {result.area_um2:.3f} um²"
-        )
+        console.print(f"  Gate equiv: {result.gate_count:,.0f} | Area: {result.area_um2:.3f} um²")
         console.print(f"  Netlist: {result.netlist_path}")
         if result.warnings:
             console.print(f"  [warning]⚠ Warnings: {len(result.warnings)}[/warning]")
@@ -2078,25 +2291,15 @@ def synth(
 
 @app.command("sta")
 def sta(
-    netlist: str = typer.Option(
-        ..., "--netlist", "-n", help="Gate-level Verilog netlist"
-    ),
+    netlist: str = typer.Option(..., "--netlist", "-n", help="Gate-level Verilog netlist"),
     sdc: str = typer.Option(..., "--sdc", help="SDC timing constraints file"),
-    lib: str = typer.Option(
-        ..., "--lib", "-l", help="Liberty timing library (.lib) file"
-    ),
+    lib: str = typer.Option(..., "--lib", "-l", help="Liberty timing library (.lib) file"),
     output_dir: str = typer.Option("./sta_out", "--out", "-o", help="Output directory"),
     corner: str = typer.Option("tt", "--corner", "-c", help="Corner: tt, ss, ff"),
-    multi_corner: bool = typer.Option(
-        False, "--multi-corner", help="Run all corners (ss/tt/ff)"
-    ),
-    min_period_ns: float = typer.Option(
-        10.0, "--period", help="Clock period constraint in ns"
-    ),
+    multi_corner: bool = typer.Option(False, "--multi-corner", help="Run all corners (ss/tt/ff)"),
+    min_period_ns: float = typer.Option(10.0, "--period", help="Clock period constraint in ns"),
     pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
-    json_output: bool = typer.Option(
-        False, "--json", help="Output machine-readable JSON"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
     """Run OpenSTA static timing analysis (pre or post PnR).
 
@@ -2154,15 +2357,11 @@ def sta(
         )
         if result.ok:
             console.print(f"  [success]✓ STA PASS [{corner}][/success]")
-            console.print(
-                f"  WNS={result.wns_setup:.3f}ns | TNS={result.tns_setup:.1f}ns"
-            )
+            console.print(f"  WNS={result.wns_setup:.3f}ns | TNS={result.tns_setup:.1f}ns")
             console.print(f"  Max frequency: {result.max_freq_mhz:.1f} MHz")
         else:
             console.print(f"  [error]✗ STA FAIL [{corner}][/error]")
-            console.print(
-                f"  WNS={result.wns_setup:.3f}ns | TNS={result.tns_setup:.1f}ns"
-            )
+            console.print(f"  WNS={result.wns_setup:.3f}ns | TNS={result.tns_setup:.1f}ns")
             if result.errors:
                 for e in result.errors:
                     console.print(f"    {e}")
@@ -2210,12 +2409,8 @@ def dft(
 
     if testability:
         ok, analysis = run_testability_analysis(rtl_file, output_dir)
-        console.print(
-            f"  DFFs: {analysis['dff_count']} | LUTs: {analysis['lut_count']}"
-        )
-        console.print(
-            f"  Estimated scan coverage: {analysis['estimated_scan_coverage']:.1f}%"
-        )
+        console.print(f"  DFFs: {analysis['dff_count']} | LUTs: {analysis['lut_count']}")
+        console.print(f"  Estimated scan coverage: {analysis['estimated_scan_coverage']:.1f}%")
         if analysis["dft_issues"]:
             console.print(f"  [warning]DFT Issues:[/warning]")
             for issue in analysis["dft_issues"]:
@@ -2245,28 +2440,19 @@ def dft(
 
 @app.command("power")
 def power(
-    netlist: str = typer.Option(
-        ..., "--netlist", "-n", help="Gate-level Verilog netlist"
-    ),
-    output_dir: str = typer.Option(
-        "./power_out", "--out", "-o", help="Output directory"
-    ),
+    netlist: str = typer.Option(..., "--netlist", "-n", help="Gate-level Verilog netlist"),
+    output_dir: str = typer.Option("./power_out", "--out", "-o", help="Output directory"),
     vdd: float = typer.Option(1.8, "--vdd", help="Supply voltage in volts"),
     freq_mhz: float = typer.Option(50.0, "--freq", help="Clock frequency in MHz"),
-    spef: str = typer.Option(
-        "", "--spef", help="SPEF parasitic file for accurate power"
-    ),
+    spef: str = typer.Option("", "--spef", help="SPEF parasitic file for accurate power"),
     pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
-    json_output: bool = typer.Option(
-        False, "--json", help="Output machine-readable JSON"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
     """Run power analysis with dynamic/leakage breakdown and IR-drop check."""
     verify_license()
     console.print(
         Panel(
-            f"[accent]Power Analysis[/accent]\n"
-            f"VDD: {vdd}V | Freq: {freq_mhz}MHz | PDK: {pdk}",
+            f"[accent]Power Analysis[/accent]\nVDD: {vdd}V | Freq: {freq_mhz}MHz | PDK: {pdk}",
             title="⚡ Power Analysis",
         )
     )
@@ -2296,9 +2482,7 @@ def power(
     ir = result.ir_drop
     if ir.max_drop_mV > 0:
         icon = "✓" if ir.ok else "⚠"
-        console.print(
-            f"  {icon} IR-drop: {ir.max_drop_mV:.4f}mV (worst: {ir.worst_node})"
-        )
+        console.print(f"  {icon} IR-drop: {ir.max_drop_mV:.4f}mV (worst: {ir.worst_node})")
 
     if result.errors:
         console.print(f"  [error]Errors:[/error]")
@@ -2324,9 +2508,7 @@ def drc(
     tech: str = typer.Option(..., "--tech", "-t", help="Magic technology file (.tech)"),
     output_dir: str = typer.Option("./drc_out", "--out", "-o", help="Output directory"),
     pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
-    json_output: bool = typer.Option(
-        False, "--json", help="Output machine-readable JSON"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
     """Run independent Magic DRC on GDSII layout.
 
@@ -2351,13 +2533,9 @@ def drc(
     if result.ok:
         console.print(f"  [success]✓ DRC PASS — 0 violations[/success]")
     else:
-        console.print(
-            f"  [error]✗ DRC FAIL — {result.drc_violations} violations[/error]"
-        )
+        console.print(f"  [error]✗ DRC FAIL — {result.drc_violations} violations[/error]")
 
-    console.print(
-        f"  Runtime: {result.runtime_sec:.1f}s | Report: {result.drc_report_path}"
-    )
+    console.print(f"  Runtime: {result.runtime_sec:.1f}s | Report: {result.drc_report_path}")
     if result.violations:
         for v in result.violations[:5]:
             console.print(f"  [error]  Layer {v.layer}: {v.message}[/error]")
@@ -2367,9 +2545,7 @@ def drc(
             {
                 "ok": result.ok,
                 "drc_violations": result.drc_violations,
-                "violations": [
-                    {"layer": v.layer, "message": v.message} for v in result.violations
-                ],
+                "violations": [{"layer": v.layer, "message": v.message} for v in result.violations],
                 "runtime_sec": result.runtime_sec,
             }
         )
@@ -2377,16 +2553,12 @@ def drc(
 
 @app.command("lvs")
 def lvs(
-    schematic: str = typer.Option(
-        ..., "--sch", "-s", help="Schematic netlist (Verilog)"
-    ),
+    schematic: str = typer.Option(..., "--sch", "-s", help="Schematic netlist (Verilog)"),
     layout_gds: str = typer.Option(..., "--gds", "-g", help="Layout GDSII file"),
     tech_setup: str = typer.Option(..., "--setup", help="Netgen tech setup file"),
     output_dir: str = typer.Option("./lvs_out", "--out", "-o", help="Output directory"),
     pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
-    json_output: bool = typer.Option(
-        False, "--json", help="Output machine-readable JSON"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
     """Run Netgen LVS (Layout vs Schematic) equivalence check.
 
@@ -2410,9 +2582,7 @@ def lvs(
     )
 
     if result.equivalent:
-        console.print(
-            f"  [success]✓ LVS PASS — Schematic equivalent to Layout[/success]"
-        )
+        console.print(f"  [success]✓ LVS PASS — Schematic equivalent to Layout[/success]")
     else:
         console.print(f"  [error]✗ LVS FAIL[/error]")
         console.print(
@@ -2420,9 +2590,7 @@ def lvs(
         )
         console.print(f"  Unconnected nets: {result.unconnected_nets}")
 
-    console.print(
-        f"  Runtime: {result.runtime_sec:.1f}s | Report: {result.lvs_report_path}"
-    )
+    console.print(f"  Runtime: {result.runtime_sec:.1f}s | Report: {result.lvs_report_path}")
 
     if json_output:
         console.print_json(
@@ -2441,9 +2609,7 @@ def report(
     design: str = typer.Option(..., "--design", "-d", help="Design name"),
     output_dir: str = typer.Option("./reports", "--out", "-o", help="Output directory"),
     pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
-    format: str = typer.Option(
-        "all", "--format", "-f", help="Format: json, csv, md, all"
-    ),
+    format: str = typer.Option("all", "--format", "-f", help="Format: json, csv, md, all"),
 ):
     """Generate structured QOR signoff report from build data.
 
@@ -2457,15 +2623,9 @@ def report(
 
     reporter = SignoffReporter(design, pdk)
 
-    json_path = reporter.generate_json_report(
-        os.path.join(output_dir, f"{design}_qor.json")
-    )
-    csv_path = reporter.generate_csv_report(
-        os.path.join(output_dir, f"{design}_checklist.csv")
-    )
-    md_path = reporter.generate_markdown_report(
-        os.path.join(output_dir, f"{design}_signoff.md")
-    )
+    json_path = reporter.generate_json_report(os.path.join(output_dir, f"{design}_qor.json"))
+    csv_path = reporter.generate_csv_report(os.path.join(output_dir, f"{design}_checklist.csv"))
+    md_path = reporter.generate_markdown_report(os.path.join(output_dir, f"{design}_signoff.md"))
 
     console.print(
         Panel(
@@ -2478,5 +2638,32 @@ def report(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY POINT — Anti-Traceback Wrapper
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app()
+    try:
+        app()
+    except KeyboardInterrupt:
+        console.print("\n[dim]AgentIC build safely aborted by user.[/dim]")
+        raise SystemExit(0) from None
+    except Exception as exc:
+        import traceback as _tb
+
+        _log_path = os.path.join(os.getcwd(), "agentic_error.log")
+        try:
+            with open(_log_path, "w") as _f:
+                _f.write(_tb.format_exc())
+        except Exception:
+            pass
+
+        console.print(
+            Panel(
+                f"[error]{type(exc).__name__}: {exc}[/error]\n\n"
+                f"[dim]Full traceback written to:[/dim] {_log_path}\n"
+                "[dim]For help:[/dim] https://github.com/Vickyrrrrrr/AgentIC/issues",
+                title="[bold red]Unexpected Error[/bold red]",
+                border_style="#d45851",
+            )
+        )
+        raise SystemExit(1) from None

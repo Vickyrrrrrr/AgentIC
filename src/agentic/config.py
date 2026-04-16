@@ -6,9 +6,7 @@ from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 # Project Paths
-WORKSPACE_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # Load .env from explicit env var, current working directory, and package root.
@@ -68,6 +66,45 @@ def _normalize_base_url(raw_url: str) -> str:
     if url.startswith(("localhost", "127.0.0.1", "0.0.0.0")):
         return f"http://{url}"
     return f"https://{url}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM PROVIDER ENVIRONMENT INJECTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _inject_llm_env_vars(base_url: str, api_key: str) -> None:
+    """Propagate LLM endpoint config into os.environ for LiteLLM/httpx."""
+    if base_url:
+        os.environ["OPENAI_API_BASE"] = base_url
+        os.environ["LITELLM_API_BASE"] = base_url
+        os.environ["LITELLM_BASE_URL"] = base_url
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIVERSAL CREDENTIAL RESOLUTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def resolve_llm_config(
+    env_var_prefix: str = "LLM",
+    credential_group: str = "build",
+    fallback_model: str = "openai/gpt-4o",
+    fallback_base_url: str = "https://api.openai.com/v1",
+) -> Dict[str, str]:
+    """Resolve LLM config with priority order: env var > credentials.json > defaults."""
+    model = os.environ.get(f"{env_var_prefix}_MODEL", "").strip()
+    api_key = os.environ.get(f"{env_var_prefix}_API_KEY", "").strip()
+    base_url = os.environ.get(f"{env_var_prefix}_BASE_URL", "").strip()
+    group = _credential_group(credential_group)
+
+    return {
+        "model": model or group.get("model", "") or fallback_model,
+        "base_url": _normalize_base_url(base_url or group.get("base_url", "") or fallback_base_url),
+        "api_key": api_key or group.get("api_key", ""),
+    }
 
 
 # For end-users, we want designs to generate exactly where they run the command.
@@ -144,23 +181,15 @@ def _default_group_credentials() -> Dict[str, str]:
 # Per-role overrides: set ROLE_{ROLE}_MODEL / ROLE_{ROLE}_BASE_URL / ROLE_{ROLE}_API_KEY
 # e.g. ROLE_DESIGNER_MODEL=gpt-4o  ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
 
-_DEFAULT_GROUP = _default_group_credentials()
+_DEFAULT_LLM_CONFIG = resolve_llm_config(
+    env_var_prefix="LLM",
+    credential_group="build",
+    fallback_model="openai/gpt-4o",
+    fallback_base_url="https://api.openai.com/v1",
+)
 
-_DEFAULT_LLM_CONFIG = {
-    "model": (
-        os.environ.get("LLM_MODEL", "").strip()
-        or _DEFAULT_GROUP.get("model", "")
-        or "openai/gpt-4o"
-    ),
-    "base_url": _normalize_base_url(
-        os.environ.get("LLM_BASE_URL", "").strip()
-        or _DEFAULT_GROUP.get("base_url", "")
-        or "https://api.openai.com/v1"
-    ),
-    "api_key": (
-        os.environ.get("LLM_API_KEY", "").strip() or _DEFAULT_GROUP.get("api_key", "")
-    ),
-}
+# Propagate into os.environ so LiteLLM/httpx clients route correctly
+_inject_llm_env_vars(_DEFAULT_LLM_CONFIG["base_url"], _DEFAULT_LLM_CONFIG["api_key"])
 
 DEFAULT_LLM_CONFIG = _DEFAULT_LLM_CONFIG.copy()
 CLOUD_CONFIG = _DEFAULT_LLM_CONFIG.copy()
@@ -208,16 +237,17 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     role_group = _ROLE_TO_GROUP.get(role_key, "build")
     group_cfg = _credential_group(role_group)
 
-    model = os.environ.get(f"ROLE_{role_upper}_MODEL", "").strip() or group_cfg.get(
-        "model", ""
-    )
+    model = os.environ.get(f"ROLE_{role_upper}_MODEL", "").strip() or group_cfg.get("model", "")
     base_url = _normalize_base_url(
-        os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip()
-        or group_cfg.get("base_url", "")
+        os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip() or group_cfg.get("base_url", "")
     )
     api_key = os.environ.get(f"ROLE_{role_upper}_API_KEY", "").strip() or group_cfg.get(
         "api_key", ""
     )
+
+    # Apply per-role base_url globally so LiteLLM uses it for this role
+    if base_url:
+        _inject_llm_env_vars(base_url, api_key)
 
     return {
         "model": model or DEFAULT_LLM_CONFIG["model"],
@@ -397,9 +427,7 @@ def detect_available_pdks() -> Dict[str, Dict[str, Any]]:
         if found_root:
             tech_candidates = [
                 os.path.join(found_root, "libs.tech", "magic", f"{pdk_name}.tech"),
-                os.path.join(
-                    found_root, "libs.tech", "netgen", f"{pdk_name}_tech.setup"
-                ),
+                os.path.join(found_root, "libs.tech", "netgen", f"{pdk_name}_tech.setup"),
                 os.path.join(found_root, "libs", "tech", "magic", f"{pdk_name}.tech"),
             ]
             tech_ok = any(os.path.isfile(p) for p in tech_candidates)
@@ -454,9 +482,7 @@ COVERAGE_FALLBACK_POLICY_DEFAULT = (
 if COVERAGE_FALLBACK_POLICY_DEFAULT not in {"fail_closed", "fallback_oss", "skip"}:
     COVERAGE_FALLBACK_POLICY_DEFAULT = "fallback_oss"
 
-COVERAGE_PROFILE_DEFAULT = (
-    os.environ.get("COVERAGE_PROFILE", "balanced").strip().lower()
-)
+COVERAGE_PROFILE_DEFAULT = os.environ.get("COVERAGE_PROFILE", "balanced").strip().lower()
 if COVERAGE_PROFILE_DEFAULT not in {"balanced", "aggressive", "relaxed"}:
     COVERAGE_PROFILE_DEFAULT = "balanced"
 

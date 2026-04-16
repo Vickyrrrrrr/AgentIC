@@ -37,7 +37,7 @@ agentic install-pdk sky130
 agentic install-pdk gf180mcu
 ```
 
-Supported PDKs: `sky130`, `gf180mcu`, `asap7`, `nangate45`, `osu018`, `osu035`, `efly45`
+Supported PDKs: `sky130`, `gf180mcu`, `asap7`, `nangate45`, `freepdk45`, `osu018`, `osu035`
 
 After installation, add to your shell profile:
 
@@ -45,39 +45,37 @@ After installation, add to your shell profile:
 export PDK_ROOT=~/.ciel   # or wherever you installed the PDK
 ```
 
-### 4. Enter your license key
+### 4. Setup AgentIC (First Run)
 
-Purchase a license at **[buildstack.live](https://www.buildstack.live)**. After purchase, enter your license key:
-
-```bash
-agentic login <your-license-key>
-```
-
-This validates your license once and stores credentials locally. You only need to do this once per machine.
-
-### 5. Configure LLM API keys
-
-AgentIC is a **Bring-Your-Own-Key** application. You provide your own LLM API credentials.
+On first run, AgentIC will automatically guide you through setup. Or run it manually:
 
 ```bash
-agentic configure
+agentic login
 ```
 
-Choose a configuration mode:
-- **Single Key** — One API key for all agents (simplest)
-- **3 Groups** — Separate keys for Build / Fix / Doc agent groups
-- **Per-Role** — Different model per agent role (recommended)
+The interactive setup wizard will ask for:
+- **LLM API Key** — Your OpenAI, Anthropic, Groq, or any OpenAI-compatible API key
+- **Custom Base URL** — Optional, for self-hosted models (LM Studio, vLLM, Ollama, etc.)
+- **AgentIC License Key** — Optional, for production features
+- **Supabase URL** — Optional, for cloud features
 
-Any OpenAI-compatible provider works: OpenAI, Anthropic, Groq, DeepSeek, Together, Ollama, etc.
+Any OpenAI-compatible provider works:
+| Provider | Base URL | Example Model |
+|----------|----------|---------------|
+| OpenAI | (default) | gpt-4o |
+| Anthropic | (none needed) | claude-3-5-sonnet |
+| Groq | api.groq.com/openai/v1 | llama-3.3-70b |
+| Ollama | localhost:11434 | qwen2.5-coder:7b |
+| LM Studio | localhost:1234 | any local model |
+| vLLM / Zai | your-endpoint.com/v1 | meta-llama-3.1-70b |
 
-### 6. Build your first chip
+### 5. Build your first chip
 
 ```bash
 agentic build \
   --name fast_multiplier \
   --desc "A high-speed 16-bit pipelined hardware multiplier with active-low synchronous reset." \
-  --pdk-profile sky130 \
-  --no-strict-gates
+  --pdk sky130
 ```
 
 ---
@@ -89,15 +87,18 @@ agentic build \
 | `agentic doctor` | Check environment and toolchain |
 | `agentic install-pdk <name>` | Install a PDK (sky130, gf180mcu, etc.) |
 | `agentic install-pdk list` | Show all available PDKs |
-| `agentic login <key>` | Activate your license |
-| `agentic configure` | Configure LLM API keys |
+| `agentic login` | Interactive setup wizard (first run) |
+| `agentic configure` | Reconfigure LLM API keys |
 | `agentic build --name X --desc "..."` | Build a chip from natural language |
 | `agentic build --dry-run ...` | Validate spec without running build |
-| `agentic simulate --name X` | Run simulation with auto-fix loop |
-| `agentic harden --name X` | Run OpenLane RTL→GDSII hardening |
+| `agentic build --skip-openlane ...` | Skip GDSII hardening (faster) |
 | `agentic synth --rtl X.v --top Y` | Run Yosys synthesis |
-| `agentic sta --netlist X.v --sdc Y.sdc --lib Z.lib` | Run OpenSTA timing analysis |
-| `agentic dft --rtl X.v --top Y` | Run DFT scan insertion + ATPG |
+| `agentic sta --rtl X.v --sdc Y.sdc` | Run OpenSTA timing analysis |
+| `agentic dft --rtl X.v --top Y` | Run DFT scan insertion |
+| `agentic power --rtl X.v --sdc Y.sdc` | Run power analysis |
+| `agentic drc --gds X.gds --pdk Y` | Run DRC checks |
+| `agentic lvs --sch X.v --gds Y.gds --setup Z` | Run LVS checks |
+| `agentic report --design X --pdk Y` | Generate QOR report |
 | `agentic power --netlist X.v` | Run power analysis |
 | `agentic drc --gds X.gds --tech Y.tech` | Run Magic DRC |
 | `agentic lvs --sch X.v --gds Y.gds --setup Z.setup` | Run Netgen LVS |

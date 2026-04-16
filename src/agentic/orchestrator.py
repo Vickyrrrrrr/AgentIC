@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from rich.console import Console
 from rich.panel import Panel
 from crewai import Agent, Task, Crew, LLM
+from rich.status import Status
 
 # Local imports
 from .config import (
@@ -122,171 +123,63 @@ claude_theme = Theme(
         "spinner": "#d97757",
     }
 )
-console = Console(theme=claude_theme)
+console = Console(theme=claude_theme, markup=True, emoji=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ThinkingDisplay — Minimal, Sophisticated LLM Activity Display
+# OpenCode-Style Output — Clean, Minimal, Classy
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class ThinkingDisplay:
-    """
-    Provides minimal, sophisticated display of AgentIC's thinking and activity.
-
-    Three levels:
-      minimal  — state transitions only (→ SPEC → ARCHITECT → ...), elapsed time
-      normal   — + brief activity indicators per stage, tool summaries
-      verbose  — + raw LLM output (current behavior)
-
-    Always shows AgentIC is alive/working without iterating details.
-    Thread-safe for concurrent operations.
-    """
+    """True Live-Updating OpenCode-style minimal display for AgentIC."""
 
     LEVELS = ("minimal", "normal", "verbose")
 
     def __init__(self, level: str = "minimal", _console: Optional["Console"] = None):
         import sys as _sys
-        import threading
 
         self.level = level if level in self.LEVELS else "minimal"
-        _mod_console = _sys.modules["src.agentic.orchestrator"].__dict__.get("console")
+        _mod_console = _sys.modules[__name__].__dict__.get("console")
         self._console = _console if _console is not None else _mod_console
-        self._lock = threading.RLock()  # RLock: reentrant, allows nested calls
-        self._state = ""
-        self._activity = ""
-        self._started_at: Optional[float] = None
-        self._state_started_at: Optional[float] = None
-        self._line_handle = None
-        self._elapsed_since_start = 0.0
-        self._spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠿"]
-        self._spinner_idx = 0
 
-    def set_level(self, level: str) -> None:
-        with self._lock:
-            self.level = level if level in self.LEVELS else "minimal"
+        # Initialize the live Rich status spinner
+        self.status = Status(
+            "[cyan]Waking up reasoning agents...[/cyan]", console=self._console, spinner="dots"
+        )
+        self.is_running = False
 
-    def _elapsed(self) -> str:
-        import time
+    def start(self):
+        if not self.is_running:
+            self.status.start()
+            self.is_running = True
 
-        if self._state_started_at is None:
-            return ""
-        elapsed = time.time() - self._state_started_at
-        if elapsed < 60:
-            return f"{elapsed:.0f}s"
-        elif elapsed < 3600:
-            return f"{elapsed / 60:.0f}m"
-        else:
-            return f"{elapsed / 3600:.1f}h"
-
-    def _spin(self) -> str:
-        frame = self._spinner_frames[self._spinner_idx % len(self._spinner_frames)]
-        self._spinner_idx += 1
-        return frame
-
-    def clear(self) -> None:
-        with self._lock:
-            if self._line_handle:
-                try:
-                    self._line_handle.cleanup()
-                except Exception:
-                    pass
-                self._line_handle = None
+    def stop(self):
+        if self.is_running:
+            self.status.stop()
+            self.is_running = False
 
     def show_state(self, state: str, subtitle: str = "") -> None:
-        """Show a state transition: → STATE [subtitle]"""
-        import sys
+        """Prints a clean, bold milestone badge."""
+        self._console.print(f"\n[bold #d97757]▶ {state}[/] [dim]{subtitle}[/dim]")
+        self.status.update(f"[bold cyan]Starting {state}...[/bold cyan]")
 
-        with self._lock:
-            self._state = state
-            import time as _time
+    def show_activity(self, activity: str, refined: bool = False) -> None:
+        """Handles background reasoning vs major outputs."""
+        clean_msg = str(activity).strip()
 
-            self._state_started_at = _time.time()
-            self.clear()
-
-            if self.level == "minimal":
-                arrow = "→"
-                elapsed = self._elapsed()
-                subtitle_part = f" [{subtitle}]" if subtitle else ""
-                line = f"  {arrow} {state}{subtitle_part}"
-                if elapsed:
-                    line += f"  ({elapsed})"
-                sys.stdout.write(line + "\n")
-                sys.stdout.flush()
-            elif self.level == "normal":
-                self._console.print(f"  → {state}  [{subtitle}]")
-
-    def show_activity(self, activity: str, spinning: bool = False) -> None:
-        """Show brief activity within a state."""
-        import sys
-
-        with self._lock:
-            if self.level == "minimal":
-                spinner = self._spin() if spinning else "·"
-                elapsed = self._elapsed()
-                elapsed_part = f"  ({elapsed})" if elapsed else ""
-                sys.stdout.write(
-                    f"\r  → {self._state}  {spinner} {activity[:40]}{elapsed_part}"
-                )
-                sys.stdout.flush()
-            elif self.level == "normal":
-                self._console.print(f"    {activity}", style="dim")
-
-    def show_result(self, result: str, ok: bool = True) -> None:
-        """Show stage completion result."""
-        with self._lock:
-            self.clear()
-            if self.level == "minimal":
-                elapsed = self._elapsed()
-                status = "✓" if ok else "✗"
-                self._console.print(f"  {status} {self._state}  ({elapsed})")
-            elif self.level == "normal":
-                status = "[success]✓[/success]" if ok else "[error]✗[/error]"
-                self._console.print(f"  {status} {result}")
-            self._activity = ""
-
-    def show_agent(self, role: str, action: str) -> None:
-        """Show a brief LLM agent action (minimal: just the role)."""
-        with self._lock:
-            if self.level == "minimal":
-                pass  # Don't show agent-level detail in minimal mode
-            elif self.level == "normal":
-                self._console.print(f"    {role}: {action}", style="dim")
-
-    def show_thinking_summary(self, summary: str) -> None:
-        """Show a 1-2 line LLM thinking summary (minimal mode)."""
-        with self._lock:
-            if self.level in ("minimal", "normal"):
-                # Clean up the thinking block markers
-                clean = summary.strip()
-                if clean.startswith("<"):
-                    return  # Skip raw thinking blocks
-                # Truncate to first meaningful line
-                first_line = clean.split("\n")[0][:80]
-                if first_line:
-                    self._console.print(f"  · {first_line}", style="dim")
-
-    def summary(self) -> str:
-        """Return a compact single-line summary."""
-        with self._lock:
-            elapsed = ""
-            if self._state_started_at:
-                import time
-
-                total = time.time() - (self._started_at or self._state_started_at)
-                if total < 60:
-                    elapsed = f"{total:.0f}s"
-                elif total < 3600:
-                    elapsed = f"{total / 60:.0f}m"
-                else:
-                    elapsed = f"{total / 3600:.1f}h"
-            return f"{self._state}  {elapsed}"
+        if refined:
+            # Major milestone: Prints above the spinner permanently
+            self._console.print(f"  [bold green]✔[/bold green] [info]{clean_msg}[/info]")
+        else:
+            # Background thought: Updates the spinner text in place
+            if self.level in ("normal", "verbose"):
+                short_msg = clean_msg[:90] + "..." if len(clean_msg) > 90 else clean_msg
+                self.status.update(f"[cyan]AgentIC reasoning...[/cyan] [dim]{short_msg}[/dim]")
 
 
 # Thinking levels for CLI
-THINKING_LEVEL_DEFAULT = (
-    os.environ.get("AGENTIC_THINKING_LEVEL", "minimal").strip().lower()
-)
+THINKING_LEVEL_DEFAULT = os.environ.get("AGENTIC_THINKING_LEVEL", "minimal").strip().lower()
 if THINKING_LEVEL_DEFAULT not in ThinkingDisplay.LEVELS:
     THINKING_LEVEL_DEFAULT = "minimal"
 
@@ -384,6 +277,66 @@ class BuildHistory:
 
 
 class BuildOrchestrator:
+    @staticmethod
+    def _suppress_external_logging():
+        """Suppress noisy external library logging to console."""
+        import io
+        import sys
+        import contextlib
+        from rich.console import Console
+
+        suppress_loggers = [
+            "",
+            "LiteLLM",
+            "LiteLLM Proxy",
+            "LiteLLM Router",
+            "crewai",
+            "crewai.A2A",
+            "httpx",
+            "openai",
+            "httpcore",
+            "urllib3",
+        ]
+
+        for logger_name in suppress_loggers:
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.ERROR)
+            for handler in logger.handlers[:]:
+                if isinstance(handler, logging.StreamHandler):
+                    logger.removeHandler(handler)
+
+        root = logging.getLogger()
+        for handler in root.handlers[:]:
+            if isinstance(handler, logging.StreamHandler):
+                root.removeHandler(handler)
+
+        # Patch crewai's console.print to suppress warnings
+        try:
+            from crewai.events import event_context as _crewai_events
+
+            _silent_console = Console(markup=False, emoji=False, file=io.StringIO())
+            _crewai_events._console = _silent_console
+        except Exception:
+            pass
+
+        try:
+            from crewai.events import event_bus as _event_bus
+
+            _silent_console2 = Console(markup=False, emoji=False, file=io.StringIO())
+            if hasattr(_event_bus, "crewai_event_bus"):
+                _event_bus.crewai_event_bus._console = _silent_console2
+        except Exception:
+            pass
+
+        # Suppress crewai event bus singleton
+        try:
+            from crewai.events import event_bus as _event_bus
+
+            _event_bus.crewai_event_bus._console = Console(markup=False, emoji=False)
+            _event_bus.crewai_event_bus._console.print = lambda *a, **k: None
+        except Exception:
+            pass
+
     def __init__(
         self,
         name: str,
@@ -413,6 +366,8 @@ class BuildOrchestrator:
         human_in_loop: bool = False,  # For web API HITL
         thinking_level: str = "minimal",  # Display: minimal, normal, verbose
     ):
+        self._suppress_external_logging()
+
         self.name = name
         self.desc = desc
         self.llm = llm
@@ -516,8 +471,7 @@ class BuildOrchestrator:
 
         def _on_retry(attempt: int, provider: str, exc: Exception) -> None:
             self.log(
-                f"Rate-limit hit ({provider}) — retry {attempt}, "
-                f"waiting... ({type(exc).__name__})",
+                f"Rate-limit hit ({provider}) — retry {attempt}, waiting... ({type(exc).__name__})",
                 refined=True,
             )
 
@@ -550,9 +504,9 @@ class BuildOrchestrator:
 
         # If a previous log exists, rotate it so we don't lose the old run's terminal output/errors
         if os.path.exists(log_file):
-            timestamp = datetime.datetime.fromtimestamp(
-                os.path.getmtime(log_file)
-            ).strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.datetime.fromtimestamp(os.path.getmtime(log_file)).strftime(
+                "%Y%m%d_%H%M%S"
+            )
             backup_log = os.path.join(
                 self.artifacts["root"], f"{self.name}_{timestamp}_previous.log"
             )
@@ -560,6 +514,7 @@ class BuildOrchestrator:
 
         self.logger = logging.getLogger(self.name)
         self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
 
         # File Handler
         fh = logging.FileHandler(log_file, mode="w")
@@ -569,7 +524,7 @@ class BuildOrchestrator:
         self.log(f"Logging initialized to {log_file}", refined=True)
 
     def log(self, message: str, refined: bool = False):
-        """Logs a message to the console (if refined) and file (always)."""
+        """Logs a message to the file (always) and UI (cleanly)."""
         now = time.time()
         self.history.append({"state": self.state.name, "msg": message, "time": now})
         self.build_history.append(
@@ -580,7 +535,7 @@ class BuildOrchestrator:
         if hasattr(self, "logger"):
             self.logger.info(f"[{self.state.name}] {message}")
 
-        # Web API event sink — emit every log entry for live streaming
+        # Web API event sink
         if self.event_sink is not None:
             try:
                 self.event_sink(
@@ -593,19 +548,13 @@ class BuildOrchestrator:
             except Exception:
                 pass  # Never let sink errors crash the build
 
-        # ThinkingDisplay — always show activity (minimal mode)
+        # Clean console output via the new ThinkingDisplay
         if hasattr(self, "_thinking"):
-            self._thinking.show_activity(message, spinning=False)
-
-        # Console Log - Only if refined/important
-        if refined or self.verbose:
-            if refined:
-                style = "bold green"
-                console.print(f"[{style}][{self.state.name}][/] {message}")
+            self._thinking.show_activity(message, refined=refined)
 
     def transition(self, new_state: BuildState, preserve_retries: bool = False):
-        self.log(f"Transitioning: {self.state.name} -> {new_state.name}", refined=True)
-        self._thinking.show_state(new_state.name, subtitle=new_state.value)
+        if hasattr(self, "_thinking"):
+            self._thinking.show_state(new_state.name, subtitle=new_state.value)
         self.state = new_state
         if not preserve_retries:
             self.retry_count = 0
@@ -637,9 +586,7 @@ class BuildOrchestrator:
                     tb = f.read()
             except OSError:
                 tb = ""
-        digest = hashlib.sha256(
-            (rtl + "\n" + tb).encode("utf-8", errors="ignore")
-        ).hexdigest()
+        digest = hashlib.sha256((rtl + "\n" + tb).encode("utf-8", errors="ignore")).hexdigest()
         return digest[:16]
 
     def _record_failure_fingerprint(self, error_text: str) -> bool:
@@ -718,9 +665,7 @@ class BuildOrchestrator:
         )
         raise RuntimeError(message)
 
-    def _consume_handoff(
-        self, key: str, *, consumer: str, required: bool = False
-    ) -> Any:
+    def _consume_handoff(self, key: str, *, consumer: str, required: bool = False) -> Any:
         value = self.artifacts.get(key)
         if value in (None, "", {}):
             if required:
@@ -747,9 +692,7 @@ class BuildOrchestrator:
         self.stage_contract_history.append(payload)
         self.artifacts["last_stage_result"] = payload
         if hasattr(self, "logger"):
-            self.logger.info(
-                f"STAGE RESULT:\n{json.dumps(payload, indent=2, default=str)}"
-            )
+            self.logger.info(f"STAGE RESULT:\n{json.dumps(payload, indent=2, default=str)}")
 
     def _record_retry(self, bucket: str, *, consume_global: bool = False) -> int:
         count = int(self.retry_metadata.get(bucket, 0)) + 1
@@ -793,14 +736,10 @@ class BuildOrchestrator:
     def _is_hierarchical_design(self, code: str) -> bool:
         return len(self._extract_module_names(code)) > 1
 
-    def _validate_rtl_candidate(
-        self, candidate_code: str, previous_code: str
-    ) -> List[str]:
+    def _validate_rtl_candidate(self, candidate_code: str, previous_code: str) -> List[str]:
         issues: List[str] = []
         if not validate_llm_code_output(candidate_code):
-            issues.append(
-                "RTL candidate is not valid Verilog/SystemVerilog code output."
-            )
+            issues.append("RTL candidate is not valid Verilog/SystemVerilog code output.")
             return issues
         modules = self._extract_module_names(candidate_code)
         if self.name not in modules:
@@ -820,9 +759,7 @@ class BuildOrchestrator:
     def _validate_tb_candidate(self, tb_code: str) -> List[str]:
         issues: List[str] = []
         if not validate_llm_code_output(tb_code):
-            issues.append(
-                "TB candidate is not valid Verilog/SystemVerilog code output."
-            )
+            issues.append("TB candidate is not valid Verilog/SystemVerilog code output.")
             return issues
         module_match = re.search(r"\bmodule\s+([A-Za-z_]\w*)", tb_code)
         if not module_match or module_match.group(1) != f"{self.name}_tb":
@@ -832,9 +769,7 @@ class BuildOrchestrator:
         if "$dumpvars(0," not in tb_code:
             issues.append("TB candidate is missing the required dumpvars block.")
         if "TEST PASSED" not in tb_code or "TEST FAILED" not in tb_code:
-            issues.append(
-                "TB candidate must include TEST PASSED and TEST FAILED markers."
-            )
+            issues.append("TB candidate must include TEST PASSED and TEST FAILED markers.")
         return issues
 
     def _validate_sva_candidate(self, sva_code: str, rtl_code: str) -> List[str]:
@@ -846,16 +781,12 @@ class BuildOrchestrator:
             issues.append(f"SVA candidate is missing module '{self.name}_sva'.")
         yosys_code = convert_sva_to_yosys(sva_code, self.name)
         if not yosys_code:
-            issues.append(
-                "SVA candidate could not be translated to Yosys-compatible assertions."
-            )
+            issues.append("SVA candidate could not be translated to Yosys-compatible assertions.")
             return issues
         ok, report = validate_yosys_sby_check(yosys_code)
         if not ok:
             for issue in report.get("issues", []):
-                issues.append(
-                    issue.get("message", "Invalid Yosys preflight assertion output.")
-                )
+                issues.append(issue.get("message", "Invalid Yosys preflight assertion output."))
         signal_inventory = self._format_signal_inventory_for_prompt(rtl_code)
         if "No signal inventory could be extracted" in signal_inventory:
             issues.append("RTL signal inventory is unavailable for SVA validation.")
@@ -880,14 +811,10 @@ class BuildOrchestrator:
             re.DOTALL | re.IGNORECASE,
         )
         code_str = code_match.group(1).strip() if code_match else final_answer.strip()
-        has_code = bool(code_match) or (
-            "module " in code_str and "endmodule" in code_str
-        )
+        has_code = bool(code_match) or ("module " in code_str and "endmodule" in code_str)
         payload = {
             "code": code_str if has_code else "",
-            "self_check_status": "verified"
-            if getattr(trace, "success", False)
-            else "unverified",
+            "self_check_status": "verified" if getattr(trace, "success", False) else "unverified",
             "tool_observations": [
                 getattr(step, "observation", "")
                 for step in getattr(trace, "steps", [])
@@ -895,24 +822,18 @@ class BuildOrchestrator:
             ],
             "final_decision": "accept" if has_code else "fallback",
         }
-        failure_class = (
-            FailureClass.UNKNOWN if has_code else FailureClass.LLM_FORMAT_ERROR
-        )
+        failure_class = FailureClass.UNKNOWN if has_code else FailureClass.LLM_FORMAT_ERROR
         return AgentResult(
             agent="ReAct",
             ok=has_code,
             producer="agent_react",
             payload=payload,
-            diagnostics=[]
-            if has_code
-            else ["ReAct did not return valid Verilog code."],
+            diagnostics=[] if has_code else ["ReAct did not return valid Verilog code."],
             failure_class=failure_class,
             raw_output=final_answer,
         )
 
-    def _normalize_waveform_result(
-        self, diagnosis: Any, raw_output: str = ""
-    ) -> AgentResult:
+    def _normalize_waveform_result(self, diagnosis: Any, raw_output: str = "") -> AgentResult:
         if diagnosis is None:
             return AgentResult(
                 agent="WaveformExpert",
@@ -938,9 +859,7 @@ class BuildOrchestrator:
                 for trace in diagnosis.root_cause_traces
             ],
             "suggested_fix_area": diagnosis.suggested_fix_area,
-            "fallback_reason": ""
-            if diagnosis.root_cause_traces
-            else "No AST trace roots found.",
+            "fallback_reason": "" if diagnosis.root_cause_traces else "No AST trace roots found.",
         }
         return AgentResult(
             agent="WaveformExpert",
@@ -952,9 +871,7 @@ class BuildOrchestrator:
             raw_output=raw_output,
         )
 
-    def _normalize_deepdebug_result(
-        self, verdict: Any, raw_output: str = ""
-    ) -> AgentResult:
+    def _normalize_deepdebug_result(self, verdict: Any, raw_output: str = "") -> AgentResult:
         if verdict is None:
             return AgentResult(
                 agent="DeepDebugger",
@@ -972,9 +889,7 @@ class BuildOrchestrator:
             "fix_description": verdict.fix_description,
             "confidence": verdict.confidence,
             "balanced_analysis_log": verdict.balanced_analysis_log,
-            "usable_for_regeneration": bool(
-                verdict.root_cause_signal and verdict.fix_description
-            ),
+            "usable_for_regeneration": bool(verdict.root_cause_signal and verdict.fix_description),
         }
         return AgentResult(
             agent="DeepDebugger",
@@ -1025,9 +940,7 @@ class BuildOrchestrator:
             raw_output=raw_output,
         )
 
-    def _build_llm_context(
-        self, include_rtl: bool = True, max_rtl_chars: int = 15000
-    ) -> str:
+    def _build_llm_context(self, include_rtl: bool = True, max_rtl_chars: int = 15000) -> str:
         """Build cumulative context string for LLM calls.
 
         Aggregates build state so the LLM can reason across the full pipeline
@@ -1130,9 +1043,7 @@ class BuildOrchestrator:
                 if fp_hash:
                     failed_tb_code = self.tb_failed_code_by_fingerprint.get(fp_hash)
                     if failed_tb_code:
-                        lines.append(
-                            f"  REJECTED TESTBENCH CODE FOR THIS EVENT:\n{failed_tb_code}"
-                        )
+                        lines.append(f"  REJECTED TESTBENCH CODE FOR THIS EVENT:\n{failed_tb_code}")
 
         # Build history (last 5 state transitions with errors)
         error_entries = [
@@ -1152,10 +1063,15 @@ class BuildOrchestrator:
 
     def run(self):
         """Main execution loop."""
-        self.log(
-            f"Starting Build Process for '{self.name}' using {self.strategy.value}",
-            refined=True,
-        )
+        import io
+        import sys
+        import contextlib
+
+        # Redirect stderr to suppress ERROR:root messages in non-verbose mode
+        if not self.verbose:
+            _stderr_sink = io.StringIO()
+            _original_stderr = sys.stderr
+            sys.stderr = _stderr_sink
 
         try:
             while self.state != BuildState.SUCCESS and self.state != BuildState.FAIL:
@@ -1236,11 +1152,15 @@ class BuildOrchestrator:
                     self.state = BuildState.FAIL
 
         except Exception as e:
-            self.log(f"CRITICAL ERROR: {str(e)}", refined=False)
             import traceback
 
-            console.print(traceback.format_exc())
+            if self.verbose:
+                console.print(traceback.format_exc())
             self.state = BuildState.FAIL
+        finally:
+            # Restore stderr
+            if not self.verbose:
+                sys.stderr = _original_stderr
 
         if self.state == BuildState.SUCCESS:
             try:
@@ -1249,49 +1169,31 @@ class BuildOrchestrator:
                 self.log(f"Benchmark metrics export warning: {e}", refined=True)
             # Create a clean summary of just the paths
             summary = {
-                k: v
-                for k, v in self.artifacts.items()
-                if "code" not in k and "spec" not in k
+                k: v for k, v in self.artifacts.items() if "code" not in k and "spec" not in k
             }
 
+            console.print(f"\n[green]✓[/green] BUILD COMPLETE")
             console.print(
-                Panel(
-                    f"[success]BUILD SUCCESSFUL[/]\n\n"
-                    + "\n".join(
-                        [f"[bold]{k.upper()}:[/] {v}" for k, v in summary.items()]
-                    ),
-                    title="Done",
-                )
+                f"  [dim]Output: {self.artifacts.get('root', 'N/A')}/runs/*/final/gdsii/[/dim]"
             )
         else:
-            console.print(Panel(f"[error]BUILD FAILED[/]", title="Failed"))
+            console.print(f"\n[red]✗[/red] BUILD FAILED")
+            console.print(f"  [dim]Log: {self.artifacts.get('root', 'N/A')}/{self.name}.log[/dim]")
 
     # --- ACTION HANDLERS ---
 
     def do_init(self):
-        with console.status(
-            "[success]Initializing Workspace...[/success]",
-            spinner="dots12",
-            spinner_style="spinner",
-        ):
-            # Setup directories, check tools
-            self.artifacts["root"] = f"{OPENLANE_ROOT}/designs/{self.name}"
-            self.setup_logger()  # Setup logging to file
-            self.artifacts["pdk_profile"] = self.pdk_profile
-            self.log(
-                f"PDK profile: {self.pdk_profile.get('profile')} "
-                f"(PDK={self.pdk_profile.get('pdk')}, LIB={self.pdk_profile.get('std_cell_library')})",
-                refined=True,
-            )
-            diag = startup_self_check()
-            self.artifacts["startup_check"] = diag
-            self.logger.info(f"STARTUP SELF CHECK: {diag}")
-            if self.strict_gates and not diag.get("ok", False):
-                self.log("Startup self-check failed in strict mode.", refined=True)
-                self.state = BuildState.FAIL
-                return
-            time.sleep(1)  # Visual pause
-            self.transition(BuildState.SPEC)
+        # Setup directories, check tools
+        self.artifacts["root"] = f"{OPENLANE_ROOT}/designs/{self.name}"
+        self.setup_logger()  # Setup logging to file
+        self.artifacts["pdk_profile"] = self.pdk_profile
+        diag = startup_self_check()
+        self.artifacts["startup_check"] = diag
+        self.logger.info(f"STARTUP SELF CHECK: {diag}")
+        if self.strict_gates and not diag.get("ok", False):
+            self.state = BuildState.FAIL
+            return
+        self.transition(BuildState.SPEC)
 
     def do_spec(self):
         # Derive safe module name upfront — Verilog identifiers cannot start with a digit
@@ -1305,9 +1207,7 @@ class BuildOrchestrator:
         # Produces a validated JSON contract (SID) that defines every port,
         # parameter, FSM state, and sub-module BEFORE any Verilog is written.
         try:
-            architect = ArchitectModule(
-                llm=self.get_llm_for_role("architect"), max_retries=3
-            )
+            architect = ArchitectModule(llm=self.get_llm_for_role("architect"), max_retries=3)
             sid = architect.decompose(
                 design_name=self.name,
                 spec_text=self.desc,
@@ -1320,9 +1220,7 @@ class BuildOrchestrator:
                 refined=True,
             )
         except Exception as e:
-            self.logger.warning(
-                f"ArchitectModule failed ({e}), falling back to Crew-based spec"
-            )
+            self.logger.warning(f"ArchitectModule failed ({e}), falling back to Crew-based spec")
             # Fallback: original Crew-based spec generation
             self._do_spec_fallback()
             return
@@ -1384,9 +1282,7 @@ SPECIFICATION SECTIONS (Markdown):
             spinner="dots12",
             spinner_style="spinner",
         ):
-            result = self._crew_kickoff(
-                Crew(verbose=False, agents=[arch_agent], tasks=[spec_task])
-            )
+            result = self._crew_kickoff(Crew(verbose=False, agents=[arch_agent], tasks=[spec_task]))
 
         self.artifacts["spec"] = str(result)
         self.log("Architecture Plan Generated (fallback)", refined=True)
@@ -1465,9 +1361,7 @@ SPECIFICATION SECTIONS (Markdown):
 
                     for i, opt in enumerate(parsed_options, 1):
                         opt_id = str(opt.get("OPTION_1".replace("1", str(i)), i))
-                        title = opt.get(
-                            "OPTION_1", opt.get(f"OPTION_{i}", f"Option {i}")
-                        )
+                        title = opt.get("OPTION_1", opt.get(f"OPTION_{i}", f"Option {i}"))
                         # Get key from dynamic OPTION_N key
                         option_key = [k for k in opt if k.startswith("OPTION_")]
                         title = opt[option_key[0]] if option_key else f"Option {i}"
@@ -1515,12 +1409,8 @@ SPECIFICATION SECTIONS (Markdown):
                             time.sleep(2)
 
                         if not choice_str:
-                            choice_str = self.artifacts.get(
-                                "spec_elaboration_choice", "1"
-                            )
-                            self.log(
-                                f"Received user choice: {choice_str}", refined=True
-                            )
+                            choice_str = self.artifacts.get("spec_elaboration_choice", "1")
+                            self.log(f"Received user choice: {choice_str}", refined=True)
 
                         self.artifacts.pop("waiting_for_elaboration", None)
                     elif is_api_server and not self.human_in_loop:
@@ -1550,9 +1440,7 @@ SPECIFICATION SECTIONS (Markdown):
                             time.sleep(2)
 
                         if not choice_str:
-                            choice_str = self.artifacts.get(
-                                "spec_elaboration_choice", "1"
-                            )
+                            choice_str = self.artifacts.get("spec_elaboration_choice", "1")
                         self.artifacts.pop("waiting_for_elaboration", None)
                     else:
                         # Non-interactive (Background/CI) -> Auto-select first option
@@ -1568,11 +1456,7 @@ SPECIFICATION SECTIONS (Markdown):
                         if 0 <= idx < len(parsed_options):
                             opt = parsed_options[idx]
                             option_key = [k for k in opt if k.startswith("OPTION_")]
-                            title = (
-                                opt[option_key[0]]
-                                if option_key
-                                else f"Option {idx + 1}"
-                            )
+                            title = opt[option_key[0]] if option_key else f"Option {idx + 1}"
                             details = opt.get("Details", "")
                             ports = opt.get("Ports", "")
                             category = opt.get("Category", "")
@@ -1582,9 +1466,7 @@ SPECIFICATION SECTIONS (Markdown):
                                 f"Category: {category}. Target frequency: {freq}. "
                                 f"Key ports: {ports}. Module name: {self.name}."
                             )
-                            self.log(
-                                f"✅ Selected option {idx + 1}: {title}", refined=True
-                            )
+                            self.log(f"✅ Selected option {idx + 1}: {title}", refined=True)
                     else:
                         # Custom description entered directly
                         chosen_desc = choice_str.strip()
@@ -1635,9 +1517,7 @@ SPECIFICATION SECTIONS (Markdown):
             # Check for hard rejection
             if hw_spec.design_category == "REJECTED":
                 rejection_reason = (
-                    hw_spec.warnings[0]
-                    if hw_spec.warnings
-                    else "Specification rejected"
+                    hw_spec.warnings[0] if hw_spec.warnings else "Specification rejected"
                 )
                 self.log(f"❌ SPEC REJECTED: {rejection_reason}", refined=True)
                 self.errors.append(f"Specification rejected: {rejection_reason}")
@@ -1724,9 +1604,7 @@ SPECIFICATION SECTIONS (Markdown):
             )
 
             # Log any consistency fixes
-            consistency_fixes = [
-                w for w in result.warnings if w.startswith("CONSISTENCY_FIX")
-            ]
+            consistency_fixes = [w for w in result.warnings if w.startswith("CONSISTENCY_FIX")]
             for fix in consistency_fixes[:3]:
                 self.log(f"  🔧 {fix}", refined=True)
 
@@ -1783,9 +1661,7 @@ SPECIFICATION SECTIONS (Markdown):
                 self.errors.append(
                     f"Feasibility rejected: {'; '.join(result.feasibility_rejections[:3])}"
                 )
-                self.artifacts["feasibility_rejection_reasons"] = (
-                    result.feasibility_rejections
-                )
+                self.artifacts["feasibility_rejection_reasons"] = result.feasibility_rejections
                 self.state = BuildState.FAIL
                 return
 
@@ -1858,9 +1734,7 @@ SPECIFICATION SECTIONS (Markdown):
 
                 # Inject CDC submodule specs into the spec artifact for RTL gen
                 if result.cdc_submodules_added:
-                    cdc_section = (
-                        "\n\n## CDC Synchronization Submodules (Auto-Generated)\n"
-                    )
+                    cdc_section = "\n\n## CDC Synchronization Submodules (Auto-Generated)\n"
                     for sub in result.cdc_submodules_added:
                         cdc_section += (
                             f"\n### {sub.module_name} ({sub.strategy})\n"
@@ -1915,9 +1789,7 @@ SPECIFICATION SECTIONS (Markdown):
             plan = planner.plan(
                 hardware_spec=hw_spec_obj,
                 cdc_result=cdc_result_dict if cdc_result_dict else None,
-                hierarchy_result=hierarchy_result_dict
-                if hierarchy_result_dict
-                else None,
+                hierarchy_result=hierarchy_result_dict if hierarchy_result_dict else None,
             )
 
             self.artifacts["verification_plan"] = plan.to_dict()
@@ -1958,9 +1830,7 @@ SPECIFICATION SECTIONS (Markdown):
             self.transition(BuildState.RTL_GEN)
 
         except Exception as e:
-            self.log(
-                f"VerificationPlanner failed ({e}); skipping to RTL_GEN.", refined=True
-            )
+            self.log(f"VerificationPlanner failed ({e}); skipping to RTL_GEN.", refined=True)
             self.logger.warning(f"VerificationPlanner error: {e}")
             self.artifacts["verification_plan"] = {}
             self.transition(BuildState.RTL_GEN)
@@ -2050,9 +1920,7 @@ SPECIFICATION SECTIONS (Markdown):
         # Extract parameters
         params = re.findall(r"parameter\s+(\w+)\s*=\s*([^,;\)]+)", rtl_code)
         if params:
-            lines.append(
-                "Parameters: " + ", ".join(f"{n} = {v.strip()}" for n, v in params)
-            )
+            lines.append("Parameters: " + ", ".join(f"{n} = {v.strip()}" for n, v in params))
 
         # Extract ports — match input/output/inout declarations
         # Support parameterized widths like [DATA_W-1:0] in addition to [7:0]
@@ -2103,8 +1971,7 @@ SPECIFICATION SECTIONS (Markdown):
             if "class Transaction" not in text:
                 missing.append("Missing class Transaction")
             if all(
-                token not in text
-                for token in ["class Driver", "class Monitor", "class Scoreboard"]
+                token not in text for token in ["class Driver", "class Monitor", "class Scoreboard"]
             ):
                 missing.append("Missing transaction flow classes")
         return len(missing) == 0, missing
@@ -2123,9 +1990,7 @@ SPECIFICATION SECTIONS (Markdown):
         for pname, pval in param_pattern.findall(text):
             param_defaults[pname.strip()] = pval.strip()
 
-        header_match = re.search(
-            r"\bmodule\b[\s\S]*?\(([\s\S]*?)\)\s*;", text, re.IGNORECASE
-        )
+        header_match = re.search(r"\bmodule\b[\s\S]*?\(([\s\S]*?)\)\s*;", text, re.IGNORECASE)
         header = header_match.group(1) if header_match else text
         header = re.sub(r"//.*", "", header)
         header = re.sub(r"/\*[\s\S]*?\*/", "", header)
@@ -2250,8 +2115,7 @@ SPECIFICATION SECTIONS (Markdown):
         if not signals:
             return "No signal inventory could be extracted from the RTL. Use only identifiers explicitly declared in the RTL."
         lines = [
-            f"- {sig['name']}: category={sig['category']}, width={sig['width']}"
-            for sig in signals
+            f"- {sig['name']}: category={sig['category']}, width={sig['width']}" for sig in signals
         ]
         return "\n".join(lines)
 
@@ -2273,18 +2137,14 @@ SPECIFICATION SECTIONS (Markdown):
         self.artifacts[f"{stem}_latest"] = latest_path
         return attempt_path
 
-    def _record_tb_gate_history(
-        self, gate: str, ok: bool, action: str, report: Dict[str, Any]
-    ):
+    def _record_tb_gate_history(self, gate: str, ok: bool, action: str, report: Dict[str, Any]):
         history = self.artifacts.setdefault("tb_gate_history", [])
         event = {
             "timestamp": int(time.time()),
             "gate": gate,
             "ok": bool(ok),
             "action": action,
-            "issue_categories": report.get(
-                "issue_categories", report.get("issue_codes", [])
-            ),
+            "issue_categories": report.get("issue_categories", report.get("issue_codes", [])),
             "fingerprint": report.get("fingerprint", ""),
         }
         history.append(event)
@@ -2318,9 +2178,7 @@ SPECIFICATION SECTIONS (Markdown):
         self.tb_compile_fail_count = 0
         self.tb_repair_fail_count = 0
 
-    def generate_uvm_lite_tb_from_rtl_ports(
-        self, design_name: str, rtl_code: str
-    ) -> str:
+    def generate_uvm_lite_tb_from_rtl_ports(self, design_name: str, rtl_code: str) -> str:
         """Deterministic Verilator-safe testbench generated from RTL ports.
 
         Generates a flat procedural TB — no interfaces, no classes, no virtual
@@ -2356,13 +2214,9 @@ SPECIFICATION SECTIONS (Markdown):
                 output_ports.append(p)
 
         non_clk_rst_inputs = [
-            p
-            for p in input_ports
-            if p["name"] != clock_name and p["name"] != reset_name
+            p for p in input_ports if p["name"] != clock_name and p["name"] != reset_name
         ]
-        reset_active_low = (
-            reset_name and reset_name.lower().endswith("_n") if reset_name else False
-        )
+        reset_active_low = reset_name and reset_name.lower().endswith("_n") if reset_name else False
 
         lines: List[str] = ["`timescale 1ns/1ps", ""]
         lines.append(f"module {design_name}_tb;")
@@ -2490,9 +2344,7 @@ SPECIFICATION SECTIONS (Markdown):
             return self._generate_fallback_testbench(rtl_code)
         return self.generate_uvm_lite_tb_from_rtl_ports(self.name, rtl_code)
 
-    def _handle_tb_gate_failure(
-        self, gate: str, report: Dict[str, Any], tb_code: str
-    ) -> None:
+    def _handle_tb_gate_failure(self, gate: str, report: Dict[str, Any], tb_code: str) -> None:
         if self._record_tb_failure_fingerprint(gate, report):
             self.log(
                 f"Repeated TB {gate} fingerprint detected. Failing closed.",
@@ -2567,9 +2419,7 @@ SPECIFICATION SECTIONS (Markdown):
             )
             return
 
-        fallback_tb = self._deterministic_tb_fallback(
-            self.artifacts.get("rtl_code", "")
-        )
+        fallback_tb = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
         path = write_verilog(self.name, fallback_tb, is_testbench=True)
         if isinstance(path, str) and path.startswith("Error:"):
             self.log(f"Deterministic TB fallback write failed: {path}", refined=True)
@@ -2582,9 +2432,7 @@ SPECIFICATION SECTIONS (Markdown):
         # Bug 2: Removing explicit counter reset: self.tb_recovery_counts[gate] = 0
         # self.artifacts[f"tb_recovery_cycle_{gate}"] = 0
         self._record_tb_gate_history(gate, False, "deterministic_fallback", report)
-        self.log(
-            "TB gate failed; switched to deterministic fallback template.", refined=True
-        )
+        self.log("TB gate failed; switched to deterministic fallback template.", refined=True)
 
     def _generate_fallback_testbench(self, rtl_code: str) -> str:
         ports = self._extract_module_ports(rtl_code)
@@ -2616,9 +2464,7 @@ endmodule
                 input_ports.append(name)
                 if clock_name is None and "clk" in name.lower():
                     clock_name = name
-                if reset_name is None and (
-                    "rst" in name.lower() or "reset" in name.lower()
-                ):
+                if reset_name is None and ("rst" in name.lower() or "reset" in name.lower()):
                     reset_name = name
             elif direction == "output":
                 output_ports.append(name)
@@ -2700,9 +2546,7 @@ endclass
                 for outp in output_ports:
                     body.append(f"      if (^({outp}) === 1'bx) begin")
                     body.append("        tb_fail = 1;")
-                    body.append(
-                        f'        $display("TEST FAILED: X detected on {outp}");'
-                    )
+                    body.append(f'        $display("TEST FAILED: X detected on {outp}");')
                     body.append("      end")
             else:
                 body.append("      #10;")
@@ -2719,9 +2563,7 @@ endclass
         body.append("endmodule")
         return "\n".join([line for line in body if line is not None])
 
-    def _kickoff_with_timeout(
-        self, agents: List[Agent], tasks: List[Task], timeout_s: int
-    ) -> str:
+    def _kickoff_with_timeout(self, agents: List[Agent], tasks: List[Task], timeout_s: int) -> str:
         """Run CrewAI kickoff with a timeout.
 
         Uses threading instead of signal.SIGALRM so it works from any thread
@@ -2735,11 +2577,7 @@ endclass
         def _run():
             try:
                 result_box.append(
-                    str(
-                        self._crew_kickoff(
-                            Crew(verbose=False, agents=agents, tasks=tasks)
-                        )
-                    )
+                    str(self._crew_kickoff(Crew(verbose=False, agents=agents, tasks=tasks)))
                 )
             except Exception as exc:
                 error_box.append(exc)
@@ -2803,9 +2641,7 @@ endclass
         line_no = int(line_match.group(1)) if line_match else 0
 
         # Extract signal/variable name — Verilator uses VARREF, Var, SELBIT, etc.
-        sig_match = re.search(
-            r"(?:VARREF|Var|of|SEL|SELBIT|ARRAYSEL)\s+'(\w+)'", warning
-        )
+        sig_match = re.search(r"(?:VARREF|Var|of|SEL|SELBIT|ARRAYSEL)\s+'(\w+)'", warning)
         signal = sig_match.group(1) if sig_match else ""
 
         # Extract expected width.
@@ -2945,9 +2781,7 @@ endclass
         regression_results = self.artifacts.get("regression_results", []) or []
         tb_gate_history = self.artifacts.get("tb_gate_history", []) or []
 
-        regression_pass = sum(
-            1 for x in regression_results if x.get("status") == "PASS"
-        )
+        regression_pass = sum(1 for x in regression_results if x.get("status") == "PASS")
         regression_total = len(regression_results)
 
         snapshot = {
@@ -3000,8 +2834,7 @@ endclass
                 "antenna_violations": signoff.get("antenna_violations", -1),
                 "total_power_mw": float(power.get("total_power_w", 0.0)) * 1000.0,
                 "internal_power_mw": float(power.get("internal_power_w", 0.0)) * 1000.0,
-                "switching_power_mw": float(power.get("switching_power_w", 0.0))
-                * 1000.0,
+                "switching_power_mw": float(power.get("switching_power_w", 0.0)) * 1000.0,
                 "leakage_power_uw": float(power.get("leakage_power_w", 0.0)) * 1e6,
                 "irdrop_vpwr_mv": float(power.get("irdrop_max_vpwr", 0.0)) * 1000.0,
                 "irdrop_vgnd_mv": float(power.get("irdrop_max_vgnd", 0.0)) * 1000.0,
@@ -3035,9 +2868,7 @@ endclass
         os.makedirs(design_dir, exist_ok=True)
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        json_path = os.path.join(
-            design_dir, f"{self.name}_industry_benchmark_{stamp}.json"
-        )
+        json_path = os.path.join(design_dir, f"{self.name}_industry_benchmark_{stamp}.json")
         md_path = os.path.join(design_dir, f"{self.name}_industry_benchmark_{stamp}.md")
         latest_json = os.path.join(design_dir, "latest.json")
         latest_md = os.path.join(design_dir, "latest.md")
@@ -3113,10 +2944,7 @@ endclass
                     for node_name in list(unprocessed):
                         node = graph.nodes[node_name]
                         # If all dependencies are already in ordered_nodes
-                        if all(
-                            dep in [n.name for n in ordered_nodes]
-                            for dep in node.dependencies
-                        ):
+                        if all(dep in [n.name for n in ordered_nodes] for dep in node.dependencies):
                             ordered_nodes.append(node)
                             unprocessed.remove(node_name)
                             progress = True
@@ -3131,9 +2959,7 @@ endclass
                         break
 
                 for node in ordered_nodes:
-                    self.log(
-                        f"Proceeding to generate Sub-Module: {node.name}", refined=True
-                    )
+                    self.log(f"Proceeding to generate Sub-Module: {node.name}", refined=True)
                     # For MVP graph implementation, we will append sub_module requirements into the prompt
                     # instead of fully isolating state transitions, avoiding disruption of standard Verification pipes.
 
@@ -3192,9 +3018,7 @@ endclass
                     tb_code,
                 )
                 # Rename parameter/port connections referencing original module name
-                tb_code = re.sub(
-                    rf"\b({re.escape(original_name)})\s*#", rf"{self.name} #", tb_code
-                )
+                tb_code = re.sub(rf"\b({re.escape(original_name)})\s*#", rf"{self.name} #", tb_code)
                 self.artifacts["golden_tb"] = tb_code
         else:
             # No template match — pure LLM generation
@@ -3269,9 +3093,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 agent=reviewer,
             )
 
-            with console.status(
-                f"[warning]Generating RTL ({self.strategy.name})...[/warning]"
-            ):
+            with console.status(f"[warning]Generating RTL ({self.strategy.name})...[/warning]"):
                 try:
                     result = self._crew_kickoff(
                         Crew(
@@ -3301,9 +3123,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                         )
                 except Exception as crew_exc:
                     self.log(f"CrewAI RTL generation error: {crew_exc}", refined=True)
-                    self.logger.warning(
-                        f"CrewAI kickoff exception in do_rtl_gen: {crew_exc}"
-                    )
+                    self.logger.warning(f"CrewAI kickoff exception in do_rtl_gen: {crew_exc}")
                     # Strategy pivot: allow recovery instead of hard crash
                     if self.strategy == BuildStrategy.SV_MODULAR:
                         self.log(
@@ -3441,9 +3261,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                                 stage=self.state.name,
                                 status=StageStatus.PASS,
                                 producer="orchestrator_rtl_fix",
-                                consumable_payload={
-                                    "semantic_report": bool(sem_report)
-                                },
+                                consumable_payload={"semantic_report": bool(sem_report)},
                                 artifacts_written=["semantic_report"],
                                 next_action=BuildState.VERIFICATION.name,
                             )
@@ -3502,9 +3320,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 self.state = BuildState.FAIL
                 return
 
-        self.log(
-            f"Fixing Code (Attempt {self.retry_count}/{self.max_retries})", refined=True
-        )
+        self.log(f"Fixing Code (Attempt {self.retry_count}/{self.max_retries})", refined=True)
         errors_for_llm = self._condense_failure_log(str(errors), kind="timing")
 
         # ── ReAct iterative RTL fix (runs before single-shot CrewAI) ──
@@ -3635,9 +3451,7 @@ You explain what you changed and why.""",
                 spinner_style="spinner",
             ):
                 try:
-                    result = self._crew_kickoff(
-                        Crew(verbose=False, agents=[fixer], tasks=[task])
-                    )
+                    result = self._crew_kickoff(Crew(verbose=False, agents=[fixer], tasks=[task]))
                     new_code = str(result)
                     # --- Universal code output validation (RTL fix) ---
                     if not validate_llm_code_output(new_code):
@@ -3654,15 +3468,11 @@ You explain what you changed and why.""",
                             f"RTL FIX VALIDATION FAIL (prose detected):\n{new_code[:500]}"
                         )
                         new_code = str(
-                            self._crew_kickoff(
-                                Crew(verbose=False, agents=[fixer], tasks=[task])
-                            )
+                            self._crew_kickoff(Crew(verbose=False, agents=[fixer], tasks=[task]))
                         )
                 except Exception as crew_exc:
                     self.log(f"CrewAI fix error: {crew_exc}", refined=True)
-                    self.logger.warning(
-                        f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}"
-                    )
+                    self.logger.warning(f"CrewAI kickoff exception in do_rtl_fix: {crew_exc}")
                     # Return last known RTL — allow the retry loop / strategy pivot to handle it
                     if self.strategy == BuildStrategy.SV_MODULAR:
                         self.log(
@@ -3694,9 +3504,7 @@ You explain what you changed and why.""",
                     next_action="retry_rtl_fix",
                 )
             )
-            self.log(
-                f"RTL candidate rejected: {rtl_validation_issues[0]}", refined=True
-            )
+            self.log(f"RTL candidate rejected: {rtl_validation_issues[0]}", refined=True)
             return
 
         # --- Inner retry loop for LLM parse errors ---
@@ -3757,9 +3565,7 @@ Original errors to fix:
                     Crew(verbose=False, agents=[fixer], tasks=[reformat_task])
                 )
             _inner_code = str(reformat_result)
-            self.logger.info(
-                f"REFORMATTED RTL (parse retry {_parse_retry + 1}):\n{_inner_code}"
-            )
+            self.logger.info(f"REFORMATTED RTL (parse retry {_parse_retry + 1}):\n{_inner_code}")
 
         if isinstance(new_path, str) and new_path.startswith("Error:"):
             return  # already handled above
@@ -3779,22 +3585,15 @@ Original errors to fix:
 
         # 1. Generate Testbench (Only if missing)
         # We reuse existing TB to ensure consistent verification targets
-        tb_exists = "tb_path" in self.artifacts and os.path.exists(
-            self.artifacts["tb_path"]
-        )
+        tb_exists = "tb_path" in self.artifacts and os.path.exists(self.artifacts["tb_path"])
         regen_context = (
-            self._consume_handoff(
-                "tb_regen_context", consumer="VERIFICATION", required=False
-            )
-            or ""
+            self._consume_handoff("tb_regen_context", consumer="VERIFICATION", required=False) or ""
         )
 
         if not tb_exists:
             # Check if we have a golden testbench from template matching
             if self.artifacts.get("golden_tb") and not regen_context:
-                self.log(
-                    "Using Golden Reference Testbench (pre-verified).", refined=True
-                )
+                self.log("Using Golden Reference Testbench (pre-verified).", refined=True)
                 tb_code = self.artifacts["golden_tb"]
                 # Replace template module name with actual design name
                 template_name = self.artifacts.get("golden_template", "counter")
@@ -3924,9 +3723,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                         "TB generation returned invalid code. Using deterministic fallback TB.",
                         refined=True,
                     )
-                    tb_code = self._deterministic_tb_fallback(
-                        self.artifacts.get("rtl_code", "")
-                    )
+                    tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
                 tb_validation_issues = self._validate_tb_candidate(tb_code)
                 if tb_validation_issues:
                     self._record_stage_contract(
@@ -3943,9 +3740,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                         f"TB candidate rejected: {tb_validation_issues[0]}. Using deterministic fallback TB.",
                         refined=True,
                     )
-                    tb_code = self._deterministic_tb_fallback(
-                        self.artifacts.get("rtl_code", "")
-                    )
+                    tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
                 self.logger.info(f"GENERATED TESTBENCH:\n{tb_code}")
 
                 tb_path = write_verilog(self.name, tb_code, is_testbench=True)
@@ -3954,9 +3749,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                         f"TB write failed ({tb_path}). Regenerating deterministic fallback TB.",
                         refined=True,
                     )
-                    tb_code = self._deterministic_tb_fallback(
-                        self.artifacts.get("rtl_code", "")
-                    )
+                    tb_code = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
                     tb_path = write_verilog(self.name, tb_code, is_testbench=True)
                     if isinstance(tb_path, str) and tb_path.startswith("Error:"):
                         self.log(f"Fallback TB write failed: {tb_path}", refined=True)
@@ -3997,9 +3790,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
         # -----------------------------
         # TB gate stack: static -> compile
         # -----------------------------
-        static_ok, static_report = run_tb_static_contract_check(
-            tb_code, self.strategy.name
-        )
+        static_ok, static_report = run_tb_static_contract_check(tb_code, self.strategy.name)
         if self.artifacts.get("golden_template"):
             # Golden reference TBs may be procedural; ignore SV-class-only requirements.
             filtered = []
@@ -4016,12 +3807,8 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
             )
             static_report["ok"] = len(filtered) == 0
             static_ok = static_report["ok"]
-        static_path = self._write_tb_diagnostic_artifact(
-            "tb_static_gate", static_report
-        )
-        self.logger.info(
-            f"TB STATIC GATE ({'PASS' if static_ok else 'FAIL'}): {static_report}"
-        )
+        static_path = self._write_tb_diagnostic_artifact("tb_static_gate", static_report)
+        self.logger.info(f"TB STATIC GATE ({'PASS' if static_ok else 'FAIL'}): {static_report}")
         self.log(
             f"TB static gate: {'PASS' if static_ok else 'FAIL'} (diag: {os.path.basename(static_path)})",
             refined=True,
@@ -4044,12 +3831,8 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 "rtl_path", f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}.v"
             ),
         )
-        compile_path = self._write_tb_diagnostic_artifact(
-            "tb_compile_gate", compile_report
-        )
-        self.logger.info(
-            f"TB COMPILE GATE ({'PASS' if compile_ok else 'FAIL'}): {compile_report}"
-        )
+        compile_path = self._write_tb_diagnostic_artifact("tb_compile_gate", compile_report)
+        self.logger.info(f"TB COMPILE GATE ({'PASS' if compile_ok else 'FAIL'}): {compile_report}")
         self.log(
             f"TB compile gate: {'PASS' if compile_ok else 'FAIL'} (diag: {os.path.basename(compile_path)})",
             refined=True,
@@ -4144,9 +3927,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 self.state = BuildState.FAIL
                 return
 
-            self.log(
-                f"Sim Failed (Attempt {self.retry_count}). Check log.", refined=True
-            )
+            self.log(f"Sim Failed (Attempt {self.retry_count}). Check log.", refined=True)
 
             # --- AUTONOMOUS FIX: Try to fix compilation errors without LLM ---
             # Auto-fixes removed (Verilator supports SV natively)
@@ -4158,9 +3939,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
             )
             _rtl_path = self.artifacts.get(
                 "rtl_path",
-                os.path.join(
-                    OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}.v"
-                ),
+                os.path.join(OPENLANE_ROOT, "designs", self.name, "src", f"{self.name}.v"),
             )
             sim_caps = self._simulation_capabilities(output, _vcd_path)
             if (
@@ -4195,9 +3974,7 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                 else:
                     self.logger.info("[WaveformExpert] No signal mismatch found in VCD")
             else:
-                _vcd_size = (
-                    os.path.getsize(_vcd_path) if os.path.exists(_vcd_path) else 0
-                )
+                _vcd_size = os.path.getsize(_vcd_path) if os.path.exists(_vcd_path) else 0
                 self._record_stage_contract(
                     StageResult(
                         stage=self.state.name,
@@ -4255,9 +4032,7 @@ Reply with JSON only, no prose, using this exact schema:
 
             with console.status("[error]Analyzing Failure (Multi-Class)...[/error]"):
                 analysis = str(
-                    self._crew_kickoff(
-                        Crew(verbose=False, agents=[analyst], tasks=[analysis_task])
-                    )
+                    self._crew_kickoff(Crew(verbose=False, agents=[analyst], tasks=[analysis_task]))
                 ).strip()
 
             self.logger.info(f"FAILURE ANALYSIS:\n{analysis}")
@@ -4280,9 +4055,7 @@ Reply with JSON only, no prose, using this exact schema:
                     analysis,
                     analyst_result.diagnostics,
                 )
-                with console.status(
-                    "[error]Retrying Failure Analysis (JSON)...[/error]"
-                ):
+                with console.status("[error]Retrying Failure Analysis (JSON)...[/error]"):
                     analysis = str(
                         self._crew_kickoff(
                             Crew(verbose=False, agents=[analyst], tasks=[analysis_task])
@@ -4325,12 +4098,8 @@ Reply with JSON only, no prose, using this exact schema:
                 failing_signals = ", ".join(str(x) for x in failing_signals_list)
             else:
                 failing_signals = str(failing_signals_list)
-            expected_vs_actual = str(
-                analysis_payload.get("expected_vs_actual", "")
-            ).strip()
-            responsible_construct = str(
-                analysis_payload.get("responsible_construct", "")
-            ).strip()
+            expected_vs_actual = str(analysis_payload.get("expected_vs_actual", "")).strip()
+            responsible_construct = str(analysis_payload.get("responsible_construct", "")).strip()
 
             # Build structured diagnosis string for downstream fix prompts
             structured_diagnosis = (
@@ -4355,9 +4124,7 @@ Reply with JSON only, no prose, using this exact schema:
                     "Port mismatch detected. Regenerating TB from RTL ports.",
                     refined=True,
                 )
-                fallback_tb = self._deterministic_tb_fallback(
-                    self.artifacts.get("rtl_code", "")
-                )
+                fallback_tb = self._deterministic_tb_fallback(self.artifacts.get("rtl_code", ""))
                 path = write_verilog(self.name, fallback_tb, is_testbench=True)
                 if isinstance(path, str) and not path.startswith("Error:"):
                     self.artifacts["tb_path"] = path
@@ -4416,9 +4183,7 @@ Reply with JSON only, no prose, using this exact schema:
             is_tb_issue = failure_class == "A"
 
             if is_tb_issue:
-                self.log(
-                    "Analyst identified Testbench Error. Fixing TB...", refined=True
-                )
+                self.log("Analyst identified Testbench Error. Fixing TB...", refined=True)
                 fixer = get_testbench_agent(
                     self.get_llm_for_role("fixer"), f"Fix TB for {self.name}"
                 )
@@ -4464,18 +4229,14 @@ always wait for at least one complete clock cycle (`@(posedge clk);` or
 Never sample a DUT output in the same time step that stimulus is applied.
 """
             else:
-                self.log(
-                    "Analyst identified RTL Logic Error. Fixing RTL...", refined=True
-                )
+                self.log("Analyst identified RTL Logic Error. Fixing RTL...", refined=True)
                 fixer = get_designer_agent(
                     self.get_llm_for_role("fixer"),
                     f"Fix RTL for {self.name}",
                     strategy=self.strategy.name,
                 )
                 error_lines = [
-                    line
-                    for line in output.split("\n")
-                    if "Error" in line or "fail" in line.lower()
+                    line for line in output.split("\n") if "Error" in line or "fail" in line.lower()
                 ]
                 error_summary = "\n".join(error_lines)
 
@@ -4542,9 +4303,7 @@ CRITICAL RULES:
                     "Fix generation returned prose instead of code. Retrying once.",
                     refined=True,
                 )
-                self.logger.warning(
-                    f"FIX VALIDATION FAIL (prose detected):\n{fixed_code[:500]}"
-                )
+                self.logger.warning(f"FIX VALIDATION FAIL (prose detected):\n{fixed_code[:500]}")
                 fixed_code = str(
                     self._crew_kickoff(
                         Crew(
@@ -4565,9 +4324,7 @@ CRITICAL RULES:
                 # Count changed lines using SequenceMatcher
                 if original_lines and fixed_lines:
                     matcher = difflib.SequenceMatcher(None, original_lines, fixed_lines)
-                    unchanged = sum(
-                        block.size for block in matcher.get_matching_blocks()
-                    )
+                    unchanged = sum(block.size for block in matcher.get_matching_blocks())
                     total = max(len(original_lines), len(fixed_lines))
                     changed_ratio = 1.0 - (unchanged / total) if total > 0 else 0.0
                     self.logger.info(
@@ -4632,9 +4389,7 @@ Return the complete module with ONLY the minimal fix applied.
                 # Write cleaned code and read it back
                 path = write_verilog(self.name, fixed_code)
                 if isinstance(path, str) and path.startswith("Error:"):
-                    self.log(
-                        f"File Write Error when fixing RTL logic: {path}", refined=True
-                    )
+                    self.log(f"File Write Error when fixing RTL logic: {path}", refined=True)
                     self.state = BuildState.FAIL
                     return
                 self.artifacts["rtl_path"] = path
@@ -4653,9 +4408,7 @@ Return the complete module with ONLY the minimal fix applied.
                 # TB Fix
                 path = write_verilog(self.name, fixed_code, is_testbench=True)
                 if isinstance(path, str) and path.startswith("Error:"):
-                    self.log(
-                        f"File Write Error when fixing TB logic: {path}", refined=True
-                    )
+                    self.log(f"File Write Error when fixing TB logic: {path}", refined=True)
                     self.state = BuildState.FAIL
                     return
                 self.artifacts["tb_path"] = path
@@ -4751,9 +4504,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 spinner_style="spinner",
             ):
                 sva_result = str(
-                    self._crew_kickoff(
-                        Crew(verbose=False, agents=[verif_agent], tasks=[sva_task])
-                    )
+                    self._crew_kickoff(Crew(verbose=False, agents=[verif_agent], tasks=[sva_task]))
                 )
 
             # --- Universal code output validation (SVA) ---
@@ -4767,13 +4518,9 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     "SVA generation returned prose instead of code. Retrying once.",
                     refined=True,
                 )
-                self.logger.warning(
-                    f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}"
-                )
+                self.logger.warning(f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}")
                 sva_result = str(
-                    self._crew_kickoff(
-                        Crew(verbose=False, agents=[verif_agent], tasks=[sva_task])
-                    )
+                    self._crew_kickoff(Crew(verbose=False, agents=[verif_agent], tasks=[sva_task]))
                 )
                 if not validate_llm_code_output(sva_result):
                     self.log(
@@ -4782,9 +4529,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     )
                     self.transition(BuildState.COVERAGE_CHECK)
                     return
-            sva_validation_issues = self._validate_sva_candidate(
-                sva_result, rtl_for_sva
-            )
+            sva_validation_issues = self._validate_sva_candidate(sva_result, rtl_for_sva)
             if sva_validation_issues:
                 self._record_stage_contract(
                     StageResult(
@@ -4796,9 +4541,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                         next_action="retry_sva_generation",
                     )
                 )
-                self.log(
-                    f"SVA candidate rejected: {sva_validation_issues[0]}", refined=True
-                )
+                self.log(f"SVA candidate rejected: {sva_validation_issues[0]}", refined=True)
                 for stale in (sva_path,):
                     if os.path.exists(stale):
                         os.remove(stale)
@@ -4807,9 +4550,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             self.logger.info(f"GENERATED SVA:\n{sva_result}")
 
             # Write SVA file
-            sva_write_path = write_verilog(
-                self.name, sva_result, suffix="_sva", ext=".sv"
-            )
+            sva_write_path = write_verilog(self.name, sva_result, suffix="_sva", ext=".sv")
             if isinstance(sva_write_path, str) and sva_write_path.startswith("Error:"):
                 self.log(
                     f"SVA write failed: {sva_write_path}. Skipping formal.",
@@ -4833,16 +4574,16 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     refined=True,
                 )
                 if self.strict_gates:
-                    self.log(
-                        "Formal translation failed under strict mode.", refined=True
-                    )
+                    self.log("Formal translation failed under strict mode.", refined=True)
                     self.state = BuildState.FAIL
                     return
                 self.transition(BuildState.COVERAGE_CHECK)
                 return
 
             preflight_ok, preflight_report = validate_yosys_sby_check(yosys_code)
-            formal_diag_path = f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_formal_preflight.json"
+            formal_diag_path = (
+                f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_formal_preflight.json"
+            )
             with open(formal_diag_path, "w") as f:
                 json.dump(preflight_report, f, indent=2)
             self.artifacts["formal_preflight"] = preflight_report
@@ -4876,9 +4617,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 self.transition(BuildState.COVERAGE_CHECK)
                 return
 
-            sby_check_path = (
-                f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_sby_check.sv"
-            )
+            sby_check_path = f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_sby_check.sv"
             with open(sby_check_path, "w") as f:
                 f.write(yosys_code)
             self.log("Yosys-compatible assertions generated.", refined=True)
@@ -4889,17 +4628,13 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             _yosys = _YOSYS_BIN or "yosys"
             preflight_cmd = [_yosys, "-p", f"read_verilog -formal -sv {sby_check_path}"]
             try:
-                pf = subprocess.run(
-                    preflight_cmd, capture_output=True, text=True, timeout=30
-                )
+                pf = subprocess.run(preflight_cmd, capture_output=True, text=True, timeout=30)
                 if pf.returncode != 0:
                     yosys_err = (pf.stderr or pf.stdout or "").strip()
                     self.logger.info(f"YOSYS SVA PREFLIGHT FAIL:\n{yosys_err}")
                     prev_err = self.artifacts.get("sva_preflight_error_last", "")
                     if prev_err == yosys_err:
-                        streak = (
-                            int(self.artifacts.get("sva_preflight_error_streak", 0)) + 1
-                        )
+                        streak = int(self.artifacts.get("sva_preflight_error_streak", 0)) + 1
                     else:
                         streak = 1
                     self.artifacts["sva_preflight_error_last"] = yosys_err
@@ -4938,9 +4673,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             # 4. Write SBY config and run
             write_sby_config(self.name, use_sby_check=True)
 
-            with console.status(
-                "[accent]Running Formal Verification (SymbiYosys)...[/accent]"
-            ):
+            with console.status("[accent]Running Formal Verification (SymbiYosys)...[/accent]"):
                 success, result = run_formal_verification(self.name)
 
             self.logger.info(f"FORMAL RESULT:\n{result}")
@@ -5007,9 +4740,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                             f"line {_verdict.root_cause_line} conf={_verdict.confidence:.2f}"
                         )
                     else:
-                        self.logger.info(
-                            "[DeepDebugger] No verdict (all signals uncertain)"
-                        )
+                        self.logger.info("[DeepDebugger] No verdict (all signals uncertain)")
                 else:
                     self.logger.info(
                         f"[DeepDebugger] Skipping — "
@@ -5025,9 +4756,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
 
                 self.artifacts["formal_result"] = "FAIL"
                 if self.strict_gates:
-                    self.log(
-                        "Formal verification failed under strict mode.", refined=True
-                    )
+                    self.log("Formal verification failed under strict mode.", refined=True)
                     self.state = BuildState.FAIL
                     return
         except Exception as e:
@@ -5067,9 +4796,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
     def do_coverage_check(self):
         """Runs coverage with adapter backend and strict fail-closed semantics."""
         thresholds = dict(self.coverage_thresholds)
-        thresholds["line"] = max(
-            float(thresholds.get("line", 85.0)), float(self.min_coverage)
-        )
+        thresholds["line"] = max(float(thresholds.get("line", 85.0)), float(self.min_coverage))
         self.log(
             (
                 f"Running Coverage Analysis "
@@ -5122,9 +4849,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             "coverage_improvement_context",
             {
                 "coverage_data": coverage_data,
-                "sim_output": sim_output[:4000]
-                if isinstance(sim_output, str)
-                else str(sim_output),
+                "sim_output": sim_output[:4000] if isinstance(sim_output, str) else str(sim_output),
             },
             producer="orchestrator_coverage",
             consumer="COVERAGE_CHECK",
@@ -5134,9 +4859,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         os.makedirs(src_dir, exist_ok=True)
         attempt = int(self.artifacts.get("coverage_attempt_count", 0)) + 1
         self.artifacts["coverage_attempt_count"] = attempt
-        coverage_attempt = os.path.join(
-            src_dir, f"{self.name}_coverage_attempt{attempt}.json"
-        )
+        coverage_attempt = os.path.join(src_dir, f"{self.name}_coverage_attempt{attempt}.json")
         coverage_latest = os.path.join(src_dir, f"{self.name}_coverage_latest.json")
         with open(coverage_attempt, "w") as f:
             json.dump(coverage_data, f, indent=2)
@@ -5184,9 +4907,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 )
                 self.state = BuildState.FAIL
                 return
-            self.log(
-                "Coverage infra failure tolerated in non-strict mode.", refined=True
-            )
+            self.log("Coverage infra failure tolerated in non-strict mode.", refined=True)
             if self.full_signoff:
                 self.transition(BuildState.REGRESSION)
             elif self.skip_openlane:
@@ -5222,9 +4943,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 backup_path = tb_path + ".best"
                 shutil.copy(tb_path, backup_path)
                 self.best_tb_backup = backup_path
-                self.log(
-                    f"New Best Coverage: {line_pct:.1f}% (Backed up)", refined=True
-                )
+                self.log(f"New Best Coverage: {line_pct:.1f}% (Backed up)", refined=True)
 
         if coverage_pass:
             self.log(
@@ -5246,9 +4965,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         self.retry_count += 1
         coverage_max_retries = min(self.max_retries, 5)  # Increased for closure loop
         if self.retry_count > coverage_max_retries:
-            if getattr(self, "best_tb_backup", None) and os.path.exists(
-                self.best_tb_backup
-            ):
+            if getattr(self, "best_tb_backup", None) and os.path.exists(self.best_tb_backup):
                 self.log(
                     f"Restoring Best Testbench ({self.best_coverage:.1f}%) before proceeding.",
                     refined=True,
@@ -5357,9 +5074,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                 f"COVERAGE TB VALIDATION FAIL (prose detected):\n{improved_tb[:500]}"
             )
             improved_tb = str(
-                self._crew_kickoff(
-                    Crew(verbose=False, agents=[tb_agent], tasks=[improve_task])
-                )
+                self._crew_kickoff(Crew(verbose=False, agents=[tb_agent], tasks=[improve_task]))
             )
         tb_validation_issues = self._validate_tb_candidate(improved_tb)
         if tb_validation_issues:
@@ -5442,9 +5157,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
         test_blocks = re.findall(r"```(?:verilog|v)?\s*\n(.*?)```", result, re.DOTALL)
 
         if not test_blocks:
-            self.log(
-                "No regression tests extracted. Skipping regression.", refined=True
-            )
+            self.log("No regression tests extracted. Skipping regression.", refined=True)
             if self.skip_openlane:
                 self.transition(BuildState.SUCCESS)
             else:
@@ -5463,9 +5176,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             )
 
             # Write test to file
-            test_path = write_verilog(
-                self.name, test_code, suffix=f"_{test_name}", ext=".v"
-            )
+            test_path = write_verilog(self.name, test_code, suffix=f"_{test_name}", ext=".v")
             if isinstance(test_path, str) and test_path.startswith("Error:"):
                 test_results.append(
                     {"test": test_name, "status": "WRITE_ERROR", "output": test_path}
@@ -5551,14 +5262,10 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     all_passed = False
 
             except subprocess.TimeoutExpired:
-                test_results.append(
-                    {"test": test_name, "status": "TIMEOUT", "output": "Timed out"}
-                )
+                test_results.append({"test": test_name, "status": "TIMEOUT", "output": "Timed out"})
                 all_passed = False
             except Exception as e:
-                test_results.append(
-                    {"test": test_name, "status": "ERROR", "output": str(e)}
-                )
+                test_results.append({"test": test_name, "status": "ERROR", "output": str(e)})
                 all_passed = False
 
         # Log results
@@ -5570,13 +5277,9 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
             self.log(f"All {len(test_results)} regression tests PASSED!", refined=True)
         else:
             passed_count = sum(1 for tr in test_results if tr["status"] == "PASS")
-            self.log(
-                f"Regression: {passed_count}/{len(test_results)} passed", refined=True
-            )
+            self.log(f"Regression: {passed_count}/{len(test_results)} passed", refined=True)
             if self.strict_gates:
-                self.log(
-                    "Regression failures are blocking under strict mode.", refined=True
-                )
+                self.log("Regression failures are blocking under strict mode.", refined=True)
                 self.state = BuildState.FAIL
                 return
 
@@ -5617,9 +5320,7 @@ REQUIREMENTS:
 
         with console.status("[accent]Generating Timing Constraints (SDC)...[/accent]"):
             sdc_content = str(
-                self._crew_kickoff(
-                    Crew(verbose=False, agents=[sdc_agent], tasks=[sdc_task])
-                )
+                self._crew_kickoff(Crew(verbose=False, agents=[sdc_agent], tasks=[sdc_task]))
             ).strip()
 
             # Clean up potential markdown wrappers created by LLM anyway
@@ -5644,9 +5345,7 @@ REQUIREMENTS:
         os.makedirs(synth_dir, exist_ok=True)
 
         rtl_files = [
-            os.path.join(src_dir, f)
-            for f in os.listdir(src_dir)
-            if f.endswith((".v", ".sv"))
+            os.path.join(src_dir, f) for f in os.listdir(src_dir) if f.endswith((".v", ".sv"))
         ]
         if not rtl_files:
             rtl_main = self.artifacts.get("rtl_path")
@@ -5772,9 +5471,7 @@ REQUIREMENTS:
             synth_netlist = self.artifacts.get("synth_netlist", "")
             if synth_netlist:
                 scan_netlist = synth_netlist
-                self.log(
-                    "Using synth netlist for ATPG (no scan netlist).", refined=True
-                )
+                self.log("Using synth netlist for ATPG (no scan netlist).", refined=True)
             else:
                 self.log("No netlist for ATPG; skipping to MBIST.", refined=True)
                 self.transition(BuildState.MBIST)
@@ -5894,9 +5591,7 @@ REQUIREMENTS:
 
         self.artifacts["mbist_dir"] = mbist_dir
         self.artifacts["mbist_configs"] = [cfg.memory_instance for cfg in mem_configs]
-        self.log(
-            f"MBIST: {len(mem_configs)} memory BIST wrappers generated.", refined=True
-        )
+        self.log(f"MBIST: {len(mem_configs)} memory BIST wrappers generated.", refined=True)
         self.transition(BuildState.GLS_SIM)
 
     def do_gls_simulation(self):
@@ -5904,11 +5599,7 @@ REQUIREMENTS:
         self.log("Running Gate-Level Simulation (GLS)...", refined=True)
         scan_netlist = self.artifacts.get("scan_netlist", "")
         synth_netlist = self.artifacts.get("synth_netlist", "")
-        netlist = (
-            scan_netlist
-            if scan_netlist and os.path.exists(scan_netlist)
-            else synth_netlist
-        )
+        netlist = scan_netlist if scan_netlist and os.path.exists(scan_netlist) else synth_netlist
         sdf_path = self.artifacts.get("synth_sdf", "")
 
         if not netlist or not os.path.exists(netlist):
@@ -5996,9 +5687,7 @@ REQUIREMENTS:
         pdk_root = os.environ.get("PDK_ROOT", "")
 
         spef_path = ""
-        spef_base = (
-            f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/routing"
-        )
+        spef_base = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/routing"
         if os.path.isdir(spef_base):
             for f in os.listdir(spef_base):
                 if f.endswith(".spef") or f.endswith(".spef.gz"):
@@ -6010,13 +5699,9 @@ REQUIREMENTS:
 
             ok, spef_nets = parse_spef(spef_path)
             self.artifacts["spef_nets"] = [n.name for n in spef_nets]
-            self.artifacts["total_capacitance_ff"] = sum(
-                n.capacitance_ff for n in spef_nets
-            )
+            self.artifacts["total_capacitance_ff"] = sum(n.capacitance_ff for n in spef_nets)
         else:
-            self.log(
-                "No SPEF found; power analysis from synth estimates.", refined=True
-            )
+            self.log("No SPEF found; power analysis from synth estimates.", refined=True)
 
         gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
         lib_files = []
@@ -6028,14 +5713,10 @@ REQUIREMENTS:
         )
         if os.path.isdir(lib_base):
             lib_files = [
-                os.path.join(lib_base, f)
-                for f in os.listdir(lib_base)
-                if f.endswith(".lib")
+                os.path.join(lib_base, f) for f in os.listdir(lib_base) if f.endswith(".lib")
             ]
 
-        freq_mhz = float(
-            self.artifacts.get("synth_metrics", {}).get("max_freq_mhz", 100.0)
-        )
+        freq_mhz = float(self.artifacts.get("synth_metrics", {}).get("max_freq_mhz", 100.0))
         power_dir = f"{OPENLANE_ROOT}/designs/{self.name}/power"
         os.makedirs(power_dir, exist_ok=True)
 
@@ -6074,9 +5755,7 @@ REQUIREMENTS:
                 for em_warn in result.ir_drop.electromigration_warnings[:3]:
                     self.log(f"  EM WARN: {em_warn}", refined=True)
         else:
-            self.log(
-                f"Power analysis skipped: {'; '.join(result.errors[:2])}", refined=True
-            )
+            self.log(f"Power analysis skipped: {'; '.join(result.errors[:2])}", refined=True)
 
         self.transition(BuildState.TIMING_ANALYSIS)
 
@@ -6107,9 +5786,7 @@ REQUIREMENTS:
         lib_files = []
         if os.path.isdir(lib_base):
             lib_files = [
-                os.path.join(lib_base, f)
-                for f in os.listdir(lib_base)
-                if f.endswith(".lib")
+                os.path.join(lib_base, f) for f in os.listdir(lib_base) if f.endswith(".lib")
             ]
 
         if not lib_files:
@@ -6235,9 +5912,7 @@ REQUIREMENTS:
                         refined=True,
                     )
         else:
-            self.log(
-                f"Magic DRC failed: {'; '.join(drc_result.errors[:2])}", refined=True
-            )
+            self.log(f"Magic DRC failed: {'; '.join(drc_result.errors[:2])}", refined=True)
 
         self.artifacts["drc_result"] = drc_result
 
@@ -6265,9 +5940,7 @@ REQUIREMENTS:
             if not lvs_result.equivalent:
                 self.log(f"  LVS errors: {lvs_result.lvs_errors}", refined=True)
         else:
-            self.log(
-                f"Netgen LVS failed: {'; '.join(lvs_result.errors[:2])}", refined=True
-            )
+            self.log(f"Netgen LVS failed: {'; '.join(lvs_result.errors[:2])}", refined=True)
 
         self.artifacts["lvs_result"] = lvs_result
         self.artifacts["pv_metrics"] = {
@@ -6288,9 +5961,7 @@ REQUIREMENTS:
         src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
         if os.path.isdir(src_dir):
             rtl_files = [
-                os.path.join(src_dir, f)
-                for f in os.listdir(src_dir)
-                if f.endswith((".v", ".sv"))
+                os.path.join(src_dir, f) for f in os.listdir(src_dir) if f.endswith((".v", ".sv"))
             ]
 
         spec_data = self.artifacts.get("spec", "")
@@ -6350,9 +6021,7 @@ REQUIREMENTS:
     def do_floorplan(self):
         """Generate floorplan artifacts and feed hardening with spatial intent."""
         self.floorplan_attempts += 1
-        self.log(
-            f"Preparing floorplan attempt {self.floorplan_attempts}...", refined=True
-        )
+        self.log(f"Preparing floorplan attempt {self.floorplan_attempts}...", refined=True)
         src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
         os.makedirs(src_dir, exist_ok=True)
 
@@ -6419,9 +6088,7 @@ REASONING: <1-line explanation>""",
                 if est_line_s.startswith("DIE_AREA:"):
                     try:
                         llm_die = int(
-                            re.search(
-                                r"\d+", est_line_s.replace("DIE_AREA:", "")
-                            ).group()
+                            re.search(r"\d+", est_line_s.replace("DIE_AREA:", "")).group()
                         )
                         llm_die = max(200, min(2000, llm_die))
                     except (ValueError, AttributeError):
@@ -6429,9 +6096,7 @@ REASONING: <1-line explanation>""",
                 elif est_line_s.startswith("UTILIZATION:"):
                     try:
                         llm_util = int(
-                            re.search(
-                                r"\d+", est_line_s.replace("UTILIZATION:", "")
-                            ).group()
+                            re.search(r"\d+", est_line_s.replace("UTILIZATION:", "")).group()
                         )
                         llm_util = max(30, min(70, llm_util))
                     except (ValueError, AttributeError):
@@ -6439,9 +6104,7 @@ REASONING: <1-line explanation>""",
                 elif est_line_s.startswith("CLOCK_PERIOD:"):
                     try:
                         llm_clk = float(
-                            re.search(
-                                r"[\d.]+", est_line_s.replace("CLOCK_PERIOD:", "")
-                            ).group()
+                            re.search(r"[\d.]+", est_line_s.replace("CLOCK_PERIOD:", "")).group()
                         )
                         llm_clk = max(1.0, min(100.0, llm_clk))
                     except (ValueError, AttributeError):
@@ -6451,9 +6114,7 @@ REASONING: <1-line explanation>""",
 
             if llm_die is not None:
                 base_die = llm_die
-                self.log(
-                    f"LLM estimated die area: {llm_die} ({llm_reasoning})", refined=True
-                )
+                self.log(f"LLM estimated die area: {llm_die} ({llm_reasoning})", refined=True)
             else:
                 base_die = heuristic_die
                 self.log(
@@ -6468,9 +6129,7 @@ REASONING: <1-line explanation>""",
                 clock_period = heuristic_clk
 
         except Exception as e:
-            self.log(
-                f"LLM floorplan estimation failed ({e}); using heuristic.", refined=True
-            )
+            self.log(f"LLM floorplan estimation failed ({e}); using heuristic.", refined=True)
             base_die = heuristic_die
             util = heuristic_util
             clock_period = heuristic_clk
@@ -6608,9 +6267,7 @@ REASONING: <1-line explanation>""",
             power_w=power_w,
         )
         self.convergence_history.append(snap)
-        self.artifacts["convergence_history"] = [
-            asdict(x) for x in self.convergence_history
-        ]
+        self.artifacts["convergence_history"] = [asdict(x) for x in self.convergence_history]
 
         self.log(
             f"Convergence snapshot: WNS={wns:.3f}ns, congestion={cong_pct:.2f}%, area={area_um2:.1f}um^2, power={power_w:.6f}W",
@@ -6758,9 +6415,7 @@ REASONING: <1-line explanation>""",
                 self.artifacts["area_scale"] = round(
                     float(self.artifacts.get("area_scale", 1.0)) * 1.15, 3
                 )
-                self.log(
-                    "Applying +15% area expansion due to congestion.", refined=True
-                )
+                self.log("Applying +15% area expansion due to congestion.", refined=True)
                 self.transition(BuildState.FLOORPLAN, preserve_retries=True)
                 return
             self._pivot_strategy("congestion persisted after area expansions")
@@ -6889,9 +6544,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.transition(BuildState.CONVERGENCE_REVIEW)
         else:
             # ── Self-Reflective Retry via SelfReflectPipeline ──
-            self.log(
-                f"Hardening failed. Activating self-reflection retry...", refined=True
-            )
+            self.log(f"Hardening failed. Activating self-reflection retry...", refined=True)
             try:
                 reflect_pipeline = SelfReflectPipeline(
                     llm=self.get_llm_for_role("manager"),
@@ -6905,9 +6558,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
 
                 def _hardening_action():
                     """Re-run OpenLane and return (success, error_msg, metrics)."""
-                    new_tag = (
-                        f"agentrun_{self.global_step_count}_{int(time.time()) % 10000}"
-                    )
+                    new_tag = f"agentrun_{self.global_step_count}_{int(time.time()) % 10000}"
                     ok, res = run_openlane(
                         self.name,
                         background=False,
@@ -6925,12 +6576,8 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                     """Apply a corrective action from self-reflection."""
                     if action.action_type == "adjust_config":
                         # Common fix: increase die area or relax utilisation
-                        self.log(
-                            f"Applying config fix: {action.description}", refined=True
-                        )
-                        return (
-                            True  # Mark as applied; the next retry re-generates config
-                        )
+                        self.log(f"Applying config fix: {action.description}", refined=True)
+                        return True  # Mark as applied; the next retry re-generates config
                     elif action.action_type == "modify_rtl":
                         self.log(
                             f"RTL modification suggested: {action.description}",
@@ -6948,20 +6595,12 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                 )
 
                 if ok:
-                    self.log(
-                        f"Hardening recovered via self-reflection: {msg}", refined=True
-                    )
-                    self.artifacts["self_reflect_history"] = (
-                        reflect_pipeline.get_summary()
-                    )
+                    self.log(f"Hardening recovered via self-reflection: {msg}", refined=True)
+                    self.artifacts["self_reflect_history"] = reflect_pipeline.get_summary()
                     self.transition(BuildState.CONVERGENCE_REVIEW)
                 else:
-                    self.log(
-                        f"Hardening failed after self-reflection: {msg}", refined=True
-                    )
-                    self.artifacts["self_reflect_history"] = (
-                        reflect_pipeline.get_summary()
-                    )
+                    self.log(f"Hardening failed after self-reflection: {msg}", refined=True)
+                    self.artifacts["self_reflect_history"] = reflect_pipeline.get_summary()
                     self.state = BuildState.FAIL
             except Exception as e:
                 self.logger.warning(f"SelfReflectPipeline error: {e}")
@@ -7030,9 +6669,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             fab_ready = False
         else:
             for c in sta["corners"]:
-                status = (
-                    "✓" if (c["setup_slack"] >= 0 and c["hold_slack"] >= 0) else "✗"
-                )
+                status = "✓" if (c["setup_slack"] >= 0 and c["hold_slack"] >= 0) else "✗"
                 self.log(
                     f"  {status} {c['name']}: setup={c['setup_slack']:.2f}ns hold={c['hold_slack']:.2f}ns",
                     refined=True,
@@ -7137,9 +6774,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             spinner_style="spinner",
         ):
             doc_content = str(
-                self._crew_kickoff(
-                    Crew(verbose=False, agents=[doc_agent], tasks=[doc_task])
-                )
+                self._crew_kickoff(Crew(verbose=False, agents=[doc_agent], tasks=[doc_task]))
             )
 
         # Save to file
@@ -7170,10 +6805,8 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                 )
                 cov_checks = {
                     "line": float(cov.get("line_pct", 0.0)) >= cov_thresholds["line"],
-                    "branch": float(cov.get("branch_pct", 0.0))
-                    >= cov_thresholds["branch"],
-                    "toggle": float(cov.get("toggle_pct", 0.0))
-                    >= cov_thresholds["toggle"],
+                    "branch": float(cov.get("branch_pct", 0.0)) >= cov_thresholds["branch"],
+                    "toggle": float(cov.get("toggle_pct", 0.0)) >= cov_thresholds["toggle"],
                     "functional": float(cov.get("functional_pct", 0.0))
                     >= cov_thresholds["functional"],
                 }
@@ -7187,16 +6820,10 @@ set ::env(MAGIC_DRC_USE_GDS) 1
 
         # FINAL VERDICT
         timing_status = (
-            "MET"
-            if sta.get("timing_met")
-            else "FAILED"
-            if not sta.get("error")
-            else "N/A"
+            "MET" if sta.get("timing_met") else "FAILED" if not sta.get("error") else "N/A"
         )
         power_status = (
-            f"{power['total_power_w'] * 1000:.3f} mW"
-            if power["total_power_w"] > 0
-            else "N/A"
+            f"{power['total_power_w'] * 1000:.3f} mW" if power["total_power_w"] > 0 else "N/A"
         )
         irdrop_status = "OK" if power.get("power_ok") else "FAIL (>5% VDD)"
 
@@ -7290,9 +6917,7 @@ FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
                             }:
                                 so_fix = so_fix_val
 
-                    self.log(
-                        f"Signoff diagnosis: {so_root_cause} -> {so_fix}", refined=True
-                    )
+                    self.log(f"Signoff diagnosis: {so_root_cause} -> {so_fix}", refined=True)
                     self.artifacts["signoff_failure_analysis"] = {
                         "root_cause": so_root_cause,
                         "recommended_fix": so_fix,
@@ -7325,9 +6950,7 @@ FIX: <one of: GATE_ECO, RTL_PATCH, AREA_EXPAND, TIMING_RELAX>""",
                         return
                     else:
                         # GATE_ECO or RTL_PATCH -> route to ECO stage
-                        self.log(
-                            "Signoff failed. Triggering ECO patch stage.", refined=True
-                        )
+                        self.log("Signoff failed. Triggering ECO patch stage.", refined=True)
                         self.transition(BuildState.ECO_PATCH, preserve_retries=True)
                         return
 
