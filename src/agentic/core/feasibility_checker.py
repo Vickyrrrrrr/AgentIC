@@ -137,6 +137,8 @@ class FeasibilityResult:
     estimated_gate_equivalents: int = 0
     recommended_floorplan_size_um: str = ""
     target_frequency_mhz: int = 50
+    recommended_frequency_mhz: int = 50  # Auto-adjusted frequency if needed
+    frequency_was_adjusted: bool = False
     memory_macros_required: List[MacroRequirement] = field(default_factory=list)
     feasibility_warnings: List[str] = field(default_factory=list)
     feasibility_rejections: List[str] = field(default_factory=list)
@@ -149,6 +151,8 @@ class FeasibilityResult:
             "estimated_gate_equivalents": self.estimated_gate_equivalents,
             "recommended_floorplan_size_um": self.recommended_floorplan_size_um,
             "target_frequency_mhz": self.target_frequency_mhz,
+            "recommended_frequency_mhz": self.recommended_frequency_mhz,
+            "frequency_was_adjusted": self.frequency_was_adjusted,
             "memory_macros_required": [m.to_dict() for m in self.memory_macros_required],
             "feasibility_warnings": list(self.feasibility_warnings),
             "feasibility_rejections": list(self.feasibility_rejections),
@@ -165,15 +169,18 @@ class FeasibilityResult:
 class FeasibilityChecker:
     """
     Evaluates whether a hardware specification is physically realizable
-    on Sky130 within the OpenLane automated flow.
+    on a given PDK within the OpenLane automated flow.
 
     Checks: frequency, memory sizing, arithmetic complexity, total area,
-    and Sky130-specific incompatibilities.  Produces a PASS / WARN / REJECT
+    and PDK-specific incompatibilities.  Produces a PASS / WARN / REJECT
     verdict with detailed justification.
+
+    Supports auto-adjust mode: adjusts frequency to PDK limits instead of rejecting.
     """
 
-    def __init__(self, pdk: str = "sky130"):
+    def __init__(self, pdk: str = "sky130", auto_adjust: bool = True):
         self.pdk = pdk
+        self.auto_adjust = auto_adjust
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -196,6 +203,8 @@ class FeasibilityChecker:
         warnings: List[str] = []
         rejections: List[str] = []
         area_breakdown: Dict[str, int] = {}
+        frequency_was_adjusted = False
+        recommended_freq = 0
 
         # Resolve target frequency
         target_freq = hw_spec_dict.get("target_frequency_mhz", 0)
@@ -204,6 +213,27 @@ class FeasibilityChecker:
             warnings.append(
                 "INFERRED: target_frequency_mhz was 0 or unspecified — defaulting to 50 MHz."
             )
+
+        # Get PDK frequency limits
+        tool_config = get_pdk_tool_config(self.pdk)
+        max_reliable_mhz = tool_config.get("max_reliable_mhz", 150)
+        upper_limit_mhz = tool_config.get("upper_limit_mhz", 200)
+
+        # Auto-adjust frequency if needed
+        if target_freq > upper_limit_mhz:
+            if self.auto_adjust:
+                original_freq = target_freq
+                target_freq = max_reliable_mhz
+                frequency_was_adjusted = True
+                warnings.append(
+                    f"AUTO_ADJUSTED: Target frequency {original_freq} MHz exceeds {self.pdk} limit "
+                    f"of {upper_limit_mhz} MHz. Adjusted to {target_freq} MHz (max reliable)."
+                )
+            else:
+                rejections.append(
+                    f"FEASIBILITY_REJECTED: {self.pdk} cannot reliably achieve "
+                    f"{target_freq} MHz. Maximum reliable: {max_reliable_mhz} MHz."
+                )
 
         # Collect all submodule specs (top-level + nested from hierarchy)
         all_submodules = self._collect_all_submodules(hw_spec_dict, hierarchy_result_dict)
@@ -256,6 +286,8 @@ class FeasibilityChecker:
             estimated_gate_equivalents=total_ge,
             recommended_floorplan_size_um=floorplan,
             target_frequency_mhz=target_freq,
+            recommended_frequency_mhz=target_freq,
+            frequency_was_adjusted=frequency_was_adjusted,
             memory_macros_required=macros,
             feasibility_warnings=warnings,
             feasibility_rejections=rejections,
@@ -277,13 +309,8 @@ class FeasibilityChecker:
         max_reliable_mhz = tool_config.get("max_reliable_mhz", 150)
         upper_limit_mhz = tool_config.get("upper_limit_mhz", 200)
 
-        if target_mhz > upper_limit_mhz:
-            rejections.append(
-                f"FEASIBILITY_REJECTED: {self.pdk} cannot reliably achieve "
-                f"{target_mhz} MHz for synthesized digital logic in OpenLane. "
-                f"Recommend redesigning with target_frequency_mhz <= {max_reliable_mhz}."
-            )
-            return warnings, rejections
+        # Note: Rejections for frequency > upper_limit are now handled in check()
+        # with auto-adjust capability. This method only adds warnings for high-risk frequencies.
 
         if target_mhz > max_reliable_mhz:
             warnings.append(

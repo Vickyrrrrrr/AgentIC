@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from crewai import Agent, Task, Crew, LLM
 
+from ..contracts import robust_json_extract
+
 logger = logging.getLogger(__name__)
 
 
@@ -215,9 +217,7 @@ class BehavioralStatement:
         return asdict(self)
 
     def __str__(self) -> str:
-        return (
-            f"GIVEN {self.given} WHEN {self.when} THEN {self.then} WITHIN {self.within}"
-        )
+        return f"GIVEN {self.given} WHEN {self.when} THEN {self.then} WITHIN {self.within}"
 
 
 @dataclass
@@ -277,9 +277,7 @@ class HardwareSpec:
             )
             for s in data.pop("submodules", [])
         ]
-        contracts = [
-            BehavioralStatement(**b) for b in data.pop("behavioral_contract", [])
-        ]
+        contracts = [BehavioralStatement(**b) for b in data.pop("behavioral_contract", [])]
         inferred = [InferredField(**f) for f in data.pop("inferred_fields", [])]
         return cls(
             ports=ports,
@@ -444,9 +442,7 @@ class HardwareSpecGenerator:
             logger.info(
                 f"[SpecGen] Description is short ({word_count} words) — elaborating via LLM"
             )
-            options = self._elaborate_description(
-                design_name, description, target_pdk=target_pdk
-            )
+            options = self._elaborate_description(design_name, description, target_pdk=target_pdk)
             spec = HardwareSpec(
                 design_category="ELABORATION_NEEDED",
                 top_module_name=design_name,
@@ -456,12 +452,8 @@ class HardwareSpecGenerator:
             return spec, [f"Short description — options generated"]
 
         # ── Stage 1-5: Updated full spec via LLM ──
-        logger.info(
-            f"[SpecGen] Generating full spec for '{design_name}' (PDK={target_pdk})"
-        )
-        spec, gen_issues = self._generate_full_spec(
-            design_name, description, target_pdk, base_sid
-        )
+        logger.info(f"[SpecGen] Generating full spec for '{design_name}' (PDK={target_pdk})")
+        spec, gen_issues = self._generate_full_spec(design_name, description, target_pdk, base_sid)
         issues.extend(gen_issues)
 
         return spec, issues
@@ -537,7 +529,9 @@ Return ONLY this JSON (no markdown, no commentary):
                 agent=agent,
             )
             raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
-            data = self._extract_json(raw)
+            data, _ = robust_json_extract(
+                raw, context="spec_elaboration", required_keys=["options"]
+            )
 
             if data and isinstance(data.get("options"), list):
                 result = []
@@ -614,9 +608,11 @@ Return ONLY this JSON (no markdown, no commentary):
 
         try:
             raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
-            data = self._extract_json(raw)
+            data, success = robust_json_extract(
+                raw, context="spec_classify", required_keys=["category"]
+            )
 
-            if data is None:
+            if not success or data is None:
                 issues.append("Classification LLM output was not valid JSON")
                 # Attempt keyword-based fallback
                 return self._keyword_classify(description), issues
@@ -625,9 +621,7 @@ Return ONLY this JSON (no markdown, no commentary):
             confidence = float(data.get("confidence", 0.0))
 
             if category not in DESIGN_CATEGORIES:
-                issues.append(
-                    f"LLM returned unknown category '{category}', using keyword fallback"
-                )
+                issues.append(f"LLM returned unknown category '{category}', using keyword fallback")
                 return self._keyword_classify(description), issues
 
             if confidence < 0.5:
@@ -814,15 +808,15 @@ Return ONLY this JSON (no markdown, no commentary):
 
             try:
                 raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
-                data = self._extract_json(raw)
+                data, success = robust_json_extract(
+                    raw, context="spec_generate", required_keys=["submodules"]
+                )
 
-                if data is None:
+                if not success or data is None:
                     last_error = "Response was not valid JSON"
                     continue
 
-                spec = self._parse_spec(
-                    data, design_name, category, target_pdk, description
-                )
+                spec = self._parse_spec(data, design_name, category, target_pdk, description)
                 validation_issues = self._validate_spec(spec, mandatory, valid_subs)
 
                 if validation_issues:
@@ -832,9 +826,7 @@ Return ONLY this JSON (no markdown, no commentary):
                     if attempt == self.max_retries:
                         issues = list(dict.fromkeys(validation_issues))  # Deduplicated
                         spec.warnings.extend(issues)
-                        logger.warning(
-                            f"[SpecGen] Accepting spec with {len(issues)} warnings"
-                        )
+                        logger.warning(f"[SpecGen] Accepting spec with {len(issues)} warnings")
                         return spec, issues
                     continue
 
@@ -855,13 +847,9 @@ Return ONLY this JSON (no markdown, no commentary):
                 "SpecGen failed even with base_sid. Cannot fallback to minimal in high-reliability mode."
             )
 
-        logger.warning(
-            "[SpecGen] All attempts failed — generating minimal fallback spec"
-        )
+        logger.warning("[SpecGen] All attempts failed — generating minimal fallback spec")
         spec = self._fallback_spec(design_name, description, category, target_pdk)
-        issues.append(
-            "Spec generation fell back to minimal template — manual review required"
-        )
+        issues.append("Spec generation fell back to minimal template — manual review required")
         return spec, issues
 
     def _parse_spec(
@@ -889,9 +877,7 @@ Return ONLY this JSON (no markdown, no commentary):
         if "clk" not in port_names:
             ports.insert(0, PortSpec("clk", "input", "logic", "System clock"))
         if "rst_n" not in port_names:
-            ports.insert(
-                1, PortSpec("rst_n", "input", "logic", "Active-low synchronous reset")
-            )
+            ports.insert(1, PortSpec("rst_n", "input", "logic", "Active-low synchronous reset"))
 
         submodules = []
         for s in data.get("submodules", []):
@@ -945,28 +931,10 @@ Return ONLY this JSON (no markdown, no commentary):
             v_issues.append("No submodules defined")
         return v_issues
 
-    def _fallback_spec(
-        self, design_name, description, category, target_pdk
-    ) -> HardwareSpec:
+    def _fallback_spec(self, design_name, description, category, target_pdk) -> HardwareSpec:
         return HardwareSpec(
             design_category=category,
             top_module_name=design_name,
             target_pdk=target_pdk,
             design_description=description,
         )
-
-    def _extract_json(self, raw: str) -> Optional[Dict[str, Any]]:
-        """Extract JSON from potential markdown/text soup."""
-        try:
-            json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(1))
-            return json.loads(raw.strip())
-        except (json.JSONDecodeError, ValueError, re.error):
-            try:
-                start = raw.find("{")
-                end = raw.rfind("}")
-                if start != -1 and end != -1:
-                    return json.loads(raw[start : end + 1])
-            except (json.JSONDecodeError, ValueError):
-                return None

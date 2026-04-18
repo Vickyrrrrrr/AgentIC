@@ -31,6 +31,7 @@ import random
 import time
 import threading
 import functools
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -51,6 +52,15 @@ class RateLimitStrategy:
     jitter_range_s: Tuple[float, float] = (0.5, 1.5)
     respect_retry_after: bool = True
     exponential_base: float = 2.0
+
+
+@dataclass
+class GlobalRateLimitConfig:
+    """Process-wide request queue limits shared across all providers."""
+
+    requests_per_minute: int = int(os.environ.get("AGENTIC_GLOBAL_LLM_RPM", "120"))
+    max_concurrent: int = int(os.environ.get("AGENTIC_GLOBAL_LLM_CONCURRENCY", "4"))
+    token_warning_ratio: float = float(os.environ.get("AGENTIC_TOKEN_WARNING_RATIO", "0.85"))
 
 
 _PROVIDER_STRATEGIES: Dict[str, RateLimitStrategy] = {
@@ -227,9 +237,40 @@ class _ProviderRateLimiter:
             self._min_interval = 60.0 / max(1, requests_per_minute)
 
 
+class _GlobalRequestQueue:
+    """Small process-wide queue to prevent aggregate LLM provider overload."""
+
+    def __init__(self, config: Optional[GlobalRateLimitConfig] = None):
+        self.config = config or GlobalRateLimitConfig()
+        self._semaphore = threading.BoundedSemaphore(max(1, self.config.max_concurrent))
+        self._lock = threading.Lock()
+        self._last_call: float = 0.0
+
+    def acquire(self) -> None:
+        self._semaphore.acquire()
+        with self._lock:
+            min_interval = 60.0 / max(1, self.config.requests_per_minute)
+            now = time.monotonic()
+            wait_time = min_interval - (now - self._last_call)
+            if wait_time > 0:
+                time.sleep(wait_time)
+            self._last_call = time.monotonic()
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+    def update(self, requests_per_minute: Optional[int] = None, max_concurrent: Optional[int] = None) -> None:
+        if requests_per_minute is not None:
+            self.config.requests_per_minute = max(1, requests_per_minute)
+        if max_concurrent is not None and max_concurrent != self.config.max_concurrent:
+            self.config.max_concurrent = max(1, max_concurrent)
+            self._semaphore = threading.BoundedSemaphore(self.config.max_concurrent)
+
+
 # Global limiter registry (one per detected provider)
 _global_limiters: Dict[str, _ProviderRateLimiter] = {}
 _limiter_lock = threading.Lock()
+_global_request_queue = _GlobalRequestQueue()
 
 
 def _get_limiter(base_url: str, model: str) -> _ProviderRateLimiter:
@@ -265,6 +306,9 @@ def rate_limited_call(
     model: str = "",
     base_url: str = "",
     max_retries: Optional[int] = None,
+    estimated_tokens: int = 0,
+    token_budget: int = 0,
+    on_warning: Optional[Callable[[str], None]] = None,
     on_retry: Optional[Callable[[int, str, Exception], None]] = None,
     **kwargs: Any,
 ) -> RateLimitResult:
@@ -276,6 +320,9 @@ def rate_limited_call(
         model: Model name (used for provider detection)
         base_url: API base URL (used for provider detection)
         max_retries: Override per-provider max retries
+        estimated_tokens: Estimated total tokens for this request.
+        token_budget: Token budget for warning before hitting limits.
+        on_warning: Callback for proactive budget warnings.
         on_retry: Callback invoked on each retry with (attempt, error_type, exc)
         **kwargs: Keyword arguments for callable_fn
 
@@ -290,14 +337,27 @@ def rate_limited_call(
     total_wait = 0.0
     errors = []
 
+    if estimated_tokens and token_budget:
+        ratio = estimated_tokens / max(1, token_budget)
+        if ratio >= _global_request_queue.config.token_warning_ratio and on_warning:
+            try:
+                on_warning(
+                    f"Estimated token use ({estimated_tokens}) is {ratio:.0%} of budget ({token_budget})."
+                )
+            except Exception:
+                pass
+
     for attempt in range(1, effective_max_retries + 2):
         wait_time = 0.0
 
         try:
-            # Thread-safe rate limit acquisition
-            limiter.acquire()
-
-            result = callable_fn(*args, **kwargs)
+            # Process-wide queue first, then provider-specific pacing.
+            _global_request_queue.acquire()
+            try:
+                limiter.acquire()
+                result = callable_fn(*args, **kwargs)
+            finally:
+                _global_request_queue.release()
             return RateLimitResult(
                 ok=True,
                 result=result,
@@ -439,10 +499,21 @@ def set_provider_rate(requests_per_minute: int, base_url: str = "", model: str =
     limiter.set_rate(requests_per_minute)
 
 
+def set_global_rate_limit(
+    requests_per_minute: Optional[int] = None,
+    max_concurrent: Optional[int] = None,
+) -> None:
+    """Override process-wide LLM request pacing."""
+    _global_request_queue.update(
+        requests_per_minute=requests_per_minute,
+        max_concurrent=max_concurrent,
+    )
+
+
 def get_provider_stats() -> Dict[str, Dict[str, Any]]:
     """Return current state of all tracked provider limiters."""
     with _limiter_lock:
-        return {
+        stats = {
             provider: {
                 "strategy": lim.strategy.name,
                 "base_delay_s": lim.strategy.base_delay_s,
@@ -452,3 +523,9 @@ def get_provider_stats() -> Dict[str, Dict[str, Any]]:
             }
             for provider, lim in _global_limiters.items()
         }
+    stats["_global"] = {
+        "requests_per_minute": _global_request_queue.config.requests_per_minute,
+        "max_concurrent": _global_request_queue.config.max_concurrent,
+        "token_warning_ratio": _global_request_queue.config.token_warning_ratio,
+    }
+    return stats

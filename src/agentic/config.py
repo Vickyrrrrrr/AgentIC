@@ -6,7 +6,9 @@ from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
 
 # Project Paths
-WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+WORKSPACE_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 
 
 # Load .env from explicit env var, current working directory, and package root.
@@ -66,45 +68,6 @@ def _normalize_base_url(raw_url: str) -> str:
     if url.startswith(("localhost", "127.0.0.1", "0.0.0.0")):
         return f"http://{url}"
     return f"https://{url}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM PROVIDER ENVIRONMENT INJECTION
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _inject_llm_env_vars(base_url: str, api_key: str) -> None:
-    """Propagate LLM endpoint config into os.environ for LiteLLM/httpx."""
-    if base_url:
-        os.environ["OPENAI_API_BASE"] = base_url
-        os.environ["LITELLM_API_BASE"] = base_url
-        os.environ["LITELLM_BASE_URL"] = base_url
-    if api_key:
-        os.environ["OPENAI_API_KEY"] = api_key
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# UNIVERSAL CREDENTIAL RESOLUTION
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def resolve_llm_config(
-    env_var_prefix: str = "LLM",
-    credential_group: str = "build",
-    fallback_model: str = "openai/gpt-4o",
-    fallback_base_url: str = "https://api.openai.com/v1",
-) -> Dict[str, str]:
-    """Resolve LLM config with priority order: env var > credentials.json > defaults."""
-    model = os.environ.get(f"{env_var_prefix}_MODEL", "").strip()
-    api_key = os.environ.get(f"{env_var_prefix}_API_KEY", "").strip()
-    base_url = os.environ.get(f"{env_var_prefix}_BASE_URL", "").strip()
-    group = _credential_group(credential_group)
-
-    return {
-        "model": model or group.get("model", "") or fallback_model,
-        "base_url": _normalize_base_url(base_url or group.get("base_url", "") or fallback_base_url),
-        "api_key": api_key or group.get("api_key", ""),
-    }
 
 
 # For end-users, we want designs to generate exactly where they run the command.
@@ -181,15 +144,23 @@ def _default_group_credentials() -> Dict[str, str]:
 # Per-role overrides: set ROLE_{ROLE}_MODEL / ROLE_{ROLE}_BASE_URL / ROLE_{ROLE}_API_KEY
 # e.g. ROLE_DESIGNER_MODEL=gpt-4o  ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
 
-_DEFAULT_LLM_CONFIG = resolve_llm_config(
-    env_var_prefix="LLM",
-    credential_group="build",
-    fallback_model="openai/gpt-4o",
-    fallback_base_url="https://api.openai.com/v1",
-)
+_DEFAULT_GROUP = _default_group_credentials()
 
-# Propagate into os.environ so LiteLLM/httpx clients route correctly
-_inject_llm_env_vars(_DEFAULT_LLM_CONFIG["base_url"], _DEFAULT_LLM_CONFIG["api_key"])
+_DEFAULT_LLM_CONFIG = {
+    "model": (
+        os.environ.get("LLM_MODEL", "").strip()
+        or _DEFAULT_GROUP.get("model", "")
+        or "openai/gpt-4o"
+    ),
+    "base_url": _normalize_base_url(
+        os.environ.get("LLM_BASE_URL", "").strip()
+        or _DEFAULT_GROUP.get("base_url", "")
+        or "https://api.openai.com/v1"
+    ),
+    "api_key": (
+        os.environ.get("LLM_API_KEY", "").strip() or _DEFAULT_GROUP.get("api_key", "")
+    ),
+}
 
 DEFAULT_LLM_CONFIG = _DEFAULT_LLM_CONFIG.copy()
 CLOUD_CONFIG = _DEFAULT_LLM_CONFIG.copy()
@@ -237,21 +208,70 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     role_group = _ROLE_TO_GROUP.get(role_key, "build")
     group_cfg = _credential_group(role_group)
 
-    model = os.environ.get(f"ROLE_{role_upper}_MODEL", "").strip() or group_cfg.get("model", "")
+    model = os.environ.get(f"ROLE_{role_upper}_MODEL", "").strip() or group_cfg.get(
+        "model", ""
+    )
     base_url = _normalize_base_url(
-        os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip() or group_cfg.get("base_url", "")
+        os.environ.get(f"ROLE_{role_upper}_BASE_URL", "").strip()
+        or group_cfg.get("base_url", "")
     )
     api_key = os.environ.get(f"ROLE_{role_upper}_API_KEY", "").strip() or group_cfg.get(
         "api_key", ""
     )
 
-    # Apply per-role base_url globally so LiteLLM uses it for this role
-    if base_url:
-        _inject_llm_env_vars(base_url, api_key)
-
     return {
         "model": model or DEFAULT_LLM_CONFIG["model"],
         "base_url": base_url or DEFAULT_LLM_CONFIG["base_url"],
+        "api_key": api_key or DEFAULT_LLM_CONFIG["api_key"],
+    }
+
+
+def resolve_llm_config(
+    env_var_prefix: str = "LLM",
+    credential_group: str = "default",
+    fallback_model: str = "openai/gpt-4o",
+    fallback_base_url: str = "https://api.openai.com/v1",
+) -> Dict[str, Any]:
+    """Resolve LLM config with priority: explicit > env > credentials > defaults.
+
+    Priority order:
+    1. env_var_prefix + "_MODEL" / "_BASE_URL" / "_API_KEY"
+    2. Saved credentials for credential_group
+    3. Fallback values
+
+    Args:
+        env_var_prefix: Prefix for environment variables (e.g., "LLM")
+        credential_group: Group name in saved credentials (e.g., "build")
+        fallback_model: Default model if nothing configured
+        fallback_base_url: Default base URL if nothing configured
+
+    Returns:
+        Dict with keys: model, base_url, api_key
+    """
+    # 1. Check environment variables
+    model = os.environ.get(f"{env_var_prefix}_MODEL", "").strip()
+    base_url = os.environ.get(f"{env_var_prefix}_BASE_URL", "").strip()
+    api_key = os.environ.get(f"{env_var_prefix}_API_KEY", "").strip()
+
+    if not api_key:
+        # 2. Try saved credentials
+        group_cfg = _credential_group(credential_group)
+        model = model or group_cfg.get("model", "")
+        base_url = base_url or group_cfg.get("base_url", "")
+        api_key = api_key or group_cfg.get("api_key", "")
+
+    # 3. Apply fallbacks
+    if not model:
+        model = fallback_model
+    if not base_url:
+        base_url = fallback_base_url
+
+    # Normalize base URL
+    base_url = _normalize_base_url(base_url)
+
+    return {
+        "model": model,
+        "base_url": base_url,
         "api_key": api_key or DEFAULT_LLM_CONFIG["api_key"],
     }
 
@@ -282,9 +302,6 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
-        "lc_area_um2": 0.054,
-        "max_reliable_mhz": 150,
-        "upper_limit_mhz": 200,
         "description": "SkyWater 130nm — most mature open PDK, best tool support",
     },
     "gf180mcu": {
@@ -293,9 +310,6 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "15.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.54",
-        "lc_area_um2": 0.036,
-        "max_reliable_mhz": 100,
-        "upper_limit_mhz": 125,
         "description": "GlobalFoundries 180nm — automotive grade, high voltage options",
     },
     "asap7": {
@@ -304,9 +318,6 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "5.0",
         "voltage_vdd": "0.7",
         "min_cell_height": "0.144",
-        "lc_area_um2": 0.005,
-        "max_reliable_mhz": 1000,
-        "upper_limit_mhz": 1200,
         "description": "ASAP 7nm predictive PDK — research/academic, not a real foundry",
     },
     "nangate45": {
@@ -315,20 +326,19 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
-        "lc_area_um2": 0.028,
-        "max_reliable_mhz": 500,
-        "upper_limit_mhz": 600,
         "description": "NanGate 45nm Open Cell Library — academic/research, Apache 2.0",
     },
     "freepdk45": {
+        # FreePDK45 is the NC State 45nm predictive PDK.  Its standard cell
+        # library is the same NangateOpenCellLibrary used by nangate45, but
+        # accessed via the FreePDK45 PDK stack (different tech files / LEF rules).
+        # Install: follow https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts
+        #          or place under $PDK_ROOT/FreePDK45/
         "pdk": "FreePDK45",
         "std_cell_library": "NangateOpenCellLibrary",
         "default_clock_period": "10.0",
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
-        "lc_area_um2": 0.028,
-        "max_reliable_mhz": 500,
-        "upper_limit_mhz": 600,
         "description": "FreePDK45 (NC State 45nm) + NanGate Open Cell Library — academic/research",
     },
     "osu018": {
@@ -337,9 +347,6 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "12.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.5",
-        "lc_area_um2": 0.036,
-        "max_reliable_mhz": 100,
-        "upper_limit_mhz": 125,
         "description": "Oklahoma State 180nm — educational/research, limited cell set",
     },
     "osu035": {
@@ -348,12 +355,170 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "15.0",
         "voltage_vdd": "3.3",
         "min_cell_height": "0.6",
-        "lc_area_um2": 0.064,
-        "max_reliable_mhz": 50,
-        "upper_limit_mhz": 75,
         "description": "Oklahoma State 350nm — high voltage, easy to probe, educational",
     },
+    "openfasoc130": {
+        "pdk": "openfasoc",
+        "std_cell_library": "sky130_fd_sc_hd",
+        "default_clock_period": "20.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.46",
+        "description": "OpenFASOC 130nm analog/generator flow — typically backed by SKY130",
+    },
+    "skywater-raw": {
+        "pdk": "skywater-pdk",
+        "std_cell_library": "sky130_fd_sc_hd",
+        "default_clock_period": "10.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.46",
+        "description": "Raw SkyWater PDK development tree — advanced users, not a packaged OpenLane PDK",
+    },
+    "lefdef175": {
+        "pdk": "lefdef175",
+        "std_cell_library": "lefdef175_stdcells",
+        "default_clock_period": "20.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.6",
+        "description": "LEF/DEF 175nm educational placeholder — manual setup required",
+    },
+    "tsmc28": {
+        "pdk": "tsmc28",
+        "std_cell_library": "tsmc28_stdcell",
+        "default_clock_period": "2.5",
+        "voltage_vdd": "0.9",
+        "min_cell_height": "0.2",
+        "description": "TSMC 28nm — proprietary PDK, manual foundry access required",
+        "proprietary": True,
+    },
+    "samsung14": {
+        "pdk": "samsung14",
+        "std_cell_library": "samsung14_stdcell",
+        "default_clock_period": "1.5",
+        "voltage_vdd": "0.8",
+        "min_cell_height": "0.1",
+        "description": "Samsung 14nm — proprietary PDK, manual foundry access required",
+        "proprietary": True,
+    },
+    "intel22": {
+        "pdk": "intel22",
+        "std_cell_library": "intel22_stdcell",
+        "default_clock_period": "2.0",
+        "voltage_vdd": "0.9",
+        "min_cell_height": "0.16",
+        "description": "Intel 22nm — proprietary PDK, manual foundry access required",
+        "proprietary": True,
+    },
+    "gf22": {
+        "pdk": "gf22",
+        "std_cell_library": "gf22_stdcell",
+        "default_clock_period": "2.0",
+        "voltage_vdd": "0.8",
+        "min_cell_height": "0.16",
+        "description": "GlobalFoundries 22nm — proprietary PDK, manual foundry access required",
+        "proprietary": True,
+    },
 }
+
+
+def _normalize_pdk_key(value: str) -> str:
+    """Normalize user-facing PDK names, aliases, and directory names."""
+    key = os.path.basename(str(value or "").strip()).lower()
+    return key.replace("_", "-").replace(" ", "-")
+
+
+def _candidate_pdk_roots() -> List[str]:
+    """Return configured PDK root directories in search order."""
+    roots: List[str] = []
+    for env_var in ("PDK_ROOT", "OPENLANE_PDK_ROOT", "PDKS_ROOT"):
+        val = os.environ.get(env_var, "").strip()
+        if val and val not in roots:
+            roots.append(val)
+
+    standard_roots = [
+        os.path.expanduser("~/.ciel"),
+        os.path.expanduser("~/.volare"),
+        "/usr/local/pdk",
+        "/opt/pdk",
+    ]
+    for root in standard_roots:
+        if root not in roots:
+            roots.append(root)
+
+    ol_root = os.environ.get("OPENLANE_ROOT", "").strip()
+    if ol_root:
+        ol_pdks = os.path.join(ol_root, "pdks")
+        if ol_pdks not in roots:
+            roots.append(ol_pdks)
+
+    return roots
+
+
+def _looks_like_pdk_dir(path: str) -> bool:
+    """Best-effort check for user-provided PDK directories."""
+    if not path or not os.path.isdir(path):
+        return False
+
+    strong_markers = [
+        os.path.join(path, "libs.ref"),
+        os.path.join(path, "libs.tech"),
+        os.path.join(path, "libs", "ref"),
+        os.path.join(path, "libs", "tech"),
+    ]
+    if any(os.path.isdir(marker) for marker in strong_markers):
+        return True
+
+    marker_files = []
+    for root, _dirs, files in os.walk(path):
+        rel_depth = os.path.relpath(root, path).count(os.sep)
+        if rel_depth > 3:
+            _dirs[:] = []
+            continue
+        for filename in files:
+            if filename.endswith((".lib", ".lef", ".tech", ".tf", ".gds", ".spice", ".cdl")):
+                marker_files.append(filename)
+                if len(marker_files) >= 2:
+                    return True
+    return False
+
+
+def _infer_std_cell_library(pdk_dir: str, fallback: str) -> str:
+    """Infer a standard-cell library name from common PDK layouts."""
+    libs_ref = os.path.join(pdk_dir, "libs.ref")
+    if os.path.isdir(libs_ref):
+        for child in sorted(os.listdir(libs_ref)):
+            verilog_dir = os.path.join(libs_ref, child, "verilog")
+            if os.path.isdir(verilog_dir):
+                return child
+
+    for root, dirs, files in os.walk(pdk_dir):
+        rel_depth = os.path.relpath(root, pdk_dir).count(os.sep)
+        if rel_depth > 4:
+            dirs[:] = []
+            continue
+        for filename in files:
+            if filename.endswith(".lib"):
+                return os.path.splitext(filename)[0]
+    return fallback
+
+
+def _custom_pdk_profile(name: str, root_path: Optional[str] = None) -> Dict[str, Any]:
+    key = _normalize_pdk_key(name) or "custom"
+    pdk_dir = os.path.basename(os.path.abspath(root_path)) if root_path else key
+    std_cell_library = _infer_std_cell_library(root_path, f"{key}_stdcells") if root_path else f"{key}_stdcells"
+    return {
+        "profile": key,
+        "pdk": pdk_dir,
+        "std_cell_library": std_cell_library,
+        "default_clock_period": "10.0",
+        "voltage_vdd": "1.8",
+        "min_cell_height": "0.46",
+        "description": "Custom user-provided PDK detected from filesystem",
+        "available": bool(root_path),
+        "root_path": root_path or "",
+        "lib_path": "",
+        "tech_ok": False,
+        "custom": True,
+    }
 
 
 def detect_available_pdks() -> Dict[str, Dict[str, Any]]:
@@ -376,28 +541,10 @@ def detect_available_pdks() -> Dict[str, Dict[str, Any]]:
         Dict mapping detected profile name -> its profile dict (with extra fields:
         'available', 'root_path', 'lib_path')
     """
-    import glob as _glob
-    import subprocess as _subprocess
-
     available = {}
 
     # Collect all candidate roots to scan
-    pdk_roots = []
-    for env_var in ("PDK_ROOT", "OPENLANE_PDK_ROOT", "PDKS_ROOT"):
-        val = os.environ.get(env_var, "").strip()
-        if val and val not in pdk_roots:
-            pdk_roots.append(val)
-
-    # Standard OSS-CAD / CIEL / Volare locations
-    standard_roots = [
-        os.path.expanduser("~/.ciel"),
-        os.path.expanduser("~/.volare"),
-        "/usr/local/pdk",
-        "/opt/pdk",
-    ]
-    for r in standard_roots:
-        if r not in pdk_roots:
-            pdk_roots.append(r)
+    pdk_roots = _candidate_pdk_roots()
 
     for profile_name, profile_data in PDK_PROFILES.items():
         pdk_name = profile_data["pdk"]
@@ -443,7 +590,9 @@ def detect_available_pdks() -> Dict[str, Dict[str, Any]]:
         if found_root:
             tech_candidates = [
                 os.path.join(found_root, "libs.tech", "magic", f"{pdk_name}.tech"),
-                os.path.join(found_root, "libs.tech", "netgen", f"{pdk_name}_tech.setup"),
+                os.path.join(
+                    found_root, "libs.tech", "netgen", f"{pdk_name}_tech.setup"
+                ),
                 os.path.join(found_root, "libs", "tech", "magic", f"{pdk_name}.tech"),
             ]
             tech_ok = any(os.path.isfile(p) for p in tech_candidates)
@@ -457,6 +606,41 @@ def detect_available_pdks() -> Dict[str, Dict[str, Any]]:
             result["tech_ok"] = tech_ok
             available[profile_name] = result
 
+    known_dirs = {
+        _normalize_pdk_key(profile.get("pdk", name))
+        for name, profile in PDK_PROFILES.items()
+    }
+    known_dirs.update(_normalize_pdk_key(name) for name in PDK_PROFILES)
+    known_roots = {os.path.abspath(info.get("root_path", "")) for info in available.values()}
+
+    # Add any user-provided/custom PDK directories found under PDK roots.
+    for root in pdk_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            child = os.path.join(root, entry)
+            if not os.path.isdir(child):
+                continue
+            child_abs = os.path.abspath(child)
+            key = _normalize_pdk_key(entry)
+            if key in known_dirs or child_abs in known_roots or key in available:
+                continue
+            if not _looks_like_pdk_dir(child):
+                continue
+
+            custom = _custom_pdk_profile(entry, child)
+            custom["available"] = True
+            custom["root_path"] = child
+            custom["tech_ok"] = bool(
+                os.path.isdir(os.path.join(child, "libs.tech"))
+                or os.path.isdir(os.path.join(child, "libs", "tech"))
+            )
+            available[key] = custom
+
     return available
 
 
@@ -464,12 +648,27 @@ DEFAULT_PDK_PROFILE = os.environ.get("PDK_PROFILE", "sky130").strip().lower()
 # Normalize legacy aliases
 _PDK_ALIASES = {
     "gf180": "gf180mcu",
+    "gf180mcuc": "gf180mcu",
     "asap7": "asap7",
     "nangate45": "nangate45",
     "freepdk45": "freepdk45",
     "osu018": "osu018",
     "osu035": "osu035",
     "sky130": "sky130",
+    "sky130a": "sky130",
+    "openfasoc": "openfasoc130",
+    "openfasoc-130": "openfasoc130",
+    "skywater_raw": "skywater-raw",
+    "skywater-pdk": "skywater-raw",
+    "lefdef175": "lefdef175",
+    "tsmc-28": "tsmc28",
+    "tsmc28nm": "tsmc28",
+    "samsung-14": "samsung14",
+    "samsung14nm": "samsung14",
+    "intel-22": "intel22",
+    "intel22nm": "intel22",
+    "gf-22": "gf22",
+    "gf22nm": "gf22",
 }
 if DEFAULT_PDK_PROFILE not in PDK_PROFILES:
     DEFAULT_PDK_PROFILE = _PDK_ALIASES.get(DEFAULT_PDK_PROFILE, "sky130")
@@ -498,7 +697,9 @@ COVERAGE_FALLBACK_POLICY_DEFAULT = (
 if COVERAGE_FALLBACK_POLICY_DEFAULT not in {"fail_closed", "fallback_oss", "skip"}:
     COVERAGE_FALLBACK_POLICY_DEFAULT = "fallback_oss"
 
-COVERAGE_PROFILE_DEFAULT = os.environ.get("COVERAGE_PROFILE", "balanced").strip().lower()
+COVERAGE_PROFILE_DEFAULT = (
+    os.environ.get("COVERAGE_PROFILE", "balanced").strip().lower()
+)
 if COVERAGE_PROFILE_DEFAULT not in {"balanced", "aggressive", "relaxed"}:
     COVERAGE_PROFILE_DEFAULT = "balanced"
 
@@ -548,53 +749,217 @@ NETGEN_BIN = _resolve_tool_binary("netgen", env_var="NETGEN_BIN")
 
 
 def get_pdk_profile(profile: Optional[str]) -> Dict[str, Any]:
-    key = (profile or DEFAULT_PDK_PROFILE).strip().lower()
+    key = _normalize_pdk_key(profile or DEFAULT_PDK_PROFILE)
     key = _PDK_ALIASES.get(key, key)
     if key not in PDK_PROFILES:
+        expanded = os.path.expanduser(str(profile or "").strip())
+        if expanded and os.path.isdir(expanded):
+            return _custom_pdk_profile(os.path.basename(expanded), expanded)
+
+        detected = detect_available_pdks()
+        if key in detected:
+            return dict(detected[key])
+
+        pdk_root = os.environ.get("PDK_ROOT", "").strip()
+        candidate = os.path.join(pdk_root, str(profile or "").strip()) if pdk_root else ""
+        if candidate and os.path.isdir(candidate):
+            return _custom_pdk_profile(profile or os.path.basename(candidate), candidate)
+
         key = "sky130"
     data = dict(PDK_PROFILES[key])
     data["profile"] = key
     return data
 
 
-def get_pdk_tool_config(profile: Optional[str] = None) -> Dict[str, Any]:
-    """Get tool-specific configuration values for a PDK.
+PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "sky130": {
+        "max_reliable_mhz": 150,
+        "upper_limit_mhz": 200,
+        "metal_layers": 6,
+        "lc_area_um2": 0.054,
+        "drc_rules": "sky130A.drc",
+        "lvs_rules": "sky130A.lvs",
+        "timing_libs": ["libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"],
+    },
+    "gf180mcu": {
+        "max_reliable_mhz": 100,
+        "upper_limit_mhz": 125,
+        "metal_layers": 5,
+        "lc_area_um2": 0.036,
+        "drc_rules": "gf180mcu.drc",
+        "lvs_rules": "gf180mcu.lvs",
+        "timing_libs": ["libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/*.lib"],
+    },
+    "asap7": {
+        "max_reliable_mhz": 1000,
+        "upper_limit_mhz": 1200,
+        "metal_layers": 9,
+        "lc_area_um2": 0.005,
+        "drc_rules": "asap7.drc",
+        "lvs_rules": "asap7.lvs",
+        "timing_libs": ["libs.ref/asap7sc7p5t/lib/*.lib"],
+        "advanced_node": True,
+        "multi_patterning": True,
+        "double_patterning_warning": True,
+        "euv_placeholder": True,
+    },
+    "nangate45": {
+        "max_reliable_mhz": 500,
+        "upper_limit_mhz": 600,
+        "metal_layers": 10,
+        "lc_area_um2": 0.028,
+        "drc_rules": "nangate45.drc",
+        "lvs_rules": "nangate45.lvs",
+        "timing_libs": ["libs.ref/NangateOpenCellLibrary/lib/*.lib"],
+    },
+    "freepdk45": {
+        "max_reliable_mhz": 500,
+        "upper_limit_mhz": 600,
+        "metal_layers": 10,
+        "lc_area_um2": 0.028,
+        "drc_rules": "FreePDK45.drc",
+        "lvs_rules": "FreePDK45.lvs",
+        "timing_libs": ["libs.ref/NangateOpenCellLibrary/lib/*.lib"],
+    },
+    "osu018": {
+        "max_reliable_mhz": 100,
+        "upper_limit_mhz": 125,
+        "metal_layers": 6,
+        "lc_area_um2": 0.036,
+        "drc_rules": "osu018.drc",
+        "lvs_rules": "osu018.lvs",
+        "timing_libs": ["libs.ref/osu018_stdcells/lib/*.lib"],
+    },
+    "osu035": {
+        "max_reliable_mhz": 50,
+        "upper_limit_mhz": 75,
+        "metal_layers": 4,
+        "lc_area_um2": 0.064,
+        "drc_rules": "osu035.drc",
+        "lvs_rules": "osu035.lvs",
+        "timing_libs": ["libs.ref/osu035_stdcells/lib/*.lib"],
+    },
+    "openfasoc130": {
+        "max_reliable_mhz": 50,
+        "upper_limit_mhz": 75,
+        "metal_layers": 6,
+        "lc_area_um2": 0.054,
+        "drc_rules": "sky130A.drc",
+        "lvs_rules": "sky130A.lvs",
+        "timing_libs": ["libs.ref/sky130_fd_sc_hd/lib/*.lib"],
+        "custom_cell_support": True,
+    },
+    "skywater-raw": {
+        "max_reliable_mhz": 150,
+        "upper_limit_mhz": 200,
+        "metal_layers": 6,
+        "lc_area_um2": 0.054,
+        "drc_rules": "sky130A.drc",
+        "lvs_rules": "sky130A.lvs",
+        "timing_libs": ["libs.ref/sky130_fd_sc_hd/lib/*.lib"],
+    },
+    "lefdef175": {
+        "max_reliable_mhz": 75,
+        "upper_limit_mhz": 100,
+        "metal_layers": 4,
+        "lc_area_um2": 0.04,
+        "drc_rules": "lefdef175.drc",
+        "lvs_rules": "lefdef175.lvs",
+        "timing_libs": ["libs.ref/lefdef175_stdcells/lib/*.lib"],
+    },
+    "tsmc28": {
+        "max_reliable_mhz": 800,
+        "upper_limit_mhz": 1000,
+        "metal_layers": 10,
+        "lc_area_um2": 0.008,
+        "drc_rules": "tsmc28.drc",
+        "lvs_rules": "tsmc28.lvs",
+        "timing_libs": ["libs.ref/tsmc28_stdcell/lib/*.lib"],
+        "advanced_node": True,
+        "double_patterning_warning": True,
+        "proprietary": True,
+    },
+    "samsung14": {
+        "max_reliable_mhz": 1200,
+        "upper_limit_mhz": 1500,
+        "metal_layers": 12,
+        "lc_area_um2": 0.003,
+        "drc_rules": "samsung14.drc",
+        "lvs_rules": "samsung14.lvs",
+        "timing_libs": ["libs.ref/samsung14_stdcell/lib/*.lib"],
+        "advanced_node": True,
+        "multi_patterning": True,
+        "double_patterning_warning": True,
+        "euv_placeholder": True,
+        "proprietary": True,
+    },
+    "intel22": {
+        "max_reliable_mhz": 900,
+        "upper_limit_mhz": 1100,
+        "metal_layers": 10,
+        "lc_area_um2": 0.006,
+        "drc_rules": "intel22.drc",
+        "lvs_rules": "intel22.lvs",
+        "timing_libs": ["libs.ref/intel22_stdcell/lib/*.lib"],
+        "advanced_node": True,
+        "double_patterning_warning": True,
+        "proprietary": True,
+    },
+    "gf22": {
+        "max_reliable_mhz": 900,
+        "upper_limit_mhz": 1100,
+        "metal_layers": 10,
+        "lc_area_um2": 0.006,
+        "drc_rules": "gf22.drc",
+        "lvs_rules": "gf22.lvs",
+        "timing_libs": ["libs.ref/gf22_stdcell/lib/*.lib"],
+        "advanced_node": True,
+        "double_patterning_warning": True,
+        "proprietary": True,
+    },
+}
 
-    This function provides a unified way to get all tool-specific values
-    needed by synthesis, DRC, LVS, and other tools. Falls back to
-    sky130 defaults if the PDK doesn't specify a value.
 
-    Args:
-        profile: PDK profile name (e.g., 'sky130', 'gf180mcu'). Uses default if None.
+def get_pdk_tool_config(pdk: Optional[str] = None) -> Dict[str, Any]:
+    """Return normalized tool configuration for a known or custom PDK."""
+    raw_key = _normalize_pdk_key(pdk or DEFAULT_PDK_PROFILE)
+    key = _PDK_ALIASES.get(raw_key, raw_key)
+    profile = get_pdk_profile(key)
+    profile_key = profile.get("profile", key)
+    tool_defaults = PDK_TOOL_CONFIGS.get(profile_key, {})
 
-    Returns:
-        Dict with keys:
-        - lc_area_um2: Logic cell area in square micrometers
-        - max_reliable_mhz: Maximum reliable clock frequency
-        - upper_limit_mhz: Upper frequency limit (warning threshold)
-        - std_cell_library: Standard cell library name
-        - pdk_dir: PDK directory name (for tool paths)
-    """
-    pdk_data = get_pdk_profile(profile)
-    return {
-        "lc_area_um2": pdk_data.get("lc_area_um2", 0.054),
-        "max_reliable_mhz": pdk_data.get("max_reliable_mhz", 150),
-        "upper_limit_mhz": pdk_data.get("upper_limit_mhz", 200),
-        "std_cell_library": pdk_data.get("std_cell_library", "sky130_fd_sc_hd"),
-        "pdk_dir": pdk_data.get("pdk", "sky130A"),
-        "voltage_vdd": pdk_data.get("voltage_vdd", "1.8"),
+    config: Dict[str, Any] = {
+        "pdk_dir": profile.get("pdk", pdk or PDK),
+        "std_cell_library": profile.get("std_cell_library", "sky130_fd_sc_hd"),
+        "default_clock_period": profile.get("default_clock_period", "10.0"),
+        "max_reliable_mhz": 150,
+        "upper_limit_mhz": 200,
+        "metal_layers": 6,
+        "voltage_vdd": profile.get("voltage_vdd", "1.8"),
+        "min_cell_height": profile.get("min_cell_height", "0.46"),
+        "lc_area_um2": 0.054,
+        "drc_rules": f"{profile.get('pdk', pdk or PDK)}.drc",
+        "lvs_rules": f"{profile.get('pdk', pdk or PDK)}.lvs",
+        "timing_libs": [],
+        "proprietary": bool(profile.get("proprietary")),
+        "custom": bool(profile.get("custom")),
     }
-
-
-def list_pdk_profiles() -> Dict[str, Dict[str, Any]]:
-    """Return all known PDK profile definitions (metadata only, no filesystem check)."""
-    return {k: {kk: vv for kk, vv in v.items()} for k, v in PDK_PROFILES.items()}
+    config.update(tool_defaults)
+    config["pdk_dir"] = profile.get("pdk", config["pdk_dir"])
+    config["std_cell_library"] = profile.get("std_cell_library", config["std_cell_library"])
+    config["voltage_vdd"] = profile.get("voltage_vdd", config["voltage_vdd"])
+    return config
 
 
 class PDKError(Exception):
     """Base exception for PDK-related errors."""
 
-    def __init__(self, message: str, suggested_action: str = "", available_pdks: List[str] = None):
+    def __init__(
+        self,
+        message: str,
+        suggested_action: str = "",
+        available_pdks: Optional[List[str]] = None,
+    ):
         self.message = message
         self.suggested_action = suggested_action
         self.available_pdks = available_pdks or []
@@ -604,13 +969,21 @@ class PDKError(Exception):
 class PDKNotInstalledError(PDKError):
     """Raised when a requested PDK is not installed on the system."""
 
-    pass
-
 
 class PDKNotFoundError(PDKError):
     """Raised when no PDK is available on the system."""
 
-    pass
+
+def _find_pdk_root() -> Optional[str]:
+    """Find a PDK root directory from the environment or common locations."""
+    for root in _candidate_pdk_roots():
+        if root and os.path.isdir(root):
+            return root
+    return None
+
+
+def _parent_pdk_root(pdk_dir_path: str) -> str:
+    return os.path.dirname(os.path.abspath(pdk_dir_path)) if pdk_dir_path else ""
 
 
 def resolve_pdk(
@@ -619,65 +992,47 @@ def resolve_pdk(
     pdk_root: Optional[str] = None,
     required: bool = True,
 ) -> Tuple[str, Dict[str, Any], str]:
-    """Resolve PDK with smart auto-detection.
-
-    Resolution order:
-    1. Use explicitly requested PDK (--pdk flag)
-    2. Detect from design path (designs/sky130_design/ → sky130)
-    3. Use first available installed PDK
-    4. Error with helpful message
-
-    Args:
-        requested_pdk: Explicitly requested PDK name (from --pdk flag)
-        design_path: Path to design file (to auto-detect from path)
-        pdk_root: Explicit pdk_root path
-        required: If True, raises error when no PDK available. If False, returns defaults.
-
-    Returns:
-        Tuple of (profile_name, profile_dict, pdk_root_path)
-
-    Raises:
-        PDKNotInstalledError: When requested PDK is not installed
-        PDKNotFoundError: When no PDK is available and required=True
-    """
+    """Resolve a PDK to (pdk_dir, profile_dict, pdk_root_parent)."""
     detected = detect_available_pdks()
     resolved_pdk_root = pdk_root or _find_pdk_root() or ""
 
-    # Case 1: User specified --pdk
     if requested_pdk:
-        requested = requested_pdk.strip().lower()
-        profile = get_pdk_profile(requested)["profile"]
+        requested_raw = str(requested_pdk).strip()
+        expanded = os.path.expanduser(requested_raw)
+        if os.path.isdir(expanded):
+            profile = _custom_pdk_profile(os.path.basename(expanded), expanded)
+            return profile["pdk"], profile, _parent_pdk_root(expanded)
 
-        if profile not in detected:
-            if required:
-                raise PDKNotInstalledError(
-                    message=f"PDK '{requested_pdk}' is not installed on this system.",
-                    suggested_action=f"Run: agentic install-pdk {requested_pdk}",
-                    available_pdks=list(detected.keys()),
-                )
-            else:
-                # Return default profile if not required
-                return profile, get_pdk_profile(profile), resolved_pdk_root
+        key = _PDK_ALIASES.get(_normalize_pdk_key(requested_raw), _normalize_pdk_key(requested_raw))
+        if key in detected:
+            profile = dict(detected[key])
+            return profile["pdk"], profile, _parent_pdk_root(profile.get("root_path", ""))
 
-        return profile, detected[profile], detected[profile].get("root_path", "")
+        candidate = os.path.join(resolved_pdk_root, requested_raw) if resolved_pdk_root else ""
+        if candidate and os.path.isdir(candidate) and _looks_like_pdk_dir(candidate):
+            profile = _custom_pdk_profile(requested_raw, candidate)
+            return profile["pdk"], profile, _parent_pdk_root(candidate)
 
-    # Case 2: Detect from design path
+        profile = get_pdk_profile(key)
+        if required:
+            raise PDKNotInstalledError(
+                message=f"PDK '{requested_pdk}' is not installed on this system.",
+                suggested_action=f"Run: agentic install-pdk {requested_pdk}",
+                available_pdks=sorted(detected.keys()),
+            )
+        return profile.get("pdk", key), profile, resolved_pdk_root
+
     if design_path:
         design_lower = design_path.lower()
-        for profile_name in detected.keys():
-            if profile_name in design_lower:
-                return (
-                    profile_name,
-                    detected[profile_name],
-                    detected[profile_name].get("root_path", ""),
-                )
+        for profile_name, profile in detected.items():
+            if profile_name in design_lower or str(profile.get("pdk", "")).lower() in design_lower:
+                return profile["pdk"], profile, _parent_pdk_root(profile.get("root_path", ""))
 
-    # Case 3: Use first available
     if detected:
-        first = list(detected.keys())[0]
-        return first, detected[first], detected[first].get("root_path", "")
+        first = sorted(detected.keys())[0]
+        profile = dict(detected[first])
+        return profile["pdk"], profile, _parent_pdk_root(profile.get("root_path", ""))
 
-    # Case 4: No PDK available
     if required:
         raise PDKNotFoundError(
             message="No PDK installed on this system.",
@@ -685,32 +1040,50 @@ def resolve_pdk(
             available_pdks=[],
         )
 
-    # Case 5: Not required, return defaults
-    return "sky130", get_pdk_profile("sky130"), ""
+    profile = get_pdk_profile("sky130")
+    return profile["pdk"], profile, resolved_pdk_root
 
 
-def _find_pdk_root() -> Optional[str]:
-    """Find PDK root directory from environment or common locations."""
-    import glob
+def validate_pdk_installation(pdk: str, pdk_root: Optional[str] = None) -> Tuple[bool, List[str]]:
+    """Validate that a PDK has enough structure for AgentIC tool flows."""
+    messages: List[str] = []
+    try:
+        resolved_pdk, profile, resolved_root = resolve_pdk(
+            requested_pdk=pdk,
+            pdk_root=pdk_root,
+            required=True,
+        )
+    except PDKError as exc:
+        return False, [exc.message, exc.suggested_action]
 
-    # Check environment variable
-    env_root = os.environ.get("PDK_ROOT", "").strip()
-    if env_root and os.path.isdir(env_root):
-        return env_root
+    pdk_dir = os.path.join(resolved_root, resolved_pdk) if resolved_root else profile.get("root_path", "")
+    if not pdk_dir or not os.path.isdir(pdk_dir):
+        return False, [f"PDK directory not found for {pdk}: {pdk_dir or 'unknown'}"]
 
-    # Check common locations
-    common_locations = [
-        os.path.expanduser("~/.ciel"),
-        os.path.expanduser("~/.volare"),
-        "/usr/local/pdk",
-        "/opt/pdk",
+    std_cell_library = profile.get("std_cell_library", "")
+    lib_dir = os.path.join(pdk_dir, "libs.ref", std_cell_library, "verilog")
+    if std_cell_library and os.path.isdir(lib_dir):
+        messages.append(f"Found standard-cell Verilog models: {lib_dir}")
+    else:
+        messages.append(f"Standard-cell Verilog models not found for {std_cell_library}")
+
+    tech_markers = [
+        os.path.join(pdk_dir, "libs.tech", "magic"),
+        os.path.join(pdk_dir, "libs.tech", "netgen"),
+        os.path.join(pdk_dir, "libs", "tech"),
     ]
+    if any(os.path.isdir(path) for path in tech_markers):
+        messages.append("Found physical verification tech files.")
+    else:
+        messages.append("Physical verification tech files were not found.")
 
-    for loc in common_locations:
-        if os.path.isdir(loc):
-            return loc
+    ok = any("Found" in msg for msg in messages)
+    return ok, messages
 
-    return None
+
+def list_pdk_profiles() -> Dict[str, Dict[str, Any]]:
+    """Return all known PDK profile definitions (metadata only, no filesystem check)."""
+    return {k: {kk: vv for kk, vv in v.items()} for k, v in PDK_PROFILES.items()}
 
 
 def get_toolchain_diagnostics() -> Dict[str, Any]:

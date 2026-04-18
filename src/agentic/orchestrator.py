@@ -46,6 +46,14 @@ from .core import (
     WaveformExpertModule,
     DeepDebuggerModule,
 )
+from .core.graceful_degradation import GracefulDegradation, get_degradation_handler
+from .core.context_manager import TokenBudgetManager, DynamicTokenBudget
+from .core.checkpoint_manager import CheckpointManager, AutomaticCheckpointTrigger
+from .core.usage_tracker import UsageTracker, get_usage_tracker
+from .core.incremental_fixer import IncrementalFixEngine, ErrorAnalysis, ErrorType
+from .core.hardware_knowledge import HardwareKnowledgeBase
+from .core.context_evolution import MultiAgentContextEvolver
+from .core.eda_capabilities import detect_eda_capabilities
 from .core import (
     HardwareSpecGenerator,
     HardwareSpec,
@@ -494,6 +502,27 @@ class BuildOrchestrator:
         self.history: List[Dict[str, Any]] = []  # Log of state transitions and errors
         self.errors: List[str] = []  # List of error messages
 
+        self.degradation = get_degradation_handler()
+        self.usage_tracker = get_usage_tracker()
+        self.checkpoint_manager = CheckpointManager(name)
+        self.checkpoint_trigger = AutomaticCheckpointTrigger(self.checkpoint_manager)
+        self.incremental_fixer = IncrementalFixEngine()
+        self.hardware_kb = HardwareKnowledgeBase()
+        self.context_evolver = MultiAgentContextEvolver()
+        self.eda_capabilities = detect_eda_capabilities()
+        self.artifacts["eda_capabilities"] = self.eda_capabilities.to_dict()
+
+        provider = "openai"
+        model = LLM_MODEL
+        if base_url := getattr(self.llm, "base_url", ""):
+            if "groq" in base_url:
+                provider = "groq"
+            elif "anthropic" in base_url:
+                provider = "anthropic"
+            elif "azure" in base_url:
+                provider = "azure"
+        self.token_budget = DynamicTokenBudget(model=model, provider=provider)
+
     def get_llm_for_role(self, role: str) -> "LLM":
         """Get the specific LLM override for a role, or fallback to the primary LLM."""
         return self.role_llms.get(role, self.llm)
@@ -504,48 +533,72 @@ class BuildOrchestrator:
         role_hint: str = "build",
         task_overrides: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Run a CrewAI crew with automatic rate-limit retry.
+        """Run a CrewAI crew with automatic rate-limit retry and caching.
 
         Detects the provider from the first agent's LLM config and applies
         per-provider exponential-backoff retry on 429/503 responses.
+        Uses GracefulDegradation for intelligent caching and fallback.
         """
-        # Extract model/base_url from the first agent's LLM
         model = ""
         base_url = ""
+        provider = "openai"
         agents = getattr(crew, "agents", [])
         if agents:
             llm_obj = getattr(agents[0], "llm", None)
             if llm_obj:
                 model = getattr(llm_obj, "model", "") or ""
                 base_url = getattr(llm_obj, "base_url", "") or ""
+                if "groq" in base_url:
+                    provider = "groq"
+                elif "anthropic" in base_url:
+                    provider = "anthropic"
+                elif "azure" in base_url:
+                    provider = "azure"
 
-        def _on_retry(attempt: int, provider: str, exc: Exception) -> None:
+        def _execute_crew():
+            return rate_limited_crew_kickoff(
+                crew,
+                task_overrides=task_overrides,
+                model=model,
+                base_url=base_url,
+            )
+
+        exec_result = self.degradation.execute(
+            task=f"CrewAI_{role_hint}",
+            prompt=f"{role_hint}_{model}",
+            execute_fn=_execute_crew,
+            providers=[provider],
+            model=model,
+        )
+
+        if exec_result.cache_hit:
+            self.log(f"[Cache hit] Using cached response", refined=True)
+
+        if exec_result.total_wait_seconds > 0:
             self.log(
-                f"Rate-limit hit ({provider}) — retry {attempt}, waiting... ({type(exc).__name__})",
+                f"Rate-limit handling: waited {exec_result.total_wait_seconds:.1f}s, "
+                f"used strategy: {exec_result.strategy_used.value}",
                 refined=True,
             )
 
-        result = rate_limited_crew_kickoff(
-            crew,
-            task_overrides=task_overrides,
+        result = exec_result.response if exec_result.success else None
+
+        if not exec_result.success:
+            err = exec_result.error or "Unknown error"
+            self.logger.error(f"CrewAI call failed: {err}")
+            self.log(f"CrewAI call failed: {err}", refined=True)
+
+        self.usage_tracker.record_call(
+            provider=provider,
             model=model,
-            base_url=base_url,
+            cache_hit=exec_result.cache_hit,
+            duration_ms=int(exec_result.total_wait_seconds * 1000),
+            success=exec_result.success,
+            build_name=self.name,
+            stage=self.state.name,
         )
 
-        if not result.ok and result.rate_limited:
-            err = (
-                f"Rate-limit exhausted after {result.attempts} attempts "
-                f"(waited {result.total_wait_s:.1f}s total)"
-            )
-            self.log(err, refined=True)
-            self.logger.error(err)
-        elif not result.ok:
-            # Log non-rate-limit errors so we can debug failures
-            error_msgs = "; ".join(result.errors) if result.errors else "Unknown error"
-            self.logger.error(f"CrewAI call failed: {error_msgs}")
-            self.log(f"CrewAI call failed: {error_msgs}", refined=True)
-
-        return result.result  # raw CrewOutput; caller does str() conversion
+        return result
 
     def setup_logger(self):
         """Sets up a file logger for the build process."""
@@ -625,6 +678,20 @@ class BuildOrchestrator:
                 )
             except Exception:
                 pass
+
+        KEY_STATES = {
+            BuildState.RTL_GEN,
+            BuildState.VERIFICATION,
+            BuildState.SYNTHESIS,
+            BuildState.FLOORPLAN,
+            BuildState.HARDENING,
+            BuildState.SIGNOFF,
+            BuildState.SUCCESS,
+        }
+        if new_state in KEY_STATES or new_state.name.startswith("FAIL"):
+            cp_path = self.checkpoint_manager.save(self, reason=f"after_{new_state.name.lower()}")
+            if cp_path and self.verbose:
+                self.log(f"Checkpoint saved: {cp_path}", refined=True)
 
     def _bump_state_retry(self) -> int:
         count = self.state_retry_counts.get(self.state.name, 0) + 1
@@ -756,6 +823,93 @@ class BuildOrchestrator:
         if consume_global:
             self.global_retry_count += 1
         return count
+
+    def _attempt_backend_error_recovery(
+        self,
+        stage_name: str,
+        errors: List[str],
+        *,
+        retry_state: BuildState,
+        fallback_state: BuildState,
+        structured_errors: Optional[List[Dict[str, Any]]] = None,
+        confidence_threshold: float = 0.5,
+        max_attempts: int = 2,
+    ) -> bool:
+        """Analyze backend tool errors and optionally route back for RTL recovery."""
+        error_lines = [str(e).strip() for e in errors if str(e).strip()]
+        if structured_errors:
+            for err in structured_errors:
+                message = str(err.get("message", "")).strip()
+                if message and message not in error_lines:
+                    error_lines.append(message)
+
+        error_text = "\n".join(error_lines)[:8000]
+        if not error_text:
+            error_text = f"{stage_name} failed without a structured error message."
+
+        analysis = self.incremental_fixer.analyze_error(
+            error_text=error_text,
+            rtl_code=self.artifacts.get("rtl_code", ""),
+        )
+        retry_key = f"{stage_name.lower()}_backend_recovery"
+        attempts = int(self.retry_metadata.get(retry_key, 0))
+
+        self.artifacts["last_error"] = f"{stage_name} failure:\n{error_text}"
+        self.artifacts["backend_error_stage"] = stage_name
+        self.artifacts["backend_error_analysis"] = {
+            "error_type": analysis.error_type.value
+            if hasattr(analysis.error_type, "value")
+            else str(analysis.error_type),
+            "fix_confidence": analysis.fix_confidence,
+            "is_surgical": analysis.is_surgical,
+            "signals": analysis.signals_mentioned[:10],
+            "modules": analysis.modules_mentioned[:10],
+            "strategy": analysis.recommended_strategy,
+            "risks": analysis.side_effect_risks[:5],
+        }
+        if structured_errors is not None:
+            self.artifacts[f"{stage_name.lower()}_structured_errors"] = structured_errors
+
+        non_rtl_error_types = {ErrorType.UNKNOWN_TOOL_ERROR}
+        if retry_state == BuildState.RTL_GEN:
+            non_rtl_error_types.update({ErrorType.DRC_ERROR, ErrorType.LVS_ERROR})
+        if attempts >= max_attempts:
+            self.log(
+                f"{stage_name} recovery budget exhausted ({attempts}/{max_attempts}); continuing to {fallback_state.name}.",
+                refined=True,
+            )
+            return False
+
+        if analysis.error_type in non_rtl_error_types:
+            self.log(
+                f"{stage_name} failure classified as {analysis.error_type.value}; not retrying RTL generation.",
+                refined=True,
+            )
+            return False
+
+        if analysis.fix_confidence <= confidence_threshold:
+            self.log(
+                f"{stage_name} failure classified as {analysis.error_type.value} "
+                f"(confidence={analysis.fix_confidence:.2f}); continuing to {fallback_state.name}.",
+                refined=True,
+            )
+            return False
+
+        self._record_retry(retry_key, consume_global=False)
+        if analysis.error_type in (ErrorType.TIMING_ERROR, ErrorType.TIMING_VIOLATION):
+            self.artifacts["logic_decoupling_hint"] = (
+                f"{stage_name} reported timing closure trouble: {error_text[:1000]}. "
+                "Reduce critical-path depth, consider register slicing, and preserve top-level IO."
+            )
+
+        self.log(
+            f"{stage_name} failed; attempting {retry_state.name} recovery "
+            f"(type={analysis.error_type.value}, confidence={analysis.fix_confidence:.2f}, "
+            f"attempt={attempts + 1}/{max_attempts}).",
+            refined=True,
+        )
+        self.transition(retry_state, preserve_retries=True)
+        return True
 
     def _record_non_consumable_output(
         self, producer: str, raw_output: str, diagnostics: List[str]
@@ -995,28 +1149,74 @@ class BuildOrchestrator:
             raw_output=raw_output,
         )
 
-    def _build_llm_context(self, include_rtl: bool = True, max_rtl_chars: int = 15000) -> str:
+    def _build_llm_context(self, include_rtl: bool = True, mode: Optional[str] = None) -> str:
         """Build cumulative context string for LLM calls.
 
+        Uses token-based budgeting for intelligent context truncation.
         Aggregates build state so the LLM can reason across the full pipeline
         instead of seeing only the immediate error + code.
+
+        Args:
+            include_rtl: Whether to include RTL code
+            mode: Token budget mode ('error_mode', 'generation_mode', 'doc_mode', 'verification_mode')
         """
+        spec = self.artifacts.get("spec", "")
+        rtl = self.artifacts.get("rtl_code", "") if include_rtl else ""
+        error = self.artifacts.get("last_error", "")
+        history = [h.message for h in self.build_history[-10:]]
+        target_pdk = self.pdk_profile.get("profile", self.pdk_profile.get("pdk", "sky130"))
+
+        budgeted = self.token_budget.budget_context(
+            spec=spec,
+            rtl=rtl,
+            error=error,
+            history=history,
+            mode=mode,
+        )
+
         sections = []
 
-        # 1. Architecture spec
-        spec = self.artifacts.get("spec", "")
-        if spec:
-            sections.append(f"ARCHITECTURE SPEC:\n{spec[:6000]}")
+        if budgeted.get("spec"):
+            sections.append(f"ARCHITECTURE SPEC:\n{budgeted['spec']}")
 
-        # 2. Current RTL snippet
-        if include_rtl:
-            rtl = self.artifacts.get("rtl_code", "")
-            if rtl:
-                sections.append(
-                    f"CURRENT RTL ({len(rtl)} chars, truncated):\n```verilog\n{rtl[:max_rtl_chars]}\n```"
-                )
+        if budgeted.get("rtl"):
+            sections.append(f"CURRENT RTL (token-budgeted):\n```verilog\n{budgeted['rtl']}\n```")
 
-        # 3. Build strategy & state
+        evolved = self.context_evolver.evolve(
+            stage=self.state.name,
+            spec=spec,
+            rtl=rtl,
+            error=error,
+            history=history,
+            target_pdk=target_pdk,
+            strategy=self.strategy.value,
+        )
+        evolved_context = evolved.to_prompt()
+        if evolved_context:
+            self.artifacts["context_evolution"] = evolved.to_dict()
+            sections.append(evolved_context)
+
+        rag_query = " ".join(
+            [
+                self.name,
+                self.desc,
+                self.state.name,
+                target_pdk,
+                str(spec)[:1200],
+                str(error)[:800],
+            ]
+        )
+        hardware_context = self.hardware_kb.build_context(
+            query=rag_query,
+            stage=self.state.name,
+            target_pdk=target_pdk,
+        )
+        if hardware_context:
+            sections.append(hardware_context)
+
+        if self.eda_capabilities:
+            sections.append(self.eda_capabilities.to_prompt())
+
         sections.append(
             f"BUILD STATE: {self.state.name} | Strategy: {self.strategy.value} | "
             f"Step: {self.global_step_count}/{self.global_step_budget} | "
@@ -1024,7 +1224,6 @@ class BuildOrchestrator:
             f"Retries this state: {self.state_retry_counts.get(self.state.name, 0)}/{self.max_retries}"
         )
 
-        # 4. Convergence history (last 3 snapshots)
         if self.convergence_history:
             recent = self.convergence_history[-3:]
             conv_lines = []
@@ -1035,7 +1234,6 @@ class BuildOrchestrator:
                 )
             sections.append("CONVERGENCE HISTORY:\n" + "\n".join(conv_lines))
 
-        # 5. Coverage data
         cov = self.artifacts.get("coverage", {})
         if cov:
             sections.append(
@@ -1046,7 +1244,6 @@ class BuildOrchestrator:
                 f"[{cov.get('backend', 'N/A')}/{cov.get('coverage_mode', 'N/A')}]"
             )
 
-        # 6. Formal + signoff results
         formal = self.artifacts.get("formal_result", "")
         if formal:
             sections.append(f"FORMAL RESULT: {formal}")
@@ -1054,12 +1251,11 @@ class BuildOrchestrator:
         if signoff:
             sections.append(f"SIGNOFF RESULT: {signoff}")
 
-        # 7. Semantic rigor report
         sem = self.artifacts.get("semantic_report", "")
         if sem:
-            sections.append(f"SEMANTIC RIGOR: {str(sem)[:2000]}")
+            sem_budget = 500
+            sections.append(f"SEMANTIC RIGOR: {str(sem)[:sem_budget]}")
 
-        # 8. Previous failure history
         fail_hist = self._format_failure_history()
         if fail_hist:
             sections.append(fail_hist)
@@ -3117,6 +3313,9 @@ STRATEGY GUIDELINES:
 LOGIC DECOUPLING HINT:
 {self.artifacts.get("logic_decoupling_hint", "N/A")}
 
+RETRIEVED HARDWARE KNOWLEDGE AND EVOLVED BUILD CONTEXT:
+{self._build_llm_context(include_rtl=False, mode="generation_mode")}
+
 CRITICAL RULES:
 1. Top-level module name MUST be "{self.name}"
 2. Async active-low reset `rst_n`
@@ -3434,9 +3633,9 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             _react_agent.register_tool(
                 "read_file",
                 "Read contents of an absolute file path.",
-                lambda p: open(p.strip()).read()
-                if os.path.exists(p.strip())
-                else f"Not found: {p}",
+                lambda p: (
+                    open(p.strip()).read() if os.path.exists(p.strip()) else f"Not found: {p}"
+                ),
             )
             _react_context = (
                 f"RTL file path: {path}\n\n"
@@ -3488,20 +3687,32 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         if _react_fixed_code:
             new_code = _react_fixed_code
         else:
-            # Agents fix syntax — with full build context and failure history
+            # Use IncrementalFixer for error analysis and surgical fixes
+            analysis = self.incremental_fixer.analyze_error(
+                error_text=errors_for_llm,
+                rtl_code=self.artifacts.get("rtl_code", ""),
+            )
+
+            # Build surgical fix prompt with error analysis
             fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
 
 CRITICAL: Do not rename the module. Do not add, modify, or remove any input/output ports. The top-module interface MUST remain exactly the same.
 
 Fix Syntax/Lint Errors in "{self.name}".
 
-BUILD CONTEXT:
-{self._build_llm_context()}
+## ERROR ANALYSIS (from IncrementalFixer)
+Error Type: {analysis.error_type.value if hasattr(analysis.error_type, "value") else analysis.error_type}
+Affected Signals: {", ".join(analysis.signals_mentioned[:5]) if analysis.signals_mentioned else "Unknown"}
+Affected Modules: {", ".join(analysis.modules_affected[:3]) if analysis.modules_affected else "Unknown"}
+Side Effect Risks: {"; ".join(analysis.side_effect_risks[:3]) if analysis.side_effect_risks else "None identified"}
 
-ERROR LOG:
+## BUILD CONTEXT:
+{self._build_llm_context(mode="error_mode")}
+
+## ERROR LOG:
 {errors_for_llm}
 
-PREVIOUS FIX ATTEMPTS (do NOT repeat these):
+## PREVIOUS FIX ATTEMPTS (do NOT repeat these):
 {self._format_failure_history()}
 
 Strategy: {self.strategy.name} (Keep consistency!)
@@ -3510,6 +3721,8 @@ IMPORTANT: The compiler is Verilator 5.0+ (SystemVerilog 2017+).
 - Use modern SystemVerilog features (`logic`, `always_comb`, `always_ff`).
 - Ensure strict 2-state logic handling (reset all registers).
 - Avoid 4-state logic (x/z) reliance as Verilator is 2-state optimized.
+- Focus on fixing the error type: {analysis.error_type.value if hasattr(analysis.error_type, "value") else analysis.error_type}
+- Be careful around signals: {", ".join(analysis.signals_mentioned[:3]) if analysis.signals_mentioned else "N/A"}
 
 Code:
 ```verilog
@@ -4625,12 +4838,24 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
                     ["SVA generation returned prose instead of code."],
                 )
                 self.log(
-                    "SVA generation returned prose instead of code. Retrying once.",
+                    "SVA generation returned prose instead of code. Retrying with error feedback.",
                     refined=True,
                 )
                 self.logger.warning(f"SVA VALIDATION FAIL (prose detected):\n{sva_result[:500]}")
+
+                retry_task = Task(
+                    description=sva_task.description
+                    + f"\n\n[RETRY ERROR FEEDBACK - IGNORE PREVIOUS OUTPUT]:\n"
+                    + "Your previous response was invalid because it contained prose/explanations "
+                    + "instead of only SystemVerilog code. The response must begin with `module` "
+                    + "and contain ONLY code. Try again with only valid code output.",
+                    expected_output="SystemVerilog SVA module",
+                    agent=verif_agent,
+                )
                 sva_result = str(
-                    self._crew_kickoff(Crew(verbose=False, agents=[verif_agent], tasks=[sva_task]))
+                    self._crew_kickoff(
+                        Crew(verbose=False, agents=[verif_agent], tasks=[retry_task])
+                    )
                 )
                 if not validate_llm_code_output(sva_result):
                     self.log(
@@ -5476,7 +5701,7 @@ REQUIREMENTS:
                 clk_constraint_ns = float(m.group(1))
 
         with console.status("[accent]Running Yosys Synthesis...[/accent]"):
-            from .tools.synth_tools import run_yosys_synth, SynthesisResult
+            from .tools.synth_tools import run_yosys_synth, SynthesisResult, parse_yosys_errors
 
             result = run_yosys_synth(
                 rtl_files=rtl_files,
@@ -5517,6 +5742,20 @@ REQUIREMENTS:
                     self.log(f"  WARN: {w}", refined=True)
             self.transition(BuildState.DFT_SCAN)
         else:
+            structured_errors = parse_yosys_errors(
+                "\n".join([result.stdout, result.stderr, *result.errors])
+            )
+            self.artifacts["synth_structured_errors"] = structured_errors
+            if self._attempt_backend_error_recovery(
+                "SYNTHESIS",
+                result.errors,
+                retry_state=BuildState.RTL_GEN,
+                fallback_state=BuildState.DFT_SCAN,
+                structured_errors=structured_errors,
+                confidence_threshold=0.5,
+            ):
+                return
+
             self.log(f"Synthesis FAILED: {'; '.join(result.errors[:2])}", refined=True)
             self.artifacts["synth_error"] = result.errors
             self.transition(BuildState.DFT_SCAN)
@@ -5567,6 +5806,21 @@ REQUIREMENTS:
             )
             self.transition(BuildState.DFT_ATPG)
         else:
+            structured_errors = (
+                result.metrics.get("structured_errors", [])
+                if isinstance(result.metrics, dict)
+                else []
+            )
+            if self._attempt_backend_error_recovery(
+                "DFT",
+                result.errors,
+                retry_state=BuildState.RTL_GEN,
+                fallback_state=BuildState.DFT_ATPG,
+                structured_errors=structured_errors,
+                confidence_threshold=0.55,
+            ):
+                return
+
             self.log(f"DFT scan FAILED: {'; '.join(result.errors[:2])}", refined=True)
             self.artifacts["dft_error"] = result.errors
             self.transition(BuildState.DFT_ATPG)
@@ -5865,6 +6119,17 @@ REQUIREMENTS:
                 for em_warn in result.ir_drop.electromigration_warnings[:3]:
                     self.log(f"  EM WARN: {em_warn}", refined=True)
         else:
+            self.artifacts["power_error"] = result.errors
+            if self._attempt_backend_error_recovery(
+                "POWER",
+                result.errors,
+                retry_state=BuildState.RTL_GEN,
+                fallback_state=BuildState.TIMING_ANALYSIS,
+                confidence_threshold=0.65,
+                max_attempts=1,
+            ):
+                return
+
             self.log(f"Power analysis skipped: {'; '.join(result.errors[:2])}", refined=True)
 
         self.transition(BuildState.TIMING_ANALYSIS)
@@ -5918,7 +6183,7 @@ REQUIREMENTS:
         os.makedirs(sta_dir, exist_ok=True)
 
         with console.status("[accent]Running Multi-Corner STA...[/accent]"):
-            from .tools.sta_tools import run_multi_corner_sta, MultiCornerSTAResult
+            from .tools.sta_tools import run_multi_corner_sta, MultiCornerSTAResult, parse_sta_errors
 
             result = run_multi_corner_sta(
                 design_name=self.name,
@@ -5971,7 +6236,49 @@ REQUIREMENTS:
                 f"all_corners={'PASS' if result.all_corners_pass else 'FAIL'}",
                 refined=True,
             )
+            if not result.all_corners_pass:
+                timing_errors: List[str] = []
+                structured_errors: List[Dict[str, Any]] = []
+                for corner, rpt in result.corners.items():
+                    timing_errors.extend(
+                        [
+                            f"{corner}: setup WNS {rpt.wns_setup:.3f}ns",
+                            f"{corner}: hold WNS {rpt.wns_hold:.3f}ns",
+                            *rpt.errors,
+                        ]
+                    )
+                    structured_errors.extend(
+                        rpt.metrics.get("structured_errors", [])
+                        if isinstance(rpt.metrics, dict)
+                        else []
+                    )
+                    if os.path.exists(rpt.report_path):
+                        with open(rpt.report_path) as f:
+                            structured_errors.extend(parse_sta_errors(f.read()))
+                self.artifacts["sta_error"] = timing_errors
+                self.artifacts["sta_structured_errors"] = structured_errors
+                if self._attempt_backend_error_recovery(
+                    "TIMING",
+                    timing_errors,
+                    retry_state=BuildState.RTL_GEN,
+                    fallback_state=BuildState.PHYSICAL_VERIFY,
+                    structured_errors=structured_errors,
+                    confidence_threshold=0.55,
+                    max_attempts=2,
+                ):
+                    return
         else:
+            timing_errors = ["STA produced no results; check netlist and SDC."]
+            self.artifacts["sta_error"] = timing_errors
+            if self._attempt_backend_error_recovery(
+                "TIMING",
+                timing_errors,
+                retry_state=BuildState.RTL_GEN,
+                fallback_state=BuildState.PHYSICAL_VERIFY,
+                confidence_threshold=0.55,
+                max_attempts=1,
+            ):
+                return
             self.log("STA produced no results; check netlist and SDC.", refined=True)
 
         self.transition(BuildState.PHYSICAL_VERIFY)
@@ -5998,7 +6305,7 @@ REQUIREMENTS:
         synth_netlist = self.artifacts.get("synth_netlist", "")
 
         with console.status("[accent]Running Magic DRC...[/accent]"):
-            from .tools.physical_tools import run_magic_drc, DRCResult
+            from .tools.physical_tools import run_magic_drc, DRCResult, parse_drc_errors
 
             drc_result = run_magic_drc(
                 gds_path=gds_path if os.path.exists(gds_path) else "",
@@ -6008,6 +6315,8 @@ REQUIREMENTS:
                 pdk_root=pdk_root,
                 timeout=600,
             )
+
+        self.artifacts["drc_result"] = drc_result
 
         if drc_result.ok:
             self.log(
@@ -6022,9 +6331,28 @@ REQUIREMENTS:
                         refined=True,
                     )
         else:
-            self.log(f"Magic DRC failed: {'; '.join(drc_result.errors[:2])}", refined=True)
+            structured_errors = []
+            structured_errors.extend(
+                drc_result.metrics.get("structured_errors", [])
+                if isinstance(drc_result.metrics, dict)
+                else []
+            )
+            if drc_result.drc_report_path and os.path.exists(drc_result.drc_report_path):
+                with open(drc_result.drc_report_path) as f:
+                    structured_errors.extend(parse_drc_errors(f.read()))
+            self.artifacts["drc_structured_errors"] = structured_errors
+            if self._attempt_backend_error_recovery(
+                "DRC",
+                drc_result.errors,
+                retry_state=BuildState.FLOORPLAN,
+                fallback_state=BuildState.SIGNOFF,
+                structured_errors=structured_errors,
+                confidence_threshold=0.6,
+                max_attempts=1,
+            ):
+                return
 
-        self.artifacts["drc_result"] = drc_result
+            self.log(f"Magic DRC failed: {'; '.join(drc_result.errors[:2])}", refined=True)
 
         with console.status("[accent]Running Netgen LVS...[/accent]"):
             from .tools.physical_tools import run_netgen_lvs, LVSResult
@@ -6041,6 +6369,8 @@ REQUIREMENTS:
                 timeout=600,
             )
 
+        self.artifacts["lvs_result"] = lvs_result
+
         if lvs_result.ok:
             self.log(
                 f"Netgen LVS: {'EQUIVALENT' if lvs_result.equivalent else 'MISMATCH'} "
@@ -6049,10 +6379,33 @@ REQUIREMENTS:
             )
             if not lvs_result.equivalent:
                 self.log(f"  LVS errors: {lvs_result.lvs_errors}", refined=True)
+                lvs_errors = [
+                    f"LVS mismatch: {lvs_result.lvs_errors} errors",
+                    f"net mismatches: {lvs_result.net_mismatches}",
+                    f"pin mismatches: {lvs_result.pin_mismatches}",
+                    f"unconnected nets: {lvs_result.unconnected_nets}",
+                ]
+                if self._attempt_backend_error_recovery(
+                    "LVS",
+                    lvs_errors,
+                    retry_state=BuildState.FLOORPLAN,
+                    fallback_state=BuildState.SIGNOFF,
+                    confidence_threshold=0.6,
+                    max_attempts=1,
+                ):
+                    return
         else:
-            self.log(f"Netgen LVS failed: {'; '.join(lvs_result.errors[:2])}", refined=True)
+            if self._attempt_backend_error_recovery(
+                "LVS",
+                lvs_result.errors,
+                retry_state=BuildState.FLOORPLAN,
+                fallback_state=BuildState.SIGNOFF,
+                confidence_threshold=0.6,
+                max_attempts=1,
+            ):
+                return
 
-        self.artifacts["lvs_result"] = lvs_result
+            self.log(f"Netgen LVS failed: {'; '.join(lvs_result.errors[:2])}", refined=True)
         self.artifacts["pv_metrics"] = {
             "drc_violations": drc_result.drc_violations,
             "lvs_errors": lvs_result.lvs_errors,
@@ -6848,19 +7201,25 @@ set ::env(MAGIC_DRC_USE_GDS) 1
 
         doc_agent = get_doc_agent(self.get_llm_for_role("documenter"))
 
+        # Use doc_mode for token budget (prioritizes RTL for documentation)
+        budgeted = self.token_budget.budget_context(
+            spec=self.artifacts.get("spec", ""),
+            rtl=self.artifacts.get("rtl_code", ""),
+            mode="doc_mode",
+        )
+
         doc_task = Task(
             description=f"""Generate a comprehensive Datasheet (Markdown) for "{self.name}".
             
             1. **Architecture Spec**:
-            {self.artifacts.get("spec", "N/A")}
+            {budgeted.get("spec", self.artifacts.get("spec", "N/A"))}
             
             2. **Physical Metrics**:
             {metrics if metrics else "N/A"}
             
             3. **RTL Source Code**:
             ```verilog
-            {self.artifacts.get("rtl_code", "")[:15000]} 
-            // ... truncated if too long
+            {budgeted.get("rtl", self.artifacts.get("rtl_code", "N/A"))}
             ```
             
             **REQUIREMENTS**:

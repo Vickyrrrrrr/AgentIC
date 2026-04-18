@@ -76,6 +76,97 @@ class MultiCornerSTAResult:
     summary_path: str
 
 
+def parse_sta_errors(output: str) -> List[Dict[str, Any]]:
+    """Parse OpenSTA output and timing reports into structured records."""
+    errors: List[Dict[str, Any]] = []
+
+    slack_pattern = re.compile(
+        r"slack\s+(?P<slack>[+-]?\d+(?:\.\d+)?)"
+        r"(?:\s+from\s+'?(?P<start>\S+)'?\s+to\s+'?(?P<end>\S+)'?)?",
+        re.IGNORECASE,
+    )
+    setup_pattern = re.compile(r"setup.*violation", re.IGNORECASE)
+    hold_pattern = re.compile(r"hold.*violation", re.IGNORECASE)
+    unconstrained_pattern = re.compile(r"(\d+)\s+unconstrained", re.IGNORECASE)
+    read_error_pattern = re.compile(
+        r"(?:error|fatal).*?(?:read|link|liberty|verilog|sdc|clock|port)",
+        re.IGNORECASE,
+    )
+
+    for line_no, raw_line in enumerate(output.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        record: Optional[Dict[str, Any]] = None
+
+        slack_match = slack_pattern.search(line)
+        if slack_match:
+            slack = float(slack_match.group("slack"))
+            if slack < 0:
+                record = {
+                    "tool": "opensta",
+                    "type": "negative_slack",
+                    "severity": "error",
+                    "message": line,
+                    "line": line_no,
+                    "slack_ns": slack,
+                    "fix_hint": "Relax the constraint, improve floorplan timing, or reduce RTL critical-path depth.",
+                }
+                if slack_match.group("start"):
+                    record["startpoint"] = slack_match.group("start").strip("'\"")
+                if slack_match.group("end"):
+                    record["endpoint"] = slack_match.group("end").strip("'\"")
+
+        if record is None and setup_pattern.search(line):
+            record = {
+                "tool": "opensta",
+                "type": "setup_violation",
+                "severity": "error",
+                "message": line,
+                "line": line_no,
+                "fix_hint": "Reduce max-delay path depth or relax the setup clock period.",
+            }
+
+        if record is None and hold_pattern.search(line):
+            record = {
+                "tool": "opensta",
+                "type": "hold_violation",
+                "severity": "error",
+                "message": line,
+                "line": line_no,
+                "fix_hint": "Add delay/buffering on short paths or adjust hold constraints.",
+            }
+
+        if record is None:
+            unconstrained_match = unconstrained_pattern.search(line)
+            if unconstrained_match:
+                record = {
+                    "tool": "opensta",
+                    "type": "unconstrained_paths",
+                    "severity": "warning",
+                    "message": line,
+                    "line": line_no,
+                    "count": int(unconstrained_match.group(1)),
+                    "fix_hint": "Add clocks, generated clocks, IO delays, or false/multicycle path constraints.",
+                }
+
+        if record is None and read_error_pattern.search(line):
+            record = {
+                "tool": "opensta",
+                "type": "sta_tool_error",
+                "severity": "error",
+                "message": line,
+                "line": line_no,
+                "fix_hint": "Check netlist, SDC, and Liberty file paths plus top-module naming.",
+            }
+
+        if record is not None:
+            errors.append(record)
+
+    return errors
+
+
 def run_opensta(
     netlist: str,
     sdc: str,
@@ -200,10 +291,22 @@ def run_opensta(
     paths = _parse_critical_paths(stdout, limit=report_paths)
     cts_metrics = _parse_cts_report(stdout)
     unconst = _count_unconstrained(stdout)
+    parsed_errors = parse_sta_errors(stdout + "\n" + stderr)
 
     for line in (stdout + stderr).splitlines():
         if re.search(r"warning", line, re.IGNORECASE):
             warnings.append(line.strip())
+
+    for err in parsed_errors:
+        message = err.get("message", "")
+        if err.get("severity") == "warning":
+            if message and message not in warnings:
+                warnings.append(message)
+        elif message and message not in errors:
+            errors.append(message)
+
+    if proc.returncode != 0 and not errors:
+        errors.append(f"OpenSTA exited with return code {proc.returncode}")
 
     ok = wns_setup >= -0.05 and wns_hold >= -0.05 and proc.returncode == 0
 
@@ -228,6 +331,7 @@ def run_opensta(
             "tns_hold": tns_hold,
             "max_freq_mhz": max_freq,
             "unconstrained_paths": unconst,
+            "structured_errors": parsed_errors,
             "corner": corner,
             "mode": mode,
         },
@@ -242,8 +346,10 @@ def run_multi_corner_sta(
     corners: Optional[List[str]] = None,
     modes: Optional[List[str]] = None,
     top_module: Optional[str] = None,
+    design_name: Optional[str] = None,
     min_period_ns: float = 10.0,
     pdk: str = "sky130",
+    enable_route: bool = True,
     opensta_script_extra: Optional[str] = None,
     timeout_per_corner: int = 300,
 ) -> MultiCornerSTAResult:
@@ -260,8 +366,10 @@ def run_multi_corner_sta(
         modes: List of modes (default: [func, test])
         output_dir: Output directory
         top_module: Top-level module name
+        design_name: Report/output name override
         min_period_ns: Minimum clock period constraint
         pdk: PDK name
+        enable_route: Include routed parasitic-aware report commands
         opensta_script_extra: Extra OpenSTA TCL commands
         timeout_per_corner: Timeout per corner in seconds
 
@@ -272,7 +380,8 @@ def run_multi_corner_sta(
     modes = modes or ["func", "test"]
 
     corner_lib_map = _map_libs_to_corners(lib_files, corners)
-    design_name = top_module or os.path.splitext(os.path.basename(netlist))[0]
+    design_name = design_name or top_module or os.path.splitext(os.path.basename(netlist))[0]
+    sta_top_module = top_module or design_name
 
     corner_reports: Dict[str, STAReport] = {}
     worst_wns_setup = 0.0
@@ -294,9 +403,10 @@ def run_multi_corner_sta(
                 corner=corner,
                 mode=mode,
                 output_dir=output_dir,
-                top_module=top_module,
+                top_module=sta_top_module,
                 pdk=pdk,
                 min_period_ns=min_period_ns,
+                enable_route=enable_route,
                 opensta_script_extra=opensta_script_extra,
                 timeout=timeout_per_corner,
             )

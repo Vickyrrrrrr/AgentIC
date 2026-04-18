@@ -175,6 +175,16 @@ def run_scan_insertion(
         errors.append("Yosys binary not found")
         return _error_dft_result(errors, scan_netlist)
 
+    from .synth_tools import parse_yosys_errors
+
+    structured_errors = parse_yosys_errors(stdout + "\n" + stderr)
+    for err in structured_errors:
+        message = err.get("message", "")
+        if message and message not in errors:
+            errors.append(message)
+    if proc.returncode != 0 and not errors:
+        errors.append(f"Yosys scan insertion exited with return code {proc.returncode}")
+
     for line in (stdout + stderr).splitlines():
         if "warning" in line.lower():
             warnings.append(line.strip())
@@ -198,12 +208,13 @@ def run_scan_insertion(
         scan_enable_signal=scan_enable_signal,
         warnings=warnings,
         errors=errors,
-        diagnostics=[],
+        diagnostics=[json.dumps(e, sort_keys=True) for e in structured_errors],
         metrics={
             "scan_chains": chain_count,
             "fault_coverage": coverage,
             "dft_method": "yosys_scan",
             "compression": include_compression,
+            "structured_errors": structured_errors,
         },
     )
 

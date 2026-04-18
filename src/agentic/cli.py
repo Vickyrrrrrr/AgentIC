@@ -107,6 +107,256 @@ from .tools.signoff_reporter import generate_qor_report, SignoffReporter
 
 # --- INITIALIZE ---
 app = typer.Typer()
+
+
+@app.command("cache")
+def cache(
+    action: str = typer.Argument("stats", help="Action: stats, clear, warmup"),
+    ttl_hours: int = typer.Option(24, "--ttl", help="Cache TTL in hours"),
+):
+    """Manage LLM response cache.
+
+    Actions:
+      stats   - Show cache statistics and hit rate
+      clear   - Clear the entire cache
+      warmup  - Pre-populate cache for common patterns
+    """
+    from .core.cache_manager import get_global_cache
+    from .core.usage_tracker import get_usage_tracker
+
+    cache_obj = get_global_cache()
+    tracker = get_usage_tracker()
+
+    if action == "stats":
+        stats = cache_obj.get_stats()
+        stats_dict = (
+            stats.to_dict()
+            if hasattr(stats, "to_dict")
+            else {
+                "total_entries": getattr(stats, "total_entries", 0),
+                "hit_rate": getattr(stats, "hit_rate", 0),
+            }
+        )
+        usage = tracker.get_stats_summary()
+
+        hit_rate = stats_dict.get("hit_rate", 0)
+        if isinstance(hit_rate, str):
+            hit_rate_str = hit_rate
+        else:
+            hit_rate_str = f"{hit_rate:.1f}%"
+
+        console.print(
+            Panel(
+                f"[accent]Cache Statistics[/accent]\n"
+                f"Total entries: {stats_dict.get('total_entries', 0)}\n"
+                f"Hit rate: {hit_rate_str}\n"
+                f"Saved API calls: {stats_dict.get('saved_api_calls', 0)}\n"
+                f"Est. cost saved: {stats_dict.get('estimated_cost_saved', '$0')}\n\n"
+                f"[accent]API Usage[/accent]\n"
+                f"Total calls: {usage.get('total_calls', 0)}\n"
+                f"Cache hits: {usage.get('cache_hits', 0)}\n"
+                f"Cache rate: {usage.get('cache_rate', '0%')}\n"
+                f"Total tokens: {usage.get('total_tokens', 0):,}",
+                title="Cache & Usage",
+            )
+        )
+    elif action == "clear":
+        if typer.confirm("Clear all cached LLM responses?"):
+            cleared = cache_obj.clear()
+            console.print(f"[success]Cleared {cleared} cache entries[/success]")
+        else:
+            console.print("[dim]Cancelled[/dim]")
+
+    elif action == "warmup":
+        console.print("[dim]Warming up cache...[/dim]")
+        console.print("[dim]Warmup not yet implemented (coming soon)[/dim]")
+
+    else:
+        console.print(f"[error]Unknown action: {action}[/error]")
+
+
+@app.command("checkpoint")
+def checkpoint(
+    design: str = typer.Option(..., "--design", "-d", help="Design name"),
+    action: str = typer.Option("list", "--action", "-a", help="Action: list, restore, clear"),
+    timestamp: str = typer.Option(None, "--timestamp", "-t", help="Specific checkpoint timestamp"),
+):
+    """Manage build checkpoints for recovery.
+
+    Actions:
+      list    - List available checkpoints
+      restore - Restore from a checkpoint
+      clear   - Clear checkpoints for a design
+    """
+    from .core.checkpoint_manager import CheckpointManager
+
+    manager = CheckpointManager(design)
+
+    if action == "list":
+        checkpoints = manager.list_checkpoints()
+        if not checkpoints:
+            console.print("[dim]No checkpoints found[/dim]")
+        else:
+            console.print(
+                Panel(
+                    "\n".join(
+                        f"[accent]{cp.timestamp}[/accent] | {cp.state} | {cp.reason} | "
+                        f"step={cp.global_step} | coverage={cp.coverage_pct:.1f}%"
+                        for cp in checkpoints[-10:]
+                    ),
+                    title=f"Checkpoints for {design}",
+                )
+            )
+
+    elif action == "restore":
+        if timestamp:
+            state = manager.load(timestamp)
+        else:
+            state = manager.load_latest()
+
+        if state:
+            console.print(
+                Panel(
+                    f"[success]Loaded checkpoint from {state.timestamp}[/success]\n"
+                    f"State: {state.state_name} | Step: {state.global_step_count}\n"
+                    f"RTL length: {len(state.rtl_code)} chars\n"
+                    f"[warning]Note: Orchestrator state cannot be directly restored via CLI[/warning]",
+                    title="Checkpoint Restored",
+                )
+            )
+        else:
+            console.print("[error]No checkpoint found[/error]")
+
+    elif action == "clear":
+        if typer.confirm(f"Clear all checkpoints for '{design}'?"):
+            count = manager.clear()
+            console.print(f"[success]Cleared {count} checkpoints[/success]")
+        else:
+            console.print("[dim]Cancelled[/dim]")
+
+
+@app.command("usage")
+def usage(
+    days: int = typer.Option(7, "--days", "-d", help="Number of days to analyze"),
+    build: str = typer.Option(None, "--build", "-b", help="Filter by build name"),
+    format: str = typer.Option(
+        "summary", "--format", "-f", help="Format: summary, detailed, provider"
+    ),
+):
+    """Show API usage statistics and cost analysis."""
+    from .core.usage_tracker import get_usage_tracker
+
+    tracker = get_usage_tracker()
+
+    if format == "summary":
+        stats = tracker.get_stats_summary()
+        console.print(
+            Panel(
+                f"[accent]API Usage Summary[/accent]\n"
+                f"Total calls: {stats.get('total_calls', 0):,}\n"
+                f"Cache hits: {stats.get('cache_hits', 0):,}\n"
+                f"Cache rate: {stats.get('cache_rate', '0%')}\n"
+                f"Total tokens: {stats.get('total_tokens', 0):,}\n"
+                f"Total builds: {stats.get('total_builds', 0)}",
+                title="Usage Summary",
+            )
+        )
+
+    elif format == "detailed":
+        daily = tracker.get_daily_usage(days)
+        if daily:
+            console.print(
+                Panel(
+                    "\n".join(
+                        f"{d['date']} | calls={d['calls']} | tokens={d['tokens']:,} | hit_rate={d['cache_hit_rate']}"
+                        for d in daily
+                    ),
+                    title=f"Daily Usage (Last {days} Days)",
+                )
+            )
+        else:
+            console.print("[dim]No usage data found[/dim]")
+
+    elif format == "provider":
+        providers = tracker.get_provider_comparison()
+        if providers:
+            console.print(
+                Panel(
+                    "\n".join(
+                        f"[accent]{p['provider']}[/accent] | calls={p['calls']} | "
+                        f"latency={p['avg_latency_ms']}ms | error_rate={p['error_rate']}"
+                        for p in providers
+                    ),
+                    title="Provider Comparison",
+                )
+            )
+        else:
+            console.print("[dim]No provider data found[/dim]")
+
+    else:
+        console.print(f"[error]Unknown format: {format}[/error]")
+
+
+@app.command("knowledge")
+def knowledge(
+    query: str = typer.Argument(..., help="Hardware/EDA topic to retrieve context for"),
+    stage: str = typer.Option("", "--stage", help="Pipeline stage hint, e.g. rtl, formal, timing"),
+    pdk: str = typer.Option("", "--pdk", help="Target PDK hint"),
+    limit: int = typer.Option(4, "--limit", min=1, max=12, help="Number of chunks to retrieve"),
+):
+    """Query the local hardware RAG knowledge base."""
+    from .core.hardware_knowledge import HardwareKnowledgeBase
+
+    kb = HardwareKnowledgeBase()
+    context = kb.build_context(query=query, stage=stage, target_pdk=pdk, limit=limit)
+    if not context:
+        console.print("[warning]No hardware knowledge chunks matched that query.[/warning]")
+        return
+    console.print(Panel(context, title="Hardware Knowledge Retrieval"))
+
+
+@app.command("corpus")
+def corpus(
+    output: str = typer.Option(
+        "training/rtl_corpus.jsonl",
+        "--out",
+        "-o",
+        help="Output JSONL path for RTL corpus records",
+    ),
+    limit: int = typer.Option(0, "--limit", min=0, help="Maximum records to export (0 = all)"),
+    root: Optional[str] = typer.Option(
+        None,
+        "--root",
+        help="Additional/specific root to scan. Repeat by running multiple exports if needed.",
+    ),
+):
+    """Build a local RTL JSONL corpus for domain-specific training/evaluation."""
+    from .core.rtl_corpus import RTLCorpusBuilder
+
+    roots = [root] if root else None
+    summary = RTLCorpusBuilder(roots=roots).export_jsonl(output, limit=limit)
+    console.print(
+        Panel(
+            f"Records: [success]{summary['records']}[/success]\n"
+            f"Output: [info]{summary['output']}[/info]\n"
+            f"Roots: {', '.join(summary['roots'])}",
+            title="RTL Corpus Export",
+        )
+    )
+
+
+@app.command("capabilities")
+def capabilities(json_output: bool = typer.Option(False, "--json", help="Print JSON")):
+    """Show detected GPU and EDA tool capabilities."""
+    from .core.eda_capabilities import detect_eda_capabilities
+
+    caps = detect_eda_capabilities()
+    if json_output:
+        console.print_json(json.dumps(caps.to_dict()))
+        return
+    console.print(Panel(caps.to_prompt(), title="EDA Capabilities"))
+
+
 from rich.theme import Theme
 from rich.ansi import AnsiDecoder
 
@@ -126,16 +376,16 @@ console = Console(theme=claude_theme, force_terminal=True, color_system="256")
 # Legacy path for license-based credentials (packaged binary)
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic/credentials.json")
 
-__version__ = "1.0.0"
+__version__ = "3.0.4"
 
-BANNER = """[cyan]
-   █████╗ ██╗     ███████╗██╗  ██╗    ███████╗██╗  ██╗███████╗
-  ██╔══██╗██║     ██╔════╝╚██╗██╔╝    ██╔════╝╚██╗██╔╝██╔════╝
-  ███████║██║     █████╗   ╚███╔╝     █████╗   ╚███╔╝ █████╗  
-  ██╔══██║██║     ██╔══╝   ██╔██╗     ██╔══╝   ██╔██╗ ██╔══╝  
-  ██║  ██║███████╗███████╗██╔╝ ██╗    ███████╗██╔╝ ██╗███████╗
-  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═╝╚══════╝
-[/cyan]"""
+BANNER = """[bold orange1]
+  ██╗   ██╗ ██████╗ ██╗  ██╗    ███████╗ ██████╗  ███╗   ███╗
+  ██║   ██║██╔═████╗██║  ██║    ██╔════╝██╔═══██╗ ████╗ ████║
+  ██║   ██║██║  ████║███████║    █████╗  ██║   ██║ ██╔████╔██║
+  ╚██╗ ██╔╝██║  ████║██╔══██║    ██╔══╝  ██║   ██║ ██║╚██╔╝██║
+   ╚████╔╝ ██║  ████║██║  ██║    ███████╗╚██████╔╝ ██║ ╚═╝ ██║
+    ╚═══╝  ╚═╝  ╚══╝╚═╝  ╚═╝    ╚══════╝ ╚═════╝  ╚═╝     ╚═╝
+ [/bold orange1]"""
 
 
 def _print_banner():
@@ -1078,6 +1328,7 @@ PDK_INSTALL_CONFIGS = {
         "name": "SkyWater SKY130",
         "pdk_dir": "sky130A",
         "description": "SkyWater 130nm — most mature open PDK",
+        "install_method": "volare",
         "volare_repo": "efabless/sky130",
         "volare_target": "sky130A",
         "download_url": "",
@@ -1089,6 +1340,7 @@ PDK_INSTALL_CONFIGS = {
         "name": "GlobalFoundries GF180MCU",
         "pdk_dir": "gf180mcuC",
         "description": "GlobalFoundries 180nm — automotive grade",
+        "install_method": "volare",
         "volare_repo": "The-OpenROAD-Project/gf180mcu",
         "volare_target": "gf180mcuC",
         "download_url": "",
@@ -1100,17 +1352,25 @@ PDK_INSTALL_CONFIGS = {
         "name": "ASAP7 Predictive PDK",
         "pdk_dir": "asap7",
         "description": "ASAP 7nm — cutting-edge predictive PDK",
+        "install_method": "download",
         "volare_repo": "",
         "volare_target": "",
         "download_url": "https://github.com/The-OpenROAD-Project/asap7/archive/refs/tags/v1.0.0.tar.gz",
         "requires_volare": False,
         "versions": ["1.0.0"],
         "default_version": "1.0.0",
+        "docker_steps": [
+            "docker pull ghcr.io/the-openroad-project/openroad:latest",
+            "git clone https://github.com/The-OpenROAD-Project/asap7.git",
+            "export PDK_ROOT=$HOME/.ciel",
+            "mkdir -p $PDK_ROOT && cp -R asap7 $PDK_ROOT/asap7",
+        ],
     },
     "nangate45": {
         "name": "NanGate 45nm",
         "pdk_dir": "nangate45",
         "description": "NanGate 45nm — academic/research",
+        "install_method": "download",
         "volare_repo": "",
         "volare_target": "",
         "download_url": "https://github.com/nangate/nangate45/archive/refs/tags/v1.0.0.tar.gz",
@@ -1122,6 +1382,7 @@ PDK_INSTALL_CONFIGS = {
         "name": "Oklahoma State 180nm",
         "pdk_dir": "osu018",
         "description": "Oklahoma State 180nm — educational/research",
+        "install_method": "download",
         "volare_repo": "",
         "volare_target": "",
         "download_url": "https://github.com/The-OpenROAD-Project/osu018/archive/refs/tags/v1.0.0.tar.gz",
@@ -1133,6 +1394,7 @@ PDK_INSTALL_CONFIGS = {
         "name": "Oklahoma State 350nm",
         "pdk_dir": "osu035",
         "description": "Oklahoma State 350nm — high voltage, easy to probe",
+        "install_method": "download",
         "volare_repo": "",
         "volare_target": "",
         "download_url": "https://github.com/The-OpenROAD-Project/osu035/archive/refs/tags/v1.0.0.tar.gz",
@@ -1140,17 +1402,153 @@ PDK_INSTALL_CONFIGS = {
         "versions": ["1.0.0"],
         "default_version": "1.0.0",
     },
-    "efly45": {
-        "name": "EFLY 45nm",
-        "pdk_dir": "efly45",
-        "description": "EFLY 45nm — emerging foundry",
+    "freepdk45": {
+        "name": "FreePDK45",
+        "pdk_dir": "FreePDK45",
+        "description": "NC State FreePDK45 + NanGate Open Cell Library",
+        "install_method": "manual",
         "volare_repo": "",
         "volare_target": "",
         "download_url": "",
         "requires_volare": False,
         "versions": ["1.0.0"],
         "default_version": "1.0.0",
+        "manual_steps": [
+            "Install via OpenROAD-flow-scripts or your university distribution.",
+            "Place the PDK at $PDK_ROOT/FreePDK45/.",
+            "Run agentic install-pdk freepdk45 --check.",
+        ],
     },
+    "openfasoc130": {
+        "name": "OpenFASOC 130nm analog flow",
+        "pdk_dir": "openfasoc",
+        "description": "OpenFASOC generator flow, typically backed by SKY130",
+        "install_method": "docker/manual",
+        "volare_repo": "",
+        "volare_target": "",
+        "download_url": "",
+        "requires_volare": False,
+        "versions": ["latest"],
+        "default_version": "latest",
+        "docker_steps": [
+            "git clone https://github.com/idea-fasoc/OpenFASOC.git",
+            "cd OpenFASOC && make sky130hd_temp",
+            "export PDK_ROOT=$HOME/.ciel",
+            "Run agentic install-pdk sky130 first if SKY130 is not installed.",
+        ],
+        "manual_steps": [
+            "Install SKY130 with agentic install-pdk sky130.",
+            "Clone OpenFASOC and set OPENFASOC_ROOT to that checkout.",
+            "Place any generated collateral under $PDK_ROOT/openfasoc/ if you want AgentIC to detect it as a custom PDK.",
+        ],
+    },
+    "skywater-raw": {
+        "name": "SkyWater raw development PDK",
+        "pdk_dir": "skywater-pdk",
+        "description": "Raw SkyWater PDK source tree for advanced/manual flows",
+        "install_method": "manual",
+        "volare_repo": "",
+        "volare_target": "",
+        "download_url": "",
+        "requires_volare": False,
+        "versions": ["latest"],
+        "default_version": "latest",
+        "manual_steps": [
+            "Clone the SkyWater PDK source tree you are developing against.",
+            "Place it at $PDK_ROOT/skywater-pdk/.",
+            "Prefer agentic install-pdk sky130 for packaged OpenLane builds.",
+        ],
+    },
+    "lefdef175": {
+        "name": "LEF/DEF 175nm placeholder",
+        "pdk_dir": "lefdef175",
+        "description": "Educational/manual 175nm LEF/DEF placeholder",
+        "install_method": "manual",
+        "volare_repo": "",
+        "volare_target": "",
+        "download_url": "",
+        "requires_volare": False,
+        "versions": ["manual"],
+        "default_version": "manual",
+        "manual_steps": [
+            "Place LEF, Liberty, and DRC/LVS collateral at $PDK_ROOT/lefdef175/.",
+            "Use libs.ref/<std_cell_library>/ and libs.tech/ when possible.",
+            "Run agentic install-pdk lefdef175 --check.",
+        ],
+    },
+    "tsmc28": {
+        "name": "TSMC 28nm",
+        "pdk_dir": "tsmc28",
+        "description": "Proprietary commercial PDK",
+        "install_method": "proprietary",
+        "requires_volare": False,
+        "versions": ["foundry-controlled"],
+        "default_version": "foundry-controlled",
+        "proprietary": True,
+        "manual_steps": [
+            "Contact TSMC or your shuttle/MPW program for authorized PDK access.",
+            "Place the installed PDK at $PDK_ROOT/tsmc28/.",
+            "Run agentic install-pdk tsmc28 --check or agentic doctor to verify.",
+        ],
+    },
+    "samsung14": {
+        "name": "Samsung 14nm",
+        "pdk_dir": "samsung14",
+        "description": "Proprietary commercial PDK",
+        "install_method": "proprietary",
+        "requires_volare": False,
+        "versions": ["foundry-controlled"],
+        "default_version": "foundry-controlled",
+        "proprietary": True,
+        "manual_steps": [
+            "Request access through Samsung Foundry or your program sponsor.",
+            "Place the installed PDK at $PDK_ROOT/samsung14/.",
+            "Run agentic install-pdk samsung14 --check or agentic doctor to verify.",
+        ],
+    },
+    "intel22": {
+        "name": "Intel 22nm",
+        "pdk_dir": "intel22",
+        "description": "Proprietary commercial PDK",
+        "install_method": "proprietary",
+        "requires_volare": False,
+        "versions": ["foundry-controlled"],
+        "default_version": "foundry-controlled",
+        "proprietary": True,
+        "manual_steps": [
+            "Request authorized PDK access through Intel Foundry or your program sponsor.",
+            "Place the installed PDK at $PDK_ROOT/intel22/.",
+            "Run agentic install-pdk intel22 --check or agentic doctor to verify.",
+        ],
+    },
+    "gf22": {
+        "name": "GlobalFoundries 22nm",
+        "pdk_dir": "gf22",
+        "description": "Proprietary commercial PDK",
+        "install_method": "proprietary",
+        "requires_volare": False,
+        "versions": ["foundry-controlled"],
+        "default_version": "foundry-controlled",
+        "proprietary": True,
+        "manual_steps": [
+            "Request authorized PDK access through GlobalFoundries or your program sponsor.",
+            "Place the installed PDK at $PDK_ROOT/gf22/.",
+            "Run agentic install-pdk gf22 --check or agentic doctor to verify.",
+        ],
+    },
+}
+
+
+PDK_INSTALL_ALIASES = {
+    "gf180": "gf180mcu",
+    "sky130a": "sky130",
+    "openfasoc": "openfasoc130",
+    "openfasoc-130": "openfasoc130",
+    "skywater_raw": "skywater-raw",
+    "tsmc-28": "tsmc28",
+    "samsung-14": "samsung14",
+    "intel-22": "intel22",
+    "gf-22": "gf22",
 }
 
 
@@ -1209,6 +1607,78 @@ def _run_volare_install(pdk: str, version: str, target_dir: str) -> bool:
         return False
 
 
+def _install_method_label(cfg: dict) -> str:
+    if cfg.get("proprietary"):
+        return "proprietary"
+    if cfg.get("requires_volare"):
+        return "volare"
+    return cfg.get("install_method") or ("download" if cfg.get("download_url") else "manual")
+
+
+def _print_manual_pdk_steps(pdk_key: str, cfg: dict) -> None:
+    steps = cfg.get("manual_steps") or [
+        f"Place the PDK at $PDK_ROOT/{cfg.get('pdk_dir', pdk_key)}/.",
+        f"Run agentic install-pdk {pdk_key} --check.",
+    ]
+    body = "\n".join(f"{idx}. {step}" for idx, step in enumerate(steps, 1))
+    title = "Manual PDK Installation"
+    if cfg.get("proprietary"):
+        title = "Proprietary PDK"
+        body = (
+            f"[warning]{cfg['name']} is proprietary and cannot be auto-installed.[/warning]\n\n"
+            f"{body}\n\n"
+            "Open-source alternatives: sky130, gf180mcu, asap7, nangate45, freepdk45, osu018, osu035"
+        )
+    console.print(Panel(body, title=title, border_style="warning"))
+
+    docker_steps = cfg.get("docker_steps") or []
+    if docker_steps:
+        docker_body = "\n".join(f"{idx}. {step}" for idx, step in enumerate(docker_steps, 1))
+        console.print(Panel(docker_body, title="Docker/Container Install Steps", border_style="info"))
+
+
+def _ensure_pdk_root_shell_export(install_dir: str) -> None:
+    """Best-effort shell setup so future AgentIC sessions see the PDK root."""
+    bashrc = os.path.expanduser("~/.bashrc")
+    export_line = f"export PDK_ROOT={install_dir}"
+    try:
+        existing = ""
+        if os.path.exists(bashrc):
+            with open(bashrc, "r", encoding="utf-8") as f:
+                existing = f.read()
+        if export_line not in existing:
+            with open(bashrc, "a", encoding="utf-8") as f:
+                f.write("\n# AgentIC PDK root\n")
+                f.write(export_line + "\n")
+            console.print(f"[success]Added PDK_ROOT to {bashrc}[/success]")
+    except OSError as exc:
+        console.print(
+            f"[warning]Could not update {bashrc}: {exc}. Set manually: export PDK_ROOT={install_dir}[/warning]"
+        )
+
+
+def _register_custom_pdk_path(pdk_key: str, source_path: str, install_dir: str) -> None:
+    source = os.path.abspath(os.path.expanduser(source_path))
+    if not os.path.isdir(source):
+        console.print(f"[error]Custom PDK path not found: {source}[/error]")
+        raise typer.Exit(1)
+
+    target = os.path.join(install_dir, pdk_key)
+    os.makedirs(install_dir, exist_ok=True)
+    if os.path.abspath(target) != source and not os.path.exists(target):
+        try:
+            os.symlink(source, target)
+            console.print(f"[success]Linked custom PDK:[/success] {target} -> {source}")
+        except OSError as exc:
+            console.print(
+                f"[warning]Could not create symlink: {exc}[/warning]\n"
+                f"Set PDK_ROOT to the parent directory instead: [accent]export PDK_ROOT={os.path.dirname(source)}[/accent]"
+            )
+    else:
+        console.print(f"[success]Custom PDK path is available:[/success] {source}")
+    _ensure_pdk_root_shell_export(install_dir)
+
+
 @app.command("install-pdk")
 def install_pdk(
     pdk_name: str = typer.Argument(
@@ -1216,6 +1686,13 @@ def install_pdk(
         help="PDK name (e.g., sky130, gf180mcu). Use 'list' to see all available PDKs.",
     ),
     version: str = typer.Option("", "--version", "-v", help="Specific version to install"),
+    check: bool = typer.Option(False, "--check", help="Verify that the PDK is installed correctly"),
+    list_versions: bool = typer.Option(
+        False, "--list-versions", help="List installable/known versions for this PDK"
+    ),
+    pdk_path: str = typer.Option(
+        "", "--path", help="Register a custom PDK directory under $PDK_ROOT"
+    ),
     list_installed: bool = typer.Option(False, "--installed", help="List currently installed PDKs"),
     force: bool = typer.Option(False, "--force", "-f", help="Reinstall even if already installed"),
 ):
@@ -1224,10 +1701,13 @@ def install_pdk(
     Examples:
         agentic install-pdk sky130
         agentic install-pdk sky130 --version 1.0.0
+        agentic install-pdk sky130 --check
+        agentic install-pdk sky130 --list-versions
+        agentic install-pdk my_custom_pdk --path /path/to/pdk
         agentic install-pdk list
         agentic install-pdk list --installed
     """
-    from .config import detect_available_pdks
+    from .config import detect_available_pdks, validate_pdk_installation
 
     if pdk_name is None or pdk_name.lower() == "list":
         detected = detect_available_pdks()
@@ -1249,8 +1729,10 @@ def install_pdk(
 
         for key, cfg in PDK_INSTALL_CONFIGS.items():
             is_installed = key in installed
+            if list_installed and not is_installed:
+                continue
             status = "[success]Installed[/success]" if is_installed else "[dim]Not installed[/dim]"
-            install_method = "volare" if cfg.get("requires_volare") else "download"
+            install_method = _install_method_label(cfg)
             table.add_row(
                 key,
                 cfg["name"],
@@ -1265,18 +1747,60 @@ def install_pdk(
         console.print("[info]After install, verify with:[/info] [accent]agentic doctor[/accent]")
         return
 
-    pdk_key = pdk_name.strip().lower()
+    pdk_key = pdk_name.strip().lower().replace("_", "-")
+    pdk_key = PDK_INSTALL_ALIASES.get(pdk_key, pdk_key)
+    install_dir = os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel"))
+
+    if pdk_path:
+        _register_custom_pdk_path(pdk_key, pdk_path, install_dir)
+        ok, messages = validate_pdk_installation(pdk_key, install_dir)
+        for msg in messages:
+            console.print(f"  {'[success]✓[/success]' if 'Found' in msg else '[warning]⚠[/warning]'} {msg}")
+        if not ok:
+            raise typer.Exit(1)
+        return
 
     if pdk_key not in PDK_INSTALL_CONFIGS:
         console.print(
             f"[error]Unknown PDK: {pdk_name}[/error]\n"
-            "Run [accent]agentic install-pdk list[/accent] to see available PDKs."
+            "Run [accent]agentic install-pdk list[/accent] to see available PDKs, "
+            "or register a custom PDK with [accent]agentic install-pdk <name> --path /path/to/pdk[/accent]."
         )
         raise typer.Exit(1)
 
     cfg = PDK_INSTALL_CONFIGS[pdk_key]
     detected = detect_available_pdks()
     is_installed = pdk_key in detected
+
+    if list_versions:
+        versions = cfg.get("versions", [])
+        console.print(
+            Panel(
+                "\n".join(f"- {item}" for item in versions) or "No version list available.",
+                title=f"Known Versions: {cfg['name']}",
+            )
+        )
+        return
+
+    if check:
+        ok, messages = validate_pdk_installation(pdk_key, install_dir)
+        title = "PDK Check Passed" if ok else "PDK Check Failed"
+        style = "success" if ok else "error"
+        console.print(
+            Panel(
+                "\n".join(messages),
+                title=title,
+                border_style=style,
+            )
+        )
+        if not ok:
+            _print_manual_pdk_steps(pdk_key, cfg)
+            raise typer.Exit(1)
+        return
+
+    if cfg.get("proprietary"):
+        _print_manual_pdk_steps(pdk_key, cfg)
+        return
 
     if is_installed and not force:
         console.print(
@@ -1291,7 +1815,6 @@ def install_pdk(
         return
 
     target_version = version or cfg.get("default_version", "")
-    install_dir = os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel"))
     os.makedirs(install_dir, exist_ok=True)
 
     console.print(
@@ -1322,6 +1845,7 @@ def install_pdk(
 
         success = _run_volare_install(pdk_key, target_version, install_dir)
         if success:
+            _ensure_pdk_root_shell_export(install_dir)
             console.print(
                 f"[success]✅ {cfg['name']} installed successfully![/success]\n"
                 f"PDK root: [info]{install_dir}[/info]\n\n"
@@ -1340,11 +1864,8 @@ def install_pdk(
     else:
         download_url = cfg.get("download_url", "")
         if not download_url:
-            console.print(
-                f"[error]No download URL configured for {pdk_key}.[/error]\n"
-                "Manual installation required. See the PDK documentation."
-            )
-            raise typer.Exit(1)
+            _print_manual_pdk_steps(pdk_key, cfg)
+            return
 
         import tempfile
         import shutil
@@ -1398,6 +1919,7 @@ def install_pdk(
 
         new_detected = detect_available_pdks()
         if pdk_key in new_detected:
+            _ensure_pdk_root_shell_export(install_dir)
             console.print(
                 f"[success]✅ {cfg['name']} installed successfully![/success]\n"
                 f"Location: [info]{new_detected[pdk_key].get('root_path')}[/info]\n\n"
@@ -1933,6 +2455,9 @@ def build(
         help="Enable strict fail-closed gating",
     ),
     pdk: str = typer.Option("", "--pdk", help="Target PDK (auto-detected if omitted)"),
+    pdk_path: str = typer.Option(
+        "", "--pdk-path", help="Path to a custom PDK directory to use for this build"
+    ),
     max_pivots: int = typer.Option(
         2, "--max-pivots", min=0, help="Maximum strategy pivots before fail-closed"
     ),
@@ -1978,18 +2503,72 @@ def build(
     check_dependencies(skip_openlane)
 
     # ── PDK Auto-Detection & Selection ─────────────────────────────────────
+    from .config import PDKError, resolve_pdk, validate_pdk_installation
+
+    if pdk_path:
+        custom_path = os.path.abspath(os.path.expanduser(pdk_path))
+        if not os.path.isdir(custom_path):
+            console.print(f"[error]Custom PDK path not found: {custom_path}[/error]")
+            raise typer.Exit(1)
+        os.environ["PDK_ROOT"] = os.path.dirname(custom_path)
+        if not pdk:
+            pdk = os.path.basename(custom_path)
+
     detected = detect_available_pdks()
     pdk_profile: str = ""
 
     if pdk:
-        # User explicitly specified a PDK — validate it
-        resolved = get_pdk_profile(pdk)
-        pdk_profile = resolved["profile"]
-        if pdk_profile not in detected:
-            console.print(
-                f"[warning]PDK '{pdk}' not found on this system. "
-                f"Available: {', '.join(sorted(detected.keys())) or 'none'}[/warning]"
+        # User explicitly specified a PDK — validate or install/guide.
+        pdk_key = pdk.strip().lower().replace("_", "-")
+        pdk_key = PDK_INSTALL_ALIASES.get(pdk_key, pdk_key)
+        try:
+            _resolved_pdk, resolved_profile, _detected_root = resolve_pdk(
+                requested_pdk=pdk_path or pdk,
+                required=True,
             )
+        except PDKError:
+            cfg = PDK_INSTALL_CONFIGS.get(pdk_key)
+            if cfg and cfg.get("proprietary"):
+                _print_manual_pdk_steps(pdk_key, cfg)
+                raise typer.Exit(1)
+            if cfg:
+                console.print(
+                    f"[warning]PDK '{pdk}' is not installed. Starting automatic install...[/warning]"
+                )
+                install_pdk(
+                    pdk_key,
+                    version="",
+                    check=False,
+                    list_versions=False,
+                    pdk_path="",
+                    list_installed=False,
+                    force=False,
+                )
+                detected = detect_available_pdks()
+                _resolved_pdk, resolved_profile, _detected_root = resolve_pdk(
+                    requested_pdk=pdk,
+                    required=True,
+                )
+            else:
+                console.print(
+                    f"[error]PDK '{pdk}' not found.[/error]\n"
+                    f"Available: {', '.join(sorted(detected.keys())) or 'none'}\n"
+                    "Use [accent]agentic install-pdk <name>[/accent] or "
+                    "[accent]--pdk-path /path/to/custom_pdk[/accent]."
+                )
+                raise typer.Exit(1)
+
+        pdk_profile = resolved_profile.get("profile", pdk_key)
+        ok, validation_messages = validate_pdk_installation(pdk_path or pdk)
+        if not ok:
+            console.print(
+                Panel(
+                    "\n".join(validation_messages),
+                    title=f"PDK Validation Failed: {pdk}",
+                    border_style="error",
+                )
+            )
+            raise typer.Exit(1)
     elif detected:
         # Auto-detected — pick the first available unless there's a preference
         if len(detected) == 1:
@@ -2050,9 +2629,13 @@ def build(
                 "  • nangate45 — NanGate 45nm\n"
                 "  • asap7     — ASAP 7nm (predictive)\n"
                 "  • osu018    — Oklahoma State 180nm\n"
-                "  • osu035    — Oklahoma State 350nm\n\n"
+                "  • osu035    — Oklahoma State 350nm\n"
+                "  • openfasoc — OpenFASOC/SKY130 analog generator flow\n"
+                "  • lefdef175 — manual educational placeholder\n\n"
                 "Install with AgentIC (recommended):\n"
                 "  [accent]agentic install-pdk sky130[/accent]\n\n"
+                "Use a custom PDK:\n"
+                "  [accent]agentic build --name ... --pdk-path /path/to/pdk[/accent]\n\n"
                 "Then re-run: [accent]agentic build --name ...[/accent]\n\n"
                 "[info]Tip: Set PDK_ROOT=/path/to/your/pdks if non-standard location.[/info]",
                 title="⚠️ PDK Not Found",

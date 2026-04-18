@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from crewai import Agent, Crew, LLM, Task
 from rich.console import Console
+
 console = Console()
 
 from .spec_generator import (
@@ -31,6 +32,7 @@ from .spec_generator import (
     PortSpec,
     SubModuleSpec,
 )
+from ..contracts import robust_json_extract
 
 logger = logging.getLogger(__name__)
 
@@ -82,27 +84,78 @@ SIMPLE_PATTERNS: List[str] = [
 # ─── Category Map (for cross-category detection) ────────────────────
 
 CATEGORY_KEYWORDS: Dict[str, List[str]] = {
-    "PROCESSOR": ["cpu", "processor", "risc", "riscv", "rv32", "rv64",
-                   "microcontroller", "instruction", "isa", "fetch",
-                   "decode", "execute", "pipeline"],
-    "MEMORY":    ["fifo", "sram", "ram", "rom", "cache", "register file",
-                   "memory", "stack", "queue", "buffer"],
-    "INTERFACE": ["uart", "spi", "i2c", "apb", "axi", "wishbone", "usb",
-                   "serial", "baud", "mosi", "miso", "sclk"],
-    "ARITHMETIC": ["alu", "multiplier", "divider", "adder", "mac", "fpu",
-                    "floating point", "multiply", "accumulate"],
-    "CONTROL":   ["state machine", "fsm", "arbiter", "scheduler",
-                   "interrupt", "controller", "priority"],
-    "DATAPATH":  ["shift register", "barrel shifter", "pipeline stage",
-                   "datapath", "mux", "demux"],
+    "PROCESSOR": [
+        "cpu",
+        "processor",
+        "risc",
+        "riscv",
+        "rv32",
+        "rv64",
+        "microcontroller",
+        "instruction",
+        "isa",
+        "fetch",
+        "decode",
+        "execute",
+        "pipeline",
+    ],
+    "MEMORY": [
+        "fifo",
+        "sram",
+        "ram",
+        "rom",
+        "cache",
+        "register file",
+        "memory",
+        "stack",
+        "queue",
+        "buffer",
+    ],
+    "INTERFACE": [
+        "uart",
+        "spi",
+        "i2c",
+        "apb",
+        "axi",
+        "wishbone",
+        "usb",
+        "serial",
+        "baud",
+        "mosi",
+        "miso",
+        "sclk",
+    ],
+    "ARITHMETIC": [
+        "alu",
+        "multiplier",
+        "divider",
+        "adder",
+        "mac",
+        "fpu",
+        "floating point",
+        "multiply",
+        "accumulate",
+    ],
+    "CONTROL": [
+        "state machine",
+        "fsm",
+        "arbiter",
+        "scheduler",
+        "interrupt",
+        "controller",
+        "priority",
+    ],
+    "DATAPATH": ["shift register", "barrel shifter", "pipeline stage", "datapath", "mux", "demux"],
 }
 
 
 # ─── Expanded Submodule Dataclass ────────────────────────────────────
 
+
 @dataclass
 class ExpandedSubModule:
     """A submodule that may contain a full nested specification."""
+
     name: str
     description: str = ""
     ports: List[PortSpec] = field(default_factory=list)
@@ -123,6 +176,7 @@ class ExpandedSubModule:
 @dataclass
 class HierarchyResult:
     """Output of the HierarchyExpander."""
+
     design_category: str
     top_module_name: str
     ports: List[PortSpec] = field(default_factory=list)
@@ -206,6 +260,7 @@ Return ONLY this JSON (no markdown, no commentary):
 
 
 # ─── Main Class ──────────────────────────────────────────────────────
+
 
 class HierarchyExpander:
     """
@@ -350,8 +405,16 @@ class HierarchyExpander:
         if len(desc.split()) < 6 and not self._is_simple(combined):
             # Only trigger if name suggests something non-trivial
             non_trivial_names = [
-                "controller", "engine", "handler", "manager", "unit",
-                "core", "processor", "interface", "bridge", "fabric",
+                "controller",
+                "engine",
+                "handler",
+                "manager",
+                "unit",
+                "core",
+                "processor",
+                "interface",
+                "bridge",
+                "fabric",
             ]
             if any(nt in name_lower for nt in non_trivial_names):
                 logger.debug(
@@ -434,7 +497,9 @@ class HierarchyExpander:
             (nested_spec_dict, depth_reached, warnings, expansion_count)
         """
         warnings: List[str] = []
-        console.print(f"[bold cyan]🔍 Hierarchy Expander:[/bold cyan] Deep-diving into complex sub-module: [bold yellow]{sub_name}[/bold yellow] (Depth: {current_depth})...")
+        console.print(
+            f"[bold cyan]🔍 Hierarchy Expander:[/bold cyan] Deep-diving into complex sub-module: [bold yellow]{sub_name}[/bold yellow] (Depth: {current_depth})..."
+        )
 
         if current_depth > self.MAX_DEPTH:
             warnings.append(
@@ -537,8 +602,7 @@ class HierarchyExpander:
         last_error = ""
         for attempt in range(1, self.max_retries + 1):
             logger.info(
-                f"[HierarchyExpander] Expanding '{sub_name}' attempt "
-                f"{attempt}/{self.max_retries}"
+                f"[HierarchyExpander] Expanding '{sub_name}' attempt {attempt}/{self.max_retries}"
             )
 
             retry_ctx = ""
@@ -567,10 +631,15 @@ class HierarchyExpander:
 
             try:
                 raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
-                data = self._extract_json(raw)
+                data, success = robust_json_extract(
+                    raw,
+                    context=f"hierarchy_expand_{sub_name}",
+                    required_keys=["ports", "behavioral_contract"],
+                    log_failures=True,
+                )
 
-                if data is None:
-                    last_error = "Response was not valid JSON"
+                if not success or data is None:
+                    last_error = "Response was not valid JSON or missing required keys"
                     continue
 
                 # Validate minimum structure
@@ -578,7 +647,10 @@ class HierarchyExpander:
                     last_error = "Missing or invalid 'ports' array"
                     continue
 
-                if "behavioral_contract" not in data or len(data.get("behavioral_contract", [])) < 3:
+                if (
+                    "behavioral_contract" not in data
+                    or len(data.get("behavioral_contract", [])) < 3
+                ):
                     last_error = (
                         "Behavioral contract must have at least 3 statements "
                         f"(got {len(data.get('behavioral_contract', []))})"
@@ -593,13 +665,10 @@ class HierarchyExpander:
             except Exception as e:
                 last_error = str(e)
                 logger.warning(
-                    f"[HierarchyExpander] Expansion attempt {attempt} for "
-                    f"'{sub_name}' failed: {e}"
+                    f"[HierarchyExpander] Expansion attempt {attempt} for '{sub_name}' failed: {e}"
                 )
 
-        logger.error(
-            f"[HierarchyExpander] All {self.max_retries} attempts failed for '{sub_name}'"
-        )
+        logger.error(f"[HierarchyExpander] All {self.max_retries} attempts failed for '{sub_name}'")
         return None
 
     # ── Step 3: Consistency Check ────────────────────────────────────
@@ -655,15 +724,23 @@ class HierarchyExpander:
 
         # Check: Clock and reset reach sequential submodules
         sequential_keywords = [
-            "register", "flip", "ff", "latch", "memory", "fifo",
-            "counter", "state", "fsm", "pipeline", "buffer", "cache",
+            "register",
+            "flip",
+            "ff",
+            "latch",
+            "memory",
+            "fifo",
+            "counter",
+            "state",
+            "fsm",
+            "pipeline",
+            "buffer",
+            "cache",
         ]
         for sm in submodules:
             desc_lower = (sm.description or "").lower()
             name_lower = sm.name.lower()
-            is_sequential = any(
-                kw in desc_lower or kw in name_lower for kw in sequential_keywords
-            )
+            is_sequential = any(kw in desc_lower or kw in name_lower for kw in sequential_keywords)
             if is_sequential:
                 port_name_set = all_sub_ports.get(sm.name, set())
                 has_clk = any("clk" in pn or "clock" in pn for pn in port_name_set)
@@ -709,8 +786,18 @@ class HierarchyExpander:
 
         nested_subs = spec_dict.get("submodules", [])
         sequential_keywords = [
-            "register", "flip", "ff", "latch", "memory", "fifo",
-            "counter", "state", "fsm", "pipeline", "buffer", "cache",
+            "register",
+            "flip",
+            "ff",
+            "latch",
+            "memory",
+            "fifo",
+            "counter",
+            "state",
+            "fsm",
+            "pipeline",
+            "buffer",
+            "cache",
         ]
 
         for nsub in nested_subs:
@@ -718,10 +805,7 @@ class HierarchyExpander:
             nsub_desc = (nsub.get("description", "") or "").lower()
             nsub_name_lower = nsub_name.lower()
 
-            is_seq = any(
-                kw in nsub_desc or kw in nsub_name_lower
-                for kw in sequential_keywords
-            )
+            is_seq = any(kw in nsub_desc or kw in nsub_name_lower for kw in sequential_keywords)
             if is_seq:
                 port_names = {p.get("name", "") for p in nsub.get("ports", [])}
                 has_clk = any("clk" in pn or "clock" in pn for pn in port_names)
@@ -731,23 +815,27 @@ class HierarchyExpander:
                         f"CONSISTENCY_FIX: Nested sequential submodule "
                         f"'{module_name}/{nsub_name}' missing clock — added 'clk'."
                     )
-                    nsub.setdefault("ports", []).append({
-                        "name": "clk",
-                        "direction": "input",
-                        "data_type": "logic",
-                        "description": "Clock (auto-added)",
-                    })
+                    nsub.setdefault("ports", []).append(
+                        {
+                            "name": "clk",
+                            "direction": "input",
+                            "data_type": "logic",
+                            "description": "Clock (auto-added)",
+                        }
+                    )
                 if not has_rst:
                     fixes.append(
                         f"CONSISTENCY_FIX: Nested sequential submodule "
                         f"'{module_name}/{nsub_name}' missing reset — added 'rst_n'."
                     )
-                    nsub.setdefault("ports", []).append({
-                        "name": "rst_n",
-                        "direction": "input",
-                        "data_type": "logic",
-                        "description": "Reset (auto-added)",
-                    })
+                    nsub.setdefault("ports", []).append(
+                        {
+                            "name": "rst_n",
+                            "direction": "input",
+                            "data_type": "logic",
+                            "description": "Reset (auto-added)",
+                        }
+                    )
 
             # Recurse deeper if nested_spec exists
             child_spec = nsub.get("nested_spec")
@@ -759,38 +847,6 @@ class HierarchyExpander:
     # ── Utility ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _extract_json(raw: str) -> Optional[Dict[str, Any]]:
-        """Extract the first JSON object from LLM output."""
-        # Strip think tags and markdown fences
-        cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"```", "", cleaned)
-        cleaned = cleaned.strip()
-
-        # Try direct parse
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-
-        # Find first { ... } block
-        depth = 0
-        start = -1
-        for i, ch in enumerate(cleaned):
-            if ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    try:
-                        return json.loads(cleaned[start : i + 1])
-                    except json.JSONDecodeError:
-                        start = -1
-
-        return None
-
     # ── Enrichment for downstream stages ─────────────────────────────
 
     def to_hierarchy_enrichment(self, result: HierarchyResult) -> Dict[str, Any]:
@@ -812,10 +868,6 @@ class HierarchyExpander:
             "hierarchy_depth": result.hierarchy_depth,
             "expansion_count": result.expansion_count,
             "expanded_modules": expansion_summary,
-            "hierarchy_warnings": [
-                w for w in result.warnings if w.startswith("HIERARCHY_WARNING")
-            ],
-            "consistency_fixes": [
-                w for w in result.warnings if w.startswith("CONSISTENCY_FIX")
-            ],
+            "hierarchy_warnings": [w for w in result.warnings if w.startswith("HIERARCHY_WARNING")],
+            "consistency_fixes": [w for w in result.warnings if w.startswith("CONSISTENCY_FIX")],
         }

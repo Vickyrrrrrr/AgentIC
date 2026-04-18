@@ -96,12 +96,105 @@ class AntennaResult:
     metrics: Dict[str, Any] = field(default_factory=dict)
 
 
+def parse_drc_errors(report: str) -> List[Dict[str, Any]]:
+    """Parse Magic DRC report text or a report path into structured records."""
+    if os.path.exists(report):
+        with open(report) as f:
+            content = f.read()
+    else:
+        content = report
+
+    errors: List[Dict[str, Any]] = []
+    count_match = re.search(
+        r"(?:total|number).*?(?:violations?|DRC)\s*[=:\-]?\s*(\d+)",
+        content,
+        re.IGNORECASE,
+    )
+
+    detail_patterns: List[Tuple[str, re.Pattern[str], str]] = [
+        (
+            "min_spacing",
+            re.compile(r"(min(?:imum)?\s+)?spacing.*?(?:violation|error)?", re.IGNORECASE),
+            "Increase spacing between shapes on the reported layer.",
+        ),
+        (
+            "min_width",
+            re.compile(r"(min(?:imum)?\s+)?width.*?(?:violation|error)?", re.IGNORECASE),
+            "Widen the reported shape or adjust the cell/layout rule deck.",
+        ),
+        (
+            "short",
+            re.compile(r"short.*detected|shorted", re.IGNORECASE),
+            "Separate the shorted nets or inspect extracted connectivity.",
+        ),
+        (
+            "overlap",
+            re.compile(r"overlap.*detected|illegal.*overlap", re.IGNORECASE),
+            "Remove illegal geometry overlap or add required enclosure.",
+        ),
+        (
+            "generic_drc",
+            re.compile(r"\b(?:drc|violation)\b", re.IGNORECASE),
+            "Inspect the Magic report and update layout/floorplan geometry.",
+        ),
+    ]
+
+    for line_no, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        matched_type = ""
+        fix_hint = ""
+        for error_type, pattern, hint in detail_patterns:
+            if pattern.search(line):
+                matched_type = error_type
+                fix_hint = hint
+                break
+        if not matched_type:
+            continue
+
+        record: Dict[str, Any] = {
+            "tool": "magic",
+            "type": matched_type,
+            "severity": "error",
+            "message": line,
+            "line": line_no,
+            "fix_hint": fix_hint,
+        }
+        layer_match = re.search(r"\b(li\d|met\d|metal\d|poly|diff|nwell|pwell|m\d)\b", line, re.IGNORECASE)
+        if layer_match:
+            record["layer"] = layer_match.group(1)
+        coord_match = re.search(r"[\[(]\s*([+-]?\d+(?:\.\d+)?)\s*,?\s+([+-]?\d+(?:\.\d+)?)\s*[\])]", line)
+        if coord_match:
+            record["x_um"] = float(coord_match.group(1))
+            record["y_um"] = float(coord_match.group(2))
+        errors.append(record)
+
+    if count_match and int(count_match.group(1)) > 0 and not errors:
+        count = int(count_match.group(1))
+        errors.append(
+            {
+                "tool": "magic",
+                "type": "generic_drc",
+                "severity": "error",
+                "message": f"{count} DRC violations reported (details unknown)",
+                "count": count,
+                "line": 0,
+                "fix_hint": "Inspect the full Magic report for rule names and locations.",
+            }
+        )
+
+    return errors
+
+
 def run_magic_drc(
     gds_path: str,
-    tech_file: str,
-    output_dir: str,
+    tech_file: str = "",
+    output_dir: str = "",
     pdk: str = "sky130",
     pdk_root: Optional[str] = None,
+    lef_path: str = "",
     extra_drc_rules: Optional[List[str]] = None,
     enable_pdf_output: bool = False,
     timeout: int = 600,
@@ -125,6 +218,7 @@ def run_magic_drc(
     Returns:
         DRCResult with violation count, severity, and locations
     """
+    output_dir = output_dir or os.getcwd()
     os.makedirs(output_dir, exist_ok=True)
     design_name = design_name or os.path.splitext(os.path.basename(gds_path))[0]
 
@@ -179,7 +273,9 @@ def run_magic_drc(
         errors.append(f"Magic binary not found. Install Magic or set MAGIC_BIN env var.")
         return _error_drc_result(errors, drc_report)
 
-    violations = _parse_magic_drc_output(stdout + stderr, drc_report)
+    raw_output = stdout + stderr
+    structured_errors = parse_drc_errors(raw_output)
+    violations = _parse_magic_drc_output(raw_output, drc_report)
 
     with open(drc_report, "a") as f:
         f.write(f"\n{'=' * 60}\nMagic DRC Complete\n")
@@ -196,16 +292,17 @@ def run_magic_drc(
         warning_count=len(warnings),
         drc_report_path=drc_report,
         gds_path=gds_path,
-        lef_path="",
+        lef_path=lef_path,
         tech_file=tech_file,
         runtime_sec=runtime,
         errors=errors,
-        diagnostics=[],
+        diagnostics=[json.dumps(e, sort_keys=True) for e in structured_errors],
         metrics={
             "drc_violations": len(violations),
             "warnings": len(warnings),
             "runtime_sec": runtime,
             "pdk": pdk,
+            "structured_errors": structured_errors,
         },
     )
 

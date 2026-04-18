@@ -56,6 +56,101 @@ class SynthesisResult:
     stderr: str = ""
 
 
+def parse_yosys_errors(output: str) -> List[Dict[str, Any]]:
+    """Parse Yosys output into structured error records."""
+    errors: List[Dict[str, Any]] = []
+
+    patterns: List[Tuple[str, re.Pattern[str], str]] = [
+        (
+            "module_not_found",
+            re.compile(r"(?:Error|ERROR):.*Module ['\"]?(\w+)['\"]? not found", re.IGNORECASE),
+            "Add the missing module source or fix the instantiated module name.",
+        ),
+        (
+            "missing_signal",
+            re.compile(
+                r"(?:Error|ERROR):.*missing definition of signal ['\"]?(\w+)['\"]?",
+                re.IGNORECASE,
+            ),
+            "Declare the signal or correct the typo in the RTL.",
+        ),
+        (
+            "multiple_drivers",
+            re.compile(
+                r"(?:Error|ERROR):.*multiple drivers? for signal ['\"]?([\\\w.$\[\]:]+)['\"]?",
+                re.IGNORECASE,
+            ),
+            "Merge the assignments behind a mux or keep the signal driven from one process.",
+        ),
+        (
+            "unknown_cell",
+            re.compile(r"(?:Error|ERROR):.*unknown cell type ['\"]?(\w+)['\"]?", re.IGNORECASE),
+            "Map the cell through the PDK library or replace the unsupported primitive.",
+        ),
+        (
+            "port_direction_mismatch",
+            re.compile(r"(?:Error|ERROR):.*port.*direction.*mismatch", re.IGNORECASE),
+            "Check the module instance port declarations and connections.",
+        ),
+        (
+            "argument_count_mismatch",
+            re.compile(r"(?:Error|ERROR):.*argument.*count.*mismatch", re.IGNORECASE),
+            "Match the instance parameter or port count to the module declaration.",
+        ),
+        (
+            "unsupported_syntax",
+            re.compile(r"(?:Error|ERROR):.*Unsupported .* syntax .* in .* context", re.IGNORECASE),
+            "Rewrite the construct into synthesis-supported SystemVerilog.",
+        ),
+        (
+            "syntax",
+            re.compile(r"(?:Error|ERROR):.*syntax error", re.IGNORECASE),
+            "Fix the reported SystemVerilog syntax.",
+        ),
+    ]
+
+    for line_no, raw_line in enumerate(output.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if not re.search(r"\b(error|fatal)\b|%Error", line, re.IGNORECASE):
+            continue
+
+        record: Dict[str, Any] = {
+            "tool": "yosys",
+            "type": "generic",
+            "severity": "error",
+            "message": line,
+            "line": line_no,
+        }
+
+        loc = re.search(r"([\w./\\-]+\.(?:sv|v|vh|svh)):(\d+)(?::(\d+))?", line)
+        if loc:
+            record["file"] = loc.group(1)
+            record["source_line"] = int(loc.group(2))
+            if loc.group(3):
+                record["column"] = int(loc.group(3))
+
+        for error_type, pattern, hint in patterns:
+            match = pattern.search(line)
+            if not match:
+                continue
+            record["type"] = error_type
+            record["fix_hint"] = hint
+            if match.groups():
+                value = match.group(1)
+                if "module" in error_type or error_type == "unknown_cell":
+                    record["module"] = value
+                elif "signal" in error_type or error_type == "multiple_drivers":
+                    record["signal"] = value
+            break
+
+        errors.append(record)
+
+    return errors
+
+
 def run_yosys_synth(
     rtl_files: List[str],
     top_module: str,
@@ -166,12 +261,23 @@ def run_yosys_synth(
     area_um2 = _parse_stat_area(stdout, pdk)
     gate_count = _parse_gate_equiv(dff_count, lut_count, cell_count)
 
+    structured_errors = parse_yosys_errors(stdout + "\n" + stderr)
+    diagnostics.extend(json.dumps(e, sort_keys=True) for e in structured_errors)
+
     for line in stdout.splitlines():
         l = line.strip()
         if l.startswith("%Warning") or l.startswith("Warning:"):
             warnings.append(l)
         if "error" in l.lower() and "%Error" in l:
             errors.append(l)
+
+    for err in structured_errors:
+        message = err.get("message", "")
+        if message and message not in errors:
+            errors.append(message)
+
+    if proc.returncode != 0 and not errors:
+        errors.append(f"Yosys exited with return code {proc.returncode}")
 
     ok = os.path.exists(netlist_path) and proc.returncode == 0 and not errors
 
