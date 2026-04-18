@@ -119,17 +119,17 @@ jobs:
             fi
             sudo $DOCKER_COMPOSE config > /dev/null 2>&1 || true
 
-            # ── Clean up legacy containers if using old docker-compose v1 ────
-            compose_version=$(sudo docker compose version --short 2>/dev/null || sudo docker-compose version --short 2>/dev/null || echo unknown)
-            if echo "$compose_version" | grep -Eq '^1\.'; then
-              echo "Legacy docker-compose detected (${compose_version}); using clean container replacement"
-              legacy_containers=$(sudo docker ps -a --format '{{.Names}}' | grep -E '(^agentic_|^[0-9a-f]{12,}_agentic_)' || true)
-              if [ -n "$legacy_containers" ]; then
-                echo "Removing legacy compose containers:"
-                echo "$legacy_containers"
-                echo "$legacy_containers" | xargs -r sudo docker rm -f
+            # ── FIX: Remove any stopped/conflicting containers before re-creating ──
+            echo "Removing any conflicting stopped containers..."
+            for cname in agentic_minio_setup agentic_worker agentic_api agentic_db agentic_redis agentic_minio; do
+              if sudo docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+                echo "  Removing container: $cname"
+                sudo docker rm -f "$cname" || true
               fi
-            fi
+            done
+
+            # ── Tear down existing compose stack cleanly ──────────────────────
+            sudo $DOCKER_COMPOSE down --remove-orphans || true
 
             # ── Cache: reuse the agentic:local image if it exists ────────────
             # Only remove dangling images (NOT the built agentic:local layer cache)
@@ -139,7 +139,7 @@ jobs:
             # ── Phase 1: Bring up CORE services only (no observability) ──────
             # This prevents prometheus from failing because api isn't ready yet
             echo "Starting core services..."
-            sudo $DOCKER_COMPOSE up -d --build --remove-orphans \
+            sudo $DOCKER_COMPOSE up -d --build --force-recreate --remove-orphans \
               api worker db redis minio minio-setup
 
             # ── Wait for core services to be healthy ─────────────────────────
