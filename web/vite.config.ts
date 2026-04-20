@@ -39,11 +39,11 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // When VITE_API_BASE_URL is not set, proxy /api/* to the local Docker backend
-      '/api': {
+      // When VITE_API_BASE_URL is not set, proxy /api/v1/* to the local Docker backend
+      '/api/v1': {
         target: 'http://localhost:7860',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
+        rewrite: (path) => path.replace(/^\/api\/v1/, ''),
       },
     },
   },

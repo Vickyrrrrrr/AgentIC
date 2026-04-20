@@ -1,10 +1,13 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
 import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import { LandingPage } from './pages/LandingPage';
 import { WaitlistDashboard } from './pages/WaitlistDashboard';
 import { api } from './api';
 import { BillingModal } from './components/BillingModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { queryClient } from './lib/query-client';
 import './index.css';
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -440,138 +443,144 @@ const App = () => {
   };
 
   return (
-    <div className="app-shell workspace-shell">
-      <aside className="app-sidebar">
-        <div className="app-brand">
-          <div className="app-brand-logo">A</div>
-          <div>
-            <div className="app-brand-title">AgentIC</div>
-            <div className="app-brand-sub">Autonomous Silicon Workspace</div>
-          </div>
-        </div>
-
-        {NAV_GROUPS.map((group) => (
-          <div className="app-sidebar-group" key={group.label}>
-            <div className="app-sidebar-label">{group.label}</div>
-            <div className="app-nav">
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <button
-                    key={item.page}
-                    className={`app-nav-btn${selectedPage === item.page ? ' active' : ''}`}
-                    onClick={() => setSelectedPage(item.page)}
-                  >
-                    <Icon size={16} className="nav-icon" />
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
+    <QueryClientProvider client={queryClient}>
+      <ErrorBoundary>
+        <div className="app-shell workspace-shell">
+          <aside className="app-sidebar">
+            <div className="app-brand">
+              <div className="app-brand-logo">A</div>
+              <div>
+                <div className="app-brand-title">AgentIC</div>
+                <div className="app-brand-sub">Autonomous Silicon Workspace</div>
+              </div>
             </div>
-          </div>
-        ))}
 
-        <div className="app-sidebar-footer">
-          <button className="theme-toggle" onClick={() => setShowBillingModal(true)}>
-            Configure BYOK Keys
-          </button>
-          <div className="app-version">
-            {profile?.plan ? `Plan: ${profile.plan}` : 'Local Workspace'} · v3.0
-          </div>
-        </div>
-      </aside>
+            {NAV_GROUPS.map((group) => (
+              <div className="app-sidebar-group" key={group.label}>
+                <div className="app-sidebar-label">{group.label}</div>
+                <div className="app-nav">
+                  {group.items.map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={item.page}
+                        className={`app-nav-btn${selectedPage === item.page ? ' active' : ''}`}
+                        onClick={() => setSelectedPage(item.page)}
+                      >
+                        <Icon size={16} className="nav-icon" />
+                        <span>{item.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
 
-      <main className="app-main">
-        <header className="app-topbar workspace-topbar">
-          <div className="workspace-title-wrap">
-            <h1>{currentPageMeta.title}</h1>
-            <div className="app-topbar-meta">{currentPageMeta.subtitle}</div>
-          </div>
-
-          <div className="workspace-topbar-actions">
-            {designs.length > 0 && (
-              <select
-                className="app-design-select"
-                value={selectedDesign}
-                onChange={(e) => setSelectedDesign(e.target.value)}
-                title="Select design context"
-              >
-                {designs.map((d) => (
-                  <option key={d.name} value={d.name}>
-                    {d.name}
-                    {d.has_gds ? ' · GDS' : ''}
-                  </option>
-                ))}
-              </select>
-            )}
-
-            <span className="workspace-plan-badge">
-              {profile?.auth_enabled ? (profile?.plan || 'free') : 'local'}
-            </span>
-
-            <button
-              className="top-nav-btn"
-              onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
-              title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
-            >
-              {theme === 'light' ? 'Dark' : 'Light'}
-            </button>
-
-            {session && (
-              <button className="top-nav-btn" onClick={handleLogout} title="Sign out">
-                Sign Out
+            <div className="app-sidebar-footer">
+              <button className="theme-toggle" onClick={() => setShowBillingModal(true)}>
+                Configure BYOK Keys
               </button>
-            )}
-          </div>
-        </header>
-
-        <section className="app-content">
-          <Suspense
-            fallback={
-              <div className="workspace-page-loader">
-                <div className="premium-loader">
-                  <span className="premium-loader-dot" />
-                  <span className="premium-loader-dot" />
-                  <span className="premium-loader-dot" />
-                </div>
-                <span>Loading workspace...</span>
+              <div className="app-version">
+                {profile?.plan ? `Plan: ${profile.plan}` : 'Local Workspace'} · v3.0
               </div>
-            }
-          >
-            <div key={selectedPage} className="page-transition">
-              {renderPage()}
             </div>
-          </Suspense>
-        </section>
-      </main>
+          </aside>
 
-      <BillingModal
-        isOpen={showBillingModal}
-        onClose={() => setShowBillingModal(false)}
-        onKeySaved={() => {
-          setProfile((prev) => (prev ? { ...prev, has_byok_key: true } : prev));
-        }}
-      />
-
-      {showPricing && (
-        <div className="pricing-standalone">
-          <Suspense
-            fallback={
-              <div className="workspace-page-loader">
-                <div className="premium-loader">
-                  <span className="premium-loader-dot" />
-                  <span className="premium-loader-dot" />
-                  <span className="premium-loader-dot" />
-                </div>
-                <span>Loading...</span>
+          <main className="app-main">
+            <header className="app-topbar workspace-topbar">
+              <div className="workspace-title-wrap">
+                <h1>{currentPageMeta.title}</h1>
+                <div className="app-topbar-meta">{currentPageMeta.subtitle}</div>
               </div>
-            }
-          >
-            <Pricing />
-          </Suspense>
+
+              <div className="workspace-topbar-actions">
+                {designs.length > 0 && (
+                  <select
+                    className="app-design-select"
+                    value={selectedDesign}
+                    onChange={(e) => setSelectedDesign(e.target.value)}
+                    title="Select design context"
+                  >
+                    {designs.map((d) => (
+                      <option key={d.name} value={d.name}>
+                        {d.name}
+                        {d.has_gds ? ' · GDS' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                <span className="workspace-plan-badge">
+                  {profile?.auth_enabled ? (profile?.plan || 'free') : 'local'}
+                </span>
+
+                <button
+                  className="top-nav-btn"
+                  onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+                  title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+                >
+                  {theme === 'light' ? 'Dark' : 'Light'}
+                </button>
+
+                {session && (
+                  <button className="top-nav-btn" onClick={handleLogout} title="Sign out">
+                    Sign Out
+                  </button>
+                )}
+              </div>
+            </header>
+
+            <section className="app-content">
+              <ErrorBoundary>
+                <Suspense
+                  fallback={
+                    <div className="workspace-page-loader">
+                      <div className="premium-loader">
+                        <span className="premium-loader-dot" />
+                        <span className="premium-loader-dot" />
+                        <span className="premium-loader-dot" />
+                      </div>
+                      <span>Loading workspace...</span>
+                    </div>
+                  }
+                >
+                  <div key={selectedPage} className="page-transition">
+                    {renderPage()}
+                  </div>
+                </Suspense>
+              </ErrorBoundary>
+            </section>
+          </main>
+
+          <BillingModal
+            isOpen={showBillingModal}
+            onClose={() => setShowBillingModal(false)}
+            onKeySaved={() => {
+              setProfile((prev) => (prev ? { ...prev, has_byok_key: true } : prev));
+            }}
+          />
+
+          {showPricing && (
+            <div className="pricing-standalone">
+              <Suspense
+                fallback={
+                  <div className="workspace-page-loader">
+                    <div className="premium-loader">
+                      <span className="premium-loader-dot" />
+                      <span className="premium-loader-dot" />
+                      <span className="premium-loader-dot" />
+                    </div>
+                    <span>Loading...</span>
+                  </div>
+                }
+              >
+                <Pricing />
+              </Suspense>
+            </div>
+          )}
         </div>
-      )}
-    </div>
+      </ErrorBoundary>
+    </QueryClientProvider>
   );
 };
 

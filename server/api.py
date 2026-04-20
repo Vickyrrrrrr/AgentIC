@@ -35,7 +35,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import inspect, text
 
 from server.approval import approval_manager
@@ -86,9 +86,16 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+_ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "")
+CORS_ORIGINS = (
+    [origin.strip() for origin in _ALLOWED_ORIGINS.split(",") if origin.strip()]
+    if _ALLOWED_ORIGINS
+    else ["*"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow your Vercel frontend to proxy requests securely
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -862,9 +869,7 @@ def _get_role_llm_map(
         if base_url:
             llm_kwargs["base_url"] = base_url
         shared_llm = LLM(**llm_kwargs)
-        print("\n--- 🤖 AgentIC Compute Routing Map ---", flush=True)
-        print("[Router] ALL ROLES -> AgentIC ({})".format(model), flush=True)
-        print("--------------------------------------\n", flush=True)
+        logger.info("AgentIC Compute Routing Map: ALL ROLES -> AgentIC (%s)", model)
         return {
             role: shared_llm
             for role in [
@@ -912,10 +917,8 @@ def _get_role_llm_map(
         debug_log_map[role] = f"{resolved['model']} [{resolved['source']}]"
 
     # Print the assignments so they appear in Docker logs
-    print("\n--- 🤖 Backend Compute Routing Map ---", flush=True)
     for r, m in debug_log_map.items():
-        print(f"[Router] {r.upper():<20} -> {m}", flush=True)
-    print("--------------------------------------\n", flush=True)
+        logger.debug("LLM Routing: %s -> %s", r.upper(), m)
 
     return role_map
 
@@ -1069,44 +1072,46 @@ def _emit_stage_complete(job_id: str, payload: dict):
 
 # ─── Models ──────────────────────────────────────────────────────────
 class BuildRequest(BaseModel):
-    api_key: Optional[str] = None
-    design_name: str
-    description: str
+    api_key: Optional[str] = Field(default=None, max_length=512)
+    design_name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+    description: str = Field(min_length=1, max_length=10000)
     skip_openlane: bool = False
     skip_coverage: bool = False
     full_signoff: bool = False
-    max_retries: int = 5
+    max_retries: int = Field(default=5, ge=0, le=20)
     show_thinking: bool = False
-    min_coverage: float = 80.0
+    min_coverage: float = Field(default=80.0, ge=0.0, le=100.0)
     strict_gates: bool = False
-    pdk_profile: str = "sky130"
-    max_pivots: int = 2
-    congestion_threshold: float = 10.0
-    hierarchical: str = "auto"
-    tb_gate_mode: str = "strict"
-    tb_max_retries: int = 3
-    tb_fallback_template: str = "uvm_lite"
-    coverage_backend: str = "auto"  # From SIM_BACKEND_DEFAULT
-    coverage_fallback_policy: str = (
-        "fail_closed"  # From COVERAGE_FALLBACK_POLICY_DEFAULT
-    )
-    coverage_profile: str = "balanced"  # From COVERAGE_PROFILE_DEFAULT
-    human_in_loop: bool = (
-        False  # Enable human-in-the-loop approval (HITL Build page sends True)
-    )
-    skip_stages: List[str] = []  # Stages to skip (from build mode selector UI)
-    plan_type: str = "byok"  # "agentic_paid" or "byok"
+    pdk_profile: str = Field(default="sky130", max_length=32)
+    max_pivots: int = Field(default=2, ge=0, le=10)
+    congestion_threshold: float = Field(default=10.0, ge=0.0, le=100.0)
+    hierarchical: str = Field(default="auto", max_length=16)
+    tb_gate_mode: str = Field(default="strict", max_length=16)
+    tb_max_retries: int = Field(default=3, ge=0, le=10)
+    tb_fallback_template: str = Field(default="uvm_lite", max_length=32)
+    coverage_backend: str = Field(default="auto", max_length=16)
+    coverage_fallback_policy: str = Field(default="fail_closed", max_length=16)
+    coverage_profile: str = Field(default="balanced", max_length=16)
+    human_in_loop: bool = False
+    skip_stages: List[str] = Field(default_factory=list, max_length=50)
+    plan_type: str = Field(default="byok", max_length=16)
+
+    model_config = {"str_strip_whitespace": True}
 
 
 class ApproveRequest(BaseModel):
-    stage: str
-    design_name: str
+    stage: str = Field(min_length=1, max_length=64)
+    design_name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+
+    model_config = {"str_strip_whitespace": True}
 
 
 class RejectRequest(BaseModel):
-    stage: str
-    design_name: str
-    feedback: Optional[str] = None
+    stage: str = Field(min_length=1, max_length=64)
+    design_name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+    feedback: Optional[str] = Field(default=None, max_length=5000)
+
+    model_config = {"str_strip_whitespace": True}
 
 
 class BuildElaborateRequest(BaseModel):
@@ -2480,6 +2485,20 @@ async def stream_build_events(job_id: str):
             ):
                 yield f"data: {json.dumps({'type': 'stream_end', 'status': job['status']})}\n\n"
                 break
+                
+            # Orphan detection: if stuck in 'cancelling' for ~15 seconds without the worker acknowledging it,
+            # assume the worker is dead and force the cancellation.
+            if job["status"] == "cancelling":
+                if not hasattr(stream_build_events, "cancel_ticks"):
+                    stream_build_events.cancel_ticks = {}
+                stream_build_events.cancel_ticks[job_id] = stream_build_events.cancel_ticks.get(job_id, 0) + 1
+                if stream_build_events.cancel_ticks[job_id] > 30:
+                    job["status"] = "cancelled"
+                    job["build_status"] = "cancelled"
+                    job.setdefault("result", {})["failure_explanation"] = "Build unexpectedly orphaned (Worker crashed or restarted). Forced cancellation."
+                    _sync_job_to_db(job_id)
+                    yield f"data: {json.dumps({'type': 'stream_end', 'status': 'cancelled'})}\n\n"
+                    break
 
             # If the orchestrator is waiting for elaboration, emit a special status event periodically
             # We track this locally so we don't spam the stream every 0.4s
