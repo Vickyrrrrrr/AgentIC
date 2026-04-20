@@ -1405,8 +1405,16 @@ class BuildOrchestrator:
         except Exception as e:
             import traceback
 
+            err_trace = traceback.format_exc()
+            # ALWAYS log the exception — not just in verbose mode.
+            # This was causing builds to fail silently with zero diagnostics.
+            logger.error("Orchestrator run() crashed: %s\n%s", e, err_trace)
+            console.print(f"[red]ORCHESTRATOR CRASH:[/red] {e}")
             if self.verbose:
-                console.print(traceback.format_exc())
+                console.print(err_trace)
+            # Store traceback so _run_agentic_build can surface it in the result
+            self.artifacts["crash_traceback"] = err_trace
+            self.artifacts["crash_error"] = str(e)
             self.state = BuildState.FAIL
         finally:
             # Restore stderr
