@@ -83,6 +83,8 @@ fix_subprocess.py
 fix_*.py
 modify_*.py
 scripts/remote_setup.sh
+video
+skills
 
 # Benchmark / leaderboard artifacts
 *.jsonl

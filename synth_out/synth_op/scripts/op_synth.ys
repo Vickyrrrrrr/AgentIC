@@ -1,0 +1,17 @@
+read_verilog designs/tiny_alu/src/tiny_alu.v
+# High-level synthesis
+synth -top op
+opt_expr -fine
+opt_clean
+# Technology stats for sky130A
+stat
+# Clock constraint: 10.0 ns (100.0 MHz)
+clk constraint [get_ports clk] 10.0
+opt -purge_registers  # remove unused registers
+# Output
+write_verilog ./synth_out/synth_op/op_synth.v
+write_ilang ./synth_out/synth_op/op_synth.ys
+# Statistics
+stat
+check
+select -assert-count 0 t:$undefined  # ensure no unresolved signals
