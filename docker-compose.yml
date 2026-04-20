@@ -1,13 +1,10 @@
-x-agentic-image: &agentic-image
-  image: ${AGENTIC_IMAGE:-agentic:local}
-  build:
-    context: .
-    dockerfile: Dockerfile
-
 services:
   # The FastAPI Web Server (handles API requests quickly)
   api:
-    <<: *agentic-image
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentic:local
     container_name: agentic_api
     ports:
       - "7860:7860"
@@ -55,7 +52,10 @@ services:
 
   # The Background Worker (handles heavy LLM & VLSI builds)
   worker:
-    <<: *agentic-image
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentic:local
     container_name: agentic_worker
     env_file:
       - .env
