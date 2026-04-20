@@ -1,0 +1,152 @@
+#!/usr/bin/env node
+
+/**
+ * AgentIC CLI Wrapper (npm)
+ * Wraps the Python CLI for Node.js/npm users
+ */
+
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import fs from 'fs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const ROOT_DIR = join(__dirname, '..');
+const MIN_PYTHON_VERSION = '3.10';
+
+function log(msg) {
+  console.error(`[agentic] ${msg}`);
+}
+
+function error(msg) {
+  console.error(`[agentic] ERROR: ${msg}`);
+  process.exit(1);
+}
+
+async function checkPython() {
+  return new Promise((resolve) => {
+    const proc = spawn('python3', ['--version'], { shell: true });
+    let output = '';
+    proc.stdout.on('data', (d) => output += d);
+    proc.stderr.on('data', (d) => output += d);
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        error('Python 3 is not installed. Please install Python 3.10+ and try again.');
+      }
+      const match = output.match(/Python (\d+\.\d+)/);
+      if (match) {
+        const version = parseFloat(match[1]);
+        if (version < MIN_PYTHON_VERSION) {
+          error(`Python ${version} found but ${MIN_PYTHON_VERSION}+ required. Please upgrade Python.`);
+        }
+        resolve(true);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+}
+
+async function checkPip() {
+  return new Promise((resolve) => {
+    const proc = spawn('python3', ['-m', 'pip', '--version'], { shell: true });
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        error('pip is not installed. Run: pip3 install agentic-ic');
+      }
+      resolve(true);
+    });
+    proc.on('error', () => {
+      error('pip is not installed. Run: pip3 install agentic-ic');
+    });
+  });
+}
+
+async function checkInstalled() {
+  return new Promise((resolve) => {
+    const proc = spawn('which', ['agentic'], { shell: true });
+    proc.on('close', (code) => {
+      resolve(code === 0);
+    });
+    proc.on('error', () => resolve(false));
+  });
+}
+
+async function installPackage() {
+  log('Installing agentic-ic package...');
+  return new Promise((resolve, reject) => {
+    const proc = spawn('python3', ['-m', 'pip', 'install', 'agentic-ic'], {
+      shell: true,
+      stdio: 'inherit'
+    });
+    proc.on('close', (code) => {
+      if (code === 0) {
+        log('agentic-ic installed successfully!');
+        resolve(true);
+      } else {
+        error('Failed to install agentic-ic. Please run: pip3 install agentic-ic');
+      }
+    });
+  });
+}
+
+async function runAgentic(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('agentic', args, {
+      shell: true,
+      stdio: 'inherit',
+      env: { ...process.env, FORCE_COLOR: '1' }
+    });
+    proc.on('close', (code) => {
+      process.exit(code || 0);
+    });
+    proc.on('error', (err) => {
+      error(`Failed to run agentic: ${err.message}`);
+    });
+  });
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+
+  if (args.length > 0 && args[0] === 'check-deps') {
+    log('Checking dependencies...');
+    try {
+      await checkPython();
+      const installed = await checkInstalled();
+      if (!installed) {
+        log('agentic-ic not found. Attempting to install...');
+        await installPackage();
+      } else {
+        log('agentic-ic is installed.');
+      }
+      console.log('[OK] All dependencies satisfied.');
+    } catch (e) {
+      error(e.message);
+    }
+    return;
+  }
+
+  if (args.length > 0 && args[0] === 'doctor') {
+    log('Running AgentIC health check...');
+  } else if (args.length > 0 && args[0] === '--version') {
+    console.log('3.0.4');
+    return;
+  }
+
+  try {
+    const installed = await checkInstalled();
+    if (!installed) {
+      log('agentic-ic not installed.');
+      log('Installing...');
+      await installPackage();
+    }
+    await runAgentic(args);
+  } catch (e) {
+    error(e.message);
+  }
+}
+
+main();

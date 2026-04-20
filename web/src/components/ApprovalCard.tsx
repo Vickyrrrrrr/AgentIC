@@ -21,11 +21,11 @@ interface Props {
 }
 
 const STAGE_ICONS: Record<string, string> = {
-    INIT: '⚙', SPEC: '◈', SPEC_VALIDATE: '⊘', HIERARCHY_EXPAND: '⊞', FEASIBILITY_CHECK: '⚖', CDC_ANALYZE: '↔', VERIFICATION_PLAN: '☑', RTL_GEN: '⌨', RTL_FIX: '◪',
-    VERIFICATION: '◉', FORMAL_VERIFY: '◈', COVERAGE_CHECK: '◎',
-    REGRESSION: '↺', SDC_GEN: '⧗', FLOORPLAN: '▣',
-    HARDENING: '⬡', CONVERGENCE_REVIEW: '◎', ECO_PATCH: '⟴',
-    SIGNOFF: '✓', SUCCESS: '✦', FAIL: '✗',
+    INIT: '⚙', SPEC: '◈', SPEC_VALIDATE: '⊘', HIERARCHY_EXPAND: '⊞', VERIFICATION_PLAN: '☑', RTL_GEN: '⌨', RTL_FIX: '◪',
+    LINT_CHECK: '✓', CDC_ANALYZE: '↔', VERIFICATION: '◉', FORMAL_VERIFY: '◈', COVERAGE_CHECK: '◎',
+    REGRESSION: '↺', SDC_GEN: '⧗', SYNTHESIS: '⚡', FEASIBILITY_CHECK: '⚖', DFT_SCAN: '🔬', DFT_ATPG: '📝',
+    MBIST: '💾', GLS_SIM: '🔬', FLOORPLAN: '▣', HARDENING: '⬡', TIMING_ANALYSIS: '⏱️', CONVERGENCE_REVIEW: '◎',
+    ECO_PATCH: '⟴', POWER_ANALYSIS: '⚡', PHYSICAL_VERIFY: '🔍', SIGNOFF: '✓', IP_PACKAGE: '📦', SUCCESS: '✦', FAIL: '✗',
 };
 
 const ARTIFACT_TYPE_LABELS: Record<string, string> = {

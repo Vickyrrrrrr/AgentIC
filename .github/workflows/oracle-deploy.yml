@@ -13,6 +13,8 @@ on:
       - 'Dockerfile'
       - 'requirements.txt'
       - 'scripts/**'
+      - 'web/src/**'
+      - 'web/package*.json'
       - '.github/workflows/oracle-deploy.yml'
 
 concurrency:
@@ -44,8 +46,57 @@ jobs:
           touch .env
           docker compose config > /dev/null
 
-  deploy:
+  build-and-push:
     needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/agentic
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image: 'ghcr.io/${{ github.repository }}/agentic:${{ github.sha }}'
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+  deploy:
+    needs: build-and-push
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -94,7 +145,7 @@ jobs:
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
           command_timeout: 60m
-          script: |
+script: |
             set -eu
             cd ~/AgentIC
 
@@ -102,6 +153,94 @@ jobs:
             if [ ! -f .env ]; then
               echo "Missing ~/AgentIC/.env on Oracle VM"
               exit 1
+            fi
+
+            required_keys="POSTGRES_PASSWORD REDIS_PASSWORD MINIO_ROOT_USER MINIO_ROOT_PASSWORD ALLOW_BACKEND_LLM_FALLBACK"
+            for key in $required_keys; do
+              if ! grep -Eq "^${key}=.+$" .env; then
+                echo "Missing required env key: ${key}"
+                exit 1
+              fi
+            done
+
+            # Use docker compose v2 plugin - ensure plugin is available
+            DOCKER_COMPOSE="docker compose"
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              DOCKER_COMPOSE="docker-compose"
+            fi
+            sudo $DOCKER_COMPOSE config > /dev/null 2>&1 || true
+
+            # ── Login to GHCR ───────────────────────────────────────────────────
+            echo "Logging into GitHub Container Registry..."
+            echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin || true
+
+            # ── Pull latest image from GHCR ────────────────────────────────────
+            GHCR_IMAGE="ghcr.io/${{ github.repository }}/agentic:latest"
+            echo "Pulling image: $GHCR_IMAGE"
+            sudo docker pull "$GHCR_IMAGE" || echo "Failed to pull latest, trying SHA tag..."
+            sudo docker pull "ghcr.io/${{ github.repository }}/agentic:${{ github.sha }}" || true
+
+            # ── Tag image for local use ────────────────────────────────────────
+            sudo docker tag "ghcr.io/${{ github.repository }}/agentic:latest" agentic:local 2>/dev/null || true
+
+            # ── FIX: Remove any stopped/conflicting containers before re-creating ──
+            echo "Removing any conflicting stopped containers..."
+            for cname in agentic_minio_setup agentic_worker agentic_api agentic_db agentic_redis agentic_minio; do
+              if sudo docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+                echo "  Removing container: $cname"
+                sudo docker rm -f "$cname" || true
+              fi
+            done
+
+            # ── Tear down existing compose stack cleanly ──────────────────────
+            sudo $DOCKER_COMPOSE down --remove-orphans || true
+
+            # ── Phase 1: Bring up CORE services only (no observability) ──────
+            # This prevents prometheus from failing because api isn't ready yet
+            echo "Starting core services..."
+            sudo $DOCKER_COMPOSE up -d --remove-orphans \
+              api worker db redis minio minio-setup
+
+            # ── Wait for core services to be healthy ─────────────────────────
+            echo "Waiting for core services to become healthy..."
+            for i in $(seq 1 36); do
+              api_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_api 2>/dev/null || echo unknown)
+              worker_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_worker 2>/dev/null || echo unknown)
+              if [ "$api_health" = "healthy" ] && [ "$worker_health" = "healthy" ] && \
+                 curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1; then
+                echo "Core services are healthy (api=${api_health} worker=${worker_health})"
+                break
+              fi
+              echo "  [${i}/36] api=${api_health} worker=${worker_health} — retrying in 5s..."
+              sleep 5
+            done
+
+            # ── Phase 2: Bring up observability stack AFTER core is healthy ──
+            # Prometheus depends_on api healthy — now it will succeed
+            echo "Starting observability stack (prometheus + grafana)..."
+            sudo env COMPOSE_PROFILES=observability \
+              $DOCKER_COMPOSE up -d --remove-orphans prometheus grafana || \
+              echo "WARNING: Observability stack failed to start — core services are still running"
+
+            # ── Final health check ───────────────────────────────────────────
+            for i in $(seq 1 12); do
+              api_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_api 2>/dev/null || echo unknown)
+              worker_health=$(sudo docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic_worker 2>/dev/null || echo unknown)
+              if [ "$api_health" = "healthy" ] && [ "$worker_health" = "healthy" ] && \
+                 curl -fsS http://127.0.0.1:7860/livez >/dev/null 2>&1 && \
+                 curl -fsS http://127.0.0.1:7860/readyz >/dev/null 2>&1; then
+                echo "AgentIC backend is fully healthy — deploy complete!"
+                sudo $DOCKER_COMPOSE ps
+                exit 0
+              fi
+              echo "Waiting for final health check... api=${api_health} worker=${worker_health}"
+              sleep 5
+            done
+
+            echo "AgentIC backend failed health checks after deploy"
+            sudo $DOCKER_COMPOSE ps
+            sudo $DOCKER_COMPOSE logs --tail=100 api worker
+            exit 1
             fi
 
             required_keys="POSTGRES_PASSWORD REDIS_PASSWORD MINIO_ROOT_USER MINIO_ROOT_PASSWORD ALLOW_BACKEND_LLM_FALLBACK"

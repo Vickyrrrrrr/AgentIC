@@ -18,9 +18,9 @@ import { api, API_BASE } from '../api';
 import '../hitl.css';
 
 const PIPELINE_STAGES = [
-    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'FEASIBILITY_CHECK', 'CDC_ANALYZE', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'FORMAL_VERIFY',
-    'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'FLOORPLAN', 'HARDENING',
-    'CONVERGENCE_REVIEW', 'ECO_PATCH', 'SIGNOFF',
+    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'LINT_CHECK', 'CDC_ANALYZE', 'VERIFICATION', 'FORMAL_VERIFY',
+    'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS', 'FEASIBILITY_CHECK', 'DFT_SCAN', 'DFT_ATPG', 'MBIST', 'GLS_SIM',
+    'FLOORPLAN', 'HARDENING', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'PHYSICAL_VERIFY', 'SIGNOFF', 'IP_PACKAGE',
 ];
 const TOTAL = PIPELINE_STAGES.length;
 
@@ -29,46 +29,63 @@ const STAGE_ENCOURAGEMENTS: Record<string, string> = {
     SPEC:              'Translating your description into a chip specification…',
     SPEC_VALIDATE:     'Validating spec — classifying design, checking completeness, generating assertions…',
     HIERARCHY_EXPAND:   'Expanding complex submodules into nested specifications…',
-    FEASIBILITY_CHECK:  'Evaluating Sky130 physical design feasibility…',
-    CDC_ANALYZE:        'Analyzing clock domain crossings…',
-    VERIFICATION_PLAN:  'Building verification plan & SVA properties…',
+    VERIFICATION_PLAN: 'Building verification plan & SVA properties…',
     RTL_GEN:           'Writing Verilog — your chip is taking shape…',
     RTL_FIX:           'Fixing any RTL issues automatically…',
-    VERIFICATION:      'Running simulation — making sure your logic is correct…',
-    FORMAL_VERIFY:     'Proving your chip is correct with formal methods…',
-    COVERAGE_CHECK:    'Measuring how thoroughly the tests cover your design…',
-    REGRESSION:        'Running the full regression suite…',
-    SDC_GEN:           'Generating timing constraints for physical design…',
-    FLOORPLAN:         'Planning the physical layout of your chip…',
-    HARDENING:         'Running place-and-route — turning RTL into real silicon…',
+    LINT_CHECK:       'Running RTL lint check for code quality…',
+    CDC_ANALYZE:      'Analyzing clock domain crossings…',
+    VERIFICATION:     'Running simulation — making sure your logic is correct…',
+    FORMAL_VERIFY:    'Proving your chip is correct with formal methods…',
+    COVERAGE_CHECK:   'Measuring how thoroughly the tests cover your design…',
+    REGRESSION:       'Running the full regression suite…',
+    SDC_GEN:          'Generating timing constraints for synthesis…',
+    SYNTHESIS:        'Synthesizing RTL to gate-level netlist…',
+    FEASIBILITY_CHECK: 'Verifying physical design feasibility after synthesis…',
+    DFT_SCAN:         'Inserting scan chains for testability…',
+    DFT_ATPG:        'Generating test patterns…',
+    MBIST:            'Inserting memory BIST circuits…',
+    GLS_SIM:         'Running gate-level simulation…',
+    FLOORPLAN:        'Planning the physical layout of your chip…',
+    HARDENING:        'Running place-and-route — turning RTL into real silicon…',
+    TIMING_ANALYSIS:   'Running static timing analysis…',
     CONVERGENCE_REVIEW:'Checking that timing is met across all corners…',
-    ECO_PATCH:         'Applying final tweaks for clean sign-off…',
-    SIGNOFF:           'Almost there — running final LVS/DRC checks…',
+    ECO_PATCH:        'Applying final tweaks for clean sign-off…',
+    POWER_ANALYSIS:    'Analyzing power consumption…',
+    PHYSICAL_VERIFY:   'Running physical verification checks…',
+    SIGNOFF:         'Almost there — running final LVS/DRC checks…',
+    IP_PACKAGE:      'Packaging IP for reuse…',
 };
 
 const MILESTONE_TOASTS: Record<string, { title: string; msg: string }> = {
     RTL_GEN:   { title: 'RTL Complete', msg: 'Your chip can now run instructions. Verilog is ready.' },
     VERIFICATION: { title: 'Verification Passed', msg: 'All simulation tests passed. Design is logically correct.' },
+    SYNTHESIS: { title: 'Synthesis Complete', msg: 'RTL converted to gate-level netlist.' },
     HARDENING: { title: 'Silicon Layout Done', msg: 'Place-and-route complete. Your chip has a physical form.' },
     SIGNOFF:   { title: 'Chip Signed Off', msg: 'All checks passed. Ready for tape-out.' },
 };
 
 const STAGE_LABELS: Record<string, string> = {
-    INIT: 'Initialization', SPEC: 'Specification', SPEC_VALIDATE: 'Spec Validation', HIERARCHY_EXPAND: 'Hierarchy Expansion', FEASIBILITY_CHECK: 'Feasibility Check', CDC_ANALYZE: 'CDC Analysis', VERIFICATION_PLAN: 'Verification Plan', RTL_GEN: 'RTL Generation',
-    RTL_FIX: 'RTL Fix', VERIFICATION: 'Verification', FORMAL_VERIFY: 'Formal Verification',
-    COVERAGE_CHECK: 'Coverage Check', REGRESSION: 'Regression', SDC_GEN: 'SDC Generation',
-    FLOORPLAN: 'Floorplan', HARDENING: 'Hardening', CONVERGENCE_REVIEW: 'Convergence',
-    ECO_PATCH: 'ECO Patch', SIGNOFF: 'Signoff', FAIL: 'Failed',
+    INIT: 'Initialization', SPEC: 'Specification', SPEC_VALIDATE: 'Spec Validation', HIERARCHY_EXPAND: 'Hierarchy Expansion',
+    VERIFICATION_PLAN: 'Verification Plan', RTL_GEN: 'RTL Generation', RTL_FIX: 'RTL Fix', LINT_CHECK: 'Lint Check',
+    CDC_ANALYZE: 'CDC Analysis', VERIFICATION: 'Verification', FORMAL_VERIFY: 'Formal Verification',
+    COVERAGE_CHECK: 'Coverage Check', REGRESSION: 'Regression', SDC_GEN: 'SDC Generation', SYNTHESIS: 'Synthesis',
+    FEASIBILITY_CHECK: 'Feasibility Check', DFT_SCAN: 'DFT Scan', DFT_ATPG: 'DFT ATPG', MBIST: 'MBIST',
+    GLS_SIM: 'GLS Simulation', FLOORPLAN: 'Floorplan', HARDENING: 'Hardening', TIMING_ANALYSIS: 'Timing Analysis',
+    CONVERGENCE_REVIEW: 'Convergence Review', ECO_PATCH: 'ECO Patch', POWER_ANALYSIS: 'Power Analysis',
+    PHYSICAL_VERIFY: 'Physical Verification', SIGNOFF: 'Signoff', IP_PACKAGE: 'IP Package', FAIL: 'Failed',
 };
 
 const MANDATORY_STAGES = new Set([
-    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'FEASIBILITY_CHECK', 'CDC_ANALYZE', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'VERIFICATION', 'HARDENING', 'SIGNOFF',
+    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'LINT_CHECK', 'CDC_ANALYZE',
+    'VERIFICATION', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS', 'FEASIBILITY_CHECK',
+    'FLOORPLAN', 'HARDENING', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS',
+    'PHYSICAL_VERIFY', 'SIGNOFF', 'IP_PACKAGE',
 ]);
 
 type BuildMode = 'quick' | 'verified' | 'full';
 const BUILD_MODE_SKIPS: Record<BuildMode, string[]> = {
-    quick: ['FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'FLOORPLAN', 'HARDENING', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'SIGNOFF'],
-    verified: ['REGRESSION', 'ECO_PATCH', 'CONVERGENCE_REVIEW'],
+    quick: ['LINT_CHECK', 'CDC_ANALYZE', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS', 'FEASIBILITY_CHECK', 'DFT_SCAN', 'DFT_ATPG', 'MBIST', 'GLS_SIM', 'FLOORPLAN', 'HARDENING', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'PHYSICAL_VERIFY', 'SIGNOFF', 'IP_PACKAGE'],
+    verified: ['LINT_CHECK', 'CDC_ANALYZE', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'DFT_SCAN', 'DFT_ATPG', 'MBIST', 'GLS_SIM', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'PHYSICAL_VERIFY', 'IP_PACKAGE'],
     full: [],
 };
 
