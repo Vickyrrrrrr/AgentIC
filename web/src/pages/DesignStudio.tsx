@@ -165,14 +165,21 @@ export const DesignStudio = () => {
         if (!prompt.trim()) return;
         setError('');
 
-        // Guard: require either AgentIC paid plan or BYOK configured
-        if (!hasActivePlan) {
+        // Guard: check if they selected AgentIC model without paying
+        if (aiModel === 'AgentIC' && !isAgenticPaid) {
+            window.history.pushState({}, '', '/pricing');
+            window.dispatchEvent(new Event('popstate'));
+            return;
+        }
+
+        // Guard: require BYOK configured if BYOK mode is selected
+        if (aiModel === 'BYOK' && !hasLocalByok && !hasServerByok) {
             setShowBillingModal(true);
             return;
         }
 
         // Billing Guard: enforce build limit for AgentIC-paid users
-        if (isAgenticPaid && profile) {
+        if (aiModel === 'AgentIC' && profile) {
             const { successful_builds, build_limit } = profile;
             if (build_limit !== null && build_limit !== undefined && (successful_builds ?? 0) >= build_limit) {
                 setShowBillingModal(true);
@@ -208,7 +215,7 @@ export const DesignStudio = () => {
                 // Send BYOK key as JSON string in body
                 api_key: byokKey ? JSON.stringify(byokKey) : null,
                 // Tell backend which path: agentic_paid or byok
-                plan_type: isAgenticPaid ? 'agentic_paid' : 'byok',
+                plan_type: aiModel === 'AgentIC' ? 'agentic_paid' : 'byok',
             });
             const { job_id } = res.data;
             setJobId(job_id);
@@ -413,7 +420,14 @@ export const DesignStudio = () => {
                                             <div className="studio-chip-row">
                                                 <button
                                                     className={`studio-chip-btn ${aiModel === 'AgentIC' ? 'is-active' : ''}`}
-                                                    onClick={() => setAiModel('AgentIC')}
+                                                    onClick={() => {
+                                                        if (!isAgenticPaid) {
+                                                            window.history.pushState({}, '', '/pricing');
+                                                            window.dispatchEvent(new Event('popstate'));
+                                                        } else {
+                                                            setAiModel('AgentIC');
+                                                        }
+                                                    }}
                                                 >
                                                     <Rocket size={15} />
                                                     AgentIC orchestration

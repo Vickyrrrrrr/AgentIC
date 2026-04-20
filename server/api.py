@@ -2289,6 +2289,15 @@ async def trigger_build(
     # ── Auth guard: check plan + build count ──
     check_build_allowed(profile)
 
+    # ── Strict Backend Model Gating ──
+    if req.plan_type == "agentic_paid":
+        actual_plan = profile.get("plan_type", "") if profile else ""
+        if actual_plan != "agentic_paid":
+            raise HTTPException(
+                status_code=403,
+                detail="AgentIC Orchestration mode is locked. Please upgrade to a paid plan."
+            )
+
     # ── Resolve BYOK key and plan type ──
     byok_key = None
     is_agentic_paid = req.plan_type == "agentic_paid"
