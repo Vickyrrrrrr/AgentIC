@@ -1072,46 +1072,40 @@ def _emit_stage_complete(job_id: str, payload: dict):
 
 # ─── Models ──────────────────────────────────────────────────────────
 class BuildRequest(BaseModel):
-    api_key: Optional[str] = Field(default=None, max_length=512)
-    design_name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
-    description: str = Field(min_length=1, max_length=10000)
+    api_key: Optional[str] = None
+    design_name: str
+    description: str
     skip_openlane: bool = False
     skip_coverage: bool = False
     full_signoff: bool = False
-    max_retries: int = Field(default=5, ge=0, le=20)
+    max_retries: int = 5
     show_thinking: bool = False
-    min_coverage: float = Field(default=80.0, ge=0.0, le=100.0)
+    min_coverage: float = 80.0
     strict_gates: bool = False
-    pdk_profile: str = Field(default="sky130", max_length=32)
-    max_pivots: int = Field(default=2, ge=0, le=10)
-    congestion_threshold: float = Field(default=10.0, ge=0.0, le=100.0)
-    hierarchical: str = Field(default="auto", max_length=16)
-    tb_gate_mode: str = Field(default="strict", max_length=16)
-    tb_max_retries: int = Field(default=3, ge=0, le=10)
-    tb_fallback_template: str = Field(default="uvm_lite", max_length=32)
-    coverage_backend: str = Field(default="auto", max_length=16)
-    coverage_fallback_policy: str = Field(default="fail_closed", max_length=16)
-    coverage_profile: str = Field(default="balanced", max_length=16)
+    pdk_profile: str = "sky130"
+    max_pivots: int = 2
+    congestion_threshold: float = 10.0
+    hierarchical: str = "auto"
+    tb_gate_mode: str = "strict"
+    tb_max_retries: int = 3
+    tb_fallback_template: str = "uvm_lite"
+    coverage_backend: str = "auto"
+    coverage_fallback_policy: str = "fail_closed"
+    coverage_profile: str = "balanced"
     human_in_loop: bool = False
-    skip_stages: List[str] = Field(default_factory=list, max_length=50)
-    plan_type: str = Field(default="byok", max_length=16)
-
-    model_config = {"str_strip_whitespace": True}
+    skip_stages: List[str] = []
+    plan_type: str = "byok"
 
 
 class ApproveRequest(BaseModel):
-    stage: str = Field(min_length=1, max_length=64)
-    design_name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
-
-    model_config = {"str_strip_whitespace": True}
+    stage: str
+    design_name: str
 
 
 class RejectRequest(BaseModel):
-    stage: str = Field(min_length=1, max_length=64)
-    design_name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
-    feedback: Optional[str] = Field(default=None, max_length=5000)
-
-    model_config = {"str_strip_whitespace": True}
+    stage: str
+    design_name: str
+    feedback: Optional[str] = None
 
 
 class BuildElaborateRequest(BaseModel):
