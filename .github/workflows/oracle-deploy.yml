@@ -145,7 +145,7 @@ jobs:
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
           command_timeout: 60m
-script: |
+          script: |
             set -eu
             cd ~/AgentIC
 
