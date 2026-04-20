@@ -20,6 +20,7 @@
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "unicornstudio-react": "^2.1.4-1",
     "vcdrom": "^1.6.0",
     "wavedrom": "^3.5.0"
   },
