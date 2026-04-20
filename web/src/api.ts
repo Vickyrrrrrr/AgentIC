@@ -3,10 +3,9 @@ import { supabase } from './supabaseClient';
 import type { ApiError } from './lib/types';
 
 const base = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? '/api' : '');
-const API_VERSION = 'v1';
 
 const cleanBase = base.replace(/\/$/, '');
-export const API_BASE = cleanBase ? `${cleanBase}/api/${API_VERSION}` : `/api/${API_VERSION}`;
+export const API_BASE = cleanBase || '';
 
 export const api = axios.create({
   baseURL: API_BASE,
