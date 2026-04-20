@@ -2,6 +2,8 @@ import enum
 import time
 import logging
 import os
+
+logger = logging.getLogger("agentic.orchestrator")
 import re
 import hashlib
 import json
