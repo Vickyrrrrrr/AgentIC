@@ -202,7 +202,7 @@ class TestbenchPayload(BaseModel):
 async def generate_testbench(req: TestbenchPayload, request: Request, profile: dict = Depends(get_current_user)):
     """Uses LLM to automatically append a testbench to the provided Verilog code."""
     try:
-        from litellm import completion
+        from litellm import acompletion
         
         system_prompt = """
 You are an expert IC verification engineer. The user will provide a Verilog design module.
@@ -235,7 +235,7 @@ IMPORTANT:
                 ),
             }
 
-        response = completion(
+        response = await acompletion(
             model=llm_model,
             api_key=llm_api_key,
             api_base=llm_api_base or None,
@@ -271,7 +271,7 @@ async def ai_assist(req: AIFixPayload, request: Request, profile: dict = Depends
     4. Return structured response with diffs
     """
     try:
-        from litellm import completion
+        from litellm import acompletion
         import difflib
         
         # ── Step 1: Run syntax check to gather error context ──
@@ -343,7 +343,7 @@ ORIGINAL CODE:
 ```"""}
         ]
         
-        response = completion(
+        response = await acompletion(
             model=cfg["model"],
             messages=messages,
             api_base=cfg.get("base_url"),
