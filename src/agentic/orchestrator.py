@@ -291,27 +291,28 @@ class BuildState(enum.Enum):
     SPEC = "Architectural Planning"
     SPEC_VALIDATE = "Specification Validation"
     HIERARCHY_EXPAND = "Hierarchy Expansion"
-    FEASIBILITY_CHECK = "Feasibility Check"
-    CDC_ANALYZE = "CDC Analysis"
     VERIFICATION_PLAN = "Verification Planning"
     RTL_GEN = "RTL Generation"
     RTL_FIX = "RTL Syntax Fixing"
+    LINT_CHECK = "RTL Lint Check"
+    CDC_ANALYZE = "CDC Analysis"
     VERIFICATION = "Verification & Testbench"
     FORMAL_VERIFY = "Formal Property Verification"
     COVERAGE_CHECK = "Coverage Analysis"
     REGRESSION = "Regression Testing"
     SDC_GEN = "Timing Constraints Generation"
     SYNTHESIS = "RTL Synthesis"
+    FEASIBILITY_CHECK = "Feasibility Check"
     DFT_SCAN = "DFT Scan Insertion"
     DFT_ATPG = "DFT ATPG Patterns"
     MBIST = "Memory BIST Insertion"
     GLS_SIM = "Gate-Level Simulation"
     FLOORPLAN = "Floorplanning"
     HARDENING = "GDSII Hardening"
+    TIMING_ANALYSIS = "Static Timing Analysis"
     CONVERGENCE_REVIEW = "Convergence Review"
     ECO_PATCH = "ECO Patch"
     POWER_ANALYSIS = "Power Analysis"
-    TIMING_ANALYSIS = "Static Timing Analysis"
     PHYSICAL_VERIFY = "Physical Verification"
     SIGNOFF = "DRC/LVS Signoff"
     IP_PACKAGE = "IP Packaging"
@@ -1362,6 +1363,10 @@ class BuildOrchestrator:
                     self.do_rtl_gen()
                 elif self.state == BuildState.RTL_FIX:
                     self.do_rtl_fix()
+                elif self.state == BuildState.LINT_CHECK:
+                    self.do_lint_check()
+                elif self.state == BuildState.CDC_ANALYZE:
+                    self.do_cdc_analyze()
                 elif self.state == BuildState.VERIFICATION:
                     self.do_verification()
                 elif self.state == BuildState.FORMAL_VERIFY:
@@ -1847,7 +1852,7 @@ SPECIFICATION SECTIONS (Markdown):
                     refined=True,
                 )
                 self.artifacts["hierarchy_result"] = {}
-                self.transition(BuildState.FEASIBILITY_CHECK)
+                self.transition(BuildState.VERIFICATION_PLAN)
                 return
 
         try:
@@ -1864,25 +1869,20 @@ SPECIFICATION SECTIONS (Markdown):
                 refined=True,
             )
 
-            # Log any consistency fixes
-            consistency_fixes = [w for w in result.warnings if w.startswith("CONSISTENCY_FIX")]
-            for fix in consistency_fixes[:3]:
-                self.log(f"  🔧 {fix}", refined=True)
-
             # Store enrichment for downstream
             enrichment = expander.to_hierarchy_enrichment(result)
             self.artifacts["hierarchy_enrichment"] = enrichment
 
-            self.transition(BuildState.FEASIBILITY_CHECK)
+            self.transition(BuildState.VERIFICATION_PLAN)
 
         except Exception as e:
             self.log(
-                f"HierarchyExpander failed ({e}); skipping to FEASIBILITY_CHECK.",
+                f"HierarchyExpander failed ({e}); skipping to VERIFICATION_PLAN.",
                 refined=True,
             )
             self.logger.warning(f"HierarchyExpander error: {e}")
             self.artifacts["hierarchy_result"] = {}
-            self.transition(BuildState.FEASIBILITY_CHECK)
+            self.transition(BuildState.VERIFICATION_PLAN)
 
     def do_feasibility_check(self):
         """Stage: Check physical realizability on Sky130 before RTL generation."""
@@ -2006,11 +2006,11 @@ SPECIFICATION SECTIONS (Markdown):
                     existing_spec = self.artifacts.get("spec", "")
                     self.artifacts["spec"] = existing_spec + cdc_section
 
-            self.transition(BuildState.VERIFICATION_PLAN)
+            self.transition(BuildState.REGRESSION)
 
         except Exception as e:
             self.log(
-                f"CDCAnalyzer failed ({e}); skipping to VERIFICATION_PLAN.",
+                f"CDCAnalyzer failed ({e}); skipping to REGRESSION.",
                 refined=True,
             )
             self.logger.warning(f"CDCAnalyzer error: {e}")
@@ -2018,7 +2018,23 @@ SPECIFICATION SECTIONS (Markdown):
                 "cdc_status": "SINGLE_DOMAIN",
                 "cdc_warnings": [f"Analysis skipped: {e}"],
             }
-            self.transition(BuildState.VERIFICATION_PLAN)
+            self.transition(BuildState.REGRESSION)
+
+    def do_lint_check(self):
+        """Stage: RTL Lint Check - runs after RTL_FIX to verify code quality."""
+        self.log("Running RTL Lint Check...", refined=True)
+        path = self.artifacts.get("rtl_path")
+        if not path or not os.path.exists(path):
+            self.log("No RTL path found, skipping LINT_CHECK.", refined=True)
+            self.transition(BuildState.CDC_ANALYZE)
+            return
+        success, report = run_lint_check(path)
+        self.artifacts["lint_report"] = report
+        if success:
+            self.log("RTL Lint Check Passed", refined=True)
+        else:
+            self.log(f"RTL Lint Check Failed: {report[:500]}", refined=True)
+        self.transition(BuildState.CDC_ANALYZE)
 
     def do_verification_plan(self):
         """Stage: Generate structured verification plan with test cases, SVA, and coverage."""
@@ -3580,9 +3596,8 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                             next_action=BuildState.VERIFICATION.name,
                         )
                     )
-                    self.transition(BuildState.VERIFICATION)
+                    self.transition(BuildState.CDC_ANALYZE)
                     return
-
             else:
                 self.log(f"Lint Failed. Check log for details.", refined=True)
                 errors = f"SYNTAX OK, BUT LINT FAILED:\n{lint_report}"

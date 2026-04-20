@@ -140,3 +140,4 @@ web/.vite/
 !web/src/lib/
 !web/src/store/
 !web/src/components/ErrorBoundary.tsx
+.env.example

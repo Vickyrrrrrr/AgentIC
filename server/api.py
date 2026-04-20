@@ -19,7 +19,6 @@ sys.path.insert(
 )
 import time
 import uuid
-import glob
 import io
 import threading
 from datetime import datetime
@@ -569,21 +568,31 @@ BUILD_STATES_ORDER = [
     "SPEC",
     "SPEC_VALIDATE",
     "HIERARCHY_EXPAND",
-    "FEASIBILITY_CHECK",
-    "CDC_ANALYZE",
     "VERIFICATION_PLAN",
     "RTL_GEN",
     "RTL_FIX",
+    "LINT_CHECK",
+    "CDC_ANALYZE",
     "VERIFICATION",
     "FORMAL_VERIFY",
     "COVERAGE_CHECK",
     "REGRESSION",
     "SDC_GEN",
+    "SYNTHESIS",
+    "FEASIBILITY_CHECK",
+    "DFT_SCAN",
+    "DFT_ATPG",
+    "MBIST",
+    "GLS_SIM",
     "FLOORPLAN",
     "HARDENING",
+    "TIMING_ANALYSIS",
     "CONVERGENCE_REVIEW",
     "ECO_PATCH",
+    "POWER_ANALYSIS",
+    "PHYSICAL_VERIFY",
     "SIGNOFF",
+    "IP_PACKAGE",
     "SUCCESS",
 ]
 TOTAL_STEPS = len(BUILD_STATES_ORDER)
@@ -593,21 +602,31 @@ STAGE_META: Dict[str, Dict[str, str]] = {
     "SPEC": {"label": "Architectural Planning", "icon": "📐"},
     "SPEC_VALIDATE": {"label": "Specification Validation", "icon": "🔍"},
     "HIERARCHY_EXPAND": {"label": "Hierarchy Expansion", "icon": "🌲"},
-    "FEASIBILITY_CHECK": {"label": "Feasibility Check", "icon": "⚖️"},
-    "CDC_ANALYZE": {"label": "CDC Analysis", "icon": "🔀"},
     "VERIFICATION_PLAN": {"label": "Verification Planning", "icon": "📋"},
     "RTL_GEN": {"label": "RTL Generation", "icon": "💻"},
     "RTL_FIX": {"label": "RTL Syntax Fixing", "icon": "🔨"},
+    "LINT_CHECK": {"label": "RTL Lint Check", "icon": "✅"},
+    "CDC_ANALYZE": {"label": "CDC Analysis", "icon": "🔀"},
     "VERIFICATION": {"label": "Verification & Testbench", "icon": "🧪"},
     "FORMAL_VERIFY": {"label": "Formal Verification", "icon": "📊"},
     "COVERAGE_CHECK": {"label": "Coverage Analysis", "icon": "📈"},
     "REGRESSION": {"label": "Regression Testing", "icon": "🔁"},
     "SDC_GEN": {"label": "SDC Generation", "icon": "🕒"},
+    "SYNTHESIS": {"label": "RTL Synthesis", "icon": "⚡"},
+    "FEASIBILITY_CHECK": {"label": "Feasibility Check", "icon": "⚖️"},
+    "DFT_SCAN": {"label": "DFT Scan Insertion", "icon": "🔬"},
+    "DFT_ATPG": {"label": "DFT ATPG Patterns", "icon": "📝"},
+    "MBIST": {"label": "Memory BIST", "icon": "💾"},
+    "GLS_SIM": {"label": "Gate-Level Simulation", "icon": "🔬"},
     "FLOORPLAN": {"label": "Floorplanning", "icon": "🗺️"},
     "HARDENING": {"label": "GDSII Hardening", "icon": "🏗️"},
+    "TIMING_ANALYSIS": {"label": "Static Timing Analysis", "icon": "⏱️"},
     "CONVERGENCE_REVIEW": {"label": "Convergence Review", "icon": "🎯"},
     "ECO_PATCH": {"label": "ECO Patch", "icon": "🩹"},
+    "POWER_ANALYSIS": {"label": "Power Analysis", "icon": "⚡"},
+    "PHYSICAL_VERIFY": {"label": "Physical Verification", "icon": "🔍"},
     "SIGNOFF": {"label": "DRC/LVS Signoff", "icon": "✅"},
+    "IP_PACKAGE": {"label": "IP Packaging", "icon": "📦"},
     "SUCCESS": {"label": "Build Complete", "icon": "🎉"},
     "FAIL": {"label": "Build Failed", "icon": "❌"},
 }
@@ -1163,14 +1182,19 @@ def _docs_index() -> Dict[str, Dict[str, str]]:
 def _generate_and_save_build_reports(job_id: str, design_name: str):
     """Automatically generate PDF and DOCX reports summarizing the build at the end of the pipeline,
     and save them into the design's workspace directory as artifacts.
+
+    This function is called in the finally block so it runs on BOTH success AND failure.
     """
     job = JOB_STORE.get(job_id)
     if not job:
+        logger.warning(f"Job {job_id} not found for report generation")
         return
 
     stages = job.get("stages", {})
     events = job.get("events", [])
     build_status = job.get("build_status", "unknown")
+    
+    logger.info(f"Generating build reports for {design_name}, status={build_status}, stages_completed={len(stages)}")
 
     workspace_dir = os.path.join(_repo_root(), "designs", design_name)
     os.makedirs(workspace_dir, exist_ok=True)
@@ -1214,23 +1238,48 @@ def _generate_and_save_build_reports(job_id: str, design_name: str):
                 entry["cloud_url"] = cloud_url
         manifest["artifacts"].append(entry)
 
+    # Collect all generated files from workspace directory as fallback artifacts
+    # This ensures we have artifacts even if stage summaries are missing
+    all_generated_files = []
     try:
-        pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events)
+        if os.path.exists(workspace_dir):
+            for f in os.listdir(workspace_dir):
+                fpath = os.path.join(workspace_dir, f)
+                if os.path.isfile(fpath) and not f.endswith('_Build_Report.pdf') and not f.endswith('_Build_Report.docx') and not f.endswith('_artifact_manifest.json'):
+                    all_generated_files.append({
+                        "name": f,
+                        "local_path": fpath,
+                        "size": os.path.getsize(fpath),
+                        "type": _classify_artifact(fpath),
+                        "cloud_url": "",
+                    })
+        logger.info(f"Found {len(all_generated_files)} generated files in workspace for {design_name}")
+    except Exception as e:
+        logger.warning(f"Failed to scan workspace for artifacts: {e}")
+
+    # Add all generated files to manifest
+    for f in all_generated_files:
+        manifest["artifacts"].append(f)
+
+    try:
+        pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events, all_generated_files)
         pdf_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.pdf")
         with open(pdf_path, "wb") as f:
             f.write(pdf_bytes)
         _register_artifact(pdf_path)
+        logger.info(f"Successfully generated PDF report for {design_name}")
     except Exception as e:
         logger.warning("Failed to generate auto PDF report for %s: %s", design_name, e)
 
     try:
         docx_bytes = generate_full_report_docx(
-            stages, design_name, build_status, events
+            stages, design_name, build_status, events, all_generated_files
         )
         docx_path = os.path.join(workspace_dir, f"{design_name}_Build_Report.docx")
         with open(docx_path, "wb") as f:
             f.write(docx_bytes)
         _register_artifact(docx_path)
+        logger.info(f"Successfully generated DOCX report for {design_name}")
     except Exception as e:
         logger.warning("Failed to generate auto DOCX report for %s: %s", design_name, e)
 
@@ -1751,21 +1800,31 @@ def _execute_stage(orchestrator, state_name: str):
         "SPEC": orchestrator.do_spec,
         "SPEC_VALIDATE": orchestrator.do_spec_validate,
         "HIERARCHY_EXPAND": orchestrator.do_hierarchy_expand,
-        "FEASIBILITY_CHECK": orchestrator.do_feasibility_check,
-        "CDC_ANALYZE": orchestrator.do_cdc_analyze,
         "VERIFICATION_PLAN": orchestrator.do_verification_plan,
         "RTL_GEN": orchestrator.do_rtl_gen,
         "RTL_FIX": orchestrator.do_rtl_fix,
+        "LINT_CHECK": orchestrator.do_lint_check,
+        "CDC_ANALYZE": orchestrator.do_cdc_analyze,
         "VERIFICATION": orchestrator.do_verification,
         "FORMAL_VERIFY": orchestrator.do_formal_verify,
         "COVERAGE_CHECK": orchestrator.do_coverage_check,
         "REGRESSION": orchestrator.do_regression,
         "SDC_GEN": orchestrator.do_sdc_gen,
+        "SYNTHESIS": orchestrator.do_synthesis,
+        "FEASIBILITY_CHECK": orchestrator.do_feasibility_check,
+        "DFT_SCAN": orchestrator.do_dft_scan,
+        "DFT_ATPG": orchestrator.do_dft_atpg,
+        "MBIST": orchestrator.do_mbist,
+        "GLS_SIM": orchestrator.do_gls_simulation,
         "FLOORPLAN": orchestrator.do_floorplan,
         "HARDENING": orchestrator.do_hardening,
+        "TIMING_ANALYSIS": orchestrator.do_timing_analysis,
         "CONVERGENCE_REVIEW": orchestrator.do_convergence_review,
         "ECO_PATCH": orchestrator.do_eco_patch,
+        "POWER_ANALYSIS": orchestrator.do_power_analysis,
+        "PHYSICAL_VERIFY": orchestrator.do_physical_verify,
         "SIGNOFF": orchestrator.do_signoff,
+        "IP_PACKAGE": orchestrator.do_ip_package,
     }
 
     handler = stage_handlers.get(state_name)
@@ -2964,7 +3023,23 @@ def download_full_report_pdf(job_id: str):
     build_status = job.get("build_status", "unknown")
     stages = job.get("stages", {})
     events = job.get("events", [])
-    pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events)
+    
+    all_generated_files = []
+    workspace_dir = os.path.join(_repo_root(), "designs", design_name)
+    try:
+        if os.path.exists(workspace_dir):
+            for f in os.listdir(workspace_dir):
+                fpath = os.path.join(workspace_dir, f)
+                if os.path.isfile(fpath) and not f.endswith('_Build_Report.pdf') and not f.endswith('_Build_Report.docx') and not f.endswith('_artifact_manifest.json'):
+                    all_generated_files.append({
+                        "name": f,
+                        "path": fpath,
+                        "size": os.path.getsize(fpath),
+                    })
+    except Exception:
+        pass
+    
+    pdf_bytes = generate_full_report_pdf(stages, design_name, build_status, events, all_generated_files)
     safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
@@ -2982,7 +3057,23 @@ def download_full_report_docx(job_id: str):
     build_status = job.get("build_status", "unknown")
     stages = job.get("stages", {})
     events = job.get("events", [])
-    docx_bytes = generate_full_report_docx(stages, design_name, build_status, events)
+    
+    all_generated_files = []
+    workspace_dir = os.path.join(_repo_root(), "designs", design_name)
+    try:
+        if os.path.exists(workspace_dir):
+            for f in os.listdir(workspace_dir):
+                fpath = os.path.join(workspace_dir, f)
+                if os.path.isfile(fpath) and not f.endswith('_Build_Report.pdf') and not f.endswith('_Build_Report.docx') and not f.endswith('_artifact_manifest.json'):
+                    all_generated_files.append({
+                        "name": f,
+                        "path": fpath,
+                        "size": os.path.getsize(fpath),
+                    })
+    except Exception:
+        pass
+    
+    docx_bytes = generate_full_report_docx(stages, design_name, build_status, events, all_generated_files)
     safe_name = re.sub(r"[^a-z0-9_]", "_", design_name.lower())
     return StreamingResponse(
         io.BytesIO(docx_bytes),

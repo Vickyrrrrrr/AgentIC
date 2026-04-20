@@ -6,7 +6,6 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 from server.auth import get_current_user, get_byok_config_for_user
-from agentic.config import get_role_llm_config
 
 router = APIRouter(prefix="/lab", tags=["Manual EDA Lab"])
 
@@ -213,13 +212,14 @@ IMPORTANT:
 """
         user_prompt = f"Here is my Verilog design:\n\n```verilog\n{req.code}\n```\n\nPlease write just the testbench module for it."
 
-        cfg = get_role_llm_config("testbench_designer")
+        # Use Supabase BYOK only for web API context
         byok_config = _load_request_byok(request, profile)
-        resolved = _resolve_byok_group(byok_config, ("group2", "group1", "group3"), cfg)
+        fallback_cfg = {"model": "", "base_url": "", "api_key": ""}
+        resolved = _resolve_byok_group(byok_config, ("group2", "group1", "group3"), fallback_cfg)
 
-        llm_model = cfg.get("model", "gpt-4o")
-        llm_api_key = cfg.get("api_key", "") if ALLOW_BACKEND_LLM_FALLBACK else ""
-        llm_api_base = cfg.get("base_url", "") if ALLOW_BACKEND_LLM_FALLBACK else ""
+        llm_model = ""
+        llm_api_key = ""
+        llm_api_base = ""
 
         if resolved:
             llm_model = resolved["model"]
@@ -297,14 +297,17 @@ async def ai_assist(req: AIFixPayload, request: Request, profile: dict = Depends
                 error_context = "No syntax errors detected by Verilator."
         
         # ── Step 2: LLM call with error context ──
-        cfg = get_role_llm_config("fixer")
+        # NOTE: We use Supabase BYOK ONLY (not CLI credentials) for web API context
         byok_config = _load_request_byok(request, profile)
+        fallback_cfg = {"model": "", "base_url": "", "api_key": ""}
         # Legacy fallback keeps Lab usable for users who filled the old UI group3 bucket.
-        resolved = _resolve_byok_group(byok_config, ("group1", "group3", "group2"), cfg)
+        resolved = _resolve_byok_group(byok_config, ("group1", "group3", "group2"), fallback_cfg)
 
-        api_key = (resolved or {}).get("api_key", cfg.get("api_key", "") if ALLOW_BACKEND_LLM_FALLBACK else "")
-        cfg["model"] = (resolved or {}).get("model", cfg.get("model", ""))
-        cfg["base_url"] = (resolved or {}).get("base_url", cfg.get("base_url", "") if ALLOW_BACKEND_LLM_FALLBACK else "")
+        api_key = (resolved or {}).get("api_key", "")
+        cfg = {
+            "model": (resolved or {}).get("model", ""),
+            "base_url": (resolved or {}).get("base_url", ""),
+        }
 
         if not _has_real_api_key(api_key):
             return {
