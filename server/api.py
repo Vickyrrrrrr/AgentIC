@@ -1366,27 +1366,42 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
 
         # Generate LLM failure explanation if build failed
         if not success:
-            try:
-                failed_state = orchestrator.state.name
-                # Find the last non-terminal state from build history
-                last_stage = "UNKNOWN"
-                for entry in reversed(orchestrator.build_history):
-                    if entry.state not in ("SUCCESS", "FAIL", "UNKNOWN"):
-                        last_stage = entry.state
-                        break
-                error_log = get_stage_log_summary(orchestrator, last_stage)
-                explanation = generate_failure_explanation(
-                    llm, last_stage, req.design_name, error_log
+            # First: check if the orchestrator itself crashed (e.g. LLM auth error)
+            crash_error = orchestrator.artifacts.get("crash_error", "")
+            crash_tb = orchestrator.artifacts.get("crash_traceback", "")
+            if crash_error:
+                result["failure_explanation"] = f"Orchestrator crashed: {crash_error}"
+                result["failure_suggestion"] = (
+                    "Check your BYOK API key, model name, and base_url in Workspace Settings. "
+                    "The LLM call likely failed due to authentication or connectivity issues."
                 )
-                result["failure_explanation"] = explanation.get("explanation", "")
-                result["failure_suggestion"] = explanation.get("suggestion", "")
-                result["failed_stage"] = last_stage
-                result["failed_stage_human"] = STAGE_HUMAN_NAMES.get(
-                    last_stage, last_stage.replace("_", " ").title()
-                )
-            except Exception:
-                result["failure_explanation"] = ""
-                result["failure_suggestion"] = ""
+                result["failed_stage"] = "INIT"
+                result["failed_stage_human"] = "Initialization"
+                result["crash_traceback"] = crash_tb
+                logger.error("[job:%s] Orchestrator crash: %s", job_id, crash_error)
+            else:
+                try:
+                    failed_state = orchestrator.state.name
+                    # Find the last non-terminal state from build history
+                    last_stage = "UNKNOWN"
+                    for entry in reversed(orchestrator.build_history):
+                        if entry.state not in ("SUCCESS", "FAIL", "UNKNOWN"):
+                            last_stage = entry.state
+                            break
+                    error_log = get_stage_log_summary(orchestrator, last_stage)
+                    explanation = generate_failure_explanation(
+                        llm, last_stage, req.design_name, error_log
+                    )
+                    result["failure_explanation"] = explanation.get("explanation", "")
+                    result["failure_suggestion"] = explanation.get("suggestion", "")
+                    result["failed_stage"] = last_stage
+                    result["failed_stage_human"] = STAGE_HUMAN_NAMES.get(
+                        last_stage, last_stage.replace("_", " ").title()
+                    )
+                except Exception:
+                    result["failure_explanation"] = ""
+                    result["failure_suggestion"] = ""
+
 
         JOB_STORE[job_id]["result"] = result
         JOB_STORE[job_id]["status"] = "done" if success else "failed"
