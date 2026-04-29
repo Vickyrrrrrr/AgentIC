@@ -9,7 +9,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['secure_build/main.py'],
+    ['main.py'],
     pathex=['src', 'secure_build'],
     binaries=binaries,
     datas=datas,
