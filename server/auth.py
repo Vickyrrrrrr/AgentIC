@@ -320,7 +320,7 @@ def get_byok_config_for_user(profile: Optional[dict]) -> Optional[dict]:
         return None
     try:
         decrypted = decrypt_api_key(encrypted_value)
-    except ValueError:
+    except (ValueError, RuntimeError):
         raise HTTPException(status_code=500, detail="Failed to decrypt stored API key")
 
     try:

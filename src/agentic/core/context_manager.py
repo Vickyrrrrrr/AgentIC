@@ -735,10 +735,18 @@ def create_context(
     Returns:
         Budgeted context string
     """
+    _MODE_MAP = {
+        "balanced": "generation_mode",
+        "conservative": "verification_mode",
+        "error_focus": "error_mode",
+    }
+    internal_mode = _MODE_MAP.get(mode, "generation_mode")
+
     budget = DynamicTokenBudget(
         model=model,
         provider=provider,
         allocation_strategy="conservative" if mode == "conservative" else "balanced",
+        mode=internal_mode,
     )
 
     if mode == "error_focus" and error:

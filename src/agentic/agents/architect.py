@@ -1,6 +1,5 @@
 import os
 from crewai import Agent
-from langchain_openai import ChatOpenAI
 
 def get_architect_agent(llm, tools, verbose=False):
     return Agent(

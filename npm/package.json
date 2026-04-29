@@ -3,7 +3,6 @@
   "version": "3.0.4",
   "description": "AgentIC — Autonomous AI-Driven Chip Design: Natural Language to GDSII (npm wrapper)",
   "type": "module",
-  "main": "bin/agentic",
   "bin": {
     "agentic": "bin/agentic"
   },
@@ -36,6 +35,5 @@
     "darwin",
     "linux",
     "win32"
-  ],
-  "preferGlobal": true
+  ]
 }

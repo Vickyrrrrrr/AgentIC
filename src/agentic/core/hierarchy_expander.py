@@ -846,9 +846,7 @@ class HierarchyExpander:
 
     # ── Utility ──────────────────────────────────────────────────────
 
-    @staticmethod
     # ── Enrichment for downstream stages ─────────────────────────────
-
     def to_hierarchy_enrichment(self, result: HierarchyResult) -> Dict[str, Any]:
         """
         Convert a HierarchyResult into an enrichment dict that can be

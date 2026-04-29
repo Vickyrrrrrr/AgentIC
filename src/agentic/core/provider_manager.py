@@ -342,18 +342,7 @@ class ProviderManager:
         return max(0, wait)
 
 
-def get_provider_manager() -> ProviderManager:
-    """Get or create global provider manager instance."""
-    global _provider_manager
-    if _provider_manager is None:
-        _provider_manager = ProviderManager()
-    return _provider_manager
-
-
 _global_provider_manager: Optional[ProviderManager] = None
-
-
-from typing import Optional
 
 
 def get_provider_manager() -> ProviderManager:

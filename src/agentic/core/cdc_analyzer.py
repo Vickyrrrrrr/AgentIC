@@ -167,31 +167,138 @@ class CDCResult:
 
 class CDCAnalyzer:
     """
-    Identifies every clock domain crossing in a hardware specification and
-    assigns synchronization strategies before RTL generation.
+    Identifies every clock domain crossing in a hardware specification AND
+    verifies them against the actual synthesized RTL for runtime accuracy.
 
-    Input:  HardwareSpec dict (+ optional hierarchy/feasibility data)
+    Input:  HardwareSpec dict + RTL Verilog code (optional, strongly recommended)
     Output: CDCResult with domains, crossings, sync submodules, and warnings
     """
+
+    # ── RTL Clock Signal Detection Patterns ──
+    _RTL_CLOCK_PATTERN = re.compile(
+        r"^\s*(?:input|wire|reg|logic)\s+(?:\[\d+:\d+\]\s+)?(\w*(?:clk|clock|sclk|aclk|hclk|pclk|mclk|bclk|refclk|sysclk)\w*)\s*[;,\)]",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    _RTL_CLOCK_WIRE = re.compile(
+        r"^\s*(?:wire|logic|reg)\s+(?:\[\d+:\d+\]\s+)?(\w*(?:clk|clock)\w*)\s*[;,]",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    _RTL_POSEDGE = re.compile(
+        r"always\s*@\s*\(\s*posedge\s+(\w+)\s*\)",
+        re.IGNORECASE,
+    )
+    _RTL_NEGEDGE = re.compile(
+        r"always\s*@\s*\(\s*negedge\s+(\w+)\s*\)",
+        re.IGNORECASE,
+    )
+    _RTL_SYNC_CHAIN = re.compile(
+        r"(\w+)_sync.*?\.\s+(\w+)\s*<=\s*\1",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @staticmethod
+    def _parse_rtl_clock_domains(rtl_code: Optional[str] = None) -> Dict[str, Any]:
+        """Extract actual clock domains from Verilog RTL code.
+
+        Identifies:
+        - Clock input ports (input clk, input aclk, etc.)
+        - posedge/negedge always blocks and their clock signals
+        - Internal clock wires
+        - Potential CDC crossings (different clocks driving same module)
+
+        Returns dict with 'rtl_clocks', 'rtl_sync_signals', 'rtl_cdc_paths'.
+        """
+        result = {
+            "rtl_clocks": [],
+            "rtl_sync_signals": [],
+            "rtl_cdc_paths": [],
+            "rtl_analyzed": False,
+        }
+        if not rtl_code or not rtl_code.strip():
+            return result
+
+        result["rtl_analyzed"] = True
+
+        # Find clock ports from module declaration
+        port_clocks = set()
+        for m in CDCAnalyzer._RTL_CLOCK_PATTERN.finditer(rtl_code):
+            port_clocks.add(m.group(1).strip())
+
+        # Find posedge/negedge clock signals (actual clock usage)
+        edge_clocks = set()
+        for m in CDCAnalyzer._RTL_POSEDGE.finditer(rtl_code):
+            edge_clocks.add(m.group(1).strip())
+        for m in CDCAnalyzer._RTL_NEGEDGE.finditer(rtl_code):
+            edge_clocks.add(m.group(1).strip())
+
+        # Find internal clock wires
+        wire_clocks = set()
+        for m in CDCAnalyzer._RTL_CLOCK_WIRE.finditer(rtl_code):
+            wire_clocks.add(m.group(1).strip())
+
+        all_clocks = port_clocks | edge_clocks | wire_clocks
+        result["rtl_clocks"] = sorted(all_clocks)
+
+        # Detect multi-clock module (potential CDC)
+        if len(all_clocks) > 1:
+            result["rtl_cdc_paths"].append(
+                f"MULTI_CLOCK: {', '.join(sorted(all_clocks))} all drive logic in same module"
+            )
+
+        # Detect missing synchronizer patterns
+        if len(all_clocks) > 1:
+            has_sync = bool(CDCAnalyzer._RTL_SYNC_CHAIN.search(rtl_code))
+            if not has_sync:
+                result["rtl_cdc_paths"].append(
+                    "WARNING: Multiple clocks detected but no synchronizer chain found. "
+                    "CDC crossings may cause metastability."
+                )
+
+        return result
 
     def analyze(
         self,
         hw_spec_dict: Dict[str, Any],
         hierarchy_result_dict: Optional[Dict[str, Any]] = None,
+        rtl_code: Optional[str] = None,
     ) -> CDCResult:
         """
-        Run full CDC analysis on the spec.
+        Run full CDC analysis on the spec AND optionally on the actual RTL.
 
         Args:
             hw_spec_dict: HardwareSpec.to_dict() output.
             hierarchy_result_dict: Optional HierarchyResult.to_dict() for
                 expanded submodule clock information.
+            rtl_code: Optional Verilog RTL code for runtime CDC verification.
+                When provided, actual clock domains are extracted from RTL
+                and compared against the spec-derived domains.
 
         Returns:
-            CDCResult with full CDC analysis.
+            CDCResult with full CDC analysis including RTL validation if available.
         """
-        # Step 1: Identify all clock domains
+        # Step 1: Identify all clock domains from specification
         domains = self._identify_clock_domains(hw_spec_dict, hierarchy_result_dict)
+
+        # Step 1b: Validate against actual RTL if available
+        rtl_cdc_info = {}
+        if rtl_code and rtl_code.strip():
+            rtl_cdc_info = self._parse_rtl_clock_domains(rtl_code)
+            if rtl_cdc_info.get("rtl_analyzed"):
+                rtl_clocks = set(rtl_cdc_info.get("rtl_clocks", []))
+                spec_clocks = {d.domain_name for d in domains if d.domain_name != "default_sys_clk"}
+                # Merge RTL-discovered clocks into domain list
+                new_from_rtl = rtl_clocks - spec_clocks
+                if new_from_rtl:
+                    for clk in sorted(new_from_rtl):
+                        domains.append(
+                            ClockDomain(
+                                domain_name=clk,
+                                nominal_frequency_mhz=0.0,
+                                phase_relationship=0.0,
+                                is_async=False,
+                                source_spec="RTL-extracted (not in spec)",
+                            )
+                        )
 
         if len(domains) <= 1:
             return CDCResult(
