@@ -2963,20 +2963,14 @@ def run_openlane(
             "OpenLane GDS Layout features are temporarily disabled on the Hugging Face backend due to Docker-in-Docker isolation policies. Please rely on the 'rtl_and_verification_mode'.",
         )
 
-    # If PDK_ROOT is not set, try to find it in common locations
+    # If PDK_ROOT is not set, try to find it using the same search logic as config.py
+    from ..config import _candidate_pdk_roots as _pdk_roots
+
     effective_pdk_root = PDK_ROOT
     selected_pdk = pdk_name or PDK
     if not effective_pdk_root or not os.path.exists(effective_pdk_root):
-        common_paths = [
-            os.path.expanduser("~/.ciel"),
-            os.path.expanduser("~/.volare"),
-            "/usr/local/pdk",
-            "/opt/pdk",
-            os.path.join(OPENLANE_ROOT, "pdks"),
-        ]
         found = False
-        for path in common_paths:
-            # Check for generic PDK structure, not just sky130A
+        for path in _pdk_roots():
             if os.path.exists(path) and (
                 os.path.exists(os.path.join(path, selected_pdk))
                 or os.path.exists(os.path.join(path, "sky130A"))
@@ -2988,7 +2982,7 @@ def run_openlane(
         if not found:
             return (
                 False,
-                f"PDK_ROOT not found in environment or common paths ({common_paths}). Please set PDK_ROOT.",
+                f"PDK_ROOT not found. Please set PDK_ROOT or run agentic install-pdk.",
             )
 
     # Ensure design dir exists

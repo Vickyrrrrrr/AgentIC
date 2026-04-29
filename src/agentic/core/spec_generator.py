@@ -268,17 +268,37 @@ class HardwareSpec:
     @classmethod
     def from_json(cls, json_str: str) -> "HardwareSpec":
         data = json.loads(json_str)
-        ports = [PortSpec(**p) for p in data.pop("ports", [])]
-        subs = [
-            SubModuleSpec(
-                name=s["name"],
-                description=s.get("description", ""),
-                ports=[PortSpec(**p) for p in s.get("ports", [])],
-            )
-            for s in data.pop("submodules", [])
-        ]
-        contracts = [BehavioralStatement(**b) for b in data.pop("behavioral_contract", [])]
-        inferred = [InferredField(**f) for f in data.pop("inferred_fields", [])]
+
+        # Helper to get keys even if they have extra quotes (LLM glitch)
+        def get_val(d, key, default=None):
+            if key in d: return d[key]
+            # Try with literal quotes
+            quoted = f'"{key}"'
+            if quoted in d: return d[quoted]
+            return default
+
+        ports_data = get_val(data, "ports", [])
+        ports = [PortSpec(**p) for p in ports_data]
+        
+        subs_data = get_val(data, "submodules", [])
+        subs = []
+        for s in subs_data:
+            s_name = get_val(s, "name", "unknown_sub")
+            s_desc = get_val(s, "description", "")
+            s_ports_data = get_val(s, "ports", [])
+            s_ports = [PortSpec(**p) for p in s_ports_data]
+            subs.append(SubModuleSpec(name=s_name, description=s_desc, ports=s_ports))
+
+        contracts_data = get_val(data, "behavioral_contract", [])
+        contracts = [BehavioralStatement(**b) for b in contracts_data]
+        
+        inferred_data = get_val(data, "inferred_fields", [])
+        inferred = [InferredField(**f) for f in inferred_data]
+
+        # Cleanup data for remaining kwargs
+        for k in ["ports", "submodules", "behavioral_contract", "inferred_fields", '"ports"', '"submodules"', '"behavioral_contract"', '"inferred_fields"']:
+            data.pop(k, None)
+
         return cls(
             ports=ports,
             submodules=subs,
@@ -457,6 +477,29 @@ class HardwareSpecGenerator:
         issues.extend(gen_issues)
 
         return spec, issues
+
+    def to_sid_enrichment(self, spec: HardwareSpec) -> Dict[str, Any]:
+        """
+        Convert a HardwareSpec into enrichment data for the Architect SID.
+        
+        This adds behavioral hints and port justifications that help the
+        recursive RTL generator produce better code.
+        """
+        hints = []
+        for stmt in spec.behavioral_contract:
+            hints.append(str(stmt))
+            
+        return {
+            "category": spec.design_category,
+            "verification_hints_from_spec": hints,
+            "inferred_parameters": {
+                f.field_name: f.inferred_value for f in spec.inferred_fields
+            },
+            "pdk_constraints": {
+                "target_frequency_mhz": spec.target_frequency_mhz,
+                "pdk": spec.target_pdk
+            }
+        }
 
     def _elaborate_description(
         self, design_name: str, description: str, target_pdk: str = "sky130"

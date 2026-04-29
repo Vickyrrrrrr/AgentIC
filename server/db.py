@@ -61,9 +61,9 @@ class Job(Base):
     waiting_approval = Column(Boolean, default=False)
     waiting_stage = Column(String, default="")
 
-    request_data = Column(JSON, default=dict)
-    events = Column(JSON, default=list)
-    stages = Column(JSON, default=dict)
+    request_data = Column(JSON, default=lambda: {})
+    events = Column(JSON, default=lambda: [])
+    stages = Column(JSON, default=lambda: {})
     result = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)

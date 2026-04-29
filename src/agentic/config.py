@@ -363,7 +363,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "20.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
-        "description": "OpenFASOC 130nm analog/generator flow — typically backed by SKY130",
+        "description": "OpenFASOC 130nm analog/generator flow — requires sky130 to be installed separately under same PDK_ROOT",
+        "requires_parent_pdk": "sky130",
     },
     "skywater-raw": {
         "pdk": "skywater-pdk",

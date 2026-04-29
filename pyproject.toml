@@ -48,6 +48,8 @@ server = [
     "psycopg2-binary",
     "boto3",
     "prometheus-client",
+    "slowapi",
+    "gunicorn",
 ]
 reports = [
     "PyMuPDF",

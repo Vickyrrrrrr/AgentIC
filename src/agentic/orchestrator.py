@@ -13,6 +13,7 @@ import difflib
 import subprocess
 import threading
 from dataclasses import dataclass, asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from typing import Optional, Dict, Any, List, Tuple
 from rich.console import Console
 from rich.panel import Panel
@@ -89,16 +90,12 @@ from .tools.vlsi_tools import (
     run_formal_verification,
     check_physical_metrics,
     run_lint_check,
-    run_iverilog_lint,
     run_simulation_with_coverage,
     parse_coverage_report,
     parse_drc_lvs_reports,
     parse_sta_signoff,
     parse_power_signoff,
     run_cdc_check,
-    generate_design_doc,
-    convert_sva_to_yosys,
-    validate_yosys_sby_check,
     startup_self_check,
     run_semantic_rigor_check,
     auto_fix_width_warnings,
@@ -117,6 +114,13 @@ from .tools.rate_limiter import (
     rate_limited_crew_kickoff,
     rate_limited_call,
     RateLimitResult,
+)
+
+from .core.pipeline_recovery import (
+    PipelineErrorRecovery,
+    RecoveryAction,
+    RecoveryResult,
+    apply_recovery_result,
 )
 
 from rich.theme import Theme
@@ -294,7 +298,6 @@ class BuildState(enum.Enum):
     VERIFICATION_PLAN = "Verification Planning"
     RTL_GEN = "RTL Generation"
     RTL_FIX = "RTL Syntax Fixing"
-    LINT_CHECK = "RTL Lint Check"
     CDC_ANALYZE = "CDC Analysis"
     VERIFICATION = "Verification & Testbench"
     FORMAL_VERIFY = "Formal Property Verification"
@@ -306,7 +309,7 @@ class BuildState(enum.Enum):
     DFT_SCAN = "DFT Scan Insertion"
     DFT_ATPG = "DFT ATPG Patterns"
     MBIST = "Memory BIST Insertion"
-    GLS_SIM = "Gate-Level Simulation"
+    GLS_SIMULATION = "Gate-Level Simulation"
     FLOORPLAN = "Floorplanning"
     HARDENING = "GDSII Hardening"
     TIMING_ANALYSIS = "Static Timing Analysis"
@@ -514,6 +517,13 @@ class BuildOrchestrator:
         self.context_evolver = MultiAgentContextEvolver()
         self.eda_capabilities = detect_eda_capabilities()
         self.artifacts["eda_capabilities"] = self.eda_capabilities.to_dict()
+        self.pipeline_recovery = PipelineErrorRecovery(self)
+        self.hardening_recovery_attempts = 0
+        self.hardening_recovery_attempts_max = 5  # Overridable by CLI
+
+        # Thread safety for parallel sub-module generation
+        self._artifact_lock = threading.RLock()
+        self._log_lock = threading.RLock()
 
         provider = "openai"
         model = LLM_MODEL
@@ -559,12 +569,19 @@ class BuildOrchestrator:
                     provider = "azure"
 
         def _execute_crew():
-            return rate_limited_crew_kickoff(
+            res = rate_limited_crew_kickoff(
                 crew,
                 task_overrides=task_overrides,
                 model=model,
                 base_url=base_url,
             )
+            # Unwrap RateLimitResult to string for GracefulDegradation to handle
+            if not res.ok:
+                error_msg = "\n".join(res.errors) if res.errors else "Unknown LLM error"
+                raise RuntimeError(f"CrewAI call failed: {error_msg}")
+            
+            # CrewAI kickoff returns a string-like object (CrewOutput)
+            return str(res.result)
 
         exec_result = self.degradation.execute(
             task=f"CrewAI_{role_hint}",
@@ -635,12 +652,13 @@ class BuildOrchestrator:
         self.log(f"Logging initialized to {log_file}", refined=True)
 
     def log(self, message: str, refined: bool = False):
-        """Logs a message to the file (always) and UI (cleanly)."""
+        """Logs a message to the file (always) and UI (cleanly). Thread-safe."""
         now = time.time()
-        self.history.append({"state": self.state.name, "msg": message, "time": now})
-        self.build_history.append(
-            BuildHistory(state=self.state.name, message=message, timestamp=now)
-        )
+        with self._log_lock:
+            self.history.append({"state": self.state.name, "msg": message, "time": now})
+            self.build_history.append(
+                BuildHistory(state=self.state.name, message=message, timestamp=now)
+            )
 
         # File Log
         if hasattr(self, "logger"):
@@ -1363,10 +1381,6 @@ class BuildOrchestrator:
                     self.do_rtl_gen()
                 elif self.state == BuildState.RTL_FIX:
                     self.do_rtl_fix()
-                elif self.state == BuildState.LINT_CHECK:
-                    self.do_lint_check()
-                elif self.state == BuildState.CDC_ANALYZE:
-                    self.do_cdc_analyze()
                 elif self.state == BuildState.VERIFICATION:
                     self.do_verification()
                 elif self.state == BuildState.FORMAL_VERIFY:
@@ -1385,7 +1399,7 @@ class BuildOrchestrator:
                     self.do_dft_atpg()
                 elif self.state == BuildState.MBIST:
                     self.do_mbist()
-                elif self.state == BuildState.GLS_SIM:
+                elif self.state == BuildState.GLS_SIMULATION:
                     self.do_gls_simulation()
                 elif self.state == BuildState.POWER_ANALYSIS:
                     self.do_power_analysis()
@@ -1852,7 +1866,7 @@ SPECIFICATION SECTIONS (Markdown):
                     refined=True,
                 )
                 self.artifacts["hierarchy_result"] = {}
-                self.transition(BuildState.VERIFICATION_PLAN)
+                self.transition(BuildState.FEASIBILITY_CHECK)
                 return
 
         try:
@@ -1873,16 +1887,16 @@ SPECIFICATION SECTIONS (Markdown):
             enrichment = expander.to_hierarchy_enrichment(result)
             self.artifacts["hierarchy_enrichment"] = enrichment
 
-            self.transition(BuildState.VERIFICATION_PLAN)
+            self.transition(BuildState.FEASIBILITY_CHECK)
 
         except Exception as e:
             self.log(
-                f"HierarchyExpander failed ({e}); skipping to VERIFICATION_PLAN.",
+                f"HierarchyExpander failed ({e}); skipping to FEASIBILITY_CHECK.",
                 refined=True,
             )
             self.logger.warning(f"HierarchyExpander error: {e}")
             self.artifacts["hierarchy_result"] = {}
-            self.transition(BuildState.VERIFICATION_PLAN)
+            self.transition(BuildState.FEASIBILITY_CHECK)
 
     def do_feasibility_check(self):
         """Stage: Check physical realizability on Sky130 before RTL generation."""
@@ -1938,11 +1952,11 @@ SPECIFICATION SECTIONS (Markdown):
             enrichment = checker.to_feasibility_enrichment(result)
             self.artifacts["feasibility_enrichment"] = enrichment
 
-            self.transition(BuildState.CDC_ANALYZE)
+            self.transition(BuildState.VERIFICATION_PLAN)
 
         except Exception as e:
             self.log(
-                f"FeasibilityChecker failed ({e}); skipping to CDC_ANALYZE.",
+                f"FeasibilityChecker failed ({e}); skipping to VERIFICATION_PLAN.",
                 refined=True,
             )
             self.logger.warning(f"FeasibilityChecker error: {e}")
@@ -1950,7 +1964,7 @@ SPECIFICATION SECTIONS (Markdown):
                 "feasibility_status": "WARN",
                 "feasibility_warnings": [f"Check skipped: {e}"],
             }
-            self.transition(BuildState.CDC_ANALYZE)
+            self.transition(BuildState.VERIFICATION_PLAN)
 
     def do_cdc_analyze(self):
         """Stage: Identify clock domain crossings and assign synchronization strategies."""
@@ -1961,10 +1975,11 @@ SPECIFICATION SECTIONS (Markdown):
 
         hw_spec_dict = self.artifacts.get("hw_spec", {})
         hierarchy_result_dict = self.artifacts.get("hierarchy_result", None)
+        rtl_code = self.artifacts.get("rtl_code", "")
 
         try:
             analyzer = CDCAnalyzer()
-            result = analyzer.analyze(hw_spec_dict, hierarchy_result_dict)
+            result = analyzer.analyze(hw_spec_dict, hierarchy_result_dict, rtl_code=rtl_code)
 
             self.artifacts["cdc_result"] = result.to_dict()
             self.artifacts["cdc_result_json"] = result.to_json()
@@ -2006,11 +2021,11 @@ SPECIFICATION SECTIONS (Markdown):
                     existing_spec = self.artifacts.get("spec", "")
                     self.artifacts["spec"] = existing_spec + cdc_section
 
-            self.transition(BuildState.REGRESSION)
+            self.transition(BuildState.VERIFICATION)
 
         except Exception as e:
             self.log(
-                f"CDCAnalyzer failed ({e}); skipping to REGRESSION.",
+                f"CDCAnalyzer failed ({e}); skipping to VERIFICATION.",
                 refined=True,
             )
             self.logger.warning(f"CDCAnalyzer error: {e}")
@@ -2018,7 +2033,7 @@ SPECIFICATION SECTIONS (Markdown):
                 "cdc_status": "SINGLE_DOMAIN",
                 "cdc_warnings": [f"Analysis skipped: {e}"],
             }
-            self.transition(BuildState.REGRESSION)
+            self.transition(BuildState.VERIFICATION)
 
     def do_lint_check(self):
         """Stage: RTL Lint Check - runs after RTL_FIX to verify code quality."""
@@ -2026,7 +2041,7 @@ SPECIFICATION SECTIONS (Markdown):
         path = self.artifacts.get("rtl_path")
         if not path or not os.path.exists(path):
             self.log("No RTL path found, skipping LINT_CHECK.", refined=True)
-            self.transition(BuildState.CDC_ANALYZE)
+            self.transition(BuildState.VERIFICATION)
             return
         success, report = run_lint_check(path)
         self.artifacts["lint_report"] = report
@@ -2034,7 +2049,7 @@ SPECIFICATION SECTIONS (Markdown):
             self.log("RTL Lint Check Passed", refined=True)
         else:
             self.log(f"RTL Lint Check Failed: {report[:500]}", refined=True)
-        self.transition(BuildState.CDC_ANALYZE)
+        self.transition(BuildState.VERIFICATION)
 
     def do_verification_plan(self):
         """Stage: Generate structured verification plan with test cases, SVA, and coverage."""
@@ -2235,23 +2250,6 @@ SPECIFICATION SECTIONS (Markdown):
             if header_match
             else "Could not extract ports — see full RTL below."
         )
-
-    @staticmethod
-    def _tb_meets_strict_contract(tb_code: str, strategy: BuildStrategy) -> tuple:
-        missing = []
-        text = tb_code or ""
-        if "TEST PASSED" not in text:
-            missing.append("Missing TEST PASSED marker")
-        if "TEST FAILED" not in text:
-            missing.append("Missing TEST FAILED marker")
-        if strategy == BuildStrategy.SV_MODULAR:
-            if "class Transaction" not in text:
-                missing.append("Missing class Transaction")
-            if all(
-                token not in text for token in ["class Driver", "class Monitor", "class Scoreboard"]
-            ):
-                missing.append("Missing transaction flow classes")
-        return len(missing) == 0, missing
 
     @staticmethod
     def _extract_module_ports(rtl_code: str) -> List[Dict[str, str]]:
@@ -3201,6 +3199,218 @@ endclass
             block_files.append(path)
         self.artifacts["hierarchy_blocks"] = block_files
 
+    def _generate_sub_modules_parallel(self, ordered_nodes: list, graph):
+        """Generate sub-modules in parallel by dependency depth.
+
+        Nodes at the same depth (no dependency on each other) are generated
+        simultaneously using ThreadPoolExecutor. Uses the existing
+        BoundedSemaphore in rate_limiter.py to prevent provider overload.
+
+        Each node gets its own CrewAI crew fired via _crew_kickoff.
+        """
+        import itertools
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Group nodes by dependency depth
+        depth_map: dict = {}
+        for node in ordered_nodes:
+            depth = 0
+            if node.dependencies:
+                depth = 1 + max(
+                    depth_map.get(dep.name, 0) for dep in node.dependencies
+                )
+            depth_map[node.name] = depth
+
+        # Group by depth, preserving topological order within each group
+        groups: dict = {}
+        for node in ordered_nodes:
+            d = depth_map.get(node.name, 0)
+            groups.setdefault(d, []).append(node)
+
+        max_workers = min(4, int(os.environ.get("AGENTIC_GLOBAL_LLM_CONCURRENCY", "4")))
+        self.log(
+            f"Parallel sub-module generation: {len(ordered_nodes)} nodes in "
+            f"{len(groups)} depth levels, {max_workers} max workers.",
+            refined=True,
+        )
+
+        for depth in sorted(groups):
+            nodes_at_level = groups[depth]
+            if len(nodes_at_level) == 1:
+                node = nodes_at_level[0]
+                self.log(f"Level {depth}: generating {node.name} (single)", refined=True)
+            else:
+                names = [n.name for n in nodes_at_level]
+                self.log(
+                    f"Level {depth}: generating {len(nodes_at_level)} modules in parallel ({', '.join(names)})",
+                    refined=True,
+                )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures: dict = {}
+                for node in nodes_at_level:
+                    future = pool.submit(
+                        self._generate_single_sub_module, node, graph, depth
+                    )
+                    futures[future] = node
+
+                for future in as_completed(futures):
+                    node = futures[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            with self._artifact_lock:
+                                if "sub_module_rtl" not in self.artifacts:
+                                    self.artifacts["sub_module_rtl"] = {}
+                                self.artifacts["sub_module_rtl"][node.name] = result
+                        self.log(
+                            f"Sub-module {node.name} generated successfully.",
+                            refined=True,
+                        )
+                    except Exception as e:
+                        self.log(
+                            f"Sub-module {node.name} generation failed: {e}",
+                            refined=True,
+                        )
+                        self.logger.error(f"Parallel sub-module error ({node.name}): {e}")
+
+    def _generate_single_sub_module(self, node, graph, depth: int) -> str:
+        """Generate RTL for a single sub-module. Called from parallel executor."""
+        from crewai import Agent, Task, Crew
+
+        design_name = node.name
+        spec_text = getattr(node, "description", "") or getattr(node, "spec", "") or ""
+        if not spec_text:
+            spec_text = f"Sub-module {design_name} of design {self.name}. Generate complete Verilog implementation."
+
+        deps = [d.name for d in node.dependencies]
+        dep_context = ""
+        if deps:
+            dep_rtls = []
+            with self._artifact_lock:
+                sub_rtls = self.artifacts.get("sub_module_rtl", {})
+            for dep_name in deps:
+                if dep_name in sub_rtls:
+                    dep_rtls.append(f"// Dependency: {dep_name}\n{sub_rtls[dep_name][:2000]}")
+            if dep_rtls:
+                dep_context = "\n\nDependent modules (already generated):\n" + "\n".join(dep_rtls)
+
+        agent = Agent(
+            role="Sub-Module RTL Designer",
+            goal=f"Generate complete, synthesizable Verilog for sub-module {design_name}",
+            backstory=(
+                "Expert Verilog designer. Generates clean, production-quality RTL "
+                "with proper ports, clock/reset handling, and complete implementation."
+            ),
+            llm=self.get_llm_for_role("designer"),
+            verbose=False,
+        )
+
+        task = Task(
+            description=f"""Generate the Verilog implementation for sub-module '{design_name}'.
+
+Specification:
+{spec_text}
+{dep_context}
+
+Requirements:
+- Module name MUST be exactly: {design_name}
+- Include clk and rst_n ports
+- Output ONLY raw Verilog in a ```verilog fence. No explanation text.
+""",
+            expected_output=f"Valid Verilog RTL for {design_name} in a ```verilog fence",
+            agent=agent,
+        )
+
+        crew = Crew(verbose=False, agents=[agent], tasks=[task])
+        result = self._crew_kickoff(crew, role_hint=f"sub_module_{design_name}")
+        return str(result) if result else ""
+
+    def _generate_functional_coverage_model(self) -> str:
+        """Generate SystemVerilog covergroups based on design spec.
+
+        IEEE 1800-2017 Section 19: Covergroups define coverage points and cross-coverage
+        that measure which functional scenarios were exercised during simulation.
+
+        Unlike line/branch/toggle coverage (which only tells you WHAT code executed),
+        functional coverage tells you WHETHER the design behaves correctly across all
+        specified scenarios (FIFO full/empty, counter rollover, state machine reachability, etc.)
+
+        Research basis:
+        - "Coverage-Driven Verification" (Piziali, 2004) — functional coverage is the
+          primary metric for verification completeness
+        - Google ChipNeMo (2023) — LLMs can generate covergroups from natural spec
+        - IEEE 1800-2017 Section 19.5 — covergroup syntax and semantics
+        """
+        from crewai import Agent, Task, Crew
+
+        spec = self.artifacts.get("spec", "")
+        rtl_code = self.artifacts.get("rtl_code", "")
+        verification_plan = self.artifacts.get("verification_plan", "")
+
+        agent = Agent(
+            role="Functional Coverage Architect",
+            goal="Generate a complete SystemVerilog covergroup model for the design",
+            backstory=(
+                "You are a verification expert specializing in coverage-driven verification. "
+                "You create covergroups with coverpoints, cross-coverage, and coverage bins "
+                "that verify every specified functional scenario. You follow IEEE 1800-2017 Section 19."
+            ),
+            llm=self.get_llm_for_role("verifier"),
+            verbose=False,
+        )
+
+        task = Task(
+            description=f"""Generate a SystemVerilog covergroup model for this design.
+
+SPECIFICATION:
+{spec[:3000]}
+
+VERIFICATION PLAN:
+{verification_plan[:2000]}
+
+RTL (first 2000 lines):
+{rtl_code[:2000]}
+
+Requirements:
+1. Create a module named "{self.name}_coverage"
+2. Define covergroups with:
+   - coverpoints for each functional state/condition from the spec
+   - cross-coverage between related coverpoints
+   - bins for boundary conditions (min, max, rollover)
+   - bins for protocol states (IDLE, ACTIVE, DONE)
+   - bins for data patterns (all-zeros, all-ones, alternating)
+3. Sample the covergroups at the right clock edge
+4. Use only signals that exist in the RTL (check port list!)
+5. Output pure Verilog in a ```verilog fence. No prose.
+
+Covergroup template example:
+```verilog
+module counter_coverage(input clk, rst_n, input [7:0] count, input enable);
+  covergroup cg @(posedge clk);
+    count_val: coverpoint count {{
+      bins zero = {{0}};
+      bins mid = {{1, 63, 127, 128, 192, 254}};
+      bins max = {{255}};
+    }}
+    enable_state: coverpoint enable {{
+      bins enabled = {{1}};
+      bins disabled = {{0}};
+    }}
+    count_x_enable: cross count_val, enable_state;
+  endgroup
+  cg cg_inst = new();
+endmodule
+```
+""",
+            expected_output="Valid SystemVerilog covergroup module in a ```verilog fence",
+            agent=agent,
+        )
+
+        crew = Crew(verbose=False, agents=[agent], tasks=[task])
+        result = self._crew_kickoff(crew, role_hint="coverage_model")
+        return str(result) if result else ""
+
     def do_rtl_gen(self):
         sid_raw = self.artifacts.get("sid")
         if sid_raw:
@@ -3237,8 +3447,10 @@ endclass
 
                 for node in ordered_nodes:
                     self.log(f"Proceeding to generate Sub-Module: {node.name}", refined=True)
-                    # For MVP graph implementation, we will append sub_module requirements into the prompt
-                    # instead of fully isolating state transitions, avoiding disruption of standard Verification pipes.
+
+                # ── Parallel sub-module generation (same-depth nodes fire simultaneously) ──
+                if len(ordered_nodes) > 1:
+                    self._generate_sub_modules_parallel(ordered_nodes, graph)
 
             except Exception as e:
                 self.log(f"Graph Builder parsing warning: {e}", refined=True)
@@ -3579,10 +3791,10 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                                 producer="orchestrator_rtl_fix",
                                 consumable_payload={"semantic_report": bool(sem_report)},
                                 artifacts_written=["semantic_report"],
-                                next_action=BuildState.VERIFICATION.name,
+                                next_action=BuildState.CDC_ANALYZE.name,
                             )
                         )
-                        self.transition(BuildState.VERIFICATION)
+                        self.transition(BuildState.CDC_ANALYZE)
                         return
                 else:
                     self.artifacts["semantic_report"] = sem_report
@@ -3593,7 +3805,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                             producer="orchestrator_rtl_fix",
                             consumable_payload={"semantic_report": True},
                             artifacts_written=["semantic_report"],
-                            next_action=BuildState.VERIFICATION.name,
+                            next_action=BuildState.CDC_ANALYZE.name,
                         )
                     )
                     self.transition(BuildState.CDC_ANALYZE)
@@ -4200,6 +4412,24 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
         self.artifacts["tb_recovery_cycle_static"] = 0
         self.artifacts["tb_recovery_cycle_compile"] = 0
         self._record_tb_gate_history("compile", True, "gate_pass", compile_report)
+
+        # ── Functional Coverage Model Generation ──
+        # Generate SystemVerilog covergroups based on spec (IEEE 1800-2017 §19).
+        # This is what separates "did the code run?" from "did we test the right scenarios?"
+        coverage_sv_path = f"{OPENLANE_ROOT}/designs/{self.name}/src/{self.name}_coverage.sv"
+        if not os.path.exists(coverage_sv_path):
+            try:
+                coverage_model = self._generate_functional_coverage_model()
+                if coverage_model:
+                    cov_code = extract_verilog_safely(coverage_model)
+                    if cov_code:
+                        with open(coverage_sv_path, "w") as f:
+                            f.write(cov_code)
+                        self.artifacts["functional_coverage_model"] = coverage_sv_path
+                        self.log("Functional coverage model generated.", refined=True)
+            except Exception as e:
+                self.log(f"Functional coverage model generation skipped: {e}", refined=True)
+                self.logger.warning(f"Coverage model gen error: {e}")
 
         # Run Sim
         with console.status(
@@ -5695,6 +5925,18 @@ REQUIREMENTS:
             self.artifacts["sdc_path"] = sdc_path
             self.log(f"SDC Constraints generated: {sdc_path}", refined=True)
 
+            # Extract clock period from generated SDC for downstream hardening
+            # Handles: create_clock -period 10.0, create_clock -name clk -period 10.0,
+            #          create_clock -add -name clk -period 10.0, etc.
+            m = re.search(
+                r"-period\s+([\d.]+)",
+                sdc_content,
+                re.IGNORECASE,
+            )
+            if m:
+                self.artifacts["sdc_clock_period_ns"] = float(m.group(1))
+                self.log(f"SDC Clock Period: {self.artifacts['sdc_clock_period_ns']}ns", refined=True)
+
         self.transition(BuildState.SYNTHESIS)
 
     def do_synthesis(self):
@@ -5771,6 +6013,24 @@ REQUIREMENTS:
                 "\n".join([result.stdout, result.stderr, *result.errors])
             )
             self.artifacts["synth_structured_errors"] = structured_errors
+
+            # Try PipelineErrorRecovery for synthesis-specific fixes (switch strategy, etc.)
+            synth_params = {
+                "synth_strategy": self.artifacts.get("synth_strategy_override", "AREA 0"),
+                "clock_period": float(self.artifacts.get("sdc_clock_period_ns", 10.0)),
+            }
+            pipeline_recovery = self.pipeline_recovery.handle_error(
+                stage_name="SYNTHESIS",
+                error_output="\n".join(result.errors),
+                rtl_code=self.artifacts.get("rtl_code", ""),
+                stage_params=synth_params,
+                allow_rtl_fix=True,
+            )
+            if pipeline_recovery and pipeline_recovery.action == RecoveryAction.SWITCH_STRATEGY:
+                self.artifacts["synth_strategy_override"] = pipeline_recovery.params.get("synth_strategy", "DELAY 0")
+                self.log(f"Synthesis strategy adjusted. Retrying...", refined=True)
+                return  # Re-enter do_synthesis with new strategy
+
             if self._attempt_backend_error_recovery(
                 "SYNTHESIS",
                 result.errors,
@@ -5926,7 +6186,7 @@ REQUIREMENTS:
 
         if not memories_found:
             self.log("No embedded memories detected; skipping MBIST.", refined=True)
-            self.transition(BuildState.GLS_SIM)
+            self.transition(BuildState.GLS_SIMULATION)
             return
 
         with console.status("[accent]Generating MBIST Wrappers...[/accent]"):
@@ -5981,7 +6241,7 @@ REQUIREMENTS:
         self.artifacts["mbist_dir"] = mbist_dir
         self.artifacts["mbist_configs"] = [cfg.memory_instance for cfg in mem_configs]
         self.log(f"MBIST: {len(mem_configs)} memory BIST wrappers generated.", refined=True)
-        self.transition(BuildState.GLS_SIM)
+        self.transition(BuildState.GLS_SIMULATION)
 
     def do_gls_simulation(self):
         """Gate-level simulation with SDF timing annotation."""
@@ -6261,6 +6521,21 @@ REQUIREMENTS:
                 f"all_corners={'PASS' if result.all_corners_pass else 'FAIL'}",
                 refined=True,
             )
+
+            # ── Extract OpenLane internal STA reports (multi-corner signoff) ──
+            # OpenLane stores per-corner timing reports at:
+            #   runs/{tag}/reports/signoff/{corner}-sta-rcx_{mode}/
+            # These contain detailed timing paths with SPEF-parasitics that
+            # go beyond what AgentIC's standalone STA collects.
+            ol_sta_data = self._extract_openlane_sta_reports(run_tag)
+            if ol_sta_data:
+                self.artifacts["openlane_sta"] = ol_sta_data
+                self.log(
+                    f"OpenLane STA: {len(ol_sta_data)} corner(s) extracted "
+                    f"(wns_setup={min(c.get('wns_setup', 0) for c in ol_sta_data.values()):.3f}ns)",
+                    refined=True,
+                )
+
             if not result.all_corners_pass:
                 timing_errors: List[str] = []
                 structured_errors: List[Dict[str, Any]] = []
@@ -6282,6 +6557,31 @@ REQUIREMENTS:
                             structured_errors.extend(parse_sta_errors(f.read()))
                 self.artifacts["sta_error"] = timing_errors
                 self.artifacts["sta_structured_errors"] = structured_errors
+
+                # Try physical fixes first (clock relax, area expand) before RTL fix
+                timing_params = {
+                    "clock_period": float(self.artifacts.get("clock_period_override",
+                                         self.artifacts.get("sdc_clock_period_ns", 10.0))),
+                    "die_area": int(self.artifacts.get("die_area_override", 500)),
+                    "core_util": int(self.artifacts.get("core_util_override", 40)),
+                }
+                timing_recovery = self.pipeline_recovery.handle_error(
+                    stage_name="TIMING_ANALYSIS",
+                    error_output="\n".join(timing_errors),
+                    stage_params=timing_params,
+                    allow_rtl_fix=(self.artifacts.get("timing_recovery_attempts", 0) >= 2),
+                )
+                self.artifacts["timing_recovery_attempts"] = (
+                    self.artifacts.get("timing_recovery_attempts", 0) + 1
+                )
+                if timing_recovery and timing_recovery.action in (
+                    RecoveryAction.RELAX_CLOCK, RecoveryAction.EXPAND_AREA, RecoveryAction.REDUCE_UTIL
+                ):
+                    apply_recovery_result(self, timing_recovery, timing_params)
+                    self.log("Timing recovery applied physical fixes. Loop to FLOORPLAN.", refined=True)
+                    self.transition(BuildState.FLOORPLAN, preserve_retries=True)
+                    return
+
                 if self._attempt_backend_error_recovery(
                     "TIMING",
                     timing_errors,
@@ -6936,16 +7236,113 @@ REASONING: <1-line explanation>""",
         self.log(f"ECO artifact generated: {patch_result}", refined=True)
         self.transition(BuildState.HARDENING, preserve_retries=True)
 
-    def do_hardening(self):
-        # 1. Generate config.tcl (CRITICAL: Required for OpenLane)
-        self.log(f"Generating OpenLane config for {self.name}...", refined=True)
+    def _extract_openlane_sta_reports(self, run_tag: str) -> dict:
+        """Extract per-corner STA results from OpenLane's internal signoff reports.
 
-        # Dynamic Clock Detection
+        OpenLane runs STA at multiple corners during flow.tcl, saving reports at:
+        runs/{tag}/reports/signoff/{corner}-sta-rcx_{mode}/
+
+        These contain SPEF-parasitic-aware timing paths beyond AgentIC's standalone STA.
+        """
+        reports = {}
+        signoff_dir = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/reports/signoff"
+        if not os.path.isdir(signoff_dir):
+            return reports
+
+        for entry in sorted(os.listdir(signoff_dir)):
+            entry_path = os.path.join(signoff_dir, entry)
+            if not os.path.isdir(entry_path):
+                continue
+
+            corner_name = entry.split("-sta")[0] if "-sta" in entry else entry
+            corner_data = {"corner": corner_name, "wns_setup": 0.0, "wns_hold": 0.0,
+                          "tns_setup": 0.0, "tns_hold": 0.0, "max_freq_mhz": 0.0, "paths": []}
+
+            for root, _dirs, files in os.walk(entry_path):
+                for f in files:
+                    if not f.endswith((".rpt", ".txt", ".summary")):
+                        continue
+                    try:
+                        with open(os.path.join(root, f), "r", errors="replace") as fh:
+                            content = fh.read()[:50000]
+                    except OSError:
+                        continue
+
+                    wns_m = re.search(r"(?:Worst Negative Slack|WNS|setup slack).*?(-?[\d.]+)\s*(?:ns)?", content, re.IGNORECASE)
+                    if wns_m:
+                        val = float(wns_m.group(1))
+                        if "hold" not in f.lower() and "min" not in f.lower():
+                            corner_data["wns_setup"] = min(corner_data["wns_setup"], val) if corner_data["wns_setup"] != 0 else val
+                        else:
+                            corner_data["wns_hold"] = min(corner_data["wns_hold"], val) if corner_data["wns_hold"] != 0 else val
+
+                    freq_m = re.search(r"(?:frequency|fmax).*?([\d.]+)\s*(?:MHz)", content, re.IGNORECASE)
+                    if freq_m:
+                        corner_data["max_freq_mhz"] = max(corner_data["max_freq_mhz"], float(freq_m.group(1)))
+
+            if corner_data["wns_setup"] != 0 or corner_data["wns_hold"] != 0:
+                reports[corner_name] = corner_data
+
+        return reports
+
+    def _post_openlane_dft(self, run_tag: str):
+        """Re-insert DFT on OpenLane's synthesized gate netlist.
+
+        OpenLane re-synthesizes from RTL during hardening, discarding AgentIC's
+        pre-hardening DFT insertion. The correct approach is to insert DFT on
+        OpenLane's output netlist, which represents the actual physical implementation.
+
+        Research basis:
+        - Standard industry DFT flow: synthesis → DFT insertion → physical design.
+          When physical design re-synthesizes, DFT must be re-inserted post-layout.
+          (IEEE Std 1149.1-2013, "Standard DFT for Scan-Based Testing")
+        """
+        openlane_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
+        if not os.path.exists(openlane_netlist):
+            self.log("No OpenLane gate netlist for post-DFT; skipping.", refined=True)
+            return
+
+        self.log("Re-inserting DFT on OpenLane synthesized netlist...", refined=True)
+
+        dft_dir = f"{OPENLANE_ROOT}/designs/{self.name}/dft"
+        os.makedirs(dft_dir, exist_ok=True)
+        scan_chain_count = int(self.artifacts.get("dft_scan_chains", 4))
+
+        try:
+            from .tools.dft_tools import run_scan_insertion
+            result = run_scan_insertion(
+                rtl_files=[openlane_netlist],
+                top_module=self.name,
+                output_dir=dft_dir,
+                scan_chain_count=scan_chain_count,
+                scan_enable_signal="scan_en",
+                scan_mode_signal="scan_mode",
+                pdk=self.pdk_profile.get("pdk", PDK),
+                timeout=600,
+            )
+            if result.ok:
+                self.artifacts["scan_netlist"] = result.scan_netlist_path
+                self.artifacts["scan_chain_count"] = result.scan_chain_count
+                self.artifacts["dft_post_openlane"] = True
+                self.log(
+                    f"Post-OpenLane DFT: {result.scan_chain_count} scan chains inserted "
+                    f"({result.total_cells} cells, {result.flops} flops)", 
+                    refined=True,
+                )
+            else:
+                self.log(f"Post-OpenLane DFT failed: {'; '.join(result.errors[:2])}", refined=True)
+                self.artifacts["dft_error"] = result.errors
+        except Exception as e:
+            self.log(f"Post-OpenLane DFT error: {e}", refined=True)
+            self.logger.warning(f"Post-OpenLane DFT exception: {e}")
+        """Generate OpenLane config.tcl with current recovery-adjusted parameters.
+        
+        Pulls SDC clock period from generated SDC file, applies any recovery overrides
+        (die_area_override, core_util_override, clock_period_override) from artifacts.
+        Returns the config TCL string.
+        """
         rtl_code = self.artifacts.get("rtl_code", "")
-        clock_port = "clk"  # Default
-
-        # Regex to find clock port: input ... clk ... ;
-        # Matches: input clk, input wire clk, input logic clk
+        clock_port = "clk"
         clk_match = re.search(
             r"input\s+(?:wire\s+|logic\s+)?(\w*(?:clk|clock|sclk|aclk)\w*)\s*[;,\)]",
             rtl_code,
@@ -6955,40 +7352,45 @@ REASONING: <1-line explanation>""",
             clock_port = clk_match.group(1)
             self.log(f"Detected Clock Port: {clock_port}", refined=True)
 
-        # Modern OpenLane Config Template
-        # Note: We use GRT_ADJUSTMENT instead of deprecated GLB_RT_ADJUSTMENT
-
         std_cell_lib = self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")
         pdk_name = self.pdk_profile.get("pdk", PDK)
+
+        # Priority: recovery override > SDC extracted > PDK default
         clock_period = str(
-            self.artifacts.get(
-                "clock_period_override",
-                self.pdk_profile.get("default_clock_period", "10.0"),
-            )
+            self.artifacts.get("clock_period_override")
+            or self.artifacts.get("sdc_clock_period_ns")
+            or self.pdk_profile.get("default_clock_period", "10.0")
         )
+        synth_strategy = self.artifacts.get("synth_strategy_override", "AREA 0")
+
         floor_meta = self.artifacts.get("floorplan_meta", {})
-        die = int(floor_meta.get("die_area", 500))
-        util = 40 if die >= 500 else 50
+        die = self.artifacts.get("die_area_override") or int(floor_meta.get("die_area", 500))
+        util = self.artifacts.get("core_util_override") or (40 if die >= 500 else 50)
+
+        # Add SDC file reference if available
+        sdc_ref = ""
+        sdc_path = self.artifacts.get("sdc_path", "")
+        if sdc_path and os.path.exists(sdc_path):
+            sdc_ref = f'\nset ::env(SDC_FILE) "{sdc_path}"\n'
 
         config_tcl = f"""
 # User config
 set ::env(DESIGN_NAME) "{self.name}"
 
 # PDK Setup
+set ::env(PDK_ROOT) "{PDK_ROOT}"
 set ::env(PDK) "{pdk_name}"
 set ::env(STD_CELL_LIBRARY) "{std_cell_lib}"
 
-# Verilog Files
 # Verilog Files (glob all .v files — supports multi-module designs)
 set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]
 
 # Clock Configuration
 set ::env(CLOCK_PORT) "{clock_port}"
 set ::env(CLOCK_NET) "{clock_port}"
-set ::env(CLOCK_PERIOD) "{clock_period}"
-
+set ::env(CLOCK_PERIOD) "{clock_period}"{sdc_ref}
 # Synthesis
-set ::env(SYNTH_STRATEGY) "AREA 0"
+set ::env(SYNTH_STRATEGY) "{synth_strategy}"
 set ::env(SYNTH_SIZING) 1
 
 # Floorplanning
@@ -7003,6 +7405,13 @@ set ::env(GRT_ADJUSTMENT) 0.15
 # Magic
 set ::env(MAGIC_DRC_USE_GDS) 1
 """
+        return config_tcl
+
+    def do_hardening(self):
+        # 1. Generate config.tcl (CRITICAL: Required for OpenLane)
+        self.log(f"Generating OpenLane config for {self.name}...", refined=True)
+
+        config_tcl = self._generate_openlane_config()
         from .tools.vlsi_tools import write_config
 
         try:
@@ -7016,6 +7425,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # 2. Run OpenLane
         run_tag = f"agentrun_{self.global_step_count}"
         floorplan_tcl = self.artifacts.get("floorplan_tcl", "")
+        pdk_name = self.pdk_profile.get("pdk", PDK)
         with console.status("[info]Hardening Layout (OpenLane)...[/info]"):
             success, result = run_openlane(
                 self.name,
@@ -7029,71 +7439,148 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             self.artifacts["gds"] = result
             self.artifacts["run_tag"] = run_tag
             self.log(f"GDSII generated: {result}", refined=True)
+
+            # ── Post-OpenLane DFT: re-insert scan chains on OpenLane's synthesized netlist ──
+            # AgentIC's pre-OpenLane DFT is lost when OpenLane re-synthesizes from RTL.
+            # The gate netlist from OpenLane's synthesis is the canonical netlist.
+            # DFT must be inserted on THIS netlist, not AgentIC's pre-hardening synthesis.
+            self._post_openlane_dft(run_tag)
+
             self.transition(BuildState.CONVERGENCE_REVIEW)
-        else:
-            # ── Self-Reflective Retry via SelfReflectPipeline ──
-            self.log(f"Hardening failed. Activating self-reflection retry...", refined=True)
+            return
+
+        # ── OpenLane failed — activate self-healing recovery ──
+        self.log(f"OpenLane hardening failed. Activating self-healing recovery...", refined=True)
+        self.hardening_recovery_attempts += 1
+
+        # Collect current physical design parameters for recovery
+        floor_meta = self.artifacts.get("floorplan_meta", {})
+        stage_params = {
+            "clock_period": float(
+                self.artifacts.get("clock_period_override",
+                self.artifacts.get("sdc_clock_period_ns",
+                self.pdk_profile.get("default_clock_period", 10.0)))
+            ),
+            "die_area": int(self.artifacts.get("die_area_override",
+                            floor_meta.get("die_area", 500))),
+            "core_util": int(self.artifacts.get("core_util_override", 40)),
+            "synth_strategy": self.artifacts.get("synth_strategy_override", "AREA 0"),
+        }
+
+        # Step 1: Try deterministic OpenLane error fix (fast, no LLM)
+        recovery = self.pipeline_recovery.handle_error(
+            stage_name="HARDENING",
+            error_output=str(result),
+            rtl_code=self.artifacts.get("rtl_code", ""),
+            stage_params=stage_params,
+            allow_rtl_fix=(self.hardening_recovery_attempts >= 3),
+        )
+
+        if not recovery or recovery.action == RecoveryAction.FAIL:
+            self.log("Pipeline recovery exhausted. Failing.", refined=True)
+            self.state = BuildState.FAIL
+            return
+
+        # Apply the recovery fix to parameters
+        stage_params = apply_recovery_result(self, recovery, stage_params)
+
+        # If the fix requires config regeneration, regenerate and store params
+        if recovery.needs_config_regen:
             try:
-                reflect_pipeline = SelfReflectPipeline(
-                    llm=self.get_llm_for_role("manager"),
-                    max_retries=3,
-                    verbose=self.verbose,
-                    on_reflection=lambda evt: self.log(
-                        f"[Self-Reflect] {evt.get('category', '')}: {evt.get('reflection', '')[:120]}",
-                        refined=True,
-                    ),
+                config_tcl = self._generate_openlane_config()
+                write_config(self.name, config_tcl)
+                self.log(
+                    f"Config regenerated with recovery params: "
+                    f"clk={stage_params.get('clock_period')}ns, "
+                    f"die={stage_params.get('die_area')}um, "
+                    f"util={stage_params.get('core_util')}%",
+                    refined=True,
                 )
-
-                def _hardening_action():
-                    """Re-run OpenLane and return (success, error_msg, metrics)."""
-                    new_tag = f"agentrun_{self.global_step_count}_{int(time.time()) % 10000}"
-                    ok, res = run_openlane(
-                        self.name,
-                        background=False,
-                        run_tag=new_tag,
-                        floorplan_tcl=self.artifacts.get("floorplan_tcl", ""),
-                        pdk_name=pdk_name,
-                    )
-                    if ok:
-                        self.artifacts["gds"] = res
-                        self.artifacts["run_tag"] = new_tag
-
-                    return ok, res if not ok else "", {}
-
-                def _hardening_fix(action):
-                    """Apply a corrective action from self-reflection."""
-                    if action.action_type == "adjust_config":
-                        # Common fix: increase die area or relax utilisation
-                        self.log(f"Applying config fix: {action.description}", refined=True)
-                        return True  # Mark as applied; the next retry re-generates config
-                    elif action.action_type == "modify_rtl":
-                        self.log(
-                            f"RTL modification suggested: {action.description}",
-                            refined=True,
-                        )
-                        return True
-                    return False
-
-                rtl_summary = self.artifacts.get("rtl_code", "")[:2000]
-                ok, msg, reflections = reflect_pipeline.run_with_retry(
-                    stage_name="OpenLane Hardening",
-                    action_fn=_hardening_action,
-                    fix_fn=_hardening_fix,
-                    rtl_summary=rtl_summary,
-                )
-
-                if ok:
-                    self.log(f"Hardening recovered via self-reflection: {msg}", refined=True)
-                    self.artifacts["self_reflect_history"] = reflect_pipeline.get_summary()
-                    self.transition(BuildState.CONVERGENCE_REVIEW)
-                else:
-                    self.log(f"Hardening failed after self-reflection: {msg}", refined=True)
-                    self.artifacts["self_reflect_history"] = reflect_pipeline.get_summary()
-                    self.state = BuildState.FAIL
             except Exception as e:
-                self.logger.warning(f"SelfReflectPipeline error: {e}")
-                self.log(f"Hardening Failed: {result}", refined=True)
+                self.log(f"Config regeneration failed: {e}", refined=True)
+
+        if recovery.action == RecoveryAction.FIX_RTL:
+            self.log("Recovery requires RTL fix. Routing to RTL_GEN.", refined=True)
+            self.transition(BuildState.RTL_GEN, preserve_retries=True)
+            return
+
+        if recovery.action == RecoveryAction.RETRY_SAME:
+            if self.hardening_recovery_attempts >= self.hardening_recovery_attempts_max:
+                self.log(
+                    f"Max retry attempts ({self.hardening_recovery_attempts_max}) reached. Failing.",
+                    refined=True,
+                )
                 self.state = BuildState.FAIL
+                return
+            self.log(
+                f"Retrying OpenLane hardening (attempt {self.hardening_recovery_attempts}/{self.hardening_recovery_attempts_max})...",
+                refined=True,
+            )
+            # Loop back — do_hardening will re-run with updated params
+            return
+
+        # Last resort: use SelfReflectPipeline for complex analysis
+        self.log("Deterministic fixes applied. Running SelfReflect for deeper analysis.", refined=True)
+        try:
+            reflect_pipeline = SelfReflectPipeline(
+                llm=self.get_llm_for_role("manager"),
+                max_retries=2,
+                verbose=self.verbose,
+                on_reflection=lambda evt: self.log(
+                    f"[Self-Reflect] {evt.get('category', '')}: {evt.get('reflection', '')[:120]}",
+                    refined=True,
+                ),
+            )
+
+            def _hardening_retry():
+                """Re-run OpenLane with updated config."""
+                new_tag = f"agentrun_{self.global_step_count}_{int(time.time()) % 10000}"
+                # Regenerate config with latest recovery params
+                config_tcl = self._generate_openlane_config()
+                write_config(self.name, config_tcl)
+                ok, res = run_openlane(
+                    self.name,
+                    background=False,
+                    run_tag=new_tag,
+                    floorplan_tcl=self.artifacts.get("floorplan_tcl", ""),
+                    pdk_name=pdk_name,
+                )
+                if ok:
+                    self.artifacts["gds"] = res
+                    self.artifacts["run_tag"] = new_tag
+                return ok, res if not ok else "", {}
+
+            def _apply_llm_fix(action):
+                """Apply corrective action from LLM self-reflection."""
+                if action.action_type == "adjust_config":
+                    self.log(f"LLM config fix: {action.description}", refined=True)
+                    return True
+                elif action.action_type == "modify_rtl":
+                    self.log(f"LLM RTL fix: {action.description}", refined=True)
+                    self.transition(BuildState.RTL_GEN, preserve_retries=True)
+                    return True
+                return False
+
+            rtl_summary = self.artifacts.get("rtl_code", "")[:2000]
+            ok, msg, reflections = reflect_pipeline.run_with_retry(
+                stage_name="OpenLane Hardening",
+                action_fn=_hardening_retry,
+                fix_fn=_apply_llm_fix,
+                rtl_summary=rtl_summary,
+            )
+
+            if ok:
+                self.log(f"Hardening recovered via self-reflection: {msg}", refined=True)
+                self.artifacts["self_reflect_history"] = reflect_pipeline.get_summary()
+                self.transition(BuildState.CONVERGENCE_REVIEW)
+            else:
+                self.log(f"Hardening failed after self-reflection: {msg}", refined=True)
+                self.artifacts["self_reflect_history"] = reflect_pipeline.get_summary()
+                self.state = BuildState.FAIL
+        except Exception as e:
+            self.logger.warning(f"SelfReflectPipeline error: {e}")
+            self.log(f"Hardening Failed: {result}", refined=True)
+            self.state = BuildState.FAIL
 
     def do_signoff(self):
         """Performs full fabrication-readiness signoff: DRC/LVS, timing closure, power analysis."""

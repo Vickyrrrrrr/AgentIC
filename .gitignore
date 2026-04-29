@@ -85,6 +85,8 @@ modify_*.py
 scripts/remote_setup.sh
 video
 skills
+checkpoints
+
 
 # Benchmark / leaderboard artifacts
 *.jsonl

@@ -131,8 +131,8 @@ _PROVIDER_STRATEGIES: Dict[str, RateLimitStrategy] = {
     "z_ai": RateLimitStrategy(
         name="z_ai",
         base_delay_s=3.0,
-        max_delay_s=180.0,
-        max_retries=5,
+        max_delay_s=300.0,
+        max_retries=8,
         exponential_base=2.0,
         respect_retry_after=True,
     ),
@@ -395,16 +395,25 @@ def rate_limited_call(
             ):
                 is_rate_limit = True
 
-            if not is_rate_limit:
-                # Non-rate-limit error — surface immediately
-                return RateLimitResult(
-                    ok=False,
-                    result=None,
-                    attempts=attempt,
-                    total_wait_s=total_wait,
-                    errors=[f"{error_type}: {error_str}"],
-                    provider=provider,
-                )
+                # For z_ai or generic, if it's a connection/timeout error, retry anyway
+                is_retryable = any(k in error_str.lower() for k in ["timeout", "connection", "disconnected", "reset", "peer", "exhausted", "limit"])
+                if is_retryable and attempt <= effective_max_retries:
+                    is_rate_limit = True  # Treat as retryable
+                else:
+                    # Non-retryable error — surface immediately
+                    err_msg = f"{error_type}: {error_str}"
+                    # LOG TO CONSOLE so the user sees the real reason
+                    from rich.console import Console
+                    Console(stderr=True).print(f"[bold red]LLM Provider Error ({provider}):[/bold red] {err_msg}")
+                    
+                    return RateLimitResult(
+                        ok=False,
+                        result=None,
+                        attempts=attempt,
+                        total_wait_s=total_wait,
+                        errors=[err_msg],
+                        provider=provider,
+                    )
 
             errors.append(f"[attempt {attempt}] {error_type}: {error_str}")
 

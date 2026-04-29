@@ -2428,7 +2428,7 @@ async def trigger_build(
 
             logger.info(f"Sending job {job_id} to distributed Celery worker queue.")
             # We dump the pydantic model to a dict so Celery/Redis can serialize it
-            run_agentic_build_task.apply_async(args=[job_id, req.dict()])
+            run_agentic_build_task.apply_async(args=[job_id, req.model_dump()])
         except ImportError:
             use_celery = False
 

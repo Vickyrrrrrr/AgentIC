@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Check, Zap, Infinity, ArrowLeft, Cpu, KeyRound, AlertCircle } from 'lucide-react';
 import { supabase } from '../supabaseClient';
+import { api } from '../api';
 
 type Plan = {
   id: string;
@@ -63,9 +64,8 @@ export function Pricing() {
 
   const loadBillingStatus = async () => {
     try {
-      const resp = await fetch('/billing/status');
-      if (resp.ok) {
-        const data = await resp.json();
+      const { data } = await api.get('/billing/status', { validateStatus: () => true });
+      if (data) {
         setCurrentPlan(data.plan);
         setCurrentPlanType(data.plan_type);
         setTestMode(data.test_mode || false);
@@ -86,39 +86,28 @@ export function Pricing() {
 
     try {
       // Step 1: Create order
-      const orderResp = await fetch('/billing/create-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan: planId, user_id: session.user.id }),
-      });
+      const { data: order, status: orderStatus } = await api.post('/billing/create-order', {
+        plan: planId,
+        user_id: session.user.id,
+      }, { validateStatus: () => true });
 
-      if (!orderResp.ok) {
-        const err = await orderResp.json();
-        throw new Error(err.detail || 'Failed to create order');
+      if (orderStatus < 200 || orderStatus >= 300) {
+        throw new Error(order?.detail || 'Failed to create order');
       }
-
-      const order = await orderResp.json();
 
       if (testMode || order.test_mode) {
         // Test mode: activate immediately without real payment
-        const activateResp = await fetch('/billing/verify-payment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            razorpay_order_id: order.order_id,
-            razorpay_payment_id: `test_payment_${Date.now()}`,
-            razorpay_signature: '0'.repeat(64),
-            user_id: session.user.id,
-            plan: planId,
-          }),
-        });
+        const { data: result, status: activateStatus } = await api.post('/billing/verify-payment', {
+          razorpay_order_id: order.order_id,
+          razorpay_payment_id: `test_payment_${Date.now()}`,
+          razorpay_signature: '0'.repeat(64),
+          user_id: session.user.id,
+          plan: planId,
+        }, { validateStatus: () => true });
 
-        if (!activateResp.ok) {
-          const err = await activateResp.json();
-          throw new Error(err.detail || 'Failed to activate plan');
+        if (activateStatus < 200 || activateStatus >= 300) {
+          throw new Error(result?.detail || 'Failed to activate plan');
         }
-
-        const result = await activateResp.json();
         setMessage({
           type: 'success',
           text: `✅ ${result.plan_name || PLANS.find(p => p.id === planId)?.name} plan activated! (Test mode — no payment taken)`,
@@ -127,24 +116,26 @@ export function Pricing() {
         setCurrentPlanType('agentic_paid');
       } else {
         // Production mode: open Razorpay checkout
-        const rzp = new (window as any).Razorpay({
+        const Razorpay = (window as any).Razorpay;
+        if (!Razorpay) {
+          setMessage({ type: 'error', text: 'Payment SDK not loaded. Please refresh the page or use test mode.' });
+          setLoading(null);
+          return;
+        }
+        const rzp = new Razorpay({
           key: order.key_id,
           order_id: order.order_id,
           name: 'AgentIC',
           description: `${order.plan_name} — ${order.amount_display}`,
           handler: async (response: any) => {
-            const verifyResp = await fetch('/billing/verify-payment', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-                user_id: session.user.id,
-                plan: planId,
-              }),
-            });
-            if (verifyResp.ok) {
+            const { data: verifyData, status: verifyStatus } = await api.post('/billing/verify-payment', {
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              user_id: session.user.id,
+              plan: planId,
+            }, { validateStatus: () => true });
+            if (verifyStatus >= 200 && verifyStatus < 300) {
               setMessage({ type: 'success', text: '✅ Plan activated! Start building your chips.' });
               setCurrentPlan(planId);
               setCurrentPlanType('agentic_paid');
@@ -172,16 +163,13 @@ export function Pricing() {
     setLoading(planId);
     setMessage(null);
     try {
-      const resp = await fetch('/billing/test-activate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan: planId, user_id: session.user.id }),
-      });
-      if (!resp.ok) {
-        const err = await resp.json();
-        throw new Error(err.detail || 'Failed to activate');
+      const { data, status } = await api.post('/billing/test-activate', {
+        plan: planId,
+        user_id: session.user.id,
+      }, { validateStatus: () => true });
+      if (status < 200 || status >= 300) {
+        throw new Error(data?.detail || 'Failed to activate');
       }
-      const data = await resp.json();
       setMessage({ type: 'success', text: data.message });
       setCurrentPlan(planId);
       setCurrentPlanType('agentic_paid');

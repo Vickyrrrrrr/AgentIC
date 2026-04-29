@@ -161,8 +161,10 @@ DESIGN NAME: {design_name}
 SPECIFICATION: {spec_text}
 
 Produce the complete Structured Information Dictionary (JSON) for this chip design.
-Decompose into sub-modules where architecturally appropriate (e.g., separate datapath,
-controller, interface adapter). For simple designs, a single top-level module suffices.
+MANDATORY: Decompose into sub-modules where architecturally appropriate (e.g., separate datapath,
+controller, interface adapter, specialized arithmetic blocks). 
+Do NOT generate a single top-level module unless the design is a basic primitive (like a simple gate or 1-bit mux). 
+For designs described as 'SoC', 'Controller', or 'Engine', expect at least 3-5 sub-modules.
 """
 
 

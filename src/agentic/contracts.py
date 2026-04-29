@@ -134,6 +134,22 @@ def _log_json_failure(raw: str, context: str, reason: str) -> None:
     _PARSE_STATS["failure"] += 1
 
 
+def _deep_clean_keys(obj: Any) -> Any:
+    """Recursively strip literal quotes and whitespace from dictionary keys."""
+    if isinstance(obj, dict):
+        new_dict = {}
+        for k, v in obj.items():
+            new_key = k
+            if isinstance(k, str):
+                # Strip whitespace and literal double quotes from both ends
+                new_key = k.strip().strip('"').strip("'")
+            new_dict[new_key] = _deep_clean_keys(v)
+        return new_dict
+    elif isinstance(obj, list):
+        return [_deep_clean_keys(i) for i in obj]
+    return obj
+
+
 def robust_json_extract(
     raw: str,
     context: str = "unknown",
@@ -170,8 +186,8 @@ def robust_json_extract(
     strategies_tried.append(strategy)
     extracted = extract_json_object(raw)
     if extracted is not None:
-        _PARSE_STATS["success"] += 1
         # Validate required keys if specified
+        extracted = _deep_clean_keys(extracted)
         if required_keys and not all(k in extracted for k in required_keys):
             missing = [k for k in required_keys if k not in extracted]
             if log_failures:
@@ -218,6 +234,7 @@ def robust_json_extract(
         try:
             parsed = json.loads(candidate)
             if isinstance(parsed, dict):
+                parsed = _deep_clean_keys(parsed)
                 _PARSE_STATS["success"] += 1
                 # Validate required keys
                 if required_keys and not all(k in parsed for k in required_keys):

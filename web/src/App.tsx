@@ -355,6 +355,27 @@ const App = () => {
     );
   }
 
+  // Dev mode: landing page preview with skip-to-app button
+  if (!AUTH_ENABLED && !session) {
+    return (
+      <div style={{ position: 'relative' }}>
+        <LandingPage onAuthSuccess={() => {}} />
+        <button
+          onClick={() => setSession({ user: { email: 'dev@localhost' } } as any)}
+          style={{
+            position: 'fixed', bottom: '1rem', right: '1rem',
+            background: '#27272A', color: '#71717A',
+            border: '1px solid #3F3F46', borderRadius: '8px',
+            padding: '0.5rem 1rem', fontSize: '0.78rem',
+            cursor: 'pointer', zIndex: 100,
+          }}
+        >
+          Skip to Dashboard
+        </button>
+      </div>
+    );
+  }
+
   if (AUTH_ENABLED && session) {
     const userEmail = session.user.email?.toLowerCase() || '';
     const isApproved = userEmail === 'vickynishad110@gmail.com';
