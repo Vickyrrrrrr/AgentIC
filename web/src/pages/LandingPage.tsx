@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { supabase } from '../supabaseClient';
 import { motion } from 'framer-motion';
 
-export const LandingPage = ({ onAuthSuccess }: { onAuthSuccess: () => void }) => {
+export const LandingPage = ({ onAuthSuccess: _onAuthSuccess }: { onAuthSuccess: () => void }) => {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');

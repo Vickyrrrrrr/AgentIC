@@ -895,7 +895,7 @@ def login():
             "[accent]Welcome to AgentIC[/accent]\n\n"
             "Let's get you set up with the credentials needed to run the VLSI pipeline.\n\n"
             "[info]Required:[/info] LLM API Key (OpenAI, Anthropic, Groq, etc.)\n"
-            "[info]Optional:[/info] License Key and Supabase URL for cloud features\n"
+            "[info]Optional:[/info] License Key for production builds\n"
             "[info]Advanced:[/info] Custom Base URL for self-hosted or corporate proxies",
             title="[bold #d97757]AgentIC Onboarding[/bold #d97757]",
             border_style="#8f8a80",
@@ -950,16 +950,10 @@ def login():
         default=existing.get("license_key", ""),
     )
 
-    supabase_url = Prompt.ask(
-        "\n[accent]Supabase URL[/accent]\n"
-        "[dim]For cloud features like live build streaming (leave blank to skip)[/dim]",
-        default=existing.get("supabase_url", ""),
-    )
-
     credentials = {
         "llm_api_key": llm_api_key.strip(),
         "license_key": license_key.strip() if license_key.strip() else None,
-        "supabase_url": supabase_url.strip() if supabase_url.strip() else None,
+        "supabase_url": None,
     }
 
     if credentials["license_key"]:
@@ -993,8 +987,6 @@ def login():
         existing["license_key"] = credentials["license_key"]
     if credentials.get("instance_id"):
         existing["instance_id"] = credentials["instance_id"]
-    if "supabase_url" in credentials:
-        existing["supabase_url"] = credentials["supabase_url"]
 
     save_user_credentials(existing)
     _apply_runtime_keys(existing)

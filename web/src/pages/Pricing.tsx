@@ -128,7 +128,7 @@ export function Pricing() {
           name: 'AgentIC',
           description: `${order.plan_name} — ${order.amount_display}`,
           handler: async (response: any) => {
-            const { data: verifyData, status: verifyStatus } = await api.post('/billing/verify-payment', {
+            const { data: _verifyData, status: verifyStatus } = await api.post('/billing/verify-payment', {
               razorpay_order_id: response.razorpay_order_id,
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_signature: response.razorpay_signature,
