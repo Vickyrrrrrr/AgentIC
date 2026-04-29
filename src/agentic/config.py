@@ -276,6 +276,77 @@ def resolve_llm_config(
     }
 
 
+def detect_llm_from_env() -> list[dict]:
+    """Scan environment for common LLM API keys across all major providers.
+
+    Returns a list of detected configurations, each with:
+        provider, model, base_url, api_key, key_env_var
+
+    Providers detected (priority order):
+        Anthropic  — ANTHROPIC_API_KEY  → claude-3-5-sonnet
+        OpenAI     — OPENAI_API_KEY     → gpt-4o
+        Groq       — GROQ_API_KEY       → llama-3.3-70b
+        DeepSeek   — DEEPSEEK_API_KEY   → deepseek-chat
+        ZhipuAI    — ZHIPUAI_API_KEY    → glm-4
+        Together   — TOGETHER_API_KEY   → meta-llama-3.1-70b
+        Ollama     — localhost:11434    → auto-detected model
+    """
+    detected = []
+
+    PROVIDER_MAP = [
+        ("openai", "gpt-4o", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+        ("anthropic", "claude-3-5-sonnet", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+        ("groq", "llama-3.3-70b", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+        ("deepseek", "deepseek-chat", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+        ("zhipuai", "glm-4", "https://open.bigmodel.cn/api/paas/v4", "ZHIPUAI_API_KEY"),
+        ("together", "meta-llama-3.1-70b", "https://api.together.xyz/v1", "TOGETHER_API_KEY"),
+    ]
+
+    for provider, model, base_url, env_var in PROVIDER_MAP:
+        key = os.environ.get(env_var, "").strip()
+        if key:
+            detected.append({
+                "provider": provider,
+                "model": model,
+                "base_url": base_url,
+                "api_key": key,
+                "key_env_var": env_var,
+            })
+
+    # Check Ollama
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        resp = urllib.request.urlopen(req, timeout=3)
+        if resp.status == 200:
+            import json as _json
+            data = _json.loads(resp.read())
+            models = [m.get("name", "") for m in data.get("models", [])]
+            model = models[0] if models else "qwen2.5-coder:7b"
+            detected.append({
+                "provider": "ollama",
+                "model": model,
+                "base_url": "http://localhost:11434/v1",
+                "api_key": "ollama",
+                "key_env_var": "OLLAMA (auto-detected)",
+            })
+    except Exception:
+        pass
+
+    # Also check generic LLM_API_KEY
+    generic = os.environ.get("LLM_API_KEY", "").strip()
+    if generic and not any(d["api_key"] == generic for d in detected):
+        detected.append({
+            "provider": "generic",
+            "model": os.environ.get("LLM_MODEL", "gpt-4o"),
+            "base_url": os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
+            "api_key": generic,
+            "key_env_var": "LLM_API_KEY",
+        })
+
+    return detected
+
+
 # =============================================================================
 # PDK Profiles
 # =============================================================================

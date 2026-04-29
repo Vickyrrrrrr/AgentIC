@@ -1,6 +1,6 @@
 {
   "name": "agentic-ic",
-  "version": "3.0.4",
+  "version": "0.1.0",
   "description": "AgentIC — Autonomous AI-Driven Chip Design: Natural Language to GDSII (npm wrapper)",
   "type": "module",
   "bin": {

@@ -904,54 +904,15 @@ def login():
     console.print()
 
     from rich.prompt import Prompt
-    from rich.table import Table
 
-    provider_table = Table(
-        title="Supported Providers", header_style="bold #d97757", show_lines=False
-    )
-    provider_table.add_column("Provider", style="#d97757 bold", width=18)
-    provider_table.add_column("Base URL (if custom)", style="info")
-    provider_table.add_column("Example Model", style="dim")
-    provider_table.add_row("OpenAI", "api.openai.com/v1", "gpt-4o")
-    provider_table.add_row("Anthropic", "(none needed)", "claude-3-5-sonnet")
-    provider_table.add_row("Groq", "api.groq.com/openai/v1", "llama-3.3-70b")
-    provider_table.add_row("Ollama", "localhost:11434", "qwen2.5-coder:7b")
-    provider_table.add_row("LM Studio", "localhost:1234", "any local model")
-    provider_table.add_row("vLLM / Zai", "your-endpoint.com/v1", "meta-llama-3.1-70b")
-    console.print(provider_table)
-    console.print()
-
-    llm_api_key = Prompt.ask(
-        "[accent]LLM API Key[/accent]\n"
-        "[dim]OpenAI, Anthropic, Groq, or any OpenAI-compatible endpoint[/dim]",
-        default=existing.get("llm_api_key", ""),
-        password=True,
-    )
-
-    base_url = Prompt.ask(
-        "\n[accent]Custom Base URL[/accent]\n"
-        "[dim]Press Enter for default (OpenAI) or type your custom endpoint[/dim]",
-        default=existing.get("base_url", ""),
-    )
-    if base_url.strip():
-        base_url = _normalize_base_url(base_url.strip())
-    else:
-        base_url = ""
-
-    model = Prompt.ask(
-        "\n[accent]Default Model[/accent]\n"
-        "[dim]Press Enter for default (gpt-4o) or specify your model[/dim]",
-        default=existing.get("model", "gpt-4o"),
-    )
-
+    # Step 1: License key
     license_key = Prompt.ask(
-        "\n[accent]AgentIC License Key[/accent]\n"
+        "[accent]AgentIC License Key[/accent]\n"
         f"[dim]Don't have one? Purchase at: {LICENSE_PURCHASE_URL}[/dim]",
         default=existing.get("license_key", ""),
     )
 
-    credentials = {
-        "llm_api_key": llm_api_key.strip(),
+    credentials: dict = {
         "license_key": license_key.strip() if license_key.strip() else None,
         "supabase_url": None,
     }
@@ -974,6 +935,85 @@ def login():
             credentials["instance_id"] = instance_id
             console.print("[success]License activated for this machine.[/success]")
 
+    # Step 2: Auto-detect LLM keys from environment
+    from .config import detect_llm_from_env
+
+    detected = detect_llm_from_env()
+    use_detected = False
+
+    if detected:
+        console.print(f"\n[accent]🔍 Found {len(detected)} LLM provider(s) in your environment:[/accent]")
+        for d in detected:
+            masked_key = d["api_key"][:4] + "..." + d["api_key"][-4:] if len(d["api_key"]) > 8 else "****"
+            console.print(
+                f"  ✅ {d['provider']:<12} → {d['model']:<22} key: {masked} ({d['key_env_var']})"
+            )
+
+        use_detected = typer.confirm(
+            f"\nUse the first detected provider ({detected[0]['provider']} / {detected[0]['model']})?",
+            default=True,
+        )
+
+    if use_detected:
+        chosen = detected[0]
+        llm_api_key = chosen["api_key"]
+        base_url = chosen["base_url"]
+        model = chosen["model"]
+        console.print(f"[success]Using {chosen['provider']} ({chosen['model']}).[/success]")
+    else:
+        # Manual entry fallback
+        if detected:
+            console.print("[dim]Skipping auto-detection. Manual configuration:[/dim]")
+        else:
+            console.print(
+                "\n[warning]No LLM API keys found in your environment.[/warning]\n"
+                "Set one of these and re-run, or configure manually:\n"
+                "  export OPENAI_API_KEY=sk-...\n"
+                "  export ANTHROPIC_API_KEY=sk-ant-...\n"
+                "  export GROQ_API_KEY=gsk_...\n"
+                "Or start Ollama locally: ollama serve"
+            )
+
+        from rich.table import Table
+        provider_table = Table(
+            title="Supported Providers", header_style="bold #d97757", show_lines=False
+        )
+        provider_table.add_column("Provider", style="#d97757 bold", width=18)
+        provider_table.add_column("Base URL (if custom)", style="info")
+        provider_table.add_column("Example Model", style="dim")
+        provider_table.add_row("OpenAI", "api.openai.com/v1", "gpt-4o")
+        provider_table.add_row("Anthropic", "(none needed)", "claude-3-5-sonnet")
+        provider_table.add_row("Groq", "api.groq.com/openai/v1", "llama-3.3-70b")
+        provider_table.add_row("Ollama", "localhost:11434", "qwen2.5-coder:7b")
+        provider_table.add_row("LM Studio", "localhost:1234", "any local model")
+        provider_table.add_row("vLLM / Zai", "your-endpoint.com/v1", "meta-llama-3.1-70b")
+        console.print(provider_table)
+        console.print()
+
+        llm_api_key = Prompt.ask(
+            "[accent]LLM API Key[/accent]\n"
+            "[dim]OpenAI, Anthropic, Groq, or any OpenAI-compatible endpoint[/dim]",
+            default=existing.get("llm_api_key", ""),
+            password=True,
+        )
+
+        base_url = Prompt.ask(
+            "\n[accent]Custom Base URL[/accent]\n"
+            "[dim]Press Enter for default (OpenAI) or type your custom endpoint[/dim]",
+            default=existing.get("base_url", ""),
+        )
+        if base_url.strip():
+            base_url = _normalize_base_url(base_url.strip())
+        else:
+            base_url = ""
+
+        model = Prompt.ask(
+            "\n[accent]Default Model[/accent]\n"
+            "[dim]Press Enter for default (gpt-4o) or specify your model[/dim]",
+            default=existing.get("model", "gpt-4o"),
+        )
+
+    credentials["llm_api_key"] = llm_api_key.strip()
     credentials = {k: v for k, v in credentials.items() if v is not None}
 
     build_group = {
