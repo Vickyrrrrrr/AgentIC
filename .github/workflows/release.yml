@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g., v3.0.5)"
+        description: "Tag to release (e.g., v0.2.0)"
         required: true
-        default: "v3.0.5"
+        default: "v0.2.0"
 
 jobs:
   build:
@@ -74,52 +74,16 @@ jobs:
             dist/${{ matrix.artifact }}
             dist/${{ matrix.artifact }}.sha256
 
-  # ═══════════════════════════════════════════════════════════════════
-  # Build Python wheel and publish to GitHub Packages on PUBLIC repo
-  # ═══════════════════════════════════════════════════════════════════
-  publish-wheel:
-    name: "Publish pip package to GitHub Packages"
-    runs-on: ubuntu-latest
-    if: ${{ vars.RELEASE_REPO || secrets.RELEASE_REPO }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Build wheel
-        run: |
-          pip install build
-          python -m build --wheel --no-isolation
-
-      - name: Publish to GitHub Packages
-        run: |
-          python -m pip install twine
-          python -m twine upload \
-            --repository-url https://upload.pkg.github.com/${{ vars.RELEASE_REPO || secrets.RELEASE_REPO }} \
-            --username ${{ github.actor }} \
-            --password ${{ secrets.RELEASE_TOKEN }} \
-            dist/*.whl
-
-  # ═══════════════════════════════════════════════════════════════════
-  # Push to PUBLIC release repository (separate from this private repo)
-  # ═══════════════════════════════════════════════════════════════════
   release:
     name: "Publish to public repo"
     needs: build
     runs-on: ubuntu-latest
-    if: ${{ vars.RELEASE_REPO || secrets.RELEASE_REPO }}  # Only if configured
+    if: ${{ vars.RELEASE_REPO != '' }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Display artifacts
-        run: find artifacts -type f -ls
 
       - name: Read SHA-256 checksums
         id: checksums
@@ -128,13 +92,11 @@ jobs:
           MACOS_SHA=$(cat artifacts/agentic-darwin-amd64/agentic-darwin-amd64.sha256 | awk '{print $1}')
           echo "linux_sha=$LINUX_SHA" >> $GITHUB_OUTPUT
           echo "macos_sha=$MACOS_SHA" >> $GITHUB_OUTPUT
-          echo "linux=$LINUX_SHA"
-          echo "macos=$MACOS_SHA"
 
       - name: Create Release in PUBLIC repo
         uses: softprops/action-gh-release@v2
         with:
-          repository: ${{ vars.RELEASE_REPO || secrets.RELEASE_REPO }}
+          repository: ${{ vars.RELEASE_REPO }}
           token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: ${{ github.ref_name }}
           name: "AgentIC ${{ github.ref_name }}"
@@ -151,7 +113,7 @@ jobs:
             ### Requirements
             - OSS CAD Suite (synthesis & verification)
             - Docker (GDSII hardening — optional)
-            - LLM API key (see Quick Start below)
+            - LLM API key (see Quick Start)
             - License key from [buildstack.live](https://www.buildstack.live)
 
             ### Quick Start
@@ -162,13 +124,16 @@ jobs:
             ./agentic-linux-amd64 build --name counter --desc "8-bit counter"
             ```
 
+            ### Install via pip
+            ```bash
+            pip install agentic-ic
+            ```
+
             ### Files & Checksums
             | File | SHA-256 |
             |------|---------|
-            | `agentic-linux-amd64` | `${{ steps.checksums.outputs.linux }}` |
-            | `agentic-darwin-amd64` | `${{ steps.checksums.outputs.macos }}` |
-
-            Full checksum files are attached to this release.
+            | `agentic-linux-amd64` | `${{ steps.checksums.outputs.linux_sha }}` |
+            | `agentic-darwin-amd64` | `${{ steps.checksums.outputs.macos_sha }}` |
 
             ### What's New
             - Self-healing pipeline with automatic error recovery
