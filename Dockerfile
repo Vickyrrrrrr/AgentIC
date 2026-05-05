@@ -1,15 +1,5 @@
 # =============================================================================
-# Stage 1: Frontend build
-# =============================================================================
-FROM node:20-alpine AS frontend-builder
-WORKDIR /app/web
-COPY web/package*.json ./
-RUN npm ci --prefer-offline
-COPY web/ ./
-RUN npm run build
-
-# =============================================================================
-# Stage 2: Download OSS CAD Suite (separate cached layer)
+# Stage 1: Download OSS CAD Suite (separate cached layer)
 # Update OSS_CAD_VERSION to upgrade ALL EDA tools in one place:
 #   yosys, sby (SymbiYosys), eqy, verilator, iverilog, vvp, sv2v, nextpnr, ...
 #
@@ -41,7 +31,7 @@ RUN ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "x64") && \
     rm /tmp/oss-cad-suite.tgz
 
 # =============================================================================
-# Stage 3: Python application runtime
+# Stage 2: Python application runtime
 # =============================================================================
 FROM python:3.11-slim
 
@@ -87,7 +77,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy application source
 COPY . .
-COPY --from=frontend-builder /app/web/dist /app/web/dist
+
 
 # Runtime directories + non-root user in one layer
 # Pre-create ALL runtime dirs so appuser owns them inside the image.
