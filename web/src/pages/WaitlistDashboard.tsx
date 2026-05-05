@@ -30,41 +30,9 @@ export const WaitlistDashboard = ({ email }: { email: string }) => {
           {/* Email */}
           <p className="waitlist-body">
             We&rsquo;ve registered{' '}
-            <span className="waitlist-email">{email}</span>
-            . Access to the Design Studio is rolling out in&nbsp;cohorts.
-            We&rsquo;ll notify you when your workspace is&nbsp;ready.
+            <span className="waitlist-email">{email}</span>.
+            Access is rolling out in cohorts. We&rsquo;ll notify you when your workspace is&nbsp;ready.
           </p>
-
-          {/* Steps */}
-          <div className="waitlist-steps">
-            <div className="waitlist-step">
-              <div className="waitlist-step-marker waitlist-step-marker--done">
-                <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
-                  <path d="M1 4.5L5 8.5L13 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </div>
-              <div className="waitlist-step-content">
-                <div className="waitlist-step-title">Verify your email</div>
-                <div className="waitlist-step-desc">Check your inbox for a confirmation&nbsp;link.</div>
-              </div>
-            </div>
-
-            <div className="waitlist-step">
-              <div className="waitlist-step-marker">2</div>
-              <div className="waitlist-step-content">
-                <div className="waitlist-step-title">Wait for approval</div>
-                <div className="waitlist-step-desc">We onboard cohorts daily to ensure stability.</div>
-              </div>
-            </div>
-
-            <div className="waitlist-step">
-              <div className="waitlist-step-marker">3</div>
-              <div className="waitlist-step-content">
-                <div className="waitlist-step-title">Open the Studio</div>
-                <div className="waitlist-step-desc">Your workspace unlocks automatically once&nbsp;approved.</div>
-              </div>
-            </div>
-          </div>
 
           {/* Actions */}
           <div className="waitlist-actions">
