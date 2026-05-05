@@ -6,7 +6,7 @@ import { LandingPage } from './pages/LandingPage';
 import { WaitlistDashboard } from './pages/WaitlistDashboard';
 import { api } from './api';
 import { BillingModal } from './components/BillingModal';
-import { ErrorBoundary } from './components/ErrorBoundary';
+import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary';
 import { queryClient } from './lib/query-client';
 import './index.css';
 import type { LucideIcon } from 'lucide-react';
@@ -21,6 +21,7 @@ import {
   TerminalSquare,
   ClipboardList,
   Settings2,
+  Menu,
 } from 'lucide-react';
 
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
@@ -187,6 +188,7 @@ const App = () => {
     const saved = localStorage.getItem('agentic-theme');
     return saved === 'dark' ? 'dark' : 'light';
   });
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!AUTH_ENABLED) {
@@ -467,7 +469,13 @@ const App = () => {
     <QueryClientProvider client={queryClient}>
       <ErrorBoundary>
         <div className="app-shell workspace-shell">
-          <aside className="app-sidebar">
+          {/* Mobile sidebar overlay */}
+          <div
+            className={`sidebar-overlay${mobileMenuOpen ? ' active' : ''}`}
+            onClick={() => setMobileMenuOpen(false)}
+          />
+
+          <aside className={`app-sidebar${mobileMenuOpen ? ' mobile-open' : ''}`}>
             <div className="app-brand">
               <div className="app-brand-logo">A</div>
               <div>
@@ -486,7 +494,10 @@ const App = () => {
                       <button
                         key={item.page}
                         className={`app-nav-btn${selectedPage === item.page ? ' active' : ''}`}
-                        onClick={() => setSelectedPage(item.page)}
+                        onClick={() => {
+                          setSelectedPage(item.page);
+                          setMobileMenuOpen(false);
+                        }}
                       >
                         <Icon size={16} className="nav-icon" />
                         <span>{item.label}</span>
@@ -510,7 +521,16 @@ const App = () => {
           <main className="app-main">
             <header className="app-topbar workspace-topbar">
               <div className="workspace-title-wrap">
-                <h1>{currentPageMeta.title}</h1>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <button
+                    className="mobile-menu-btn"
+                    onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                    aria-label="Toggle navigation menu"
+                  >
+                    <Menu size={20} />
+                  </button>
+                  <h1>{currentPageMeta.title}</h1>
+                </div>
                 <div className="app-topbar-meta">{currentPageMeta.subtitle}</div>
               </div>
 
@@ -555,19 +575,24 @@ const App = () => {
               <ErrorBoundary>
                 <Suspense
                   fallback={
-                    <div className="workspace-page-loader">
-                      <div className="premium-loader">
-                        <span className="premium-loader-dot" />
-                        <span className="premium-loader-dot" />
-                        <span className="premium-loader-dot" />
+                    <div className="skeleton-page">
+                      <div className="skeleton skeleton-hero" />
+                      <div className="skeleton-grid">
+                        <div className="skeleton skeleton-card" />
+                        <div className="skeleton skeleton-card" />
+                        <div className="skeleton skeleton-card" />
+                        <div className="skeleton skeleton-card" />
                       </div>
-                      <span>Loading workspace...</span>
+                      <div className="skeleton skeleton-block" />
+                      <div className="skeleton skeleton-block-sm" />
                     </div>
                   }
                 >
-                  <div key={selectedPage} className="page-transition">
-                    {renderPage()}
-                  </div>
+                  <PageErrorBoundary>
+                    <div key={selectedPage} className="page-transition">
+                      {renderPage()}
+                    </div>
+                  </PageErrorBoundary>
                 </Suspense>
               </ErrorBoundary>
             </section>

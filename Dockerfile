@@ -101,4 +101,4 @@ USER appuser
 EXPOSE 7860
 
 # Use gunicorn with uvicorn workers for production stability
-CMD ["gunicorn", "server.api:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:7860"]
+CMD ["gunicorn", "server.api:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:7860"]

@@ -2444,8 +2444,9 @@ async def trigger_build(
 
 
 @app.post("/build/elaborate")
+@limiter.limit("10/minute")
 async def elaborate_build(
-    req: BuildElaborateRequest, user: dict = Depends(get_current_user)
+    req: BuildElaborateRequest, request: Request, user: dict = Depends(get_current_user)
 ):
     """Inject a user choice into a waiting orchestrator (HITL Elaboration)."""
     job_id = req.job_id
@@ -2739,7 +2740,8 @@ def get_signoff_report(design_name: str):
 
 
 @app.post("/approve")
-def approve_stage(req: ApproveRequest):
+@limiter.limit("15/minute")
+def approve_stage(req: ApproveRequest, request: Request):
     """Approve the current stage and allow the pipeline to proceed."""
     ok = approval_manager.approve(req.design_name, req.stage)
     if not ok:
@@ -2754,7 +2756,8 @@ def approve_stage(req: ApproveRequest):
 
 
 @app.post("/reject")
-def reject_stage(req: RejectRequest):
+@limiter.limit("15/minute")
+def reject_stage(req: RejectRequest, request: Request):
     """Reject the current stage, optionally providing feedback for retry."""
     ok = approval_manager.reject(req.design_name, req.stage, req.feedback)
     if not ok:
@@ -2965,8 +2968,9 @@ async def get_profile_byok(profile: dict = Depends(get_current_user)):
 
 
 @app.post("/profile/byok")
+@limiter.limit("10/minute")
 async def set_profile_byok(
-    req: SetByokConfigRequest, profile: dict = Depends(get_current_user)
+    req: SetByokConfigRequest, request: Request, profile: dict = Depends(get_current_user)
 ):
     """Persist encrypted multi-group BYOK config for cross-device sync."""
     if profile is None:
@@ -2983,8 +2987,9 @@ async def set_profile_byok(
 
 
 @app.post("/profile/api-key")
+@limiter.limit("10/minute")
 async def set_byok_key(
-    req: SetApiKeyRequest, profile: dict = Depends(get_current_user)
+    req: SetApiKeyRequest, request: Request, profile: dict = Depends(get_current_user)
 ):
     """Store an encrypted LLM API key for BYOK plan users."""
     if profile is None:

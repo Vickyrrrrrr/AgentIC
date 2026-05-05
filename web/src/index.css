@@ -8696,3 +8696,229 @@ details[open] .pricing-faq-item summary::after {
     align-self: center;
   }
 }
+
+/* ── Skeleton Loading Screens ────────────────────────────────────── */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.85; }
+}
+
+.skeleton {
+  background: var(--border);
+  border-radius: var(--radius);
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.skeleton-page {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 1080px;
+}
+
+.skeleton-hero {
+  height: 140px;
+  border-radius: var(--radius-lg);
+}
+
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.8rem;
+}
+
+.skeleton-card {
+  height: 90px;
+  border-radius: var(--radius-md);
+}
+
+.skeleton-block {
+  height: 200px;
+  border-radius: var(--radius-md);
+}
+
+.skeleton-block-sm {
+  height: 120px;
+  border-radius: var(--radius-md);
+}
+
+.skeleton-line {
+  height: 14px;
+  border-radius: 4px;
+  width: 60%;
+}
+
+.skeleton-line-short {
+  height: 14px;
+  border-radius: 4px;
+  width: 35%;
+}
+
+.skeleton-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.skeleton-table-row {
+  height: 42px;
+  border-radius: var(--radius);
+}
+
+/* ── Responsive Mobile Sidebar ──────────────────────────────────── */
+.mobile-menu-btn {
+  display: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 0.5rem;
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+
+.mobile-menu-btn:hover {
+  background: var(--bg-hover);
+}
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 99;
+  backdrop-filter: blur(2px);
+}
+
+.sidebar-overlay.active {
+  display: block;
+}
+
+@media (max-width: 768px) {
+  .app-shell, .workspace-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .app-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 280px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform var(--mid) var(--ease);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .app-sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .mobile-menu-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .workspace-topbar-actions {
+    gap: 0.4rem !important;
+  }
+
+  .workspace-topbar-actions .app-design-select {
+    max-width: 120px;
+    font-size: 0.78rem;
+  }
+
+  .app-topbar h1 {
+    font-size: 0.95rem;
+  }
+
+  .app-topbar-meta {
+    display: none;
+  }
+
+  /* Stack metric cards */
+  .home-card-grid,
+  .dash-metrics-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  .skeleton-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* Studio responsive */
+  .studio-launch-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .hitl-launch-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .home-agent-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .home-card-grid,
+  .dash-metrics-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .skeleton-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .home-agent-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Error Boundary ─────────────────────────────────────────────── */
+.error-boundary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+  padding: 2rem;
+}
+
+.error-boundary-content {
+  text-align: center;
+  max-width: 420px;
+}
+
+.error-boundary-content h2 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  color: var(--fail);
+}
+
+.error-boundary-content p {
+  color: var(--text-mid);
+  font-size: 0.88rem;
+  margin-bottom: 1rem;
+  line-height: 1.6;
+}
+
+.error-boundary-reset {
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  padding: 0.55rem 1.2rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--fast);
+}
+
+.error-boundary-reset:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
