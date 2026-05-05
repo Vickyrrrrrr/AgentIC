@@ -5481,10 +5481,10 @@ body {
 
 
 /* ══════════════════════════════════════════════════════════════════════
-   WAITLIST DASHBOARD — Clean centered vertical timeline
+   WAITLIST DASHBOARD — Clean, minimal, Apple-like
    ══════════════════════════════════════════════════════════════════════ */
 
-.waitlist-page {
+.waitlist-root {
   min-height: 100vh;
   background: #09090B;
   display: flex;
@@ -5497,191 +5497,179 @@ body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-.waitlist-page-grid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.035) 1px, transparent 0);
-  background-size: 32px 32px;
-  pointer-events: none;
-}
-
 .waitlist-card {
   width: 100%;
-  max-width: 520px;
-  background: #18181B;
-  border: 1px solid #27272A;
-  border-radius: 20px;
-  padding: 3rem;
-  text-align: center;
+  max-width: 480px;
+  background: #0D0D10;
+  border: 1px solid #1F1F24;
+  border-radius: 24px;
+  padding: 3rem 2.5rem;
   position: relative;
   z-index: 1;
+  box-shadow: 0px 32px 64px rgba(0, 0, 0, 0.4);
 }
 
+.waitlist-card-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+/* ─── Status badge ─── */
 .waitlist-status {
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
-  padding: 0.35rem 0.9rem;
-  background: rgba(34, 197, 94, 0.1);
-  border: 1px solid rgba(34, 197, 94, 0.2);
-  border-radius: 100px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #86EFAC;
+  gap: 0.5rem;
   margin-bottom: 2rem;
-  letter-spacing: 0.03em;
 }
 
-.waitlist-status-dot {
-  width: 6px;
-  height: 6px;
+.waitlist-dot {
+  width: 7px;
+  height: 7px;
   background: #22C55E;
   border-radius: 50%;
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
-  animation: pulse-green 2s infinite;
+  flex-shrink: 0;
 }
 
-.waitlist-icon {
-  color: #c18a73;
-  margin-bottom: 1.5rem;
-  display: flex;
-  justify-content: center;
-}
-
-.waitlist-title {
-  font-size: 2rem;
-  font-weight: 800;
-  letter-spacing: -0.03em;
-  margin: 0 0 1rem;
-}
-
-.waitlist-body {
-  font-size: 0.92rem;
-  color: #A1A1AA;
-  line-height: 1.6;
-  margin: 0 0 2.5rem;
-}
-
-.waitlist-body strong {
-  color: #FAFAFA;
+.waitlist-status-text {
+  font-size: 0.75rem;
   font-weight: 600;
+  color: #22C55E;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
-/* Vertical timeline */
-.waitlist-timeline {
+/* ─── Heading ─── */
+.waitlist-heading {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 1.5rem;
+  color: #FAFAFA;
+}
+
+/* ─── Body ─── */
+.waitlist-body {
+  font-size: 0.9rem;
+  color: #8E8E93;
+  line-height: 1.65;
+  margin: 0 0 2.5rem;
+  max-width: 380px;
+}
+
+.waitlist-email {
+  color: #D4D4D8;
+  font-weight: 500;
+}
+
+/* ─── Steps ─── */
+.waitlist-steps {
   display: flex;
   flex-direction: column;
-  text-align: left;
-  margin-bottom: 2.5rem;
+  margin-bottom: 2rem;
+  width: 100%;
 }
 
 .waitlist-step {
   display: flex;
-  gap: 1rem;
-  padding: 0.2rem 0;
+  align-items: flex-start;
+  gap: 0.85rem;
+  padding: 0.65rem 0;
 }
 
-.waitlist-step-indicator {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.waitlist-step-num {
-  width: 28px;
-  height: 28px;
+.waitlist-step-marker {
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
-  background: #27272A;
-  border: 1px solid #3F3F46;
+  background: #18181B;
+  border: 1px solid #27272A;
   display: grid;
   place-items: center;
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #A1A1AA;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #52525B;
   flex-shrink: 0;
+  margin-top: 1px;
 }
 
-.waitlist-step--done .waitlist-step-num {
-  background: rgba(34, 197, 94, 0.15);
-  border-color: rgba(34, 197, 94, 0.3);
-  color: #86EFAC;
-}
-
-.waitlist-step-line {
-  width: 1px;
-  flex: 1;
-  min-height: 20px;
-  background: #27272A;
-  margin: 4px 0;
-}
-
-.waitlist-step-content {
-  padding: 0.25rem 0 1.4rem;
+.waitlist-step-marker--done {
+  background: #22C55E;
+  border-color: #22C55E;
+  color: #fff;
 }
 
 .waitlist-step-title {
-  font-size: 0.88rem;
+  font-size: 0.85rem;
   font-weight: 600;
-  color: #E4E4E7;
-  margin-bottom: 3px;
+  color: #D4D4D8;
+  margin-bottom: 2px;
 }
 
 .waitlist-step-desc {
   font-size: 0.78rem;
-  color: #71717A;
+  color: #52525B;
   line-height: 1.45;
 }
 
+/* ─── Actions ─── */
 .waitlist-actions {
   display: flex;
-  gap: 0.75rem;
-  justify-content: center;
+  gap: 0.65rem;
+  width: 100%;
 }
 
 .waitlist-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.65rem 1.2rem;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1.1rem;
   border-radius: 10px;
-  font-size: 0.82rem;
+  font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s, transform 0.1s;
+  transition: background 0.15s, color 0.15s;
   text-decoration: none;
+  border: none;
+  font-family: inherit;
 }
 
 .waitlist-btn--primary {
   background: #c18a73;
   color: #fff;
-  border: none;
 }
 
 .waitlist-btn--primary:hover {
-  background: #d4a18b;
+  background: #d19b85;
 }
 
-.waitlist-btn--secondary {
+.waitlist-btn--ghost {
   background: transparent;
-  color: #A1A1AA;
+  color: #71717A;
   border: 1px solid #27272A;
 }
 
-.waitlist-btn--secondary:hover {
-  background: #27272A;
-  color: #E4E4E7;
+.waitlist-btn--ghost:hover {
+  background: #18181B;
+  color: #A1A1AA;
 }
 
-.waitlist-footer {
-  margin-top: 2.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.4rem;
-  font-size: 0.72rem;
-  color: #3F3F46;
+/* ─── Responsive ─── */
+@media (max-width: 520px) {
+  .waitlist-card {
+    padding: 2rem 1.5rem;
+    border-radius: 16px;
+  }
+  .waitlist-heading {
+    font-size: 1.6rem;
+  }
+  .waitlist-actions {
+    flex-direction: column;
+  }
+  .waitlist-btn {
+    width: 100%;
+    padding: 0.65rem;
+  }
 }
 
 
@@ -6520,241 +6508,6 @@ body {
   }
 }
 
-/* ── Waitlist Dashboard (Confirmed State) ────────────────────────── */
-.waitlist-root {
-  min-height: 100vh;
-  background: var(--bg-dark);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem;
-  position: relative;
-  overflow: hidden;
-  color: #fff;
-}
-
-.waitlist-glass {
-  width: 100%;
-  max-width: 640px;
-  background: rgba(255, 255, 255, 0.02);
-  backdrop-filter: blur(32px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 40px;
-  padding: 4rem;
-  text-align: center;
-  position: relative;
-  z-index: 10;
-  box-shadow: 0 32px 100px rgba(0, 0, 0, 0.6);
-}
-
-.waitlist-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.45rem 1rem;
-  background: rgba(58, 120, 86, 0.15);
-  border: 1px solid rgba(58, 120, 86, 0.3);
-  border-radius: 100px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: #61b88b;
-  margin-bottom: 2.5rem;
-}
-
-.waitlist-badge-dot {
-  width: 6px;
-  height: 6px;
-  background: #61b88b;
-  border-radius: 50%;
-  animation: pulse-green 2s infinite;
-}
-
-.waitlist-icon {
-  margin-bottom: 2rem;
-  color: var(--accent);
-}
-
-.waitlist-title {
-  font-size: 2.8rem;
-  font-weight: 800;
-  margin-bottom: 1.5rem;
-  letter-spacing: -0.03em;
-}
-
-.waitlist-message {
-  font-size: 1.15rem;
-  color: rgba(255, 255, 255, 0.6);
-  line-height: 1.6;
-  margin-bottom: 3.5rem;
-}
-
-.waitlist-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-  text-align: left;
-  margin-bottom: 4rem;
-}
-
-.waitlist-step {
-  display: flex;
-  gap: 1.5rem;
-  padding: 1.5rem;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 20px;
-  transition: all 0.3s var(--ease);
-}
-
-.waitlist-step:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.1);
-  transform: translateX(10px);
-}
-
-.waitlist-step-num {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  display: grid;
-  place-items: center;
-  font-weight: 800;
-  font-size: 0.9rem;
-}
-
-.waitlist-step-title {
-  font-weight: 700;
-  margin-bottom: 0.2rem;
-  font-size: 1.05rem;
-}
-
-.waitlist-step-desc {
-  font-size: 0.9rem;
-  color: rgba(255, 255, 255, 0.4);
-}
-
-.waitlist-actions {
-  display: flex;
-  gap: 1rem;
-  justify-content: center;
-}
-
-.waitlist-btn-primary {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 14px;
-  padding: 1rem 2rem;
-  font-weight: 700;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.waitlist-btn-secondary {
-  background: rgba(255, 255, 255, 0.05);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 14px;
-  padding: 1rem 2rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.waitlist-footer {
-  margin-top: 3rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.6rem;
-  font-size: 0.85rem;
-  color: rgba(255, 255, 255, 0.3);
-}
-
-
-@keyframes spin-slow {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes pulse-green {
-
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-    box-shadow: 0 0 0 rgba(97, 184, 139, 0);
-  }
-
-  50% {
-    opacity: 0.6;
-    transform: scale(1.2);
-    box-shadow: 0 0 12px rgba(97, 184, 139, 0.4);
-  }
-}
-
-/* Spinner for auth state */
-.spinner-auth {
-  width: 20px;
-  height: 20px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
-  border-radius: 50%;
-  animation: spin-slow 0.6s linear infinite;
-}
-
-/* Auth Alerts */
-.auth-error-msg {
-  background: rgba(184, 48, 48, 0.1);
-  border: 1px solid rgba(184, 48, 48, 0.2);
-  color: #ff9999;
-  padding: 0.75rem 1rem;
-  border-radius: 10px;
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-
-.auth-success-msg {
-  background: rgba(58, 120, 86, 0.1);
-  border: 1px solid rgba(58, 120, 86, 0.2);
-  color: #a8ffd0;
-  padding: 0.75rem 1rem;
-  border-radius: 10px;
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-
-/* Responsive adjustments */
-@media (max-width: 1080px) {
-  .landing-content-wrapper {
-    grid-template-columns: 1fr;
-    padding: 2rem;
-    gap: 4rem;
-    text-align: center;
-  }
-
-  .landing-left-story {
-    align-items: center;
-  }
-
-  .hero-title {
-    font-size: 3rem;
-  }
-
-  .landing-hero-features {
-    justify-content: center;
-  }
-}
-
-/* ══════════════════════════════════════════════════════════════════════
    SHARED UI COMPONENTS — Used across multiple pages
    ══════════════════════════════════════════════════════════════════════ */
 
