@@ -51,6 +51,7 @@ designs/
 Thumbs.db
 
 # Node / web build artifacts
+web/
 web/node_modules/
 web/dist/
 client/node_modules/
