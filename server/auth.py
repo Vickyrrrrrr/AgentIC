@@ -180,31 +180,28 @@ def _supabase_rpc_sync(fn_name: str, params: dict) -> dict:
 
 
 # ─── BYOK Encryption ────────────────────────────────────────────────
+def _derive_fernet_key(secret: str) -> bytes:
+    """Derive a Fernet-compatible key from the ENCRYPTION_KEY env var."""
+    import base64
+    key_bytes = hashlib.sha256(secret.encode()).digest()
+    return base64.urlsafe_b64encode(key_bytes)
+
+
 def encrypt_api_key(plaintext: str) -> str:
-    """XOR-based encryption with HMAC integrity check."""
+    """Encrypt a BYOK API key using Fernet (AES-128-CBC)."""
     if not ENCRYPTION_KEY:
         raise RuntimeError(
             "ENCRYPTION_KEY env var is not set. "
-            "Set a secret 32+ character value in HuggingFace Spaces secrets before storing BYOK keys."
+            "Set a secret 32+ character value in your environment before storing BYOK keys."
         )
-    key_bytes = hashlib.sha256(ENCRYPTION_KEY.encode()).digest()
-    ct = bytes(
-        a ^ b
-        for a, b in zip(plaintext.encode(), (key_bytes * ((len(plaintext) // 32) + 1)))
-    )
-    mac = hmac.new(key_bytes, ct, hashlib.sha256).hexdigest()
+    from cryptography.fernet import Fernet
+    f = Fernet(_derive_fernet_key(ENCRYPTION_KEY))
+    return "fernet:" + f.encrypt(plaintext.encode()).decode()
+
+
+def _decrypt_legacy_xor(ciphertext: str) -> str:
+    """Backward-compatible decryption for old XOR-encrypted keys."""
     import base64
-
-    return base64.urlsafe_b64encode(ct).decode() + "." + mac
-
-
-def decrypt_api_key(ciphertext: str) -> str:
-    import base64
-
-    if not ENCRYPTION_KEY:
-        raise RuntimeError(
-            "ENCRYPTION_KEY env var is not set — cannot decrypt stored API key."
-        )
     parts = ciphertext.split(".", 1)
     if len(parts) != 2:
         raise ValueError("Malformed encrypted key")
@@ -216,6 +213,22 @@ def decrypt_api_key(ciphertext: str) -> str:
         raise ValueError("Integrity check failed — key may have been tampered with")
     pt = bytes(a ^ b for a, b in zip(ct, (key_bytes * ((len(ct) // 32) + 1))))
     return pt.decode()
+
+
+def decrypt_api_key(ciphertext: str) -> str:
+    """Decrypt a BYOK API key. Supports both Fernet and legacy XOR format."""
+    if not ENCRYPTION_KEY:
+        raise RuntimeError(
+            "ENCRYPTION_KEY env var is not set — cannot decrypt stored API key."
+        )
+    # New Fernet format: prefixed with "fernet:"
+    if ciphertext.startswith("fernet:"):
+        from cryptography.fernet import Fernet
+        f = Fernet(_derive_fernet_key(ENCRYPTION_KEY))
+        return f.decrypt(ciphertext[7:].encode()).decode()
+
+    # Legacy XOR format: "base64.hmac"
+    return _decrypt_legacy_xor(ciphertext)
 
 
 # ─── FastAPI Dependency: get current user ────────────────────────────

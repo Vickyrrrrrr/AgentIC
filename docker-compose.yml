@@ -38,7 +38,7 @@ services:
     group_add:
       - "${DOCKER_GID:-1001}"
     entrypoint: ["/bin/sh", "/app/scripts/init-dirs.sh"]
-    command: gunicorn server.api:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:7860
+    command: gunicorn server.api:app -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:7860
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:7860/livez >/dev/null || exit 1"]
       interval: 30s
