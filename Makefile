@@ -20,13 +20,13 @@ all: lint sim harden verify
 # Step 1: Lint (syntax check)
 lint:
 	@echo "━━━ [1/4] LINTING $(DESIGN) ━━━"
-	iverilog -t null $(RTL)
+	iverilog -g2012 -t null $(RTL)
 	@echo "✓ Syntax OK"
 
 # Step 2: Simulate (functional verification)
 sim: lint
 	@echo "━━━ [2/4] SIMULATING $(DESIGN) ━━━"
-	iverilog -o $(DESIGN_SRC)/sim $(RTL) $(TB)
+	iverilog -g2012 -o $(DESIGN_SRC)/sim $(RTL) $(TB)
 	cd $(DESIGN_SRC) && vvp sim | tee sim.log
 	@grep -q "TEST PASSED" $(DESIGN_SRC)/sim.log && echo "✓ Simulation PASSED" || (echo "✗ Simulation FAILED" && exit 1)
 
