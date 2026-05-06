@@ -19,6 +19,7 @@ os.environ.setdefault("FORCE_COLOR", "1")
 os.environ.setdefault("LITELLM_LOG", "ERROR")
 os.environ.setdefault("LITELLM_SUPPRESS_DEBUG_INFO", "True")
 os.environ.setdefault("JSON_LOGS", "False")
+os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
 
 from datetime import datetime, timedelta, timezone
 import typer
@@ -1965,6 +1966,242 @@ def _register_custom_pdk_path(pdk_key: str, source_path: str, install_dir: str) 
     _ensure_pdk_root_shell_export(install_dir)
 
 
+# ── Stable volare version for sky130 ────────────────────────────────────────
+_VOLARE_SKY130_VERSION = "0fe599b2afb6708d281543108caf8310912f54af"
+
+
+@app.command("install-tools")
+def install_tools(
+    target_dir: str = typer.Option(
+        "/root/oss-cad-suite",
+        "--target",
+        "-t",
+        help="Directory to install OSS CAD Suite into",
+    ),
+    pdk_root: str = typer.Option(
+        "/root/.ciel",
+        "--pdk-root",
+        help="Directory to install PDKs into",
+    ),
+    skip_pdk: bool = typer.Option(
+        False,
+        "--skip-pdk",
+        help="Skip PDK installation (tools only)",
+    ),
+    skip_oss: bool = typer.Option(
+        False,
+        "--skip-oss",
+        help="Skip OSS CAD Suite installation",
+    ),
+    env_file: str = typer.Option(
+        "",
+        "--env-file",
+        help="Write local-LLM .env template to this path",
+    ),
+):
+    """One-shot setup: install OSS CAD Suite, volare, PDKs, and shell env.
+
+    Examples:
+        agentic install-tools
+        agentic install-tools --target /opt/oss-cad-suite --pdk-root /opt/pdks
+        agentic install-tools --skip-pdk
+        agentic install-tools --env-file /root/my-project/.env
+    """
+    import shutil
+    import subprocess
+    from .install_tools import install_oss_cad_suite
+    from .config import detect_available_pdks, validate_pdk_installation
+
+    changed = False
+
+    # ── 1. OSS CAD Suite ──────────────────────────────────────────────────
+    if not skip_oss:
+        console.print(
+            Panel(
+                "[accent]Step 1/3: OSS CAD Suite[/accent]\n"
+                f"Target: {target_dir}",
+                title="🔧 Installing EDA Tools",
+            )
+        )
+        if _is_toolchain_present():
+            console.print("[success]OSS CAD Suite already detected — skipping.[/success]")
+        else:
+            os.makedirs(target_dir, exist_ok=True)
+            ok = install_oss_cad_suite(target_dir)
+            if ok:
+                console.print("[success]OSS CAD Suite installed.[/success]")
+                changed = True
+            else:
+                console.print("[error]OSS CAD Suite installation failed.[/error]")
+                raise typer.Exit(1)
+    else:
+        console.print("[dim]Skipped OSS CAD Suite (--skip-oss).[/dim]")
+
+    # ── 2. Volare ─────────────────────────────────────────────────────────
+    console.print(
+        Panel(
+            "[accent]Step 2/3: Volare PDK Manager[/accent]",
+            title="📦 Installing Volare",
+        )
+    )
+    volare_ok, volare_version = _check_volare_available()
+    if volare_ok:
+        console.print(f"[success]Volare already installed ({volare_version}) — skipping.[/success]")
+    else:
+        console.print("[warning]Volare not found. Installing via pip...[/warning]")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "git+https://github.com/efabless/volare.git"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            console.print(f"[error]Failed to install volare:[/error]\n{result.stderr}")
+            raise typer.Exit(1)
+        console.print("[success]Volare installed successfully.[/success]")
+        changed = True
+
+    # ── 3. PDK ────────────────────────────────────────────────────────────
+    if not skip_pdk:
+        console.print(
+            Panel(
+                "[accent]Step 3/3: SkyWater SKY130 PDK[/accent]\n"
+                f"Target: {pdk_root}",
+                title="🧱 Installing PDK",
+            )
+        )
+        os.makedirs(pdk_root, exist_ok=True)
+
+        detected = detect_available_pdks()
+        if "sky130" in detected:
+            console.print("[success]Sky130 PDK already installed — skipping.[/success]")
+        else:
+            # Use volare directly with the stable version hash
+            cmd = [
+                "volare", "enable",
+                "--pdk-root", pdk_root,
+                _VOLARE_SKY130_VERSION,
+            ]
+            console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                if stderr:
+                    console.print(f"[error]Volare error:[/error]\n{stderr[:500]}")
+                raise typer.Exit(1)
+
+            # Verify
+            ok, messages = validate_pdk_installation("sky130", pdk_root)
+            for msg in messages:
+                console.print(f"  {'[success]✓[/success]' if 'Found' in msg else '[warning]⚠[/warning]'} {msg}")
+            if not ok:
+                console.print("[error]PDK validation failed.[/error]")
+                raise typer.Exit(1)
+            console.print("[success]Sky130 PDK installed and verified.[/success]")
+            changed = True
+    else:
+        console.print("[dim]Skipped PDK installation (--skip-pdk).[/dim]")
+
+    # ── 4. Shell environment ──────────────────────────────────────────────
+    console.print(
+        Panel(
+            "[accent]Configuring shell environment[/accent]",
+            title="🐚 Shell Setup",
+        )
+    )
+
+    rc_files = [os.path.expanduser("~/.bashrc")]
+    zshrc = os.path.expanduser("~/.zshrc")
+    if os.path.exists(zshrc):
+        rc_files.append(zshrc)
+
+    exports = []
+    if not skip_oss:
+        exports.append((f"export OSS_CAD_SUITE_HOME={target_dir}", f"export OSS_CAD_SUITE_HOME={target_dir}"))
+        exports.append((f"export PATH=\"{target_dir}/bin:$PATH\"", f"export PATH=\"{target_dir}/bin:$PATH\""))
+    exports.append((f"export PDK_ROOT={pdk_root}", f"export PDK_ROOT={pdk_root}"))
+
+    for rcfile in rc_files:
+        existing = ""
+        if os.path.exists(rcfile):
+            with open(rcfile, "r", encoding="utf-8") as f:
+                existing = f.read()
+
+        added = 0
+        for marker, line in exports:
+            if marker not in existing:
+                with open(rcfile, "a", encoding="utf-8") as f:
+                    if not existing.endswith("\n"):
+                        f.write("\n")
+                    f.write(f"# AgentIC auto-config\n{line}\n")
+                added += 1
+
+        if added:
+            console.print(f"[success]Updated {rcfile} ({added} lines added).[/success]")
+        else:
+            console.print(f"[dim]{rcfile} already up to date.[/dim]")
+
+    # Apply to current process so doctor works immediately
+    if not skip_oss:
+        os.environ["OSS_CAD_SUITE_HOME"] = target_dir
+        os.environ["PATH"] = f"{target_dir}/bin:{os.environ.get('PATH', '')}"
+    os.environ["PDK_ROOT"] = pdk_root
+
+    # ── 5. Optional .env file ─────────────────────────────────────────────
+    if env_file:
+        env_path = os.path.abspath(os.path.expanduser(env_file))
+        os.makedirs(os.path.dirname(env_path), exist_ok=True)
+        if not os.path.exists(env_path):
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.write(
+                    '# --- Local vLLM Backend ---\n'
+                    'LLM_MODEL="local-llm"\n'
+                    'LLM_BASE_URL="http://localhost:8000/v1"\n'
+                    'LLM_API_KEY="sk-no-key-required"\n\n'
+                    '# --- Role overrides (all local) ---\n'
+                    'ROLE_ARCHITECT_MODEL="local-llm"\n'
+                    'ROLE_ARCHITECT_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_DESIGNER_MODEL="local-llm"\n'
+                    'ROLE_DESIGNER_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_FIXER_MODEL="local-llm"\n'
+                    'ROLE_FIXER_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_DEBUGGER_MODEL="local-llm"\n'
+                    'ROLE_DEBUGGER_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_VERIFIER_MODEL="local-llm"\n'
+                    'ROLE_VERIFIER_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_TESTBENCH_DESIGNER_MODEL="local-llm"\n'
+                    'ROLE_TESTBENCH_DESIGNER_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_MANAGER_MODEL="local-llm"\n'
+                    'ROLE_MANAGER_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_PHYSICAL_MODEL="local-llm"\n'
+                    'ROLE_PHYSICAL_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_DOCUMENTER_MODEL="local-llm"\n'
+                    'ROLE_DOCUMENTER_BASE_URL="http://localhost:8000/v1"\n'
+                    'ROLE_REASONER_MODEL="local-llm"\n'
+                    'ROLE_REASONER_BASE_URL="http://localhost:8000/v1"\n\n'
+                    '# --- Verilog Codegen ---\n'
+                    'VERILOG_CODEGEN_ENABLED=1\n'
+                    'VERILOG_CODEGEN_MODEL="local-llm"\n'
+                    'VERILOG_CODEGEN_BASE_URL="http://localhost:8000/v1"\n\n'
+                    '# --- PDK ---\n'
+                    f'PDK_ROOT="{pdk_root}"\n'
+                    'PDK="sky130A"\n'
+                )
+            console.print(f"[success]Created local-LLM .env at {env_path}[/success]")
+        else:
+            console.print(f"[warning].env already exists at {env_path} — not overwriting.[/warning]")
+
+    # ── Final report ──────────────────────────────────────────────────────
+    console.print(
+        Panel(
+            "[success]All done![/success]\n\n"
+            "Run [accent]source ~/.bashrc[/accent] (or open a new shell) to reload PATH.\n"
+            "Then verify with: [accent]agentic doctor[/accent]",
+            title="🎉 Setup Complete",
+            border_style="success",
+        )
+    )
+
+
 @app.command("install-pdk")
 def install_pdk(
     pdk_name: str = typer.Argument(
@@ -2396,6 +2633,7 @@ def get_llm(
             top_p=0.7,
             max_tokens=max_tokens,
             timeout=300,
+            num_retries=3,
             extra_body=extra_body if extra_body else None,
         )
 
@@ -3015,6 +3253,12 @@ def build(
 
     Recovery is deterministic first (fast), then falls back to LLM self-reflection.
     """
+    # Guard design name against accidental override by PDK or env logic
+    _design_name = name.strip()
+    if not _design_name:
+        console.print("[error]Design name cannot be empty. Use --name <chip_name>[/error]")
+        raise typer.Exit(1)
+
     _print_banner()
     _ensure_setup(skip_toolchain_prompt=skip_openlane)
     verify_license()
@@ -3165,7 +3409,7 @@ def build(
     if dry_run:
         console.print(
             Panel(
-                f"[accent]DRY RUN — Spec Validation[/accent]\nDesign: {name}\nDescription: {desc}",
+                f"[accent]DRY RUN — Spec Validation[/accent]\nDesign: {_design_name}\nDescription: {desc}",
                 title="🔍 Dry Run Mode",
             )
         )
@@ -3175,7 +3419,7 @@ def build(
 
         llm = get_llm()
         spec_gen = HardwareSpecGenerator(llm)
-        spec, issues = spec_gen.generate(desc, name)
+        spec, issues = spec_gen.generate(desc, _design_name)
         if issues:
             console.print(f"[warning]Spec issues:[/warning]")
             for issue in issues:
@@ -3183,13 +3427,13 @@ def build(
         else:
             console.print("[success]Spec looks valid[/success]")
         console.print(f"\n[info]To run full build:[/info]")
-        console.print(f"  agentic build --name {name} --desc '{desc}'")
+        console.print(f"  agentic build --name {_design_name} --desc '{desc}'")
         return
 
     from .orchestrator import BuildOrchestrator
 
-    # Clean opencode-style header
-    console.print(f"\n[bold #d97757]AgentIC[/] • Building [warning]{name}[/warning]")
+    # Clean opencode-style header — use guarded name so PDK logic never overrides it
+    console.print(f"\n[bold #d97757]AgentIC[/] • Building [warning]{_design_name}[/warning]")
     console.print(f"[dim]  {desc}[/dim]")
     console.print(
         f"[dim]  PDK: {pdk_profile} | {'Full Signoff' if full_signoff else 'RTL → GDSII'}[/dim]"
@@ -3269,7 +3513,7 @@ def build(
     _sys.stderr = _old_err
 
     orchestrator = BuildOrchestrator(
-        name=name,
+        name=_design_name,
         desc=desc,
         llm=llm,
         role_llms=role_llms,
@@ -3302,7 +3546,7 @@ def build(
 
         console.print_json(
             {
-                "design": name,
+                "design": _design_name,
                 "description": desc,
                 "pdk": pdk_profile,
                 "state": orchestrator.state.name,

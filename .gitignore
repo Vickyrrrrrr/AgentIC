@@ -143,3 +143,4 @@ web/.vite/
 !web/src/store/
 !web/src/components/ErrorBoundary.tsx
 .env.example
+README_HF.md
