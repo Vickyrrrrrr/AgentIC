@@ -7,10 +7,10 @@ return 429 (Too Many Requests) or 503 (Service Unavailable) errors.
 Supported strategies:
   - openai:     60 req/min (tier 1), exponential backoff up to 60s
   - anthropic: 50 req/min, backoff with Claude-specific headers
-  - groq:       30 req/min (free tier), aggressive backoff
+  - generic:       30 req/min (free tier), aggressive backoff
   - openrouter: varies by model, conservative backoff
   - ollama:     local — no rate limits, fast retries
-  - nvidia_nim: varies by model, conservative backoff
+  - generic_nim: varies by model, conservative backoff
   - together_ai: 20 req/min free, conservative backoff
   - azure:      configurable, exponential backoff
   - gemini:     15 req/min, conservative backoff
@@ -79,8 +79,8 @@ _PROVIDER_STRATEGIES: Dict[str, RateLimitStrategy] = {
         exponential_base=2.0,
         respect_retry_after=True,
     ),
-    "groq": RateLimitStrategy(
-        name="groq",
+    "generic": RateLimitStrategy(
+        name="generic",
         base_delay_s=2.0,
         max_delay_s=120.0,
         max_retries=5,
@@ -100,8 +100,8 @@ _PROVIDER_STRATEGIES: Dict[str, RateLimitStrategy] = {
         max_retries=3,
         exponential_base=1.5,
     ),
-    "nvidia_nim": RateLimitStrategy(
-        name="nvidia_nim",
+    "generic_nim": RateLimitStrategy(
+        name="generic_nim",
         base_delay_s=2.0,
         max_delay_s=60.0,
         max_retries=4,
@@ -161,10 +161,10 @@ def _detect_provider(base_url: str, model: str) -> str:
                 return "openai"
         if model_lower.startswith(("claude/", "anthropic/")):
             return "anthropic"
-        if model_lower.startswith("groq/"):
-            return "groq"
-        if model_lower.startswith("nvidia_nim/"):
-            return "nvidia_nim"
+        if model_lower.startswith("generic/"):
+            return "generic"
+        if model_lower.startswith("generic_nim/"):
+            return "generic_nim"
         if model_lower.startswith("ollama/"):
             return "ollama"
         if model_lower.startswith("gemini/"):
@@ -179,14 +179,14 @@ def _detect_provider(base_url: str, model: str) -> str:
         return "openai"
     if "api.anthropic.com" in url_lower:
         return "anthropic"
-    if "groq.com" in url_lower:
-        return "groq"
+    if "generic.com" in url_lower:
+        return "generic"
     if "openrouter.ai" in url_lower:
         return "openrouter"
     if "localhost" in url_lower or "ollama" in url_lower:
         return "ollama"
-    if "nvidia.com" in url_lower:
-        return "nvidia_nim"
+    if "generic.com" in url_lower:
+        return "generic_nim"
     if "together.xyz" in url_lower:
         return "together_ai"
     if "azure" in url_lower or "cognitive.microsoft" in url_lower:

@@ -86,7 +86,7 @@ scripts/remote_setup.sh
 video
 skills
 checkpoints
-
+fix
 
 # Benchmark / leaderboard artifacts
 *.jsonl

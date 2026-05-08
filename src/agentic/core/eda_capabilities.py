@@ -53,10 +53,10 @@ def _run_version(cmd: List[str], timeout: int = 5) -> str:
 def detect_eda_capabilities() -> EDACapabilities:
     caps = EDACapabilities()
 
-    if shutil.which("nvidia-smi"):
+    if shutil.which("generic-smi"):
         caps.gpu_available = True
         caps.gpu_backend = "cuda"
-        caps.gpu_summary = _run_version(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
+        caps.gpu_summary = _run_version(["generic-smi", "--query-gpu=name", "--format=csv,noheader"])
     elif shutil.which("rocm-smi"):
         caps.gpu_available = True
         caps.gpu_backend = "rocm"

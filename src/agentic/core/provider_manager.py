@@ -85,8 +85,8 @@ class ProviderManager:
 
     # Default provider configurations
     DEFAULT_PROVIDERS = {
-        "groq": ProviderConfig(
-            name="groq",
+        "generic": ProviderConfig(
+            name="generic",
             priority=1,
             models=["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
             rate_limit=RateLimitConfig(

@@ -2,7 +2,7 @@ import os
 import sys
 import platform
 import tarfile
-import urllib.request
+import tempfile
 from pathlib import Path
 from rich.console import Console
 
@@ -41,15 +41,21 @@ def install_oss_cad_suite(target_dir):
         
     try:
         import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
     except ImportError:
-        console.print("[red]Missing 'requests' module. Please 'pip install requests' first.[/red]")
+        console.print("[red]Missing 'requests' module. Please 'pip install requests urllib3' first.[/red]")
         return False
+
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[ 502, 503, 504 ])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
 
     api_url = "https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest"
     console.print(f"[bold]Fetching latest OSS CAD Suite release info...[/bold]")
     
     try:
-        resp = requests.get(api_url)
+        resp = session.get(api_url, timeout=15)
         resp.raise_for_status()
         release_data = resp.json()
     except Exception as e:
@@ -59,8 +65,8 @@ def install_oss_cad_suite(target_dir):
     assets = release_data.get("assets", [])
     expected_suffix = f"{os_name}-{arch}.tgz"
     download_url = None
+    filename = None
     
-    # E.g. oss-cad-suite-darwin-arm64-XXXXXXXX.tgz
     for asset in assets:
         name = asset["name"]
         if name.endswith(expected_suffix) or (os_name == "windows" and name.endswith(".exe") and "windows-x64" in name):
@@ -74,14 +80,24 @@ def install_oss_cad_suite(target_dir):
 
     console.print(f"[yellow]Downloading {filename} (this may take a while)...[/yellow]")
     
-    # Download the file
-    import tempfile
     ext = ".exe" if os_name == "windows" else ".tgz"
     fd, temp_path = tempfile.mkstemp(suffix=ext)
     os.close(fd)
     
     try:
-        urllib.request.urlretrieve(download_url, temp_path)
+        from rich.progress import Progress
+        with session.get(download_url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            total_length = int(r.headers.get("content-length", 0))
+            
+            with Progress() as progress:
+                task = progress.add_task(f"[cyan]Downloading...", total=total_length)
+                with open(temp_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            progress.update(task, advance=len(chunk))
+                            
         console.print("[green]Download complete. Extracting...[/green]")
         
         os.makedirs(target_dir, exist_ok=True)
@@ -94,7 +110,7 @@ def install_oss_cad_suite(target_dir):
             return False
             
     except Exception as e:
-        console.print(f"[red]Extraction failed: {e}[/red]")
+        console.print(f"[red]Download or extraction failed: {e}[/red]")
         return False
     finally:
         if os.path.exists(temp_path) and ext == ".tgz":

@@ -93,7 +93,7 @@ class TokenBudgetManager:
     Token Limits by Provider/Model:
     - OpenAI GPT-4o: 128K context
     - Anthropic Claude-3.5: 200K context
-    - Groq: 32K context
+    - Generic: 32K context
     """
 
     # Provider context limits (input tokens)
@@ -112,7 +112,7 @@ class TokenBudgetManager:
             "claude-3-sonnet": 200000,
             "claude-3-haiku": 200000,
         },
-        "groq": {
+        "generic": {
             "llama-3.3-70b": 32768,
             "llama-3.1-70b": 32768,
             "mixtral-8x7b": 32768,

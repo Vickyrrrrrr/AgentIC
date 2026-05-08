@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 
 os.environ.setdefault("FORCE_COLOR", "1")
 
@@ -64,9 +64,6 @@ from .config import (
     LLM_MODEL,
     LLM_BASE_URL,
     LLM_API_KEY,
-    NVIDIA_CONFIG,
-    LOCAL_CONFIG,
-    CLOUD_CONFIG,
     PDK,
     SIM_BACKEND_DEFAULT,
     COVERAGE_FALLBACK_POLICY_DEFAULT,
@@ -676,18 +673,7 @@ def _persist_credentials(data: dict) -> None:
 
 
 def _apply_runtime_keys(data: dict) -> None:
-    from . import config
-
-    mappings = (
-        ("nvidia_api_key", config.CLOUD_CONFIG, "NVIDIA_API_KEY"),
-        ("groq_api_key", config.GROQ_CONFIG, "GROQ_API_KEY"),
-        ("glm_api_key", config.GLM_CONFIG, "GLM_API_KEY"),
-    )
-    for field, cfg, env_name in mappings:
-        value = (data.get(field) or "").strip()
-        if value:
-            cfg["api_key"] = value
-            os.environ[env_name] = value
+    pass
 
 
 def _validate_license_with_server(key: str, instance_id: str = "") -> tuple[bool, str]:
@@ -895,7 +881,7 @@ def login():
         Panel(
             "[accent]Welcome to AgentIC[/accent]\n\n"
             "Let's get you set up with the credentials needed to run the VLSI pipeline.\n\n"
-            "[info]Required:[/info] LLM API Key (OpenAI, Anthropic, Groq, etc.)\n"
+            "[info]Required:[/info] LLM API Key (OpenAI, Anthropic, Generic, etc.)\n"
             "[info]Optional:[/info] License Key for production builds\n"
             "[info]Advanced:[/info] Custom Base URL for self-hosted or corporate proxies",
             title="[bold #d97757]AgentIC Onboarding[/bold #d97757]",
@@ -907,11 +893,15 @@ def login():
     from rich.prompt import Prompt
 
     # Step 1: License key
-    license_key = Prompt.ask(
-        "[accent]AgentIC License Key[/accent]\n"
-        f"[dim]Don't have one? Purchase at: {LICENSE_PURCHASE_URL}[/dim]",
-        default=existing.get("license_key", ""),
-    )
+    license_key = existing.get("license_key", "")
+    while not license_key.strip():
+        license_key = Prompt.ask(
+            "[accent]AgentIC License Key[/accent]\n"
+            f"[dim]Don't have one? Purchase at: {LICENSE_PURCHASE_URL}[/dim]",
+            default=license_key
+        )
+        if not license_key.strip():
+            console.print("[red]A valid License Key is required.[/red]")
 
     credentials: dict = {
         "license_key": license_key.strip() if license_key.strip() else None,
@@ -947,7 +937,7 @@ def login():
         for d in detected:
             masked_key = d["api_key"][:4] + "..." + d["api_key"][-4:] if len(d["api_key"]) > 8 else "****"
             console.print(
-                f"  ✅ {d['provider']:<12} → {d['model']:<22} key: {masked} ({d['key_env_var']})"
+                f"  ✅ {d['provider']:<12} → {d['model']:<22} key: {masked_key} ({d['key_env_var']})"
             )
 
         use_detected = typer.confirm(
@@ -971,7 +961,7 @@ def login():
                 "Set one of these and re-run, or configure manually:\n"
                 "  export OPENAI_API_KEY=sk-...\n"
                 "  export ANTHROPIC_API_KEY=sk-ant-...\n"
-                "  export GROQ_API_KEY=gsk_...\n"
+                "  export GENERIC_API_KEY=gsk_...\n"
                 "Or start Ollama locally: ollama serve"
             )
 
@@ -984,19 +974,23 @@ def login():
         provider_table.add_column("Example Model", style="dim")
         provider_table.add_row("OpenAI", "api.openai.com/v1", "gpt-4o")
         provider_table.add_row("Anthropic", "(none needed)", "claude-3-5-sonnet")
-        provider_table.add_row("Groq", "api.groq.com/openai/v1", "llama-3.3-70b")
+        provider_table.add_row("Generic", "api.generic.com/openai/v1", "llama-3.3-70b")
         provider_table.add_row("Ollama", "localhost:11434", "qwen2.5-coder:7b")
         provider_table.add_row("LM Studio", "localhost:1234", "any local model")
-        provider_table.add_row("vLLM / Zai", "your-endpoint.com/v1", "meta-llama-3.1-70b")
+        provider_table.add_row("vLLM / Generic", "your-endpoint.com/v1", "meta-llama-3.1-70b")
         console.print(provider_table)
         console.print()
 
-        llm_api_key = Prompt.ask(
-            "[accent]LLM API Key[/accent]\n"
-            "[dim]OpenAI, Anthropic, Groq, or any OpenAI-compatible endpoint[/dim]",
-            default=existing.get("llm_api_key", ""),
-            password=True,
-        )
+        llm_api_key = existing.get("llm_api_key", "")
+        while not llm_api_key.strip():
+            llm_api_key = Prompt.ask(
+                "[accent]LLM API Key[/accent]\n"
+                "[dim]OpenAI, Anthropic, Generic, or any OpenAI-compatible endpoint[/dim]",
+                default=llm_api_key,
+                password=True,
+            )
+            if not llm_api_key.strip():
+                console.print("[red]An API Key is required to run the agents.[/red]")
 
         base_url = Prompt.ask(
             "\n[accent]Custom Base URL[/accent]\n"
@@ -1082,37 +1076,24 @@ def login():
 
 
 @app.command()
-def configure(
-    single_key: bool = typer.Option(
-        False, "--single-key", "-s", help="Use a single API key for all agent roles"
-    ),
-):
+def configure():
     """Interactive setup wizard — configure LLM API keys for AgentIC.
 
-    Works with any OpenAI-compatible LLM provider (OpenAI, Anthropic, Groq,
-    ZhipuAI, NVIDIA, DeepSeek, Together, Mistral, Ollama, etc.).
-
-    Supports three configuration modes:
-      1. Single key — one API key for all agents
-      2. Group keys — separate keys for build/fix/doc groups
-      3. Per-role keys — different model for each agent role (recommended)
-
+    Works with any OpenAI-compatible LLM provider.
+    Configures a single API key and model for all agents.
+    
     Keys are saved to ~/.agentic/credentials.json. Your .env file is never modified.
     """
     from .config import save_user_credentials, CREDENTIALS_PATH, _load_user_credentials
-    from .tools.api_manager import _PROVIDER_MODEL_DEFAULTS, ApiManager
 
     existing = _load_user_credentials()
 
     console.print(
         Panel(
             "[heading]AgentIC LLM Configuration Wizard[/heading]\n\n"
-            "AgentIC runs [accent]12+ LLM agents[/accent] during a chip build.\n"
-            "Choose how to configure them:\n\n"
-            "  [accent]1.[/accent] [success]Single Key[/success]  — One model for all agents (simplest)\n"
-            "  [accent]2.[/accent] [success]3 Groups[/success]   — Build / Fix / Doc groups (balanced)\n"
-            "  [accent]3.[/accent] [success]Per-Role[/success]   — Best model per agent role (recommended)\n\n"
-            "Any OpenAI-compatible provider works (OpenAI, Groq, Anthropic, DeepSeek, etc.)",
+            "AgentIC runs highly collaborative LLM agents during a chip build.\n\n"
+            "Any OpenAI-compatible provider works.\n"
+            "This setup configures [success]One LLM Model[/success] for all roles natively.",
             title="🔧 Configure LLM",
             border_style="accent",
         )
@@ -1122,39 +1103,18 @@ def configure(
     from rich.table import Table
 
     table = Table(title="Smart Model Suggestions", header_style="bold #d97757", show_lines=True)
-    table.add_column("Role / Agent", style="#d97757 bold")
+    table.add_column("Model Family", style="#d97757 bold")
     table.add_column("Suggested Model", style="info")
     table.add_column("Best For", style="dim")
 
     suggestions = [
-        ("architect", "claude-3-5-sonnet-20250620", "Architecture, CDC, FSM reasoning"),
-        ("designer", "gpt-4o", "RTL generation, SystemVerilog"),
-        ("verifier", "gpt-4o", "Verification planning, coverage analysis"),
-        ("physical", "gpt-4o", "Floorplanning, STA, DRC/LVS"),
-        ("fixer", "gpt-4o-mini", "Fast iterative RTL fixes, lint repair"),
-        (
-            "debugger",
-            "claude-3-5-haiku-20250620",
-            "Quick error triage, regression analysis",
-        ),
-        ("documenter", "groq/llama-3.3-70b-versatile", "Fast docs, report generation"),
+        ("Claude", "claude-3-5-sonnet-20250620", "Best overall reasoning, SystemVerilog and FSMs"),
+        ("GPT-4", "gpt-4o", "Excellent zero-shot RTL generation & debugging"),
+        ("Qwen / DeepSeek", "qwen2.5-coder-32b-instruct", "Extremely capable custom/local code models"),
     ]
     for role, model, best_for in suggestions:
         table.add_row(role, model, best_for)
     console.print(table)
-
-    mode_map = {
-        "1": "single",
-        "2": "group",
-        "3": "per_role",
-    }
-
-    if not single_key:
-        mode = typer.prompt("\nSelect configuration mode [1/2/3]", default="3").strip()
-    else:
-        mode = "single"
-
-    mode = mode_map.get(mode, "per_role")
 
     def _test_connection(model: str, api_key: str, base_url: str = "") -> bool:
         """Test a model + key combo with a minimal call."""
@@ -1166,13 +1126,13 @@ def configure(
                 model_name.startswith(p)
                 for p in (
                     "openai/",
-                    "groq/",
+                    "generic/",
                     "ollama/",
                     "anthropic/",
                     "azure/",
                     "together_ai/",
                     "mistral/",
-                    "nvidia_nim/",
+                    "generic_nim/",
                     "deepseek/",
                     "gemini/",
                 )
@@ -1193,192 +1153,61 @@ def configure(
         existing_key: str = "",
         existing_model: str = "",
         existing_base: str = "",
-        skip_key: bool = False,
     ) -> Tuple[str, str, str]:
         """Prompt for model + base_url + api_key. Returns (model, base_url, api_key)."""
         if existing_model:
             console.print(f"  Current model: [info]{existing_model}[/info]")
         model = typer.prompt(f"  {label} model", default=existing_model or "gpt-4o").strip()
 
-        console.print("  Base URL (blank for OpenAI/Anthropic/Groq):")
+        console.print("  Base URL (blank for standard OpenAI/Anthropic etc.):")
         base_url = typer.prompt("  >", default=existing_base or "").strip()
 
-        if skip_key and not existing_key:
-            api_key = ""
-        else:
-            if existing_key:
-                masked = (
-                    f"{existing_key[:4]}...{existing_key[-4:]}" if len(existing_key) > 8 else "****"
-                )
-                keep = typer.confirm(f"  Keep saved API key ({masked})?", default=True)
-                if keep:
-                    api_key = existing_key
-                else:
-                    api_key = typer.prompt("  API Key", hide_input=True).strip()
+        if existing_key:
+            masked = (
+                f"{existing_key[:4]}...{existing_key[-4:]}" if len(existing_key) > 8 else "****"
+            )
+            keep = typer.confirm(f"  Keep saved API key ({masked})?", default=True)
+            if keep:
+                api_key = existing_key
             else:
                 api_key = typer.prompt("  API Key", hide_input=True).strip()
+        else:
+            api_key = typer.prompt("  API Key", hide_input=True).strip()
 
         return model, base_url, api_key
 
     creds: Dict[str, Any] = {}
 
-    if mode == "single":
-        model, base_url, api_key = _prompt_key(
-            "Primary",
-            existing_model=existing.get("build", {}).get("model", ""),
-            existing_key=existing.get("build", {}).get("api_key", ""),
-            existing_base=existing.get("build", {}).get("base_url", ""),
-        )
-        if not api_key:
-            api_key = LLM_API_KEY
-        if api_key:
-            console.print("[accent]Testing connection...[/accent]")
-            if not _test_connection(model, api_key, base_url):
-                if not typer.confirm("Save anyway?", default=False):
-                    console.print("[info]Configuration cancelled.[/info]")
-                    raise typer.Exit(0)
-        for g in ("build", "fix", "doc"):
-            creds[g] = {"model": model, "base_url": base_url, "api_key": api_key}
-
-    elif mode == "group":
-        for key, label in [
-            ("build", "Build (Architect, Designer, Verifier, Physical)"),
-            ("fix", "Fix (Fixer, Debugger, Reasoner)"),
-            ("doc", "Doc (Documenter, Reporter)"),
-        ]:
-            ex = existing.get(key, {})
-            model, base_url, api_key = _prompt_key(
-                label,
-                existing_model=ex.get("model", ""),
-                existing_key=ex.get("api_key", ""),
-                existing_base=ex.get("base_url", ""),
-            )
-            if not api_key:
-                api_key = LLM_API_KEY
-            if api_key:
-                console.print(f"[accent]Testing {key}...[/accent]")
-                if not _test_connection(model, api_key, base_url):
-                    if not typer.confirm(f"  Save {key} anyway?", default=False):
-                        console.print("[info]Configuration cancelled.[/info]")
-                        raise typer.Exit(0)
-            creds[key] = {"model": model, "base_url": base_url, "api_key": api_key}
-
-    elif mode == "per_role":
-        console.print(
-            "\n[info]Per-Role Configuration[/info] — assign the best model to each role.\n"
-            "Press Enter to use the suggested model.\n"
-        )
-        from crewai import LLM
-
-        # Per-role config stored under "roles" key in credentials
-        existing_roles = existing.get("roles", {})
-        role_defaults = {
-            "architect": ("claude-3-5-sonnet-20250620", "Anthropic", ""),
-            "designer": ("gpt-4o", "OpenAI", ""),
-            "verifier": ("gpt-4o", "OpenAI", ""),
-            "physical": ("gpt-4o", "OpenAI", ""),
-            "fixer": ("gpt-4o-mini", "OpenAI", ""),
-            "debugger": ("claude-3-5-haiku-20250620", "Anthropic", ""),
-            "documenter": (
-                "groq/llama-3.3-70b-versatile",
-                "Groq",
-                "https://api.groq.com/openai/v1",
-            ),
-            "reporter": (
-                "groq/llama-3.3-70b-versatile",
-                "Groq",
-                "https://api.groq.com/openai/v1",
-            ),
-            "testbench_designer": ("gpt-4o", "OpenAI", ""),
-            "manager": ("gpt-4o", "OpenAI", ""),
-            "reasoner": ("gpt-4o", "OpenAI", ""),
-        }
-
-        role_configs = {}
-        skip_key = False
-        for role, (suggested, provider, suggested_base) in role_defaults.items():
-            ex = existing_roles.get(role, {})
-            ex_model = ex.get("model", suggested)
-            ex_base = ex.get("base_url", suggested_base)
-            ex_key = ex.get("api_key", "")
-
-            if not ex_key and not skip_key:
-                # Try to reuse key from earlier role
-                prev_key = ""
-                for prev_role in role_configs:
-                    if role_configs[prev_role].get("api_key"):
-                        prev_key = role_configs[prev_role]["api_key"]
-                        break
-                if prev_key:
-                    ex_key = prev_key
-
-            default_model = ex_model or suggested
-            model = typer.prompt(
-                f"  {role} model",
-                default=default_model,
-            ).strip()
-
-            default_base = ex_base or suggested_base
-            base_url = typer.prompt(
-                f"  {role} base URL",
-                default=default_base,
-            ).strip()
-
-            if not skip_key:
-                if ex_key:
-                    masked = f"{ex_key[:4]}...{ex_key[-4:]}" if len(ex_key) > 8 else "****"
-                    keep = typer.confirm(f"  {role} API key ({masked}) — keep?", default=True)
-                    if keep:
-                        api_key = ex_key
-                    else:
-                        api_key = typer.prompt(f"  {role} API Key", hide_input=True).strip()
-                        if not api_key:
-                            skip_key = True
-                else:
-                    api_key = typer.prompt(f"  {role} API Key", hide_input=True).strip()
-                    if not api_key:
-                        skip_key = True
-
-            role_configs[role] = {
-                "model": model,
-                "base_url": base_url,
-                "api_key": api_key,
-                "provider": provider,
-            }
-
-            if api_key:
-                console.print(f"  [dim]Testing {role}...[/dim]")
-                if _test_connection(model, api_key, base_url):
-                    console.print(f"  [success]  ✓[/success]")
-                else:
-                    if not typer.confirm(f"  Save {role} anyway?", default=False):
-                        console.print("[info]Configuration cancelled.[/info]")
-                        raise typer.Exit(0)
-
-        creds = {"roles": role_configs}
-        # Also set group-level for backward compat
-        build_key = next((rc["api_key"] for rc in role_configs.values() if rc.get("api_key")), "")
-        if build_key:
-            build_model = role_configs.get("designer", {}).get("model", "gpt-4o")
-            creds["build"] = {
-                "model": build_model,
-                "base_url": "",
-                "api_key": build_key,
-            }
+    model, base_url, api_key = _prompt_key(
+        "Primary",
+        existing_model=existing.get("build", {}).get("model", ""),
+        existing_key=existing.get("build", {}).get("api_key", ""),
+        existing_base=existing.get("build", {}).get("base_url", ""),
+    )
+    if not api_key:
+        api_key = LLM_API_KEY
+    if api_key:
+        console.print("[accent]Testing connection...[/accent]")
+        if not _test_connection(model, api_key, base_url):
+            if not typer.confirm("Save anyway?", default=False):
+                console.print("[info]Configuration cancelled.[/info]")
+                raise typer.Exit(0)
+                
+    for g in ("build", "fix", "doc"):
+        creds[g] = {"model": model, "base_url": base_url, "api_key": api_key}
 
     # Preserve any existing non-group keys
     merged = {**existing, **creds}
+    # Clear out roles if they existed previously, since we are strictly 1 LLM now
+    if "roles" in merged:
+        del merged["roles"]
+
     save_user_credentials(merged)
 
-    summary_text = (
-        "Single key"
-        if mode == "single"
-        else ("3 groups (build/fix/doc)" if mode == "group" else "per-role models")
-    )
     console.print(
         Panel(
             f"[success]Configuration saved![/success]\n\n"
-            f"Mode: [accent]{summary_text}[/accent]\n"
+            f"Mode: [accent]Single LLM for all roles[/accent]\n"
             f"Location: [info]{CREDENTIALS_PATH}[/info]\n\n"
             f"[heading]Ready to build![/heading]\n"
             "Run: [accent]agentic build --name counter --desc '8-bit counter with reset'[/accent]",
@@ -1973,13 +1802,13 @@ _VOLARE_SKY130_VERSION = "0fe599b2afb6708d281543108caf8310912f54af"
 @app.command("install-tools")
 def install_tools(
     target_dir: str = typer.Option(
-        "/root/oss-cad-suite",
+        os.path.expanduser("~/oss-cad-suite"),
         "--target",
         "-t",
         help="Directory to install OSS CAD Suite into",
     ),
     pdk_root: str = typer.Option(
-        "/root/.ciel",
+        os.path.expanduser("~/.ciel"),
         "--pdk-root",
         help="Directory to install PDKs into",
     ),
@@ -2531,7 +2360,7 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
     LiteLLM requires provider prefixes for non-OpenAI endpoints:
       - openai/gpt-4o
       - anthropic/claude-3-5-sonnet
-      - groq/llama-3.3-70b
+      - generic/llama-3.3-70b
       - openai/llama-3.1-70b  (custom endpoint with OpenAI-compatible API)
 
     If base_url is localhost/internal, assume OpenAI-compatible format.
@@ -2547,14 +2376,18 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
 
     if "anthropic" in base_lower:
         return f"anthropic/{model}"
-    if "groq" in base_lower:
-        return f"groq/{model}"
+    if "generic" in base_lower:
+        return f"generic/{model}"
     if "openai" in base_lower:
         return f"openai/{model}"
     if "together" in base_lower:
         return f"together/{model}"
     if "azure" in base_lower:
         return f"azure/{model}"
+
+    # Localhost/vLLM/internal endpoints — keep model name as-is (no prefix)
+    if "localhost" in base_lower or "127.0.0.1" in base_lower or "0.0.0.0" in base_lower:
+        return model
 
     # Default to openai/ prefix for custom endpoints
     if base_lower and "openai.com" not in base_lower:
@@ -2581,7 +2414,7 @@ def get_llm(
 
     Args:
         model: Override model name (e.g. "gpt-4o", "claude-3-5-sonnet")
-        base_url: Override endpoint (e.g. "https://api.groq.com/openai/v1")
+        base_url: Override endpoint (e.g. "https://api.generic.com/openai/v1")
         api_key: Override API key
         temperature: Sampling temperature (default 0.2)
         max_tokens: Max output tokens (default 16384)
@@ -2633,7 +2466,6 @@ def get_llm(
             top_p=0.7,
             max_tokens=max_tokens,
             timeout=300,
-            num_retries=3,
             extra_body=extra_body if extra_body else None,
         )
 
@@ -2951,7 +2783,7 @@ def _extract_sdc_clock(sdc_path: str) -> float:
 
 def _apply_harden_fix(
     die_size: int, util: int, clock_period: float,
-    ol_categories: list, attempt: int,
+    ol_categories: list, attempt: int, wns: float = 0.0,
 ) -> tuple:
     """Apply deterministic fix parameters for OpenLane failures.
     Returns (new_die, new_util, new_clock_period, description).
@@ -2961,8 +2793,9 @@ def _apply_harden_fix(
 
     primary = ol_categories[0]
     if primary == "timing_setup":
-        new_clock = round(clock_period * (1.15 + attempt * 0.10), 2)
-        return die_size, util, new_clock, f"Relax clock: {clock_period}ns → {new_clock}ns"
+        relaxation_factor = 1.15 + attempt * 0.10 + (abs(wns) / 10.0 if wns < -0.5 else 0)
+        new_clock = round(clock_period * relaxation_factor, 2)
+        return die_size, util, new_clock, f"Relax clock: {clock_period}ns → {new_clock}ns (WNS: {wns:.3f}ns)"
 
     elif primary == "routing_congestion":
         new_util = max(25, util - 8 - attempt * 3)
@@ -3110,6 +2943,9 @@ def harden(
         error_text = str(ol_result)[:5000]
         categories = ol_fixer.classify(error_text)
 
+        wns_match = re.search(r'wns\s+([-\d.]+)', error_text, re.IGNORECASE)
+        wns_val = float(wns_match.group(1)) if wns_match else 0.0
+
         if not categories or attempt == recovery_attempts:
             console.print(f"[error]✗ OpenLane failed (attempt {attempt+1}/{recovery_attempts+1})[/error]")
             console.print(f"[error]  Error category: {categories or 'unknown'}[/error]")
@@ -3124,7 +2960,7 @@ def harden(
 
         # Apply deterministic fix
         die_size, util, clock_period, fix_desc = _apply_harden_fix(
-            die_size, util, clock_period, categories, attempt,
+            die_size, util, clock_period, categories, attempt, wns=wns_val,
         )
         console.print(f"  [info]🔧 Applying fix: {fix_desc}[/info]")
 

@@ -123,11 +123,11 @@ _PROVIDER_MODEL_DEFAULTS: Dict[str, List[ModelStrategy]] = {
             cost_tier="low",
         ),
     ],
-    "groq": [
+    "generic": [
         ModelStrategy(
-            model="groq/llama-3.3-70b-versatile",
-            provider="groq",
-            base_url="https://api.groq.com/openai/v1",
+            model="generic/llama-3.3-70b-versatile",
+            provider="generic",
+            base_url="https://api.generic.com/openai/v1",
             temperature=0.6,
             max_tokens=8192,
             strengths=["ultra-fast RTL generation", "rapid iteration"],
@@ -135,9 +135,9 @@ _PROVIDER_MODEL_DEFAULTS: Dict[str, List[ModelStrategy]] = {
             cost_tier="free",
         ),
         ModelStrategy(
-            model="groq/mixtral-8x7b-32768",
-            provider="groq",
-            base_url="https://api.groq.com/openai/v1",
+            model="generic/mixtral-8x7b-32768",
+            provider="generic",
+            base_url="https://api.generic.com/openai/v1",
             temperature=0.6,
             max_tokens=8192,
             strengths=["fast SDC generation", "quick analysis"],
@@ -426,11 +426,11 @@ class ApiManager:
         premium = provider_by_tier.get("anthropic", []) + provider_by_tier.get(
             "openai", []
         )
-        cheap = provider_by_tier.get("groq", []) + provider_by_tier.get("deepseek", [])
+        cheap = provider_by_tier.get("generic", []) + provider_by_tier.get("deepseek", [])
         others = [
             p
             for grp, tier_d in provider_by_tier.items()
-            if grp not in ("anthropic", "openai", "groq", "deepseek")
+            if grp not in ("anthropic", "openai", "generic", "deepseek")
             for p in tier_d
         ]
 
@@ -459,11 +459,11 @@ class ApiManager:
         defaults = {
             "openai": "https://api.openai.com/v1",
             "anthropic": "https://api.anthropic.com",
-            "groq": "https://api.groq.com/openai/v1",
+            "generic": "https://api.generic.com/openai/v1",
             "deepseek": "https://api.deepseek.com",
             "together_ai": "https://api.together.xyz/v1",
             "ollama": "http://localhost:11434",
-            "nvidia_nim": "https://integrate.api.nvidia.com/v1",
+            "generic_nim": "https://integrate.api.generic.com/v1",
         }
         return defaults.get(provider, "")
 
