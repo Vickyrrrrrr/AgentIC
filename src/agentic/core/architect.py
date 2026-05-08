@@ -374,7 +374,7 @@ class ArchitectModule:
         except Exception:
             return ""
 
-    def sid_to_rtl_prompt(self, sid: StructuredSpecDict) -> str:
+    def sid_to_rtl_prompt(self, sid: StructuredSpecDict, target_pdk_profile: Optional[Dict[str, Any]] = None) -> str:
         """
         Convert a SID into a detailed RTL generation prompt.
         
@@ -384,6 +384,18 @@ class ArchitectModule:
         sections = []
         sections.append(f"# RTL Specification for {sid.top_module}")
         sections.append(f"Chip Family: {sid.chip_family}")
+        
+        if target_pdk_profile:
+            pdk_name = target_pdk_profile.get("profile", "unknown")
+            voltage = target_pdk_profile.get("voltage_vdd", "unknown")
+            # Try to grab frequency limits if injected into the profile dictionary, or fallback to heuristics
+            clock_ns = target_pdk_profile.get("default_clock_period", "unknown")
+            sections.append(f"\n## Target PDK Constraints (CRITICAL for Pipelining)")
+            sections.append(f"Target node: {pdk_name} ({voltage}V).")
+            sections.append(f"Target clock period is {clock_ns}ns.")
+            sections.append(f"You MUST adapt your pipelining logic to this timeframe. Do NOT write single-cycle logic blocks that result in overly long critical paths.")
+            sections.append(f"If the clock period is aggressive for {pdk_name}, ensure intermediate pipeline registers are utilized heavily.\n")
+
         sections.append(f"Description: {sid.description}")
         sections.append(f"Reset: {sid.reset_style} ({sid.reset_polarity})")
         sections.append(f"Interface: {sid.interface_protocol or 'custom'}")

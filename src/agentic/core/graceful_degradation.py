@@ -16,7 +16,7 @@ Usage:
     result = degrader.execute(
         task="Generate RTL",
         prompt=...,
-        providers=["groq", "openai", "anthropic"],
+        providers=["generic", "openai", "anthropic"],
     )
 """
 

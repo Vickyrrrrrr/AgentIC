@@ -528,8 +528,8 @@ class BuildOrchestrator:
         provider = "openai"
         model = LLM_MODEL
         if base_url := getattr(self.llm, "base_url", ""):
-            if "groq" in base_url:
-                provider = "groq"
+            if "generic" in base_url:
+                provider = "generic"
             elif "anthropic" in base_url:
                 provider = "anthropic"
             elif "azure" in base_url:
@@ -561,8 +561,8 @@ class BuildOrchestrator:
             if llm_obj:
                 model = getattr(llm_obj, "model", "") or ""
                 base_url = getattr(llm_obj, "base_url", "") or ""
-                if "groq" in base_url:
-                    provider = "groq"
+                if "generic" in base_url:
+                    provider = "generic"
                 elif "anthropic" in base_url:
                     provider = "anthropic"
                 elif "azure" in base_url:
@@ -1494,7 +1494,7 @@ class BuildOrchestrator:
             )
             self.artifacts["sid"] = sid.to_json()
             # Convert SID → detailed RTL prompt for the coder agent
-            self.artifacts["spec"] = architect.sid_to_rtl_prompt(sid)
+            self.artifacts["spec"] = architect.sid_to_rtl_prompt(sid, target_pdk_profile=self.pdk_profile)
             self.log(
                 f"Structured Spec: {len(sid.sub_modules)} sub-modules decomposed",
                 refined=True,

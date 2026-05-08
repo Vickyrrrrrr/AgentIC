@@ -297,37 +297,39 @@ def validate_agent_payload(payload: Dict[str, Any], required_keys: List[str]) ->
 
 
 def infer_failure_class(
-    *,
-    producer: str,
-    raw_output: str = "",
+    raw_output: str,
     diagnostics: Optional[List[str]] = None,
+    producer: str = "",
     tool_result: Optional[Dict[str, Any]] = None,
 ) -> FailureClass:
-    diag_text = "\n".join(diagnostics or [])
-    text = f"{raw_output}\n{diag_text}".lower()
+    """Intelligently map a failure into a canonical Recovery class."""
+    if tool_result and isinstance(tool_result.get("structured_errors"), list):
+        if any("synth" in e.get("type", "").lower() for e in tool_result["structured_errors"]):
+            return FailureClass.EDA_TOOL_ERROR
+
+    diag_text = "\\n".join(diagnostics or [])
+    text = f"{raw_output}\\n{diag_text}".lower()
+    
     if tool_result:
         if tool_result.get("infra_failure"):
             return FailureClass.INFRASTRUCTURE_ERROR
         if tool_result.get("tool"):
             return FailureClass.EDA_TOOL_ERROR
+
+    if "syntax error" in text or "drc error" in text or "yosys" in text or "verilator" in text:
+        return FailureClass.EDA_TOOL_ERROR
     if "not valid json" in text or "missing required key" in text or "prose" in text:
         return FailureClass.LLM_FORMAT_ERROR
-    if "timed out" in text or "tool missing" in text or "binary not found" in text:
+    if "timed out" in text or "binary not found" in text or "no logic found" in text:
         return FailureClass.INFRASTRUCTURE_ERROR
-    if (
-        "cannot find" in text
-        or "%error" in text
-        or "warning" in text
-        or "yosys" in text
-        or "verilator" in text
-    ):
-        return FailureClass.EDA_TOOL_ERROR
-    if "handoff" in text or "missing artifact" in text or "routing" in text:
+    if "handoff" in text or "missing artifact" in text:
         return FailureClass.ORCHESTRATOR_ROUTING_ERROR
     if "retry" in text and "budget" in text:
         return FailureClass.RETRY_BUDGET_ERROR
+    
     if producer.startswith("llm") or producer.startswith("agent"):
         return FailureClass.LLM_SEMANTIC_ERROR
+        
     return FailureClass.UNKNOWN
 
 

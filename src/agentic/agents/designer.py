@@ -79,7 +79,7 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         """
     else:
         role = "SystemVerilog Architect"
-        backstory = f"""You are a Principal ASIC Architect at a top-tier semiconductor company (NVIDIA/Intel).
+        backstory = f"""You are a Principal ASIC Architect at a top-tier semiconductor company (Generic/Intel).
         You write PRODUCTION-READY RTL — never toy code or placeholders.
 
         Your Principles:

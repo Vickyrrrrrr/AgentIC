@@ -121,10 +121,9 @@ def _credential_group(group_name: str) -> Dict[str, str]:
 
 
 def _default_group_credentials() -> Dict[str, str]:
-    for group_name in ("build", "fix", "doc"):
-        group = _credential_group(group_name)
-        if group.get("api_key"):
-            return group
+    group = _credential_group("build")
+    if group.get("api_key"):
+        return group
     return {"model": "", "base_url": "", "api_key": ""}
 
 
@@ -135,8 +134,8 @@ def _default_group_credentials() -> Dict[str, str]:
 #
 #   OpenAI:      LLM_BASE_URL=https://api.openai.com/v1       LLM_MODEL=gpt-4o
 #   Anthropic:   LLM_MODEL=anthropic/claude-3-5-sonnet        (no base_url needed)
-#   Groq:        LLM_BASE_URL=https://api.groq.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
-#   NVIDIA NIM:  LLM_BASE_URL=https://integrate.api.nvidia.com/v1
+#   Generic:        LLM_BASE_URL=https://api.generic.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
+#   Generic NIM:  LLM_BASE_URL=https://integrate.api.generic.com/v1
 #   Ollama:      LLM_BASE_URL=http://localhost:11434           LLM_MODEL=ollama/qwen2.5-coder:7b
 #   Together AI: LLM_BASE_URL=https://api.together.xyz/v1
 #   OpenRouter:  LLM_BASE_URL=https://openrouter.ai/api/v1
@@ -163,12 +162,6 @@ _DEFAULT_LLM_CONFIG = {
 }
 
 DEFAULT_LLM_CONFIG = _DEFAULT_LLM_CONFIG.copy()
-CLOUD_CONFIG = _DEFAULT_LLM_CONFIG.copy()
-NVIDIA_CONFIG = _DEFAULT_LLM_CONFIG.copy()
-LOCAL_CONFIG = _DEFAULT_LLM_CONFIG.copy()
-GROQ_CONFIG = _DEFAULT_LLM_CONFIG.copy()
-GLM_CONFIG = _DEFAULT_LLM_CONFIG.copy()
-DEEPSEEK_CONFIG = _DEFAULT_LLM_CONFIG.copy()
 
 LLM_MODEL = DEFAULT_LLM_CONFIG["model"]
 LLM_BASE_URL = DEFAULT_LLM_CONFIG["base_url"]
@@ -200,7 +193,7 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
         ROLE_DESIGNER_MODEL=gpt-4o
         ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
         ROLE_DOCUMENTER_MODEL=llama-3.3-70b-versatile
-        ROLE_DOCUMENTER_BASE_URL=https://api.groq.com/openai/v1
+        ROLE_DOCUMENTER_BASE_URL=https://api.generic.com/openai/v1
         ROLE_DOCUMENTER_API_KEY=gsk_...
     """
     role_key = role.lower().replace("-", "_")
@@ -285,7 +278,7 @@ def detect_llm_from_env() -> list[dict]:
     Providers detected (priority order):
         Anthropic  — ANTHROPIC_API_KEY  → claude-3-5-sonnet
         OpenAI     — OPENAI_API_KEY     → gpt-4o
-        Groq       — GROQ_API_KEY       → llama-3.3-70b
+        Generic       — GENERIC_API_KEY       → llama-3.3-70b
         DeepSeek   — DEEPSEEK_API_KEY   → deepseek-chat
         ZhipuAI    — ZHIPUAI_API_KEY    → glm-4
         Together   — TOGETHER_API_KEY   → meta-llama-3.1-70b
@@ -296,7 +289,7 @@ def detect_llm_from_env() -> list[dict]:
     PROVIDER_MAP = [
         ("openai", "gpt-4o", "https://api.openai.com/v1", "OPENAI_API_KEY"),
         ("anthropic", "claude-3-5-sonnet", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
-        ("groq", "llama-3.3-70b", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+        ("generic", "llama-3.3-70b", "https://api.generic.com/openai/v1", "GENERIC_API_KEY"),
         ("deepseek", "deepseek-chat", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
         ("zhipuai", "glm-4", "https://open.bigmodel.cn/api/paas/v4", "ZHIPUAI_API_KEY"),
         ("together", "meta-llama-3.1-70b", "https://api.together.xyz/v1", "TOGETHER_API_KEY"),

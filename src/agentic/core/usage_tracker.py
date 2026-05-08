@@ -92,8 +92,8 @@ class UsageTracker:
         ("anthropic", "claude-3-5-sonnet"): 0.003,
         ("anthropic", "claude-3-5-haiku"): 0.00025,
         ("anthropic", "claude-3-opus"): 0.015,
-        ("groq", "llama-3.3-70b"): 0.00059,
-        ("groq", "mixtral-8x7b"): 0.00024,
+        ("generic", "llama-3.3-70b"): 0.00059,
+        ("generic", "mixtral-8x7b"): 0.00024,
         ("openrouter", "default"): 0.005,
     }
 
