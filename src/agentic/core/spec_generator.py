@@ -884,13 +884,10 @@ Return ONLY this JSON (no markdown, no commentary):
                 logger.warning(f"[SpecGen] Attempt {attempt} failed: {e}")
                 continue
 
-        # Fallback: generate minimal spec (Only if no base_sid provided)
-        if base_sid:
-            raise RuntimeError(
-                "SpecGen failed even with base_sid. Cannot fallback to minimal in high-reliability mode."
-            )
-
-        logger.warning("[SpecGen] All attempts failed — generating minimal fallback spec")
+        # Fallback: generate minimal spec (even if base_sid is provided)
+        # We previously raised RuntimeError in high-reliability mode, but we need
+        # to ensure it always falls back to avoid complete pipeline failure.
+        logger.warning(f"[SpecGen] All attempts failed (base_sid present: {bool(base_sid)}) — generating minimal fallback spec")
         spec = self._fallback_spec(design_name, description, category, target_pdk)
         issues.append("Spec generation fell back to minimal template — manual review required")
         return spec, issues

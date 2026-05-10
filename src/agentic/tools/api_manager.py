@@ -280,8 +280,11 @@ class ApiManager:
         kwargs = dict(
             model=full_model if "/" in full_model else f"{provider}/{full_model}",
             api_key=api_key,
-            temperature=0.6,
+            temperature=0.1,
             max_tokens=16384,
+            presence_penalty=0.5,
+            frequency_penalty=0.5,
+            stop=["<|im_end|>", "<|endoftext|>"]
         )
         if base_url:
             kwargs["base_url"] = base_url

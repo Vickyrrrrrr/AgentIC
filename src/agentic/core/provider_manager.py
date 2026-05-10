@@ -85,6 +85,20 @@ class ProviderManager:
 
     # Default provider configurations
     DEFAULT_PROVIDERS = {
+        "custom": ProviderConfig(
+            name="custom",
+            priority=0,  # Highest priority
+            models=["openai/vxkyyy/vlsi-moe-yarn", "vxkyyy/vlsi-moe-yarn"], # Default fallbacks etc
+            base_url="http://134.199.196.164:8000/v1",
+            rate_limit=RateLimitConfig(
+                requests_per_minute=1000,
+                tokens_per_minute=500000,
+                max_retries=10,
+                base_delay_seconds=1.0,
+                max_delay_seconds=60.0,
+            ),
+            cost_per_1k_tokens=0.0,
+        ),
         "generic": ProviderConfig(
             name="generic",
             priority=1,

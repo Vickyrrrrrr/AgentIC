@@ -228,10 +228,12 @@ def extract_verilog_safely(raw_llm_text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
     fences = [
-        (r"```(?:verilog|systemverilog|sv)\s*\n(.*?)\n```", re.DOTALL),
-        (r"```(?:verilog|systemverilog|sv)\s*(.*?)```", re.DOTALL),
-        (r"```v\s*\n(.*?)\n```", re.DOTALL),
-        (r"```v\s*(.*?)```", re.DOTALL),
+        (r"```(?:verilog|systemverilog|sv)\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE),
+        (r"```(?:verilog|systemverilog|sv)\s*(.*?)```", re.DOTALL | re.IGNORECASE),
+        (r"```v\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE),
+        (r"```v\s*(.*?)```", re.DOTALL | re.IGNORECASE),
+        (r"```\s*\n(.*?)\n```", re.DOTALL),
+        (r"```\s*(.*?)```", re.DOTALL),
     ]
     for pattern, flags in fences:
         m = re.search(pattern, text, flags)
@@ -240,10 +242,11 @@ def extract_verilog_safely(raw_llm_text: str) -> str:
             if "module" in code and "endmodule" in code:
                 return code.strip()
 
+    # Fallback: robustly match a real module declaration, not just the word "module" in prose
     module_match = re.search(
-        r"\bmodule\s+\w+.*?\bendmodule\b",
+        r"\bmodule\s+[a-zA-Z_]\w*\s*(?:#|\(|;).*?\bendmodule\b",
         text,
-        re.DOTALL | re.IGNORECASE,
+        re.DOTALL,
     )
     if module_match:
         return module_match.group(0).strip()
@@ -729,7 +732,26 @@ class BuildOrchestrator:
                     tb = f.read()
             except OSError:
                 tb = ""
-        digest = hashlib.sha256((rtl + "\n" + tb).encode("utf-8", errors="ignore")).hexdigest()
+        # Hierarchical fix: Fingerprint should represent the state of the ENTIRE design
+        design_hash = ""
+        rtl_path = self.artifacts.get("rtl_path", "")
+        if rtl_path:
+            src_dir = os.path.dirname(rtl_path)
+            if os.path.exists(src_dir):
+                import glob
+                # Sort for deterministic hashing
+                for fpath in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+                    try:
+                        with open(fpath, "rb") as f:
+                            design_hash += hashlib.md5(f.read()).hexdigest()
+                    except OSError:
+                        pass
+        
+        # If no files yet, fall back to current artifacts
+        if not design_hash:
+            design_hash = rtl
+
+        digest = hashlib.sha256((design_hash + "\n" + tb).encode("utf-8", errors="ignore")).hexdigest()
         return digest[:16]
 
     def _record_failure_fingerprint(self, error_text: str) -> bool:
@@ -1170,6 +1192,21 @@ class BuildOrchestrator:
             raw_output=raw_output,
         )
 
+
+    def run_eda_physical_analyst(self, error_log: str) -> dict:
+        """Native AgentIC VLSI-Aware Physical Design Analyst."""
+        sys_prompt = (
+            "You are the Principal Physical Design Analyst. "
+            "Diagnose OpenLane, Yosys, and magic log summaries. Map congestion, "
+            "DRC violations, setup/hold timing violations, or standard cell mapping errors "
+            "to exact Verilog logic lines. Return a JSON with: {'class': 'A/B/C', 'root_cause': '...', 'fix_hint': '...'}"
+        )
+        # Call the configured llm_provider
+        from .core.graceful_degradation import FallbackPipeline
+        from .core.llm_schemas import OutputParser
+        res = self.llm.execute(sys_prompt, error_log)
+        return OutputParser.parse_json(res)
+
     def _build_llm_context(self, include_rtl: bool = True, mode: Optional[str] = None) -> str:
         """Build cumulative context string for LLM calls.
 
@@ -1202,6 +1239,12 @@ class BuildOrchestrator:
 
         if budgeted.get("rtl"):
             sections.append(f"CURRENT RTL (token-budgeted):\n```verilog\n{budgeted['rtl']}\n```")
+
+        backend_analysis = self.artifacts.get("backend_error_analysis", {})
+        if backend_analysis:
+            import json
+            analysis_json = json.dumps(backend_analysis, indent=2)
+            sections.append(f"STRUCTURED ERROR ANALYSIS (Fix Focus):\n```json\n{analysis_json}\n```")
 
         evolved = self.context_evolver.evolve(
             stage=self.state.name,
@@ -1890,11 +1933,13 @@ SPECIFICATION SECTIONS (Markdown):
             self.transition(BuildState.FEASIBILITY_CHECK)
 
         except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
             self.log(
                 f"HierarchyExpander failed ({e}); skipping to FEASIBILITY_CHECK.",
                 refined=True,
             )
-            self.logger.warning(f"HierarchyExpander error: {e}")
+            self.logger.warning(f"HierarchyExpander error: {e}\n{tb_str}")
             self.artifacts["hierarchy_result"] = {}
             self.transition(BuildState.FEASIBILITY_CHECK)
 
@@ -2980,8 +3025,12 @@ endclass
     def _condense_failure_log(self, raw_text: str, kind: str) -> str:
         if not raw_text:
             return raw_text
-        if len(raw_text) < 12000:
+        
+        # Always use EDA log parser for known EDA steps. Use 4000 char cutoff for generic steps.
+        eda_kinds = {"timing", "synth", "placement", "routing", "floorplan", "lvs", "drc", "backend"}
+        if len(raw_text) < 4000 and kind.lower() not in eda_kinds:
             return raw_text
+
         src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
         os.makedirs(src_dir, exist_ok=True)
         log_path = os.path.join(src_dir, f"{self.name}_{kind}_failure.log")
@@ -2989,9 +3038,9 @@ endclass
             with open(log_path, "w") as f:
                 f.write(raw_text)
             summary = parse_eda_log_summary(log_path, kind=kind, top_n=10)
-            return f"LOG_SUMMARY: {summary}"
+            return f"LOG_SUMMARY:\n{summary}"
         except OSError:
-            return raw_text[-12000:]
+            return raw_text[-4000:]
 
     def _evaluate_hierarchy(self, rtl_code: str):
         module_count = len(re.findall(r"\bmodule\b", rtl_code))
@@ -3532,12 +3581,20 @@ undriven outputs, and Verilator-incompatible constructs. You verify that:
 3. Width mismatches are flagged
 4. Module name matches the design name
 5. No placeholders or TODO comments remain
+6. NO PROSE: Output ONLY pure Verilog code. Do NOT include any conversational text, explanations, or reasoning inside or outside the Verilog code blocks.
 You return the FINAL corrected code in ```verilog``` fences.""",
                 llm=self.get_llm_for_role("designer"),
                 verbose=False,
                 tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
                 allow_delegation=False,
             )
+
+            sub_rtls = self.artifacts.get("sub_module_rtl", {})
+            if sub_rtls:
+                sub_names = ", ".join(sub_rtls.keys())
+                hierarchy_rule = f"5. **HIERARCHICAL WRAPPER**: The following sub-modules already exist: {sub_names}. YOU MUST ONLY WRITE THE TOP-LEVEL MODULE '{self.name}' THAT INSTANTIATES THEM. DO NOT redefine these sub-modules in your code."
+            else:
+                hierarchy_rule = "5. **MODULAR HIERARCHY**: For complex designs, break them into smaller sub-modules. Output ALL modules in your response."
 
             rtl_task = Task(
                 description=f"""Design module "{self.name}" based on SPEC.
@@ -3559,7 +3616,7 @@ CRITICAL RULES:
 2. Async active-low reset `rst_n`
 3. Flatten ports on the TOP module (no multi-dim arrays on top-level ports). Internal modules can use them.
 4. **IMPLEMENT EVERYTHING**: Do not leave any logic as "to be implemented" or "simplified".
-5. **MODULAR HIERARCHY**: For complex designs, break them into smaller sub-modules. Output ALL modules in your response.
+{hierarchy_rule}
 6. Return code in ```verilog fence.
 """,
                 expected_output="Complete Verilog RTL Code",
@@ -3670,7 +3727,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
 
             self.logger.info(f"GENERATED RTL ({self.strategy.name}):\n{rtl_code[:500]}...")
 
-        # Save file (write_verilog cleans LLM output: strips markdown, think tags, etc.)
+        # Save top module file FIRST (write_verilog cleans LLM output, splits files if multiple exist)
         path = write_verilog(self.name, rtl_code)
         if "Error" in path:
             self.log(f"File Write Error: {path}", refined=True)
@@ -3678,6 +3735,24 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             return
 
         self.artifacts["rtl_path"] = path
+        
+        # Dump parallel-generated sub-modules to the project src directory LAST
+        # This guarantees that the perfectly generated parallel submodules overwrite 
+        # any hallucinated or duplicated submodules that the top-level LLM might have generated.
+        sub_rtls = self.artifacts.get("sub_module_rtl", {})
+        if sub_rtls:
+            src_dir = os.path.join(OPENLANE_ROOT, "designs", self.name, "src")
+            os.makedirs(src_dir, exist_ok=True)
+            for mod_name, mod_code in sub_rtls.items():
+                # Extract clean Verilog code from the sub-module artifact
+                _, clean_mod_code = extract_and_validate_llm_code(mod_code)
+                if not clean_mod_code:
+                    clean_mod_code = mod_code  # fallback
+                
+                mod_path = os.path.join(src_dir, f"{mod_name}.v")
+                with open(mod_path, "w") as f:
+                    f.write(clean_mod_code + "\n")
+            self.log(f"Wrote {len(sub_rtls)} parallel-generated sub-modules to disk (overwriting any hallucinations).", refined=True)
         # Store the CLEANED code (read back from file), not raw LLM output
         with open(path, "r") as f:
             self.artifacts["rtl_code"] = f.read()
@@ -3874,18 +3949,35 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                     open(p.strip()).read() if os.path.exists(p.strip()) else f"Not found: {p}"
                 ),
             )
+            # Load all RTL files in src/ so the fixer sees all sub-modules
+            src_dir = os.path.dirname(path)
+            all_rtl_code = ""
+            if os.path.exists(src_dir):
+                import glob
+                for v_file in glob.glob(os.path.join(src_dir, "*.v")):
+                    try:
+                        with open(v_file, "r") as f:
+                            all_rtl_code += f"// --- File: {os.path.basename(v_file)} ---\n{f.read()}\n\n"
+                    except OSError:
+                        pass
+            
+            if not all_rtl_code.strip():
+                all_rtl_code = self.artifacts.get("rtl_code", "")
+
             _react_context = (
-                f"RTL file path: {path}\n\n"
+                f"RTL directory: {src_dir}\n\n"
                 f"Errors:\n{errors_for_llm}\n\n"
-                f"Current RTL:\n```verilog\n{self.artifacts['rtl_code']}\n```"
+                f"Current RTL (All Modules):\n```verilog\n{all_rtl_code}\n```"
             )
             _react_trace = _react_agent.run(
                 task=(
-                    f"Fix all syntax and lint errors in Verilog module '{self.name}'. "
+                    f"Fix all syntax and lint errors in the Verilog code for design '{self.name}'. "
+                    f"The errors may be in the top module or in any of the sub-modules provided in the context. "
                     f"CRITICAL: Do not rename the module. Do not add, modify, or remove any input/output ports. "
                     f"The top-module interface MUST remain exactly the same. "
                     f"Use syntax_check tool to verify your fix compiles clean. "
-                    f"Final Answer must be ONLY corrected Verilog inside ```verilog fences."
+                    f"Final Answer must be ONLY corrected Verilog inside ```verilog fences. "
+                    f"YOU MUST OUTPUT THE FULL CODE FOR ALL MODULES THAT YOU MODIFY so they can be saved to disk."
                 ),
                 context=_react_context,
             )
@@ -3927,7 +4019,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             # Use IncrementalFixer for error analysis and surgical fixes
             analysis = self.incremental_fixer.analyze_error(
                 error_text=errors_for_llm,
-                rtl_code=self.artifacts.get("rtl_code", ""),
+                rtl_code=all_rtl_code,
             )
 
             # Build surgical fix prompt with error analysis
@@ -3961,12 +4053,12 @@ IMPORTANT: The compiler is Verilator 5.0+ (SystemVerilog 2017+).
 - Focus on fixing the error type: {analysis.error_type.value if hasattr(analysis.error_type, "value") else analysis.error_type}
 - Be careful around signals: {", ".join(analysis.signals_mentioned[:3]) if analysis.signals_mentioned else "N/A"}
 
-Code:
+Code Directory Context (All Modules):
 ```verilog
-{self.artifacts["rtl_code"]}
+{all_rtl_code}
 ```
+YOU MUST RETURN THE FULL CODE FOR ALL MODULES THAT YOU MODIFY so they can be properly saved back to disk.
 """
-
             # Use a fixer agent with enhanced backstory
             fixer = Agent(
                 role="Syntax Rectifier",
