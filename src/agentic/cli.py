@@ -2367,8 +2367,9 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
     """
     model = (model or "").strip()
 
-    # Already has a provider prefix
-    if "/" in model:
+    # Already has a provider prefix (check if first part is a known provider)
+    known_providers = ["openai", "anthropic", "generic", "together", "azure", "ollama", "huggingface", "vertex_ai", "bedrock", "groq"]
+    if "/" in model and any(model.startswith(p + "/") for p in known_providers):
         return model
 
     # Infer provider from base_url
@@ -2401,7 +2402,7 @@ def get_llm(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     temperature: float = 0.2,
-    max_tokens: int = 16384,
+    max_tokens: int = int(os.environ.get("LLM_MAX_TOKENS", 8192)),
     show_verbose: bool = False,
 ) -> "LLM":
     """
@@ -3332,7 +3333,7 @@ def build(
             model=cfg["model"],
             api_key=cfg["api_key"],
             temperature=0.6,
-            max_tokens=16384,
+            max_tokens=int(os.environ.get("LLM_MAX_TOKENS", 8192)),
             request_timeout=600,
         )
         if cfg.get("base_url"):

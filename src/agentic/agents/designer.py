@@ -55,6 +55,13 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   ──────────────────
   • When adding signals of width W, the result can be W+1 bits — declare accordingly.
   • Index into arrays with the minimum-width signal: for 16-entry ROM use [3:0], not [15:0].
+
+  NO PROSE (CRITICAL):
+  ────────────────────
+  • Output ONLY pure Verilog code.
+  • Do NOT include any conversational text, explanations, or reasoning inside the Verilog code blocks.
+  • Do NOT include markdown text outside of the Verilog blocks.
+  • If you need to comment, use // Verilog comments.
 """
 
 def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):

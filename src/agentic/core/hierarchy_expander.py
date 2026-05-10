@@ -240,7 +240,7 @@ Return ONLY this JSON (no markdown, no commentary):
   "design_category": "{sub_category}",
   "top_module_name": "{sub_name}",
   "ports": [
-    {"name": "<name>", "direction": "input|output", "data_type": "logic|logic [N:0]", "description": "<purpose>"}
+    {{"name": "<name>", "direction": "input|output", "data_type": "logic|logic [N:0]", "description": "<purpose>"}}
   ],
   "submodules": [
     {{

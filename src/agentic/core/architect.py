@@ -147,12 +147,11 @@ MANDATORY RULES:
 1. Every module (including top-level) MUST appear in "sub_modules" with ALL fields populated.
 2. Every sub-module MUST have at minimum: name, ports (with direction and width), functional_logic.
 3. For sequential designs, the global clock and reset ports are MANDATORY for the top module and EVERY sub-module that contains logic (FSM, registers, etc.).
-4. Do not forget to include the global clock/reset in the port list of sub-modules like 'ctrl_fsm', 'alu', 'pe', etc.
-5. FSM modules MUST list ALL states with transitions and outputs.
-5. Use "parameters" for configurable widths/depths — NEVER hardcode magic numbers.
-6. "functional_logic" must be a CONCISE (under 100 words) specification of the behavior. DO NOT generate Verilog skeletons in this JSON.
-7. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces. Ensure all objects and arrays are properly closed.
-8. Limit the JSON size by omitting any unnecessary commentary, and avoiding massive unneeded string literals.
+4. Strictly separate Control (FSM) and Datapath into separate sub-modules when modeling complex systems like CPUs, NPUs, or pipelined components like Multipliers.
+5. If the design involves Arithmetic (e.g. Multiplier, ALU, MAC), you MUST explicitly mandate the internal pipeline stages inside "functional_logic" to avoid logic being optimized away into 0 logic gates (0 GE). Do NOT allow single-cycle massive arithmetic block unless specified.
+6. Use "parameters" for configurable widths/depths — NEVER hardcode magic numbers.
+7. "functional_logic" must be a deeply VLSI-aware specification of the microarchitecture (e.g., multiplier staging, adder trees, FSM encodings) under 100 words. DO NOT generate Verilog skeletons in this JSON.
+8. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces. Ensure all objects and arrays are properly closed.
 9. IF THE DESIGN IS MASSIVE (e.g. CPUs, SoCs, Superscalar systems): You MUST OMIT the `fsm_states` and `internal_signals` arrays entirely to save tokens. The Designer module will independently infer those.
 """
 

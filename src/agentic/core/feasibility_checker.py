@@ -580,7 +580,8 @@ class FeasibilityChecker:
             total_ge += ge
 
         # Add overhead for top-level IO pads, clock tree, etc. (~5%)
-        overhead = max(100, int(total_ge * 0.05))
+        # Dynamic calculation instead of a hard 100 GE floor to allow simpler modules
+        overhead = max(10, int(total_ge * 0.05)) if total_ge > 0 else 0
         breakdown["_interconnect_overhead"] = overhead
         total_ge += overhead
 

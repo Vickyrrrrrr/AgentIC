@@ -445,7 +445,7 @@ def write_verilog(
     # Industry standard strict filtering:
     # To truly prevent LLM reasoning from bleeding into the code, we extract strictly from the
     # first Verilog keyword to the last 'endmodule'.
-    match = re.search(r"(`timescale\s|`include\s|`define\s|module\s)", clean_code)
+    match = re.search(r"(`timescale\s|`include\s|`define\s|module\s+[a-zA-Z_]\w*\s*(?:#|\(|;))", clean_code)
     if match:
         start_idx = match.start()
         end_idx = clean_code.rfind("endmodule")
@@ -456,7 +456,7 @@ def write_verilog(
     else:
         # Fallback to original raw code if extraction mangled it
         raw_clean = re.sub(r"<think>.*?</think>", "", code, flags=re.DOTALL)
-        match = re.search(r"(`timescale\s|`include\s|`define\s|module\s)", raw_clean)
+        match = re.search(r"(`timescale\s|`include\s|`define\s|module\s+[a-zA-Z_]\w*\s*(?:#|\(|;))", raw_clean)
         if match:
             start_idx = match.start()
             end_idx = raw_clean.rfind("endmodule")
@@ -500,8 +500,9 @@ def write_verilog(
         r"\1[\2]",
         clean_code,
     )
-    module_pos = clean_code.find("module")
-    if module_pos > 0:
+    module_match = re.search(r"\bmodule\s+[a-zA-Z_]\w*\s*(?:#|\(|;)", clean_code)
+    if module_match:
+        module_pos = module_match.start()
         preamble = clean_code[:module_pos]
         # Keep only lines that start with ` (preprocessor) or are empty
         filtered_lines = []
@@ -512,9 +513,9 @@ def write_verilog(
         clean_code = "\n".join(filtered_lines) + "\n" + clean_code[module_pos:]
 
     # --- VALIDATION ---
-    if "module" not in clean_code:
+    if not re.search(r"\bmodule\s+[a-zA-Z_]\w*\s*(?:#|\(|;)", clean_code):
         # Last resort: try to find module..endmodule in the ORIGINAL input
-        last_chance = re.search(r"(module\s+\w+[\s\S]*?(?:endmodule|$))", code)
+        last_chance = re.search(r"(\bmodule\s+[a-zA-Z_]\w*[\s\S]*?(?:endmodule|$))", code)
         if last_chance:
             clean_code = last_chance.group(1)
         else:
@@ -552,17 +553,10 @@ def write_verilog(
         if not is_testbench and ext == ".v" and "module" in clean_code:
             import glob
 
-            # Remove old RTL files to prevent stale modules from breaking build
-            src_dir = os.path.dirname(path)
-            for old_rt in glob.glob(os.path.join(src_dir, "*.v")):
-                if not old_rt.endswith("_tb.v") and "regression" not in old_rt:
-                    try:
-                        os.remove(old_rt)
-                    except OSError:
-                        pass
+            # (File deletion logic removed to support parallel hierarchical generation)
 
             # Find all modules
-            modules = re.findall(r"(module\s+([a-zA-Z0-9_]+).*?endmodule)", clean_code, re.DOTALL)
+            modules = re.findall(r"(\bmodule\s+([a-zA-Z_]\w*)\b[\s\S]*?\bendmodule\b)", clean_code)
             if len(modules) > 1:
                 # If multiple modules exist, write them to separate files
                 for mod_code, mod_name in modules:

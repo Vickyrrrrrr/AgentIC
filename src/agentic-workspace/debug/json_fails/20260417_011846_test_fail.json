@@ -1,6 +1,0 @@
-{
-  "timestamp": "2026-04-17T01:18:46.806917",
-  "context": "test_fail",
-  "failure_reason": "strategies_exhausted: ['extract_json_object', 'direct_parse', 'markdown_fence', 'brace_depth']",
-  "raw_output": "This is not JSON at all"
-}

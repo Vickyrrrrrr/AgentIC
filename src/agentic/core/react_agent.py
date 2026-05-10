@@ -150,6 +150,7 @@ RULES:
 4. When you have enough information, produce a Final Answer.
 5. Maximum {max_steps} steps — be efficient.
 6. If an action fails, reason about WHY and try a different approach.
+7. NO PROSE: Do not include conversational filler, explanations, or markdown text outside of the Thought/Action/Final Answer format. Output ONLY the required fields.
 
 Available Tools:
 {tools}
