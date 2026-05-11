@@ -149,3 +149,4 @@ patch_eda_analyst.py
 src/agentic-workspace/debug/json_fails/20260510_193154_spec_generate.json
 .gitignore
 src/agentic-workspace/debug/json_fails/20260510_200808_spec_generate.json
+vlsirag.md
