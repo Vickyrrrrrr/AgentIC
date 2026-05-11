@@ -4138,6 +4138,11 @@ You explain what you changed and why.""",
                 )
             )
             self.log(f"RTL candidate rejected: {rtl_validation_issues[0]}", refined=True)
+            
+            # CRITICAL FIX: Clear the fingerprint hash because we rejected this candidate.
+            # This ensures the next loop iteration doesn't see the SAME error log (on the same disk code)
+            # and incorrectly assume we are in an infinite loop.
+            self._clear_last_fingerprint(str(errors))
             return
 
         # --- Inner retry loop for LLM parse errors ---

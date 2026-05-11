@@ -445,7 +445,11 @@ def write_verilog(
     # Industry standard strict filtering:
     # To truly prevent LLM reasoning from bleeding into the code, we extract strictly from the
     # first Verilog keyword to the last 'endmodule'.
-    match = re.search(r"(`timescale\s|`include\s|`define\s|module\s+[a-zA-Z_]\w*\s*(?:#|\(|;))", clean_code)
+    # We look for the absolute first structural Verilog keyword to begin our extraction.
+    # This regex is specifically hardened to ignore prose like "The module uses..."
+    _MODULE_START_REGEX = r"(\b`timescale\b|\b`include\b|\b`define\b|\bmodule\b\s+[a-zA-Z_]\w*\s*(?:#|\(|;))"
+    
+    match = re.search(_MODULE_START_REGEX, clean_code)
     if match:
         start_idx = match.start()
         end_idx = clean_code.rfind("endmodule")
@@ -456,7 +460,7 @@ def write_verilog(
     else:
         # Fallback to original raw code if extraction mangled it
         raw_clean = re.sub(r"<think>.*?</think>", "", code, flags=re.DOTALL)
-        match = re.search(r"(`timescale\s|`include\s|`define\s|module\s+[a-zA-Z_]\w*\s*(?:#|\(|;))", raw_clean)
+        match = re.search(_MODULE_START_REGEX, raw_clean)
         if match:
             start_idx = match.start()
             end_idx = raw_clean.rfind("endmodule")
@@ -556,7 +560,9 @@ def write_verilog(
             # (File deletion logic removed to support parallel hierarchical generation)
 
             # Find all modules
-            modules = re.findall(r"(\bmodule\s+([a-zA-Z_]\w*)\b[\s\S]*?\bendmodule\b)", clean_code)
+            # Specifically hardened to require structural characters (#, (, or ;) after the name
+            # to avoid matching prose like "The module uses..."
+            modules = re.findall(r"(\bmodule\s+([a-zA-Z_]\w*)\s*(?:#|\(|;)[\s\S]*?\bendmodule\b)", clean_code)
             if len(modules) > 1:
                 # If multiple modules exist, write them to separate files
                 for mod_code, mod_name in modules:
