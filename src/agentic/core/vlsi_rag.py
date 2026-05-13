@@ -1704,7 +1704,7 @@ class VLSIKnowledgeBase:
 
     # ── Full Answer Pipeline (Step 11 + 12) ────────────────────────────────
 
-    NVIDIA_API_KEY = "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"
+    NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
     NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
     SYNTHESIS_MODEL = "qwen/qwen3-next-80b-a3b-thinking"
     SYNTHESIS_FALLBACK = "meta/llama-4-maverick-17b-128e-instruct"
