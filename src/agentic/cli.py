@@ -22,6 +22,7 @@ os.environ.setdefault("JSON_LOGS", "False")
 os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -299,17 +300,87 @@ def knowledge(
     query: str = typer.Argument(..., help="Hardware/EDA topic to retrieve context for"),
     stage: str = typer.Option("", "--stage", help="Pipeline stage hint, e.g. rtl, formal, timing"),
     pdk: str = typer.Option("", "--pdk", help="Target PDK hint"),
+    domain: str = typer.Option("", "--domain", help="VLSI domain filter: rtl, timing, power, physical_design, verification, analog, device_physics"),
     limit: int = typer.Option(4, "--limit", min=1, max=12, help="Number of chunks to retrieve"),
+    vector: bool = typer.Option(False, "--vector", "-v", help="Use vector search instead of lexical"),
 ):
-    """Query the local hardware RAG knowledge base."""
-    from .core.hardware_knowledge import HardwareKnowledgeBase
-
-    kb = HardwareKnowledgeBase()
-    context = kb.build_context(query=query, stage=stage, target_pdk=pdk, limit=limit)
+    """Query the VLSI knowledge base for chip design information."""
+    if vector:
+        from .core.vlsi_rag import VLSIKnowledgeBase
+        kb = VLSIKnowledgeBase()
+        context = kb.build_context(
+            query=query,
+            stage=stage,
+            target_pdk=pdk,
+            top_k=limit,
+        )
+    else:
+        from .core.hardware_knowledge import HardwareKnowledgeBase
+        kb = HardwareKnowledgeBase()
+        context = kb.build_context(query=query, stage=stage, target_pdk=pdk, limit=limit)
     if not context:
-        console.print("[warning]No hardware knowledge chunks matched that query.[/warning]")
+        console.print("[warning]No knowledge chunks matched that query.[/warning]")
         return
-    console.print(Panel(context, title="Hardware Knowledge Retrieval"))
+    console.print(Panel(context, title="VLSI Knowledge Retrieval"))
+
+
+@app.command("knowledge-ingest")
+def knowledge_ingest(
+    path: str = typer.Argument(..., help="File or directory to ingest"),
+    source_type: str = typer.Option("auto", "--type", "-t", help="Source type: book, pdk_doc, pdk_spice, pdk_liberty, pdk_verilog, paper, user_doc"),
+    pdk: str = typer.Option("", "--pdk", help="PDK name if ingesting PDK files"),
+    recursive: bool = typer.Option(False, "--recursive", "-r", help="Scan directories recursively"),
+):
+    """Ingest files into the VLSI vector knowledge base."""
+    from .core.vlsi_rag import VLSIKnowledgeBase
+    kb = VLSIKnowledgeBase()
+    path_obj = Path(path)
+    if not path_obj.exists():
+        console.print(f"[error]Path not found: {path}[/error]")
+        raise typer.Exit(1)
+
+    files = []
+    if path_obj.is_file():
+        files = [path_obj]
+    elif path_obj.is_dir():
+        pattern = "**/*" if recursive else "*"
+        files = sorted(path_obj.glob(pattern))
+
+    count = 0
+    for f in files:
+        if f.suffix.lower() not in {".pdf", ".md", ".txt", ".sv", ".v", ".lib", ".sp", ".spice", ".sdc", ".tcl", ".lef"}:
+            continue
+        with console.status(f"Ingesting {f.name}..."):
+            try:
+                kb.ingest_file(str(f))
+                count += 1
+            except Exception as e:
+                console.print(f"[warning]Failed to ingest {f.name}: {e}[/warning]")
+    console.print(f"[success]Ingested {count} file(s) into VLSI knowledge base.[/success]")
+
+
+@app.command("knowledge-stats")
+def knowledge_stats():
+    """Show statistics about the VLSI knowledge base."""
+    from .core.vlsi_rag import VLSIKnowledgeBase
+    kb = VLSIKnowledgeBase()
+    stats = kb.stats()
+    if "error" in stats:
+        console.print(f"[error]{stats['error']}[/error]")
+        return
+    lines = [
+        f"Total chunks: {stats['total_chunks']}",
+        f"Vector dimension: {stats['vector_dim']}",
+        f"Embedding model: {stats['embedding_model']}",
+        f"DB path: {stats['db_path']}",
+    ]
+    if stats.get("domains"):
+        lines.append(f"\nDomains: {', '.join(f'{k}={v}' for k, v in stats['domains'].items())}")
+    if stats.get("source_types"):
+        lines.append(f"Source types: {', '.join(f'{k}={v}' for k, v in stats['source_types'].items())}")
+    if stats.get("pdks"):
+        lines.append(f"PDKs: {', '.join(stats['pdks'])}")
+    console.print(Panel("\n".join(lines), title="VLSI Knowledge Base Stats"))
 
 
 @app.command("corpus")

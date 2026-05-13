@@ -183,6 +183,10 @@ __all__ = [
     "rate_limited_crew_kickoff",
     "set_provider_rate",
     "get_provider_stats",
+    # VLSI RAG
+    "vlsi_search",
+    "pdk_rule_lookup",
+    "paper_search",
     # API Manager
     "ApiManager",
     "get_api_manager",
@@ -218,6 +222,12 @@ from .rate_limiter import (
     rate_limited_crew_kickoff,
     set_provider_rate,
     get_provider_stats,
+)
+
+from .retrieval_tool import (
+    vlsi_search,
+    pdk_rule_lookup,
+    paper_search,
 )
 
 from .api_manager import (

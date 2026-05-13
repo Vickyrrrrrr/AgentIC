@@ -1,6 +1,7 @@
 # agents/designer.py
 from crewai import Agent
 from ..tools.vlsi_tools import syntax_check_tool, read_file_tool, write_verilog_tool
+from ..tools.retrieval_tool import vlsi_search
 
 # Universal chip support: complete list of chip families the LLM must handle
 CHIP_FAMILIES = """
@@ -109,5 +110,5 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         llm=llm,
         verbose=verbose,
         allow_delegation=False,
-        tools=[syntax_check_tool, read_file_tool, write_verilog_tool]
+        tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search]
     )
