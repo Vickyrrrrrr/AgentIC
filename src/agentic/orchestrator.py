@@ -55,6 +55,8 @@ from .core.checkpoint_manager import CheckpointManager, AutomaticCheckpointTrigg
 from .core.usage_tracker import UsageTracker, get_usage_tracker
 from .core.incremental_fixer import IncrementalFixEngine, ErrorAnalysis, ErrorType
 from .core.hardware_knowledge import HardwareKnowledgeBase
+from .core.vlsi_rag import VLSIKnowledgeBase
+from .tools.retrieval_tool import vlsi_search, vlsi_ask, pdk_rule_lookup, expand_abbr
 from .core.context_evolution import MultiAgentContextEvolver
 from .core.eda_capabilities import detect_eda_capabilities
 from .core import (
@@ -517,6 +519,7 @@ class BuildOrchestrator:
         self.checkpoint_trigger = AutomaticCheckpointTrigger(self.checkpoint_manager)
         self.incremental_fixer = IncrementalFixEngine()
         self.hardware_kb = HardwareKnowledgeBase()
+        self.vlsi_kb = VLSIKnowledgeBase()
         self.context_evolver = MultiAgentContextEvolver()
         self.eda_capabilities = detect_eda_capabilities()
         self.artifacts["eda_capabilities"] = self.eda_capabilities.to_dict()
@@ -1270,13 +1273,28 @@ class BuildOrchestrator:
                 str(error)[:800],
             ]
         )
-        hardware_context = self.hardware_kb.build_context(
-            query=rag_query,
-            stage=self.state.name,
-            target_pdk=target_pdk,
-        )
-        if hardware_context:
-            sections.append(hardware_context)
+
+        vlsi_context = ""
+        try:
+            vlsi_context = self.vlsi_kb.build_context(
+                query=rag_query,
+                stage=self.state.name,
+                target_pdk=target_pdk,
+                top_k=4,
+            )
+        except Exception as e:
+            self.logger.warning(f"VLSI RAG context build failed: {e}")
+
+        if vlsi_context:
+            sections.append(vlsi_context)
+        else:
+            hardware_context = self.hardware_kb.build_context(
+                query=rag_query,
+                stage=self.state.name,
+                target_pdk=target_pdk,
+            )
+            if hardware_context:
+                sections.append(hardware_context)
 
         if self.eda_capabilities:
             sections.append(self.eda_capabilities.to_prompt())
@@ -3585,7 +3603,7 @@ undriven outputs, and Verilator-incompatible constructs. You verify that:
 You return the FINAL corrected code in ```verilog``` fences.""",
                 llm=self.get_llm_for_role("designer"),
                 verbose=False,
-                tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
+                tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search],
                 allow_delegation=False,
             )
 
@@ -4069,7 +4087,7 @@ You review PREVIOUS FIX ATTEMPTS to avoid repeating ineffective patches.
 You explain what you changed and why.""",
                 llm=self.get_llm_for_role("fixer"),
                 verbose=self.verbose,
-                tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
+                tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search],
             )
 
             task = Task(

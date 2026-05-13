@@ -1,5 +1,6 @@
 # agents/doc_agent.py
 from crewai import Agent
+from ..tools.retrieval_tool import vlsi_search, vlsi_ask
 
 
 def get_doc_agent(llm, verbose=False):
@@ -21,5 +22,6 @@ def get_doc_agent(llm, verbose=False):
         Your documentation follows IEEE and company datasheet standards.""",
         llm=llm,
         verbose=verbose,
-        allow_delegation=False
+        allow_delegation=False,
+        tools=[vlsi_search, vlsi_ask]
     )

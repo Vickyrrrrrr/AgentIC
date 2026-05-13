@@ -1,6 +1,7 @@
 # agents/testbench_designer.py
 from crewai import Agent
 from ..tools.vlsi_tools import syntax_check_tool, read_file_tool, write_verilog_tool
+from ..tools.retrieval_tool import vlsi_search
 
 TB_UNIVERSAL_RULES = """
 TESTBENCH UNIVERSAL RULES (must follow for ANY chip type):
@@ -120,5 +121,5 @@ def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         llm=llm,
         verbose=verbose,
         allow_delegation=False,
-        tools=[syntax_check_tool, read_file_tool, write_verilog_tool]
+        tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search]
     )

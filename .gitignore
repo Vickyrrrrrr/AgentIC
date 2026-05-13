@@ -103,11 +103,11 @@ agentic_jobs.db
 designs/
 archived_dev_scripts/
 docs/
-
+data 
 
 # Temporary fix scripts
 fix_*.py
-
+scripts
 
 # Security build outputs
 secure_build/
@@ -150,3 +150,5 @@ src/agentic-workspace/debug/json_fails/20260510_193154_spec_generate.json
 .gitignore
 src/agentic-workspace/debug/json_fails/20260510_200808_spec_generate.json
 vlsirag.md
+advanced_vlsi_rag_design.md
+task_grounded_answer_synthesis.md
