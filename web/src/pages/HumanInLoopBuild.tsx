@@ -14,7 +14,7 @@ import { StageProgressBar } from '../components/StageProgressBar';
 import { ApprovalCard } from '../components/ApprovalCard';
 import ElaborationCard from '../components/ElaborationCard';
 import { BillingModal } from '../components/BillingModal';
-import { api, API_BASE } from '../api';
+import { api, API_BASE, getSseHeaders } from '../api';
 import '../hitl.css';
 
 const PIPELINE_STAGES = [
@@ -144,6 +144,31 @@ interface ElaborationData {
     message: string;
 }
 
+interface PdkOption {
+    key: string;
+    pdk: string;
+    std_cell_library: string;
+    description: string;
+    available: boolean;
+    gds_ready: boolean;
+    tech_ok: boolean;
+    proprietary: boolean;
+    status: string;
+    reason: string;
+}
+
+const formatError = (value: unknown, fallback: string): string => {
+    if (!value) return fallback;
+    if (typeof value === 'string') return value;
+    if (typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        if (typeof record.message === 'string') return record.message;
+        if (typeof record.detail === 'string') return record.detail;
+        if (typeof record.error === 'string') return record.error;
+    }
+    return fallback;
+};
+
 function slugify(text: string): string {
     return text
         .toLowerCase()
@@ -191,6 +216,7 @@ export const HumanInLoopBuild = () => {
     const [minCoverage, setMinCoverage] = useState(80.0);
     const [strictGates, setStrictGates] = useState(false);
     const [pdkProfile, setPdkProfile] = useState("sky130");
+    const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
 
     const [buildMode, setBuildMode] = useState<BuildMode>('verified');
     const [skipStages, setSkipStages] = useState<Set<string>>(new Set(BUILD_MODE_SKIPS.verified));
@@ -211,8 +237,10 @@ export const HumanInLoopBuild = () => {
     const [milestoneToast, setMilestoneToast] = useState<{ title: string; msg: string } | null>(null);
     const [profile, setProfile] = useState<{ has_byok_key?: boolean } | null>(null);
     const milestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingLaunchAfterByokRef = useRef(false);
     const byokKey = localStorage.getItem('agentic_byok_key');
     const hasByokReady = Boolean(byokKey) || Boolean(profile?.has_byok_key);
+    const selectedPdk = pdkOptions.find((pdk) => pdk.key === pdkProfile);
 
     useEffect(() => {
         if (prompt.length > 8) {
@@ -224,16 +252,20 @@ export const HumanInLoopBuild = () => {
         api.get('/profile')
             .then((res) => setProfile(res.data || null))
             .catch(() => setProfile(null));
+        api.get('/pdks')
+            .then((res) => {
+                const pdks: PdkOption[] = res.data?.pdks || [];
+                const defaultPdk = res.data?.default || 'sky130';
+                const readyDefault = pdks.find((pdk) => pdk.key === defaultPdk && pdk.gds_ready);
+                const firstReady = pdks.find((pdk) => pdk.gds_ready);
+                setPdkOptions(pdks);
+                setPdkProfile((current) => {
+                    if (pdks.some((pdk) => pdk.key === current && pdk.gds_ready)) return current;
+                    return readyDefault?.key || firstReady?.key || defaultPdk;
+                });
+            })
+            .catch(() => setPdkOptions([]));
     }, []);
-
-    // Auto-reconnect SSE if returning to page with an active build
-    useEffect(() => {
-        if (savedPhase === 'building' && savedJobId) {
-            startStreaming(savedJobId);
-        }
-        // IMPORTANT: do NOT abort on unmount — backend keeps running.
-        // Only explicit Cancel/Reset should abort.
-    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Persist active build state to sessionStorage so navigation doesn't lose it
     useEffect(() => {
@@ -255,15 +287,31 @@ export const HumanInLoopBuild = () => {
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
         setError('');
+        setEvents([]);
+        setResult(null);
+        setPartialArtifacts([]);
+        setJobStatus('queued');
+        setCurrentStage('INIT');
+        setCompletedStages(new Set());
+        setFailedStage(undefined);
+        setWaitingForApproval(false);
+        setApprovalData(null);
+        setElaborationData(null);
 
-        const hasAnyByok = Boolean(localStorage.getItem('agentic_byok_key')) || Boolean(profile?.has_byok_key);
+        const currentByokKey = localStorage.getItem('agentic_byok_key');
+        const hasAnyByok = Boolean(currentByokKey) || Boolean(profile?.has_byok_key);
         if (!hasAnyByok) {
+            pendingLaunchAfterByokRef.current = true;
             setShowBillingModal(true);
             return;
         }
 
         const effectiveSkipOpenlane = buildMode === 'quick' || skipOpenlane;
         const effectiveSkipCoverage = skipCoverage || skipStages.has('COVERAGE_CHECK');
+        if (!effectiveSkipOpenlane && selectedPdk && !selectedPdk.gds_ready) {
+            setError(`${selectedPdk.key} is not ready for GDSII on this VPS. Install the PDK first or choose an installed PDK.`);
+            return;
+        }
         try {
             const res = await api.post(`/build`, {
                 design_name: designName || slugify(prompt),
@@ -277,35 +325,54 @@ export const HumanInLoopBuild = () => {
                 pdk_profile: pdkProfile,
                 human_in_loop: true,
                 skip_stages: Array.from(skipStages),
+                api_key: currentByokKey || null,
+                plan_type: 'byok',
             });
             const { job_id, design_name: dn } = res.data;
             setJobId(job_id);
             if (dn) setDesignName(dn);
+            setJobStatus('running');
             setPhase('building');
-            startStreaming(job_id);
+            void startStreaming(job_id);
         } catch (e: any) {
             if (e?.code === 'ERR_NETWORK' || !e?.response) {
                 setError('Backend is offline. Start the server with: uvicorn server.api:app --port 7860');
             } else {
-                setError(e?.response?.data?.detail || 'Build failed. Check the backend logs.');
+                setError(formatError(e?.response?.data?.detail, 'Build failed. Check the backend logs.'));
             }
         }
     };
 
-    const startStreaming = (jid: string) => {
+    async function startStreaming(jid: string) {
         // Abort any existing stream before opening a new one
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         const ctrl = new AbortController();
         abortCtrlRef.current = ctrl;
         setEvents([]);
+        let retryCount = 0;
+
+        const currentByokKey = localStorage.getItem('agentic_byok_key');
+        const headers = await getSseHeaders(
+            currentByokKey ? { 'X-LLM-API-Key': currentByokKey } : {}
+        );
 
         fetchEventSource(`${API_BASE}/build/stream/${jid}`, {
             method: 'GET',
-            headers: {
-                'ngrok-skip-browser-warning': 'true',
-                'Accept': 'text/event-stream',
-            },
+            headers,
             signal: ctrl.signal,
+            openWhenHidden: true,
+            async onopen(response) {
+                const contentType = response.headers.get('content-type') || '';
+                if (response.ok && contentType.includes('text/event-stream')) {
+                    retryCount = 0;
+                    setStallWarning(null);
+                    return;
+                }
+                if ([401, 403, 404].includes(response.status)) {
+                    throw new Error(`Live stream rejected with ${response.status}`);
+                }
+                throw new Error(`Live stream unavailable (${response.status})`);
+            },
             onmessage(evt) {
                 try {
                     const data: BuildEvent = JSON.parse(evt.data);
@@ -394,11 +461,33 @@ export const HumanInLoopBuild = () => {
                 } catch { /* ignore parse errors */ }
             },
             onerror(err) {
-                ctrl.abort();
-                throw err;
+                if (ctrl.signal.aborted) return;
+                retryCount += 1;
+                if (retryCount > 8) {
+                    ctrl.abort();
+                    setJobStatus('failed');
+                    setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+                    void fetchResult(jid, 'failed');
+                    throw err;
+                }
+                return Math.min(1000 * retryCount, 5000);
             }
+        }).catch((err) => {
+            if (ctrl.signal.aborted) return;
+            setJobStatus('failed');
+            setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+            void fetchResult(jid, 'failed');
         });
-    };
+    }
+
+    // Auto-reconnect SSE if returning to page with an active build.
+    useEffect(() => {
+        if (savedPhase === 'building' && savedJobId) {
+            void startStreaming(savedJobId);
+        }
+        // IMPORTANT: do not abort on unmount; the backend job runs independently.
+        // Only explicit Cancel/Reset should abort the local stream.
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     const fetchResult = async (jid: string, status: string) => {
         clearSessionStorage();
@@ -463,7 +552,7 @@ export const HumanInLoopBuild = () => {
                 design_name: designName,
                 feedback: feedback || undefined,
             });
-            const feedbackMsg = feedback ? ` — Feedback: ${feedback}` : '';
+            const feedbackMsg = feedback ? ` - Feedback: ${feedback}` : '';
             setEvents(prev => [...prev, {
                 type: 'user_action',
                 state: approvalData.stage_name,
@@ -654,17 +743,20 @@ export const HumanInLoopBuild = () => {
                                             <button
                                                 key={mode}
                                                 className={`hitl-mode-pill${buildMode === mode ? ' hitl-mode-pill--active' : ''}`}
-                                                onClick={() => {
-                                                    setBuildMode(mode);
-                                                    setSkipStages(new Set(BUILD_MODE_SKIPS[mode]));
-                                                    if (mode === 'quick') setSkipOpenlane(true);
-                                                }}
+                                            onClick={() => {
+                                                setBuildMode(mode);
+                                                setSkipStages(new Set(BUILD_MODE_SKIPS[mode]));
+                                                if (mode === 'quick') setSkipOpenlane(true);
+                                                if (mode === 'full' && selectedPdk && !selectedPdk.gds_ready) {
+                                                    setError(`${selectedPdk.key} is not ready for GDSII on this VPS. Install the PDK first or choose an installed PDK.`);
+                                                }
+                                            }}
                                             >
                                                 <span className="hitl-mode-pill-name">
                                                     {mode === 'quick' ? 'Quick RTL' : mode === 'verified' ? 'Verified Design' : 'Fabrication Ready'}
                                                 </span>
                                                 <span className="hitl-mode-pill-desc">
-                                                    {mode === 'quick' ? 'RTL + basic verify' : mode === 'verified' ? 'Full verify pipeline' : 'All stages incl. physical'}
+                                                    {mode === 'quick' ? 'RTL + basic verify' : mode === 'verified' ? 'Full verify pipeline' : 'All stages including physical'}
                                                 </span>
                                             </button>
                                         ))}
@@ -711,10 +803,40 @@ export const HumanInLoopBuild = () => {
                                             </label>
                                             <label className="hitl-opt">
                                                 <span>PDK</span>
-                                                <select value={pdkProfile} onChange={e => setPdkProfile(e.target.value)}>
-                                                    <option value="sky130">sky130</option>
-                                                    <option value="gf180">gf180</option>
+                                                <select
+                                                    value={pdkProfile}
+                                                    onChange={e => {
+                                                        const next = e.target.value;
+                                                        setPdkProfile(next);
+                                                        const nextPdk = pdkOptions.find((pdk) => pdk.key === next);
+                                                        if (nextPdk?.gds_ready) setError('');
+                                                        if (!nextPdk?.gds_ready) setSkipOpenlane(true);
+                                                    }}
+                                                >
+                                                    {(pdkOptions.length
+                                                        ? pdkOptions
+                                                        : [{
+                                                            key: 'sky130',
+                                                            pdk: 'sky130A',
+                                                            std_cell_library: 'sky130_fd_sc_hd',
+                                                            description: 'SkyWater 130nm',
+                                                            available: true,
+                                                            gds_ready: true,
+                                                            tech_ok: true,
+                                                            proprietary: false,
+                                                            status: 'ready',
+                                                            reason: '',
+                                                        } as PdkOption]).map((pdk) => (
+                                                        <option key={pdk.key} value={pdk.key} disabled={!pdk.gds_ready}>
+                                                            {pdk.key} {pdk.gds_ready ? 'ready' : 'not installed'}
+                                                        </option>
+                                                    ))}
                                                 </select>
+                                                <em className="hitl-opt-help">
+                                                    {selectedPdk
+                                                        ? `${selectedPdk.pdk} · ${selectedPdk.std_cell_library || 'standard cells'} · ${selectedPdk.gds_ready ? 'GDSII ready' : selectedPdk.reason}`
+                                                        : 'PDKs are loaded from the VPS runtime.'}
+                                                </em>
                                             </label>
                                         </div>
                                     </div>
@@ -741,7 +863,11 @@ export const HumanInLoopBuild = () => {
                                                         if (mandatory) return;
                                                         setSkipStages(prev => {
                                                             const next = new Set(prev);
-                                                            next.has(stage) ? next.delete(stage) : next.add(stage);
+                                                            if (next.has(stage)) {
+                                                                next.delete(stage);
+                                                            } else {
+                                                                next.add(stage);
+                                                            }
                                                             return next;
                                                         });
                                                     }}
@@ -1097,7 +1223,14 @@ export const HumanInLoopBuild = () => {
             <BillingModal
                 isOpen={showBillingModal}
                 onClose={() => setShowBillingModal(false)}
-                onKeySaved={() => setShowBillingModal(false)}
+                onKeySaved={() => {
+                    setShowBillingModal(false);
+                    setProfile((prev) => ({ ...(prev || {}), has_byok_key: true }));
+                    if (pendingLaunchAfterByokRef.current) {
+                        pendingLaunchAfterByokRef.current = false;
+                        void handleLaunch();
+                    }
+                }}
             />
         </div>
     );

@@ -22,10 +22,12 @@ import uuid
 import io
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -85,17 +87,32 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+APP_ENV = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).strip().lower()
+IS_PRODUCTION = APP_ENV in {"prod", "production"}
 _ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "")
 CORS_ORIGINS = (
     [origin.strip() for origin in _ALLOWED_ORIGINS.split(",") if origin.strip()]
     if _ALLOWED_ORIGINS
-    else ["*"]
+    else ([] if IS_PRODUCTION else ["*"])
 )
+if IS_PRODUCTION and not CORS_ORIGINS:
+    logging.getLogger("agentic.api").error(
+        "APP_ENV=production requires ALLOWED_ORIGINS. Browser clients will be denied by CORS."
+    )
+if "*" in CORS_ORIGINS and IS_PRODUCTION:
+    logging.getLogger("agentic.api").warning(
+        "Wildcard CORS is unsafe for production. Set ALLOWED_ORIGINS to your deployed frontend URL."
+    )
+
+_ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "")
+ALLOWED_HOSTS = [host.strip() for host in _ALLOWED_HOSTS.split(",") if host.strip()]
+if ALLOWED_HOSTS:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials="*" not in CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -196,6 +213,26 @@ async def advanced_request_logging_middleware(request: Request, call_next):
             duration
         )
         HTTP_INFLIGHT_REQUESTS.dec()
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    response.headers["X-Request-ID"] = request_id
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=()",
+    )
+    if IS_PRODUCTION and request.url.scheme == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
 
 
 # ─── Job Store ───────────────────────────────────────────────────────
@@ -398,6 +435,38 @@ def _load_jobs_for_profile(profile: Optional[dict]) -> List[Dict[str, Any]]:
     return jobs
 
 
+def _ensure_job_access(job_id: str, profile: Optional[dict]) -> Dict[str, Any]:
+    """Return a job only if the active user is allowed to access it."""
+    _pull_job_from_db(job_id)
+    job = JOB_STORE.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if AUTH_ENABLED:
+        if profile is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        owner_id = job.get("user_id")
+        if not owner_id:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if owner_id != profile.get("id"):
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    return job
+
+
+def _ensure_design_access(design_name: str, profile: Optional[dict]) -> None:
+    """Authorize access to design-scoped files and reports."""
+    _validate_design_name(design_name)
+    if not AUTH_ENABLED:
+        return
+    if profile is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    for job in _load_jobs_for_profile(profile):
+        if job.get("design_name") == design_name:
+            return
+    raise HTTPException(status_code=404, detail="Design not found")
+
+
 def _hydrate_job_store_from_db(limit: int = 250) -> None:
     """Warm memory from persisted jobs so restarts keep recent workspace history available."""
     if not _db_persistence_ready():
@@ -555,6 +624,80 @@ def _collect_platform_status(include_llm: bool = False) -> Dict[str, Any]:
     }
 
 
+def _pdk_catalog_payload() -> Dict[str, Any]:
+    from agentic.config import (
+        DEFAULT_PDK_PROFILE,
+        PDK_ROOT,
+        detect_available_pdks,
+        list_pdk_profiles,
+    )
+
+    profiles = list_pdk_profiles()
+    available = detect_available_pdks()
+    items: List[Dict[str, Any]] = []
+    for key, profile in sorted(profiles.items()):
+        detected = available.get(key, {})
+        proprietary = bool(profile.get("proprietary", False))
+        is_available = bool(detected.get("available", False))
+        gds_ready = is_available and not proprietary
+        if proprietary and not is_available:
+            status = "requires_foundry_pdk"
+            reason = "Proprietary node. Install licensed PDK, timing libs, LEF/tech files, and OpenLane/OpenROAD integration on the VPS."
+        elif gds_ready:
+            status = "ready"
+            reason = "Installed on this VPS and available for full GDSII runs."
+        else:
+            status = "not_installed"
+            reason = "Install this PDK under PDK_ROOT or OPENLANE_PDK_ROOT before enabling GDSII for users."
+
+        items.append(
+            {
+                "key": key,
+                "label": key,
+                "pdk": profile.get("pdk", key),
+                "std_cell_library": profile.get("std_cell_library", ""),
+                "description": profile.get("description", ""),
+                "available": is_available,
+                "gds_ready": gds_ready,
+                "tech_ok": bool(detected.get("tech_ok", False)),
+                "proprietary": proprietary,
+                "root_path": detected.get("root_path", ""),
+                "status": status,
+                "reason": reason,
+            }
+        )
+
+    for key, detected in sorted(available.items()):
+        if key in profiles:
+            continue
+        items.append(
+            {
+                "key": key,
+                "label": key,
+                "pdk": detected.get("pdk", key),
+                "std_cell_library": detected.get("std_cell_library", ""),
+                "description": detected.get(
+                    "description", "Custom user-provided PDK detected on this VPS"
+                ),
+                "available": True,
+                "gds_ready": True,
+                "tech_ok": bool(detected.get("tech_ok", False)),
+                "proprietary": False,
+                "root_path": detected.get("root_path", ""),
+                "status": "ready",
+                "reason": "Custom PDK detected on this VPS.",
+            }
+        )
+
+    ready = [item for item in items if item["gds_ready"]]
+    return {
+        "default": DEFAULT_PDK_PROFILE,
+        "pdk_root": PDK_ROOT,
+        "pdks": items,
+        "gds_ready_pdks": ready,
+    }
+
+
 # Registry for active orchestrator instances to support HITL interaction
 RUNNING_ORCHESTRATORS: Dict[str, Any] = {}
 
@@ -643,6 +786,17 @@ _KNOWN_MODEL_PREFIXES = (
     "mistral/",
 )
 
+BYOK_DEFAULT_MODEL = (
+    os.getenv("BYOK_DEFAULT_MODEL", "").strip()
+    or os.getenv("LLM_MODEL", "").strip()
+    or "gpt-4o"
+)
+BYOK_DEFAULT_BASE_URL = (
+    os.getenv("BYOK_DEFAULT_BASE_URL", "").strip()
+    or os.getenv("LLM_BASE_URL", "").strip()
+    or "https://api.openai.com/v1"
+)
+
 
 def _has_real_api_key(value: str) -> bool:
     return bool(value and value.strip() and value.strip() not in ("NA", "mock-key"))
@@ -705,11 +859,11 @@ def _load_request_byok_config(
                 "group2": {"api_key": header_key},
                 "group3": {"api_key": header_key},
             }
-        return parsed, "request_header"
+        return _normalize_byok_config(parsed), "request_header"
 
     profile_byok = get_byok_config_for_user(profile)
     if profile_byok:
-        return profile_byok, "stored_profile"
+        return _normalize_byok_config(profile_byok), "stored_profile"
     return None, "backend_env"
 
 
@@ -1114,6 +1268,20 @@ class BuildRequest(BaseModel):
     human_in_loop: bool = False
     skip_stages: List[str] = []
     plan_type: str = "byok"
+
+
+class RagQueryRequest(BaseModel):
+    query: str = Field(..., min_length=2, max_length=4000)
+    domain: Optional[str] = None
+    pdk: Optional[str] = None
+    stage: str = ""
+    top_k: int = Field(6, ge=1, le=12)
+    answer: bool = True
+
+
+class RagIngestRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+    recursive: bool = True
 
 
 class ApproveRequest(BaseModel):
@@ -2142,9 +2310,110 @@ def get_pipeline_schema():
     }
 
 
+@app.get("/pdks")
+def list_available_pdks():
+    """Return known and installed PDKs so the web UI only offers real GDSII targets."""
+    return _pdk_catalog_payload()
+
+
+@app.get("/rag/health")
+def get_rag_health():
+    """Report Qdrant-backed VLSI RAG readiness for VPS deployments."""
+    try:
+        from agentic.core.vlsi_rag import VLSIKnowledgeBase
+
+        kb = VLSIKnowledgeBase()
+        stats = kb.stats()
+        if "error" in stats:
+            return {
+                "ok": False,
+                "qdrant_url": os.getenv("VLSI_RAG_QDRANT_URL", "local"),
+                "error": stats["error"],
+            }
+        return {
+            "ok": True,
+            "qdrant_url": os.getenv("VLSI_RAG_QDRANT_URL", "local"),
+            **stats,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "qdrant_url": os.getenv("VLSI_RAG_QDRANT_URL", "local"),
+            "error": str(exc),
+        }
+
+
+@app.post("/rag/query")
+def query_vlsi_rag(req: RagQueryRequest):
+    """Query the VLSI knowledge base from the web/backend runtime."""
+    try:
+        from agentic.core.vlsi_rag import VLSIKnowledgeBase
+
+        kb = VLSIKnowledgeBase()
+        if req.answer:
+            result = kb.answer(
+                req.query,
+                domain=req.domain,
+                pdk=req.pdk,
+                top_k=req.top_k,
+            )
+            return result
+        return {
+            "context": kb.build_context(
+                query=req.query,
+                stage=req.stage,
+                target_pdk=req.pdk or "",
+                top_k=req.top_k,
+            )
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"RAG query failed: {exc}")
+
+
+@app.post("/rag/ingest")
+def ingest_vlsi_rag(req: RagIngestRequest):
+    """Ingest a mounted knowledge file or directory into Qdrant."""
+    try:
+        from agentic.core.vlsi_rag import VLSIKnowledgeBase
+
+        root = os.path.abspath(os.path.expanduser(req.path))
+        knowledge_root = os.path.abspath(
+            os.path.expanduser(os.getenv("AGENTIC_KNOWLEDGE_DIR", "/app/knowledge/hardware"))
+        )
+        if not os.path.exists(root):
+            raise HTTPException(status_code=404, detail=f"Path not found: {req.path}")
+        allowed_roots = [knowledge_root, "/tmp"]
+        if not any(os.path.commonpath([root, allowed]) == allowed for allowed in allowed_roots):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ingest path must be under {knowledge_root} or /tmp",
+            )
+
+        kb = VLSIKnowledgeBase()
+        if os.path.isfile(root):
+            kb.ingest_file(root)
+            return {"ingested": 1, "path": root}
+
+        allowed_suffixes = {".pdf", ".md", ".txt", ".sv", ".v", ".lib", ".sp", ".spice", ".sdc", ".tcl", ".lef"}
+        pattern = "**/*" if req.recursive else "*"
+        count = 0
+        for path in sorted(Path(root).glob(pattern)):
+            if path.is_file() and path.suffix.lower() in allowed_suffixes:
+                kb.ingest_file(str(path))
+                count += 1
+        return {"ingested": count, "path": root}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"RAG ingest failed: {exc}")
+
+
 @app.get("/build/options")
 def get_build_options_contract():
     """Metadata contract for web build-option UI and docs sync."""
+    pdk_catalog = _pdk_catalog_payload()
+    pdk_values = [item["key"] for item in pdk_catalog["pdks"]]
+    pdk_ready_values = [item["key"] for item in pdk_catalog["gds_ready_pdks"]]
     return {
         "groups": [
             {
@@ -2251,9 +2520,10 @@ def get_build_options_contract():
                     {
                         "key": "pdk_profile",
                         "type": "enum",
-                        "default": "sky130",
-                        "values": ["sky130", "gf180"],
-                        "description": "OSS PDK profile.",
+                        "default": pdk_catalog["default"],
+                        "values": pdk_values,
+                        "gds_ready_values": pdk_ready_values,
+                        "description": "PDK profile. Full GDSII runs require the selected PDK to be installed on this VPS.",
                     },
                     {
                         "key": "max_pivots",
@@ -2356,6 +2626,23 @@ async def trigger_build(
                 detail="AgentIC Orchestration mode is locked. Please upgrade to a paid plan."
             )
 
+    if not req.skip_openlane:
+        from agentic.config import validate_pdk_installation
+
+        pdk_ok, pdk_messages = validate_pdk_installation(req.pdk_profile)
+        if not pdk_ok:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "pdk_not_ready",
+                    "message": (
+                        f"PDK '{req.pdk_profile}' is not installed or not usable for GDSII on this VPS."
+                    ),
+                    "messages": pdk_messages,
+                    "pdks": _pdk_catalog_payload(),
+                },
+            )
+
     # ── Resolve BYOK key and plan type ──
     byok_key = None
     is_agentic_paid = req.plan_type == "agentic_paid"
@@ -2363,16 +2650,16 @@ async def trigger_build(
     # Priority: req.api_key (JSON or plain string) > Supabase stored BYOK > None
     if req.api_key:
         try:
-            byok_key = json.loads(req.api_key)
+            byok_key = _normalize_byok_config(json.loads(req.api_key))
         except json.JSONDecodeError:
-            byok_key = {
+            byok_key = _normalize_byok_config({
                 "group1": {"api_key": req.api_key},
                 "group2": {"api_key": req.api_key},
                 "group3": {"api_key": req.api_key},
-            }
+            })
     elif not is_agentic_paid:
         # Fall back to Supabase-stored BYOK for BYOK plan users
-        byok_key = get_byok_config_for_user(profile)
+        byok_key = _normalize_byok_config(get_byok_config_for_user(profile))
 
     # ── LLM pre-flight: fail fast with a clear message ──
     try:
@@ -2450,6 +2737,7 @@ async def elaborate_build(
 ):
     """Inject a user choice into a waiting orchestrator (HITL Elaboration)."""
     job_id = req.job_id
+    _ensure_job_access(job_id, user)
     if job_id not in RUNNING_ORCHESTRATORS:
         raise HTTPException(
             status_code=404, detail="Active build not found or not in elaboration state"
@@ -2462,12 +2750,9 @@ async def elaborate_build(
 
 
 @app.get("/build/status/{job_id}")
-def get_build_status(job_id: str):
+def get_build_status(job_id: str, profile: dict = Depends(get_current_user)):
     """Poll current build status and all events so far."""
-    _pull_job_from_db(job_id)  # Ensure API stays synced with Worker
-    if job_id not in JOB_STORE:
-        raise HTTPException(status_code=404, detail="Job not found")
-    job = JOB_STORE[job_id]
+    job = _ensure_job_access(job_id, profile)
     resp = {
         "job_id": job_id,
         "status": job["status"],
@@ -2491,22 +2776,29 @@ def get_build_status(job_id: str):
 
 
 @app.get("/build/stream/{job_id}")
-async def stream_build_events(job_id: str):
+async def stream_build_events(
+    job_id: str,
+    request: Request,
+    profile: dict = Depends(get_current_user),
+):
     """SSE endpoint — streams live build events as they are emitted."""
-    _pull_job_from_db(job_id)  # Prime memory
-    if job_id not in JOB_STORE:
-        raise HTTPException(status_code=404, detail="Job not found")
+    _ensure_job_access(job_id, profile)
 
     async def event_generator():
         sent_index = 0
         last_event_sent_at = time.time()
+        last_ping_sent_at = time.time()
         stall_warned = False
         elaboration_sent = False
         STALL_TIMEOUT = 300  # 5 minutes of silence → stall warning
+        HEARTBEAT_INTERVAL = 15
         # Send a ping immediately so the browser knows the connection is alive
-        yield 'data: {"type": "ping", "message": "connected"}\n\n'
+        yield 'event: ping\ndata: {"type": "ping", "message": "connected"}\n\n'
 
         while True:
+            if await request.is_disconnected():
+                break
+
             _pull_job_from_db(job_id)
             job = JOB_STORE.get(job_id)
             if job is None:
@@ -2532,6 +2824,7 @@ async def stream_build_events(job_id: str):
                 sent_index += 1
                 last_event_sent_at = time.time()
                 stall_warned = False  # new event arrived — reset warning
+                last_ping_sent_at = time.time()
 
             # Stop streaming when done, failed, or cancelled
             if job["status"] in ("done", "failed", "cancelled") and sent_index >= len(
@@ -2593,6 +2886,16 @@ async def stream_build_events(job_id: str):
                 }
                 yield f"data: {json.dumps(stall_event)}\n\n"
                 stall_warned = True
+                last_ping_sent_at = time.time()
+
+            if (time.time() - last_ping_sent_at) >= HEARTBEAT_INTERVAL:
+                ping_event = {
+                    "type": "ping",
+                    "status": job.get("status", "unknown"),
+                    "timestamp": int(time.time()),
+                }
+                yield f"event: ping\ndata: {json.dumps(ping_event)}\n\n"
+                last_ping_sent_at = time.time()
 
             await asyncio.sleep(0.4)
 
@@ -2601,18 +2904,17 @@ async def stream_build_events(job_id: str):
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
 
 
 @app.get("/build/result/{job_id}")
-def get_build_result(job_id: str):
+def get_build_result(job_id: str, profile: dict = Depends(get_current_user)):
     """Return the final chip summary after build completes."""
-    if job_id not in JOB_STORE:
-        raise HTTPException(status_code=404, detail="Job not found")
-    job = JOB_STORE[job_id]
-    if job["status"] not in ("done", "failed"):
+    job = _ensure_job_access(job_id, profile)
+    if job["status"] not in ("done", "failed", "cancelled"):
         raise HTTPException(status_code=202, detail="Build still in progress")
     return {"job_id": job_id, "status": job["status"], "result": job["result"]}
 
@@ -2624,14 +2926,12 @@ def list_jobs(profile: dict = Depends(get_current_user)):
 
 
 @app.post("/build/cancel/{job_id}")
-def cancel_build(job_id: str):
+def cancel_build(job_id: str, profile: dict = Depends(get_current_user)):
     """Request cancellation of a running build.
     Sets a flag that the build thread checks — the thread exits gracefully
     after its current step completes (cannot hard-kill Python threads).
     """
-    if job_id not in JOB_STORE:
-        raise HTTPException(status_code=404, detail="Job not found")
-    job = JOB_STORE[job_id]
+    job = _ensure_job_access(job_id, profile)
     if job["status"] not in ("queued", "running"):
         return {
             "ok": False,
@@ -2685,9 +2985,9 @@ def list_designs(profile: dict = Depends(get_current_user)):
 
 
 @app.get("/metrics/{design_name}")
-def get_metrics(design_name: str):
+def get_metrics(design_name: str, profile: dict = Depends(get_current_user)):
     """Return latest OpenLane metrics for a design."""
-    _validate_design_name(design_name)
+    _ensure_design_access(design_name, profile)
     from agentic.config import OPENLANE_ROOT
 
     des_dir = os.path.join(OPENLANE_ROOT, "designs", design_name)
@@ -2725,8 +3025,8 @@ def get_metrics(design_name: str):
 
 
 @app.get("/signoff/{design_name}")
-def get_signoff_report(design_name: str):
-    _validate_design_name(design_name)
+def get_signoff_report(design_name: str, profile: dict = Depends(get_current_user)):
+    _ensure_design_access(design_name, profile)
     try:
         from agentic.tools.vlsi_tools import check_physical_metrics
 
@@ -2741,8 +3041,13 @@ def get_signoff_report(design_name: str):
 
 @app.post("/approve")
 @limiter.limit("15/minute")
-def approve_stage(req: ApproveRequest, request: Request):
+def approve_stage(
+    req: ApproveRequest,
+    request: Request,
+    profile: dict = Depends(get_current_user),
+):
     """Approve the current stage and allow the pipeline to proceed."""
+    _ensure_design_access(req.design_name, profile)
     ok = approval_manager.approve(req.design_name, req.stage)
     if not ok:
         raise HTTPException(
@@ -2757,8 +3062,13 @@ def approve_stage(req: ApproveRequest, request: Request):
 
 @app.post("/reject")
 @limiter.limit("15/minute")
-def reject_stage(req: RejectRequest, request: Request):
+def reject_stage(
+    req: RejectRequest,
+    request: Request,
+    profile: dict = Depends(get_current_user),
+):
     """Reject the current stage, optionally providing feedback for retry."""
+    _ensure_design_access(req.design_name, profile)
     ok = approval_manager.reject(req.design_name, req.stage, req.feedback)
     if not ok:
         raise HTTPException(
@@ -2774,18 +3084,28 @@ def reject_stage(req: RejectRequest, request: Request):
 
 
 @app.get("/approval/status")
-def get_approval_status():
+def get_approval_status(profile: dict = Depends(get_current_user)):
     """List all stages currently waiting for user approval."""
     waiting = approval_manager.get_waiting_stages()
+    if AUTH_ENABLED and profile is not None:
+        allowed_designs = {
+            job.get("design_name")
+            for job in _load_jobs_for_profile(profile)
+            if job.get("design_name")
+        }
+        waiting = [item for item in waiting if item.get("design_name") in allowed_designs]
     return {"waiting": waiting, "count": len(waiting)}
 
 
 @app.get("/build/artifacts/{design_name}")
-def get_partial_artifacts(design_name: str):
+def get_partial_artifacts(
+    design_name: str,
+    profile: dict = Depends(get_current_user),
+):
     """Scan the design's output directory for any partial artifacts produced during a build.
     Used by the failure summary card to show what was generated before the build failed.
     """
-    _validate_design_name(design_name)
+    _ensure_design_access(design_name, profile)
     artifacts = []
     manifest_cloud_urls: Dict[str, str] = {}
 
@@ -2802,9 +3122,9 @@ def get_partial_artifacts(design_name: str):
         except Exception:
             pass
     if os.path.isdir(workspace_dir):
-        for file_name in os.listdir(workspace_dir):
-            fpath = os.path.join(workspace_dir, file_name)
-            if os.path.isfile(fpath):
+        for root_dir, _dirs, files in os.walk(workspace_dir):
+            for file_name in files:
+                fpath = os.path.join(root_dir, file_name)
                 size = os.path.getsize(fpath)
                 artifacts.append(
                     {
@@ -2830,12 +3150,18 @@ def get_partial_artifacts(design_name: str):
                         ".vcd",
                         ".gds",
                         ".def",
+                        ".lef",
+                        ".spef",
+                        ".sdf",
                         ".sdc",
                         ".json",
                         ".tcl",
                         ".sby",
                         ".log",
                         ".csv",
+                        ".rpt",
+                        ".pdf",
+                        ".docx",
                     )
                 ):
                     fpath = os.path.join(root_dir, file_name)
@@ -2854,9 +3180,13 @@ def get_partial_artifacts(design_name: str):
 
 
 @app.get("/build/artifacts/{design_name}/{filename}")
-def download_artifact(design_name: str, filename: str):
+def download_artifact(
+    design_name: str,
+    filename: str,
+    profile: dict = Depends(get_current_user),
+):
     """Download an individual artifact file from a design's output directory."""
-    _validate_design_name(design_name)
+    _ensure_design_access(design_name, profile)
     # Sanitize filename to prevent path traversal
     safe_name = os.path.basename(filename)
     if safe_name != filename or ".." in filename:
@@ -2888,12 +3218,16 @@ def _classify_artifact(filename: str) -> str:
         ".vcd": "waveform",
         ".gds": "layout",
         ".def": "layout",
+        ".lef": "layout",
+        ".spef": "timing",
+        ".sdf": "timing",
         ".sdc": "constraints",
         ".json": "config",
         ".tcl": "script",
         ".sby": "formal",
         ".log": "log",
         ".csv": "report",
+        ".rpt": "report",
         ".pdf": "report",
         ".docx": "report",
     }
@@ -2919,15 +3253,30 @@ class SetByokConfigRequest(BaseModel):
 
 def _normalize_byok_config(raw: Optional[dict]) -> dict:
     source = raw if isinstance(raw, dict) else {}
+    first_api_key = ""
+    first_model = ""
+    first_base_url = ""
+    if isinstance(raw, str):
+        first_api_key = raw.strip()
+    for group_name in ("group1", "group2", "group3"):
+        group = source.get(group_name)
+        if not isinstance(group, dict):
+            continue
+        first_api_key = first_api_key or str(group.get("api_key", "") or "").strip()
+        first_model = first_model or str(group.get("model", "") or "").strip()
+        first_base_url = first_base_url or str(group.get("base_url", "") or "").strip()
+
+    first_model = first_model or BYOK_DEFAULT_MODEL
+    first_base_url = first_base_url or BYOK_DEFAULT_BASE_URL
     normalized: Dict[str, Dict[str, str]] = {}
     for group_name in ("group1", "group2", "group3"):
         group = source.get(group_name)
         if not isinstance(group, dict):
             group = {}
         normalized[group_name] = {
-            "model": str(group.get("model", "") or "").strip(),
-            "api_key": str(group.get("api_key", "") or "").strip(),
-            "base_url": str(group.get("base_url", "") or "").strip(),
+            "model": str(group.get("model", "") or "").strip() or first_model,
+            "api_key": str(group.get("api_key", "") or "").strip() or first_api_key,
+            "base_url": str(group.get("base_url", "") or "").strip() or first_base_url,
         }
     return normalized
 
@@ -3012,18 +3361,18 @@ async def set_byok_key(
 # Single-stage reports (HITL flow) and full-build reports (both flows).
 
 
-def _get_job_or_404(job_id: str) -> dict:
+def _get_job_or_404(job_id: str, profile: Optional[dict] = None) -> dict:
     if not re.match(r"^[0-9a-f-]{36}$", job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID")
-    job = JOB_STORE.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return _ensure_job_access(job_id, profile)
 
 
 @app.get("/report/{job_id}/full.pdf", summary="Download full build report as PDF")
-def download_full_report_pdf(job_id: str):
-    job = _get_job_or_404(job_id)
+def download_full_report_pdf(
+    job_id: str,
+    profile: dict = Depends(get_current_user),
+):
+    job = _get_job_or_404(job_id, profile)
     design_name = job.get("design_name", "design")
     build_status = job.get("build_status", "unknown")
     stages = job.get("stages", {})
@@ -3056,8 +3405,11 @@ def download_full_report_pdf(job_id: str):
 
 
 @app.get("/report/{job_id}/full.docx", summary="Download full build report as DOCX")
-def download_full_report_docx(job_id: str):
-    job = _get_job_or_404(job_id)
+def download_full_report_docx(
+    job_id: str,
+    profile: dict = Depends(get_current_user),
+):
+    job = _get_job_or_404(job_id, profile)
     design_name = job.get("design_name", "design")
     build_status = job.get("build_status", "unknown")
     stages = job.get("stages", {})
@@ -3093,10 +3445,14 @@ def download_full_report_docx(job_id: str):
     "/report/{job_id}/stage/{stage_name}.pdf",
     summary="Download a single-stage report as PDF",
 )
-def download_stage_report_pdf(job_id: str, stage_name: str):
+def download_stage_report_pdf(
+    job_id: str,
+    stage_name: str,
+    profile: dict = Depends(get_current_user),
+):
     if not re.match(r"^[A-Z_]{2,30}$", stage_name):
         raise HTTPException(status_code=400, detail="Invalid stage name")
-    job = _get_job_or_404(job_id)
+    job = _get_job_or_404(job_id, profile)
     stages = job.get("stages", {})
     if stage_name not in stages:
         raise HTTPException(
@@ -3118,10 +3474,14 @@ def download_stage_report_pdf(job_id: str, stage_name: str):
     "/report/{job_id}/stage/{stage_name}.docx",
     summary="Download a single-stage report as DOCX",
 )
-def download_stage_report_docx(job_id: str, stage_name: str):
+def download_stage_report_docx(
+    job_id: str,
+    stage_name: str,
+    profile: dict = Depends(get_current_user),
+):
     if not re.match(r"^[A-Z_]{2,30}$", stage_name):
         raise HTTPException(status_code=400, detail="Invalid stage name")
-    job = _get_job_or_404(job_id)
+    job = _get_job_or_404(job_id, profile)
     stages = job.get("stages", {})
     if stage_name not in stages:
         raise HTTPException(

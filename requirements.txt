@@ -23,6 +23,10 @@ prometheus-client
 slowapi
 gunicorn
 cryptography
+qdrant-client>=1.9.0
+sentence-transformers>=2.2.0
+pdfplumber>=0.9.0
+arxiv>=2.0.0
 
 # ── Reports ──────────────────────────────────────────────────────────
 PyMuPDF

@@ -1,7 +1,9 @@
 import os
+import logging
 import boto3
-from botocore.exceptions import NoCredentialsError
 from botocore.client import Config
+
+logger = logging.getLogger("agentic.storage")
 
 # Standard S3 / MinIO Configuration
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "")   # internal Docker URL e.g. http://minio:9000
@@ -55,12 +57,17 @@ def upload_artifact_to_cloud(local_file_path: str, destination_name: str) -> str
     if not os.path.exists(local_file_path):
         return ""
 
+    destination_name = destination_name.strip().lstrip("/")
+    if not destination_name or ".." in destination_name.split("/"):
+        logger.warning("Rejected unsafe artifact destination: %r", destination_name)
+        return ""
+
     try:
         s3.upload_file(local_file_path, S3_BUCKET_NAME, destination_name)
         # Use MINIO_PUBLIC_URL so remote users get a reachable link
         return f"{MINIO_PUBLIC_URL.rstrip('/')}/{S3_BUCKET_NAME}/{destination_name}"
     except Exception as e:
-        print(f"Failed to upload {destination_name} to cloud storage: {e}")
+        logger.warning("Failed to upload %s to cloud storage: %s", destination_name, e)
         return ""
 
 
@@ -93,5 +100,5 @@ def generate_presigned_download_url(file_key: str, expiration: int = 3600) -> st
 
         return internal_url
     except Exception as e:
-        print(f"Failed to generate signed URL for {file_key}: {e}")
+        logger.warning("Failed to generate signed URL for %s: %s", file_key, e)
         return ""

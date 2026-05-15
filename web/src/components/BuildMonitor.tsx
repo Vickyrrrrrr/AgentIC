@@ -188,12 +188,12 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                                 onClick={handleCancel}
                                 disabled={cancelling}
                             >
-                                {cancelling ? 'Stopping…' : '✕ Cancel'}
+                                {cancelling ? 'Stopping...' : 'Cancel'}
                             </button>
                         </>
                     ) : (
                         <span style={{ color: effectiveJobStatus === 'done' ? 'var(--success)' : 'var(--fail)', fontWeight: 600 }}>
-                            {effectiveJobStatus === 'done' ? '✓ Complete' : effectiveJobStatus === 'cancelled' ? '⊘ Cancelled' : '✕ Failed'}
+                            {effectiveJobStatus === 'done' ? 'Complete' : effectiveJobStatus === 'cancelled' ? 'Cancelled' : 'Failed'}
                         </span>
                     )}
                 </div>
@@ -216,7 +216,7 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                     </div>
                     <div className="live-terminal" ref={logsRef}>
                         {logEvents.length === 0 ? (
-                            <span className="terminal-waiting">Waiting for AgentIC to start…</span>
+                            <span className="terminal-waiting">Waiting for AgentIC to start...</span>
                         ) : (
                             <>
                                 {processedLogs.map((msg, i) => {
@@ -271,8 +271,8 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
             {!isDone && (
                 <div className="monitor-footer">
                     <span className="spinner-small" />
-                    AgentIC is building your chip autonomously. This takes 10–30 min.
-                    You'll get a browser notification when done — you can leave this tab open.
+                    AgentIC is building your chip autonomously. This takes 10-30 min.
+                    You can leave this tab open; the live log will keep reconnecting if the network blips.
                 </div>
             )}
         </div>

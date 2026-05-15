@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import sys
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 os.environ.setdefault("FORCE_COLOR", "1")
 
@@ -1356,11 +1356,12 @@ PDK_INSTALL_CONFIGS = {
         "description": "SkyWater 130nm — most mature open PDK",
         "install_method": "volare",
         "volare_repo": "efabless/sky130",
+        "volare_family": "sky130",
         "volare_target": "sky130A",
         "download_url": "",
         "requires_volare": True,
-        "versions": ["1.0.0", "0.16.0"],
-        "default_version": "1.0.0",
+        "versions": ["latest", "0fe599b2afb6708d281543108caf8310912f54af"],
+        "default_version": "0fe599b2afb6708d281543108caf8310912f54af",
     },
     "gf180mcu": {
         "name": "GlobalFoundries GF180MCU",
@@ -1368,11 +1369,12 @@ PDK_INSTALL_CONFIGS = {
         "description": "GlobalFoundries 180nm — automotive grade",
         "install_method": "volare",
         "volare_repo": "The-OpenROAD-Project/gf180mcu",
+        "volare_family": "gf180mcu",
         "volare_target": "gf180mcuC",
         "download_url": "",
         "requires_volare": True,
-        "versions": ["2.0.0", "1.0.0"],
-        "default_version": "1.0.0",
+        "versions": ["latest"],
+        "default_version": "",
     },
     "asap7": {
         "name": "ASAP7 Predictive PDK",
@@ -1634,31 +1636,41 @@ def _run_volare_install(pdk: str, version: str, target_dir: str) -> bool:
     if not volare_path:
         return False
 
-    # volare enable syntax: volare enable --pdk-root <dir> <target> [<version>]
-    # --set-version and --repository do NOT exist in volare CLI.
-    # Instead, the version is passed as a positional argument after the target.
-    target = PDK_INSTALL_CONFIGS.get(pdk, {}).get("volare_target", pdk)
-    cmd = ["volare", "enable", "--pdk-root", target_dir, target]
-    if version:
-        cmd.append(version)
+    cfg = PDK_INSTALL_CONFIGS.get(pdk, {})
+    family = cfg.get("volare_family", pdk)
+    target = cfg.get("volare_target", pdk)
+    requested_version = "" if version in {"", "latest"} else version
+
+    # Volare has used both family-based and target-positional CLIs over time.
+    # Try the documented family form first, then fall back for older installs.
+    commands = [
+        ["volare", "enable", "--pdk", family, "--pdk-root", target_dir],
+        ["volare", "enable", "--pdk-root", target_dir, target],
+    ]
+    if requested_version:
+        commands = [cmd + [requested_version] for cmd in commands]
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if result.returncode != 0:
-            # Show volare's error output so user can diagnose
+        last_output = ""
+        for cmd in commands:
+            console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            if result.returncode == 0:
+                return True
             stderr = (result.stderr or "").strip()
             stdout = (result.stdout or "").strip()
-            if stderr:
-                console.print(f"[error]Volare error:[/error]\n{stderr[:500]}")
-            elif stdout:
-                console.print(f"[warning]Volare output:[/warning]\n{stdout[:500]}")
-            return False
-        return True
+            last_output = stderr or stdout
+            if "no such option" not in last_output.lower() and "unrecognized" not in last_output.lower():
+                break
+
+        if last_output:
+            console.print(f"[error]Volare error:[/error]\n{last_output[:800]}")
+        return False
     except subprocess.TimeoutExpired:
         console.print("[error]Volare installation timed out (10 minutes).[/error]")
         return False
@@ -1893,6 +1905,11 @@ def install_tools(
         "--skip-oss",
         help="Skip OSS CAD Suite installation",
     ),
+    pdks: str = typer.Option(
+        "sky130",
+        "--pdks",
+        help="Comma-separated PDKs to install, or 'all-open-auto'.",
+    ),
     env_file: str = typer.Option(
         "",
         "--env-file",
@@ -1904,6 +1921,8 @@ def install_tools(
     Examples:
         agentic install-tools
         agentic install-tools --target /opt/oss-cad-suite --pdk-root /opt/pdks
+        agentic install-tools --pdks sky130,gf180mcu,asap7
+        agentic install-tools --pdks all-open-auto
         agentic install-tools --skip-pdk
         agentic install-tools --env-file /root/my-project/.env
     """
@@ -1913,6 +1932,8 @@ def install_tools(
     from .config import detect_available_pdks, validate_pdk_installation
 
     changed = False
+    target_dir = os.path.abspath(os.path.expanduser(target_dir))
+    pdk_root = os.path.abspath(os.path.expanduser(pdk_root))
 
     # ── 1. OSS CAD Suite ──────────────────────────────────────────────────
     if not skip_oss:
@@ -1962,41 +1983,37 @@ def install_tools(
 
     # ── 3. PDK ────────────────────────────────────────────────────────────
     if not skip_pdk:
+        requested_pdks = [
+            item.strip().lower()
+            for item in pdks.split(",")
+            if item.strip()
+        ]
+        if not requested_pdks:
+            requested_pdks = ["sky130"]
+        if requested_pdks == ["all-open-auto"]:
+            requested_pdks = ["sky130", "gf180mcu", "asap7", "nangate45", "osu018", "osu035"]
+
         console.print(
             Panel(
-                "[accent]Step 3/3: SkyWater SKY130 PDK[/accent]\n"
-                f"Target: {pdk_root}",
+                "[accent]Step 3/3: PDK Installation[/accent]\n"
+                f"Target: {pdk_root}\n"
+                f"PDKs: {', '.join(requested_pdks)}",
                 title="🧱 Installing PDK",
             )
         )
         os.makedirs(pdk_root, exist_ok=True)
 
-        detected = detect_available_pdks()
-        if "sky130" in detected:
-            console.print("[success]Sky130 PDK already installed — skipping.[/success]")
-        else:
-            # Use volare directly with the stable version hash
-            cmd = [
-                "volare", "enable",
-                "--pdk-root", pdk_root,
-                _VOLARE_SKY130_VERSION,
-            ]
-            console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode != 0:
-                stderr = (result.stderr or "").strip()
-                if stderr:
-                    console.print(f"[error]Volare error:[/error]\n{stderr[:500]}")
-                raise typer.Exit(1)
-
-            # Verify
-            ok, messages = validate_pdk_installation("sky130", pdk_root)
-            for msg in messages:
-                console.print(f"  {'[success]✓[/success]' if 'Found' in msg else '[warning]⚠[/warning]'} {msg}")
-            if not ok:
-                console.print("[error]PDK validation failed.[/error]")
-                raise typer.Exit(1)
-            console.print("[success]Sky130 PDK installed and verified.[/success]")
+        for requested_pdk in requested_pdks:
+            install_pdk(
+                pdk_name=requested_pdk,
+                version="",
+                check=False,
+                list_versions=False,
+                pdk_path="",
+                pdk_root=pdk_root,
+                list_installed=False,
+                force=False,
+            )
             changed = True
     else:
         console.print("[dim]Skipped PDK installation (--skip-pdk).[/dim]")
@@ -2116,6 +2133,11 @@ def install_pdk(
     pdk_path: str = typer.Option(
         "", "--path", help="Register a custom PDK directory under $PDK_ROOT"
     ),
+    pdk_root: str = typer.Option(
+        "",
+        "--pdk-root",
+        help="PDK root to install into. Defaults to $PDK_ROOT or ~/.ciel.",
+    ),
     list_installed: bool = typer.Option(False, "--installed", help="List currently installed PDKs"),
     force: bool = typer.Option(False, "--force", "-f", help="Reinstall even if already installed"),
 ):
@@ -2123,7 +2145,7 @@ def install_pdk(
 
     Examples:
         agentic install-pdk sky130
-        agentic install-pdk sky130 --version 1.0.0
+        agentic install-pdk sky130 --pdk-root ~/.ciel
         agentic install-pdk sky130 --check
         agentic install-pdk sky130 --list-versions
         agentic install-pdk my_custom_pdk --path /path/to/pdk
@@ -2131,6 +2153,13 @@ def install_pdk(
         agentic install-pdk list --installed
     """
     from .config import detect_available_pdks, validate_pdk_installation
+    if pdk_root:
+        install_dir = os.path.abspath(os.path.expanduser(pdk_root))
+        os.environ["PDK_ROOT"] = install_dir
+    else:
+        install_dir = os.path.abspath(
+            os.path.expanduser(os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel")))
+        )
 
     if pdk_name is None or pdk_name.lower() == "list":
         detected = detect_available_pdks()
@@ -2172,7 +2201,6 @@ def install_pdk(
 
     pdk_key = pdk_name.strip().lower().replace("_", "-")
     pdk_key = PDK_INSTALL_ALIASES.get(pdk_key, pdk_key)
-    install_dir = os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel"))
 
     if pdk_path:
         _register_custom_pdk_path(pdk_key, pdk_path, install_dir)

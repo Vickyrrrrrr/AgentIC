@@ -5,6 +5,8 @@ Generates human-readable stage completion summaries using the LLM.
 import json
 import time
 import logging
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,140 @@ def get_next_stage(current_stage: str) -> Optional[str]:
     return None
 
 
-def collect_stage_artifacts(orchestrator, stage_name: str) -> List[Dict[str, str]]:
+ARTIFACT_DESCRIPTIONS = {
+    ".v": "Generated Verilog RTL or netlist",
+    ".sv": "SystemVerilog source or assertions",
+    ".sdc": "Timing constraints for synthesis and STA",
+    ".sby": "Formal verification configuration",
+    ".vcd": "Simulation waveform",
+    ".json": "Structured pipeline data or tool configuration",
+    ".tcl": "EDA tool script",
+    ".gds": "GDSII physical layout",
+    ".def": "DEF physical placement/routing data",
+    ".lef": "LEF abstract/layout metadata",
+    ".spef": "Parasitic extraction data",
+    ".sdf": "Timing annotation data",
+    ".rpt": "EDA report",
+    ".log": "Tool execution log",
+    ".pdf": "Build report PDF",
+    ".docx": "Build report document",
+}
+
+STAGE_ARTIFACT_SUFFIXES = {
+    "SPEC": {".json", ".md", ".txt"},
+    "SPEC_VALIDATE": {".json", ".md", ".txt"},
+    "HIERARCHY_EXPAND": {".json", ".md", ".txt"},
+    "VERIFICATION_PLAN": {".json", ".sv", ".sva", ".md", ".txt"},
+    "RTL_GEN": {".v", ".sv"},
+    "RTL_FIX": {".v", ".sv", ".log"},
+    "LINT_CHECK": {".log", ".rpt", ".txt"},
+    "CDC_ANALYZE": {".json", ".rpt", ".log"},
+    "VERIFICATION": {".v", ".sv", ".vcd", ".log", ".txt"},
+    "FORMAL_VERIFY": {".sby", ".sv", ".v", ".log", ".txt"},
+    "COVERAGE_CHECK": {".json", ".dat", ".info", ".log", ".rpt", ".html"},
+    "REGRESSION": {".json", ".log", ".rpt", ".txt"},
+    "SDC_GEN": {".sdc", ".tcl", ".log"},
+    "SYNTHESIS": {".v", ".json", ".blif", ".rpt", ".log"},
+    "FEASIBILITY_CHECK": {".json", ".rpt", ".log"},
+    "FLOORPLAN": {".tcl", ".json", ".def", ".odb", ".log"},
+    "HARDENING": {".gds", ".def", ".lef", ".odb", ".spef", ".sdf", ".rpt", ".log"},
+    "TIMING_ANALYSIS": {".rpt", ".spef", ".sdf", ".log"},
+    "CONVERGENCE_REVIEW": {".json", ".rpt", ".log"},
+    "ECO_PATCH": {".v", ".def", ".tcl", ".rpt", ".log"},
+    "POWER_ANALYSIS": {".rpt", ".json", ".log"},
+    "PHYSICAL_VERIFY": {".rpt", ".log", ".gds", ".def"},
+    "SIGNOFF": {".rpt", ".log", ".json", ".gds", ".def", ".lef"},
+    "IP_PACKAGE": {".zip", ".tar", ".gz", ".json", ".pdf", ".docx", ".v", ".sv", ".sdc", ".gds"},
+}
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _artifact_description(path: Path) -> str:
+    return ARTIFACT_DESCRIPTIONS.get(path.suffix.lower(), "Generated VLSI pipeline artifact")
+
+
+def _append_file_artifact(artifacts: List[Dict[str, str]], path: Path, description: str = "") -> None:
+    try:
+        if not path.is_file():
+            return
+        name = path.name
+        if any(existing.get("name") == name for existing in artifacts):
+            return
+        artifacts.append({
+            "name": name,
+            "path": str(path),
+            "description": description or _artifact_description(path),
+        })
+    except OSError:
+        return
+
+
+def _materialize_logical_artifact(design_name: str, stage_name: str, key: str, value: Any) -> Optional[Path]:
+    if not design_name or value in (None, ""):
+        return None
+    out_dir = _repo_root() / "designs" / design_name / "_checkpoint_artifacts" / stage_name.lower()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = ".json" if isinstance(value, (dict, list)) else ".txt"
+    if key in {"rtl_code"}:
+        ext = ".v"
+    elif key in {"spec", "sim_result", "formal_result", "signoff_result"}:
+        ext = ".txt"
+    filename = f"{stage_name.lower()}_{key}{ext}"
+    path = out_dir / filename
+    try:
+        if isinstance(value, (dict, list)):
+            path.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        else:
+            path.write_text(str(value), encoding="utf-8")
+        return path
+    except OSError as exc:
+        logger.warning("Failed to materialize checkpoint artifact %s: %s", filename, exc)
+        return None
+
+
+def _collect_filesystem_artifacts(design_name: str, stage_name: str, limit: int = 10) -> List[Dict[str, str]]:
+    suffixes = STAGE_ARTIFACT_SUFFIXES.get(stage_name, {".v", ".sv", ".json", ".log", ".rpt"})
+    roots = [_repo_root() / "designs" / design_name]
+
+    try:
+        from agentic.config import OPENLANE_ROOT
+
+        if OPENLANE_ROOT:
+            roots.append(Path(OPENLANE_ROOT) / "designs" / design_name)
+    except Exception:
+        pass
+
+    candidates: List[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            for path in root.rglob("*"):
+                if path.is_file() and path.suffix.lower() in suffixes:
+                    candidates.append(path)
+        except OSError:
+            continue
+
+    file_infos = []
+    for path in candidates:
+        try:
+            mtime = path.stat().st_mtime
+            file_infos.append((path, mtime))
+        except OSError:
+            continue
+
+    file_infos.sort(key=lambda x: (0 if x[0].suffix.lower() in {".gds", ".v", ".sv", ".sdc", ".sby", ".vcd", ".def"} else 1, -x[1]))
+    
+    artifacts: List[Dict[str, str]] = []
+    for path, _ in file_infos[:limit]:
+        _append_file_artifact(artifacts, path)
+    return artifacts
+
+
+def collect_stage_artifacts(orchestrator, stage_name: str, design_name: str = "") -> List[Dict[str, str]]:
     """Collect artifacts produced in a given stage."""
     artifacts = []
     art = orchestrator.artifacts or {}
@@ -145,14 +280,23 @@ def collect_stage_artifacts(orchestrator, stage_name: str) -> List[Dict[str, str
     for key, desc in stage_artifacts:
         value = art.get(key)
         if value is not None:
-            path = value if isinstance(value, str) else json.dumps(value)[:200]
-            artifacts.append({
-                "name": key,
-                "path": path[:500],
-                "description": desc,
-            })
+            if isinstance(value, str):
+                path = Path(value)
+                if not path.is_absolute() and design_name:
+                    path = _repo_root() / "designs" / design_name / value
+                if path.is_file():
+                    _append_file_artifact(artifacts, path, desc)
+                    continue
+            materialized = _materialize_logical_artifact(design_name, stage_name, key, value)
+            if materialized is not None:
+                _append_file_artifact(artifacts, materialized, desc)
+
+    if design_name:
+        for item in _collect_filesystem_artifacts(design_name, stage_name):
+            if not any(existing.get("name") == item["name"] for existing in artifacts):
+                artifacts.append(item)
     
-    return artifacts
+    return artifacts[:12]
 
 
 def collect_stage_decisions(orchestrator, stage_name: str) -> List[str]:
@@ -276,7 +420,7 @@ def generate_stage_summary_llm(llm, stage_name: str, design_name: str,
 
 def build_stage_complete_payload(orchestrator, stage_name: str, design_name: str, llm) -> dict:
     """Build the complete stage_complete event payload."""
-    artifacts = collect_stage_artifacts(orchestrator, stage_name)
+    artifacts = collect_stage_artifacts(orchestrator, stage_name, design_name)
     decisions = collect_stage_decisions(orchestrator, stage_name)
     warnings = collect_stage_warnings(orchestrator, stage_name)
     stage_log = get_stage_log_summary(orchestrator, stage_name)

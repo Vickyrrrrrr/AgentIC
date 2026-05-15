@@ -361,10 +361,10 @@ def _build_yosys_script(
 
     if clk_constraint > 0:
         lines.append(f"# Clock constraint: {clk_constraint} ns ({1000.0 / clk_constraint:.1f} MHz)")
-        lines.append(f"clk constraint [get_ports clk] {clk_constraint}")
+        # lines.append(f"clk constraint [get_ports clk] {clk_constraint}")
 
     if buffer_insertion:
-        lines.append("opt -purge_registers  # remove unused registers")
+        lines.append("opt -purge  # remove unused registers")
 
     lines.append(f"# Output")
     lines.append(f"write_verilog {netlist_path}")

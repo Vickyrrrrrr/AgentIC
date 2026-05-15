@@ -1,5 +1,6 @@
-import React, { Suspense, lazy, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { Download, Layers3, ShieldCheck, XCircle } from 'lucide-react';
+import { api, API_BASE } from '../api';
 
 const FabricationViewer3D = lazy(() =>
   import('../components/FabricationViewer3D').then((m) => ({ default: m.FabricationViewer3D }))
@@ -12,11 +13,50 @@ interface FabricationProps {
 
 export const Fabrication: React.FC<FabricationProps> = ({ selectedDesign, hasGds }) => {
     const [viewMode, setViewMode] = useState<'2D' | '3D'>('2D');
+    const [gdsArtifact, setGdsArtifact] = useState<{ name: string; size?: number } | null>(null);
+    const [isLoadingArtifacts, setIsLoadingArtifacts] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        if (!selectedDesign) {
+            void Promise.resolve().then(() => {
+                if (!cancelled) setGdsArtifact(null);
+            });
+            return;
+        }
+
+        const loadArtifacts = async () => {
+            setGdsArtifact(null);
+            setIsLoadingArtifacts(true);
+            try {
+                const res = await api.get(`/build/artifacts/${selectedDesign}`);
+                if (cancelled) return;
+                const artifacts = Array.isArray(res.data?.artifacts) ? res.data.artifacts : [];
+                const gds = artifacts.find((item: { name?: string; type?: string }) =>
+                    item?.type === 'layout' && item?.name?.toLowerCase().endsWith('.gds')
+                );
+                setGdsArtifact(gds ? { name: gds.name, size: gds.size } : null);
+            } catch {
+                if (!cancelled) setGdsArtifact(null);
+            } finally {
+                if (!cancelled) setIsLoadingArtifacts(false);
+            }
+        };
+
+        void loadArtifacts();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedDesign]);
 
     const handleDownloadGDS = () => {
-        if (!hasGds) return alert('No GDSII available for this design yet.');
-        alert(`Initiating download for ${selectedDesign}.gds...`);
+        if (!gdsArtifact) return;
+        window.location.href = `${API_BASE}/build/artifacts/${selectedDesign}/${encodeURIComponent(gdsArtifact.name)}`;
     };
+
+    const effectiveHasGds = Boolean(gdsArtifact);
 
     return (
         <div className="fab-page">
@@ -34,9 +74,9 @@ export const Fabrication: React.FC<FabricationProps> = ({ selectedDesign, hasGds
                         <Layers3 size={15} />
                         {selectedDesign || 'No design selected'}
                     </span>
-                    <span className={`app-hero-pill ${hasGds ? 'is-success' : 'is-warn'}`}>
+                    <span className={`app-hero-pill ${effectiveHasGds ? 'is-success' : 'is-warn'}`}>
                         <ShieldCheck size={15} />
-                        {hasGds ? 'GDS available' : 'Awaiting hardened layout'}
+                        {effectiveHasGds ? 'GDS available' : hasGds || isLoadingArtifacts ? 'Locating GDS artifact' : 'Awaiting hardened layout'}
                     </span>
                 </div>
             </section>
@@ -65,11 +105,11 @@ export const Fabrication: React.FC<FabricationProps> = ({ selectedDesign, hasGds
                                 readOnly
                             />
                             <button
-                                className={`fab-download-btn ${hasGds ? '' : 'fab-download-btn--disabled'}`}
+                                className={`fab-download-btn ${effectiveHasGds ? '' : 'fab-download-btn--disabled'}`}
                                 onClick={handleDownloadGDS}
-                                disabled={!hasGds}
+                                disabled={!effectiveHasGds}
                             >
-                                {hasGds ? <><Download size={14} /> Download .gds</> : <><XCircle size={14} /> GDS Not Available</>}
+                                {effectiveHasGds ? <><Download size={14} /> Download .gds</> : <><XCircle size={14} /> {isLoadingArtifacts ? 'Checking artifacts' : 'GDS Not Available'}</>}
                             </button>
                         </div>
                     </div>

@@ -16,7 +16,7 @@ import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
 import { BillingModal } from '../components/BillingModal';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
-import { api, API_BASE } from '../api';
+import { api, API_BASE, getSseHeaders } from '../api';
 
 type Phase = 'prompt' | 'building' | 'done';
 
@@ -35,6 +35,31 @@ interface StageSchemaItem {
     label: string;
     icon: string;
 }
+
+interface PdkOption {
+    key: string;
+    pdk: string;
+    std_cell_library: string;
+    description: string;
+    available: boolean;
+    gds_ready: boolean;
+    tech_ok: boolean;
+    proprietary: boolean;
+    status: string;
+    reason: string;
+}
+
+const formatError = (value: unknown, fallback: string): string => {
+    if (!value) return fallback;
+    if (typeof value === 'string') return value;
+    if (typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        if (typeof record.message === 'string') return record.message;
+        if (typeof record.detail === 'string') return record.detail;
+        if (typeof record.error === 'string') return record.error;
+    }
+    return fallback;
+};
 
 function slugify(text: string): string {
     return text
@@ -88,8 +113,7 @@ export const DesignStudio = () => {
     const [events, setEvents] = useState<BuildEvent[]>([]);
     const [jobStatus, setJobStatus] = useState<'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'cancelling'>('queued');
     const [result, setResult] = useState<any>(null);
-    const [ // @ts-ignore
-    error, setError] = useState('');
+    const [error, setError] = useState('');
 
     // Billing / Profile State
     const [profile, setProfile] = useState<{
@@ -111,7 +135,8 @@ export const DesignStudio = () => {
     const [maxRetries, _setMaxRetries] = useState(5);
     const [minCoverage, _setMinCoverage] = useState(80.0);
     const [aiModel, setAiModel] = useState<'AgentIC' | 'BYOK'>('AgentIC');
-    const [pdkProfile, _setPdkProfile] = useState("sky130");
+    const [pdkProfile, setPdkProfile] = useState("sky130");
+    const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
     const [maxPivots, _setMaxPivots] = useState(2);
     const [congestionThreshold, _setCongestionThreshold] = useState(10.0);
     const [hierarchical, _setHierarchical] = useState("auto");
@@ -124,6 +149,7 @@ export const DesignStudio = () => {
     const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
 
     const abortCtrlRef = useRef<AbortController | null>(null);
+    const pendingLaunchAfterByokRef = useRef(false);
 
     // Auto-generate design name from prompt
     useEffect(() => {
@@ -143,8 +169,10 @@ export const DesignStudio = () => {
             const billing = billingRes.status === 'fulfilled' ? billingRes.value.data : null;
             if (prof && billing) {
                 setProfile({ ...prof, plan_type: billing.plan_type, build_limit: billing.build_limit });
+                if (billing.plan_type !== 'agentic_paid') setAiModel('BYOK');
             } else if (prof) {
                 setProfile(prof);
+                setAiModel('BYOK');
             }
         }).catch(() => setProfile(null));
     }, []);
@@ -155,6 +183,8 @@ export const DesignStudio = () => {
     const hasActivePlan = isAgenticPaid || hasLocalByok || hasServerByok;
     const launchStatus = isAgenticPaid ? 'AgentIC Model active' : hasActivePlan ? 'BYOK configured' : 'Configure required';
     const launchModeLabel = skipOpenlane ? 'Verification-first run' : 'Full silicon path';
+    const selectedPdk = pdkOptions.find((pdk) => pdk.key === pdkProfile);
+    const gdsReadyPdks = pdkOptions.filter((pdk) => pdk.gds_ready);
     const workspaceSuccessfulBuilds = profile?.workspace_successful_builds ?? profile?.successful_builds ?? 0;
     const usageLabel = profile
         ? `${workspaceSuccessfulBuilds} successful · ${profile.total_builds ?? 0} total builds on ${profile.plan ?? 'local'}`
@@ -164,16 +194,17 @@ export const DesignStudio = () => {
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
         setError('');
+        setEvents([]);
+        setResult(null);
+        setJobStatus('queued');
 
-        // Guard: check if they selected AgentIC model without paying
-        if (aiModel === 'AgentIC' && !isAgenticPaid) {
-            window.history.pushState({}, '', '/pricing');
-            window.dispatchEvent(new Event('popstate'));
-            return;
-        }
+        const byokRaw = localStorage.getItem('agentic_byok_key');
+        const hasByokNow = Boolean(byokRaw) || hasServerByok;
+        const effectiveAiModel = aiModel === 'AgentIC' && !isAgenticPaid ? 'BYOK' : aiModel;
 
         // Guard: require BYOK configured if BYOK mode is selected
-        if (aiModel === 'BYOK' && !hasLocalByok && !hasServerByok) {
+        if (effectiveAiModel === 'BYOK' && !hasByokNow) {
+            pendingLaunchAfterByokRef.current = true;
             setShowBillingModal(true);
             return;
         }
@@ -189,11 +220,11 @@ export const DesignStudio = () => {
 
         try {
             // Build the BYOK payload if user has BYOK configured
-            const byokRaw = localStorage.getItem('agentic_byok_key');
             const byokKey = byokRaw ? JSON.parse(byokRaw) : null;
 
+            const requestedDesignName = designName || slugify(prompt);
             const res = await api.post(`/build`, {
-                design_name: designName || slugify(prompt),
+                design_name: requestedDesignName,
                 description: prompt,
                 skip_openlane: skipOpenlane,
                 skip_coverage: false,
@@ -215,12 +246,15 @@ export const DesignStudio = () => {
                 // Send BYOK key as JSON string in body
                 api_key: byokKey ? JSON.stringify(byokKey) : null,
                 // Tell backend which path: agentic_paid or byok
-                plan_type: aiModel === 'AgentIC' ? 'agentic_paid' : 'byok',
+                plan_type: effectiveAiModel === 'AgentIC' ? 'agentic_paid' : 'byok',
             });
-            const { job_id } = res.data;
+            const { job_id, design_name: serverDesignName } = res.data;
+            const activeDesignName = serverDesignName || requestedDesignName;
             setJobId(job_id);
+            setDesignName(activeDesignName);
+            setJobStatus('running');
             setPhase('building');
-            startStreaming(job_id, byokKey);
+            void startStreaming(job_id, byokKey, activeDesignName);
         } catch (e: any) {
             if (e?.code === 'ERR_NETWORK' || !e?.response) {
                 setError('Backend is offline. Please check your connection and try again.');
@@ -230,39 +264,50 @@ export const DesignStudio = () => {
                     setShowBillingModal(true);
                     return;
                 }
-                setError(detail || 'Build failed. Check the backend logs.');
+                setError(formatError(detail, 'Build failed. Check the backend logs.'));
             }
         }
     };
 
-    const startStreaming = (jid: string, byokKey: any = null) => {
+    const startStreaming = async (jid: string, byokKey: any = null, activeDesignName = designName) => {
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         const ctrl = new AbortController();
         abortCtrlRef.current = ctrl;
+        let retryCount = 0;
 
         setEvents([]);
 
-        const headers: Record<string, string> = {
-            'ngrok-skip-browser-warning': 'true',
-            'Accept': 'text/event-stream',
-        };
-
+        const extraHeaders: Record<string, string> = {};
         // Forward BYOK key as header for SSE stream
         if (byokKey) {
-            headers['X-LLM-API-Key'] = JSON.stringify(byokKey);
+            extraHeaders['X-LLM-API-Key'] = JSON.stringify(byokKey);
         }
+
+        const headers = await getSseHeaders(extraHeaders);
 
         fetchEventSource(`${API_BASE}/build/stream/${jid}`, {
             method: 'GET',
             headers,
             signal: ctrl.signal,
+            openWhenHidden: true,
+            async onopen(response) {
+                const contentType = response.headers.get('content-type') || '';
+                if (response.ok && contentType.includes('text/event-stream')) {
+                    retryCount = 0;
+                    return;
+                }
+                if ([401, 403, 404].includes(response.status)) {
+                    throw new Error(`Live stream rejected with ${response.status}`);
+                }
+                throw new Error(`Live stream unavailable (${response.status})`);
+            },
             onmessage(evt) {
                 try {
                     const data: BuildEvent = JSON.parse(evt.data);
                     if (data.type === 'ping') return;
                     if (data.type === 'stream_end') {
                         ctrl.abort();
-                        fetchResult(jid, data.status as any);
+                        void fetchResult(jid, data.status as any, activeDesignName);
                         return;
                     }
                     setEvents(prev => {
@@ -274,13 +319,26 @@ export const DesignStudio = () => {
                 } catch { /* ignore parse errors */ }
             },
             onerror(err) {
-                ctrl.abort();
-                throw err;
+                if (ctrl.signal.aborted) return;
+                retryCount += 1;
+                if (retryCount > 8) {
+                    ctrl.abort();
+                    setJobStatus('failed');
+                    setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+                    void fetchResult(jid, 'failed', activeDesignName);
+                    throw err;
+                }
+                return Math.min(1000 * retryCount, 5000);
             }
+        }).catch((err) => {
+            if (ctrl.signal.aborted) return;
+            setJobStatus('failed');
+            setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+            void fetchResult(jid, 'failed', activeDesignName);
         });
     };
 
-    const fetchResult = async (jid: string, status: string) => {
+    const fetchResult = async (jid: string, status: string, activeDesignName = designName) => {
         setJobStatus(status === 'done' ? 'done' : 'failed');
         try {
             const res = await api.get(`/build/result/${jid}`);
@@ -290,8 +348,8 @@ export const DesignStudio = () => {
 
         // Browser notification
         if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('AgentIC — Chip Build Complete 🎉', {
-                body: `Your chip "${designName}" has finished ${status === 'done' ? 'successfully!' : 'with errors.'}`,
+            new Notification('AgentIC chip build complete', {
+                body: `Your chip "${activeDesignName}" finished ${status === 'done' ? 'successfully.' : 'with errors.'}`,
                 icon: '/chip-icon.png',
             });
         }
@@ -316,6 +374,19 @@ export const DesignStudio = () => {
         api.get(`/pipeline/schema`)
             .then(res => setStageSchema(res.data?.stages || []))
             .catch(() => setStageSchema([]));
+        api.get('/pdks')
+            .then(res => {
+                const pdks: PdkOption[] = res.data?.pdks || [];
+                const defaultPdk = res.data?.default || 'sky130';
+                const readyDefault = pdks.find((pdk) => pdk.key === defaultPdk && pdk.gds_ready);
+                const firstReady = pdks.find((pdk) => pdk.gds_ready);
+                setPdkOptions(pdks);
+                setPdkProfile((current) => {
+                    if (pdks.some((pdk) => pdk.key === current && pdk.gds_ready)) return current;
+                    return readyDefault?.key || firstReady?.key || defaultPdk;
+                });
+            })
+            .catch(() => setPdkOptions([]));
         return () => abortCtrlRef.current?.abort();
     }, []);
 
@@ -422,8 +493,8 @@ export const DesignStudio = () => {
                                                     className={`studio-chip-btn ${aiModel === 'AgentIC' ? 'is-active' : ''}`}
                                                     onClick={() => {
                                                         if (!isAgenticPaid) {
-                                                            window.history.pushState({}, '', '/pricing');
-                                                            window.dispatchEvent(new Event('popstate'));
+                                                            setAiModel('BYOK');
+                                                            setShowBillingModal(true);
                                                         } else {
                                                             setAiModel('AgentIC');
                                                         }
@@ -458,6 +529,8 @@ export const DesignStudio = () => {
                                                     onClick={() => {
                                                         if (isHuggingFace) {
                                                             alert("GDS Layout is temporarily under maintenance on the cloud platform. It will be available back in a few days. Using RTL & Verification mode for now.");
+                                                        } else if (selectedPdk && !selectedPdk.gds_ready) {
+                                                            setError(`${selectedPdk.key} is not ready for GDSII on this VPS. Install the PDK first or choose an installed PDK.`);
                                                         } else {
                                                             setSkipOpenlane(false);
                                                         }
@@ -468,6 +541,47 @@ export const DesignStudio = () => {
                                                     {isHuggingFace ? 'Full signoff unavailable on cloud' : 'Full silicon path'}
                                                 </button>
                                             </div>
+                                        </div>
+
+                                        <div className="studio-option-group">
+                                            <span className="studio-field-label">PDK target</span>
+                                            <select
+                                                className="studio-select"
+                                                value={pdkProfile}
+                                                onChange={(event) => {
+                                                    const next = event.target.value;
+                                                    setPdkProfile(next);
+                                                    const nextPdk = pdkOptions.find((pdk) => pdk.key === next);
+                                                    if (nextPdk?.gds_ready) setError('');
+                                                    if (!nextPdk?.gds_ready) setSkipOpenlane(true);
+                                                }}
+                                            >
+                                                {(pdkOptions.length
+                                                    ? pdkOptions
+                                                    : [{
+                                                        key: 'sky130',
+                                                        pdk: 'sky130A',
+                                                        std_cell_library: 'sky130_fd_sc_hd',
+                                                        description: 'SkyWater 130nm',
+                                                        available: true,
+                                                        gds_ready: true,
+                                                        tech_ok: true,
+                                                        proprietary: false,
+                                                        status: 'ready',
+                                                        reason: '',
+                                                    } as PdkOption]).map((pdk) => (
+                                                    <option key={pdk.key} value={pdk.key} disabled={!pdk.gds_ready}>
+                                                        {pdk.key} {pdk.gds_ready ? 'ready' : 'not installed'}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <span className="studio-option-hint">
+                                                {selectedPdk
+                                                    ? `${selectedPdk.pdk} · ${selectedPdk.std_cell_library || 'standard cells'} · ${selectedPdk.gds_ready ? 'GDSII ready' : selectedPdk.reason}`
+                                                    : gdsReadyPdks.length
+                                                        ? `${gdsReadyPdks.length} installed PDK target${gdsReadyPdks.length === 1 ? '' : 's'} available`
+                                                        : 'No GDSII-ready PDK detected on this VPS.'}
+                                            </span>
                                         </div>
                                     </div>
 
@@ -578,6 +692,7 @@ export const DesignStudio = () => {
                 isOpen={showBillingModal}
                 onClose={() => setShowBillingModal(false)}
                 onKeySaved={() => {
+                    setAiModel('BYOK');
                     // Refresh profile + billing status
                     Promise.allSettled([
                         api.get('/profile'),
@@ -589,6 +704,10 @@ export const DesignStudio = () => {
                             setProfile({ ...prof, plan_type: billing.plan_type, build_limit: billing.build_limit });
                         } else if (prof) {
                             setProfile(prof);
+                        }
+                        if (pendingLaunchAfterByokRef.current) {
+                            pendingLaunchAfterByokRef.current = false;
+                            void handleLaunch();
                         }
                     });
                 }}

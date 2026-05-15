@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import platform
 import tarfile
 import tempfile
@@ -33,7 +34,37 @@ def get_platform_info():
         
     return os_name, arch
 
+def _safe_extract_tar(tar: tarfile.TarFile, destination: str) -> None:
+    """Extract a tarball without allowing path traversal outside destination."""
+    destination_path = Path(destination).resolve()
+    for member in tar.getmembers():
+        member_path = (destination_path / member.name).resolve()
+        if not str(member_path).startswith(str(destination_path)):
+            raise RuntimeError(f"Unsafe path in archive: {member.name}")
+    tar.extractall(path=destination)
+
+
+def _move_tree_contents(source: str, destination: str) -> None:
+    """Move extracted oss-cad-suite contents into the requested final directory."""
+    os.makedirs(destination, exist_ok=True)
+    for item in os.listdir(source):
+        src = os.path.join(source, item)
+        dst = os.path.join(destination, item)
+        if os.path.isdir(dst) and os.path.isdir(src):
+            shutil.rmtree(dst)
+        elif os.path.exists(dst):
+            os.remove(dst)
+        shutil.move(src, dst)
+
+
 def install_oss_cad_suite(target_dir):
+    """Install OSS CAD Suite so target_dir itself is the suite root.
+
+    GitHub archives contain a top-level ``oss-cad-suite/`` directory.  Users,
+    docs, and the rest of AgentIC expect ``OSS_CAD_SUITE_HOME`` to point to the
+    directory containing ``bin/yosys``.  This function normalizes that layout
+    after extraction instead of leaving ``target/oss-cad-suite/bin`` behind.
+    """
     os_name, arch = get_platform_info()
     if not os_name:
         console.print("[red]Unsupported platform for automatic EDA tool installation.[/red]")
@@ -80,9 +111,16 @@ def install_oss_cad_suite(target_dir):
 
     console.print(f"[yellow]Downloading {filename} (this may take a while)...[/yellow]")
     
+    target_dir = os.path.abspath(os.path.expanduser(str(target_dir)))
+    expected_yosys = os.path.join(target_dir, "bin", "yosys")
+    if os.path.exists(expected_yosys):
+        console.print(f"[green]OSS CAD Suite already present at {target_dir}[/green]")
+        return True
+
     ext = ".exe" if os_name == "windows" else ".tgz"
     fd, temp_path = tempfile.mkstemp(suffix=ext)
     os.close(fd)
+    extract_root = tempfile.mkdtemp(prefix="agentic_oss_cad_")
     
     try:
         from rich.progress import Progress
@@ -100,10 +138,34 @@ def install_oss_cad_suite(target_dir):
                             
         console.print("[green]Download complete. Extracting...[/green]")
         
-        os.makedirs(target_dir, exist_ok=True)
         if ext == ".tgz":
             with tarfile.open(temp_path, "r:gz") as tar:
-                tar.extractall(path=target_dir)
+                _safe_extract_tar(tar, extract_root)
+
+            extracted_suite = os.path.join(extract_root, "oss-cad-suite")
+            if not os.path.isdir(extracted_suite):
+                candidates = [
+                    os.path.join(extract_root, name)
+                    for name in os.listdir(extract_root)
+                    if os.path.isdir(os.path.join(extract_root, name))
+                ]
+                extracted_suite = next(
+                    (
+                        path
+                        for path in candidates
+                        if os.path.exists(os.path.join(path, "bin", "yosys"))
+                    ),
+                    "",
+                )
+            if not extracted_suite:
+                console.print("[red]Archive did not contain an oss-cad-suite/bin layout.[/red]")
+                return False
+
+            _move_tree_contents(extracted_suite, target_dir)
+            if not os.path.exists(expected_yosys):
+                console.print(f"[red]Install verification failed: {expected_yosys} not found.[/red]")
+                return False
+
             console.print(f"[green]Successfully installed to {target_dir}[/green]")
         else:
             console.print(f"[red]Windows self-extracting .exe needs manual run: {temp_path}[/red]")
@@ -115,5 +177,6 @@ def install_oss_cad_suite(target_dir):
     finally:
         if os.path.exists(temp_path) and ext == ".tgz":
             os.remove(temp_path)
+        shutil.rmtree(extract_root, ignore_errors=True)
             
     return True

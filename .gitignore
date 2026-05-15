@@ -34,7 +34,7 @@ ENV/
 # Environment / secrets
 .env
 *.env.local
-
+.env.example
 # AgentIC specific
 runs/
 work/
@@ -87,12 +87,12 @@ video
 skills
 checkpoints
 fix
-
+scratch
 # Benchmark / leaderboard artifacts
 *.jsonl
 leaderboard.md
 verieval_results.json
-
+src/agentic-workspace
 # PLY parser cache (auto-generated, 2+ MB)
 parser.out
 parsetab.py
@@ -104,7 +104,7 @@ designs/
 archived_dev_scripts/
 docs/
 data 
-
+benchmark
 # Temporary fix scripts
 fix_*.py
 scripts
@@ -152,3 +152,13 @@ src/agentic-workspace/debug/json_fails/20260510_200808_spec_generate.json
 vlsirag.md
 advanced_vlsi_rag_design.md
 task_grounded_answer_synthesis.md
+eval/benchmark_results.json
+synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth_report.txt
+.gitignore
+synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth.v
+synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth.ys
+workspace_changes.diff
+AGENTIC_ARCHITECTURE.md
+.env.example
+.env.example
+.env.example

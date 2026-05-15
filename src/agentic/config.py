@@ -786,7 +786,12 @@ def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
     oss_home = os.environ.get("OSS_CAD_SUITE_HOME", "").strip()
     if oss_home:
         roots.append(oss_home)
+        # Some older AgentIC installers extracted the archive into
+        # $OSS_CAD_SUITE_HOME/oss-cad-suite.  Keep detecting that layout so
+        # existing machines recover without manual PATH surgery.
+        roots.append(os.path.join(oss_home, "oss-cad-suite"))
     roots.append(os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
+    roots.append(os.path.join(WORKSPACE_ROOT, "oss-cad-suite", "oss-cad-suite"))
 
     for root in roots:
         candidate = os.path.join(root, "bin", bin_name)

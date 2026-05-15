@@ -11,6 +11,7 @@ Env vars required:
 import hashlib
 import hmac
 import json
+import logging
 import os
 from typing import Optional
 
@@ -39,6 +40,7 @@ PLAN_LIMITS = {
 }
 
 _bearer = HTTPBearer(auto_error=False)
+logger = logging.getLogger("agentic.auth")
 
 
 # ─── JWT Decode (no pyjwt dependency — use Supabase /auth/v1/user) ──
@@ -364,15 +366,18 @@ def record_build_start(profile: Optional[dict], job_id: str, design_name: str) -
     """Insert a build record into the builds table."""
     if profile is None or not AUTH_ENABLED:
         return
-    _supabase_insert_sync(
-        "builds",
-        {
-            "user_id": profile["id"],
-            "job_id": job_id,
-            "design_name": design_name,
-            "status": "queued",
-        },
-    )
+    try:
+        _supabase_insert_sync(
+            "builds",
+            {
+                "user_id": profile["id"],
+                "job_id": job_id,
+                "design_name": design_name,
+                "status": "queued",
+            },
+        )
+    except Exception as exc:
+        logger.warning("Failed to record build start for %s: %s", job_id, exc)
 
 
 def record_build_success(profile: Optional[dict], job_id: str) -> None:
@@ -380,28 +385,34 @@ def record_build_success(profile: Optional[dict], job_id: str) -> None:
     if profile is None or not AUTH_ENABLED:
         return
     uid = profile["id"]
-    # Update build row
-    _supabase_update_sync(
-        "builds",
-        f"job_id=eq.{job_id}",
-        {
-            "status": "done",
-            "finished_at": "now()",
-        },
-    )
-    # Increment counter
-    _supabase_rpc_sync("increment_successful_builds", {"uid": uid})
+    try:
+        # Update build row
+        _supabase_update_sync(
+            "builds",
+            f"job_id=eq.{job_id}",
+            {
+                "status": "done",
+                "finished_at": "now()",
+            },
+        )
+        # Increment counter
+        _supabase_rpc_sync("increment_successful_builds", {"uid": uid})
+    except Exception as exc:
+        logger.warning("Failed to record build success for %s: %s", job_id, exc)
 
 
 def record_build_failure(job_id: str) -> None:
     """Mark build as failed."""
     if not AUTH_ENABLED:
         return
-    _supabase_update_sync(
-        "builds",
-        f"job_id=eq.{job_id}",
-        {
-            "status": "failed",
-            "finished_at": "now()",
-        },
-    )
+    try:
+        _supabase_update_sync(
+            "builds",
+            f"job_id=eq.{job_id}",
+            {
+                "status": "failed",
+                "finished_at": "now()",
+            },
+        )
+    except Exception as exc:
+        logger.warning("Failed to record build failure for %s: %s", job_id, exc)

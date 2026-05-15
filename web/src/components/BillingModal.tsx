@@ -9,10 +9,13 @@ type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: str
 
 type ModalMode = 'agentic' | 'byok';
 
+const DEFAULT_BYOK_MODEL = 'gpt-4o';
+const DEFAULT_BYOK_BASE_URL = 'https://api.openai.com/v1';
+
 const DEFAULT_GROUPS: GroupState = {
-  group1: { model: '', apiKey: '', baseUrl: '' },
-  group2: { model: '', apiKey: '', baseUrl: '' },
-  group3: { model: '', apiKey: '', baseUrl: '' },
+  group1: { model: DEFAULT_BYOK_MODEL, apiKey: '', baseUrl: DEFAULT_BYOK_BASE_URL },
+  group2: { model: DEFAULT_BYOK_MODEL, apiKey: '', baseUrl: DEFAULT_BYOK_BASE_URL },
+  group3: { model: DEFAULT_BYOK_MODEL, apiKey: '', baseUrl: DEFAULT_BYOK_BASE_URL },
 };
 
 const MaskedKey = ({ value }: { value: string }) => {
@@ -69,7 +72,7 @@ const ByokGroupCard = ({
               <label className="byok-field-label">Model</label>
               <input
                 className="byok-field-input"
-                placeholder="e.g. gpt-4o, deepseek-chat, claude-3-5-sonnet"
+                placeholder={DEFAULT_BYOK_MODEL}
                 value={group.model}
                 onChange={(e) => onUpdate(groupKey, 'model', e.target.value)}
               />
@@ -110,22 +113,22 @@ export const BillingModal = ({
   onClose: () => void;
   onKeySaved: () => void;
 }) => {
-  const [mode, setMode] = useState<ModalMode>('agentic');
+  const [mode, setMode] = useState<ModalMode>('byok');
   const [groups, setGroups] = useState<GroupState>(DEFAULT_GROUPS);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [quickMode, setQuickMode] = useState(true);
   const [quickKey, setQuickKey] = useState('');
-  const [quickModel, setQuickModel] = useState('');
-  const [quickBaseUrl, setQuickBaseUrl] = useState('');
+  const [quickModel, setQuickModel] = useState(DEFAULT_BYOK_MODEL);
+  const [quickBaseUrl, setQuickBaseUrl] = useState(DEFAULT_BYOK_BASE_URL);
   const [saved, setSaved] = useState(false);
   const [agenticPlan, setAgenticPlan] = useState<{ plan_type: string; plan: string; build_limit: number | null } | null>(null);
 
   const applyParsed = (parsed: any) => {
     const nextGroups: GroupState = {
-      group1: { model: parsed.group1?.model || '', apiKey: parsed.group1?.api_key || '', baseUrl: parsed.group1?.base_url || '' },
-      group2: { model: parsed.group2?.model || '', apiKey: parsed.group2?.api_key || '', baseUrl: parsed.group2?.base_url || '' },
-      group3: { model: parsed.group3?.model || '', apiKey: parsed.group3?.api_key || '', baseUrl: parsed.group3?.base_url || '' },
+      group1: { model: parsed.group1?.model || DEFAULT_BYOK_MODEL, apiKey: parsed.group1?.api_key || '', baseUrl: parsed.group1?.base_url || DEFAULT_BYOK_BASE_URL },
+      group2: { model: parsed.group2?.model || DEFAULT_BYOK_MODEL, apiKey: parsed.group2?.api_key || '', baseUrl: parsed.group2?.base_url || DEFAULT_BYOK_BASE_URL },
+      group3: { model: parsed.group3?.model || DEFAULT_BYOK_MODEL, apiKey: parsed.group3?.api_key || '', baseUrl: parsed.group3?.base_url || DEFAULT_BYOK_BASE_URL },
     };
     setGroups(nextGroups);
     const k1 = nextGroups.group1.apiKey;
@@ -187,8 +190,8 @@ export const BillingModal = ({
         if (!raw) {
           setGroups(DEFAULT_GROUPS);
           setQuickKey('');
-          setQuickModel('');
-          setQuickBaseUrl('');
+          setQuickModel(DEFAULT_BYOK_MODEL);
+          setQuickBaseUrl(DEFAULT_BYOK_BASE_URL);
           setQuickMode(true);
           return;
         }
@@ -197,8 +200,8 @@ export const BillingModal = ({
       } catch (_e) {
         setGroups(DEFAULT_GROUPS);
         setQuickKey('');
-        setQuickModel('');
-        setQuickBaseUrl('');
+        setQuickModel(DEFAULT_BYOK_MODEL);
+        setQuickBaseUrl(DEFAULT_BYOK_BASE_URL);
         setQuickMode(true);
       }
     };
@@ -222,13 +225,17 @@ export const BillingModal = ({
 
     let payload: any;
     if (quickMode) {
-      const common = { model: quickModel, api_key: quickKey, base_url: quickBaseUrl };
+      const common = {
+        model: quickModel.trim() || DEFAULT_BYOK_MODEL,
+        api_key: quickKey.trim(),
+        base_url: quickBaseUrl.trim() || DEFAULT_BYOK_BASE_URL,
+      };
       payload = { group1: { ...common }, group2: { ...common }, group3: { ...common } };
     } else {
       payload = {
-        group1: { model: groups.group1.model, api_key: groups.group1.apiKey, base_url: groups.group1.baseUrl },
-        group2: { model: groups.group2.model, api_key: groups.group2.apiKey, base_url: groups.group2.baseUrl },
-        group3: { model: groups.group3.model, api_key: groups.group3.apiKey, base_url: groups.group3.baseUrl },
+        group1: { model: groups.group1.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group1.apiKey.trim(), base_url: groups.group1.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
+        group2: { model: groups.group2.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group2.apiKey.trim(), base_url: groups.group2.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
+        group3: { model: groups.group3.model.trim() || DEFAULT_BYOK_MODEL, api_key: groups.group3.apiKey.trim(), base_url: groups.group3.baseUrl.trim() || DEFAULT_BYOK_BASE_URL },
       };
     }
 
@@ -409,7 +416,7 @@ export const BillingModal = ({
                       <label className="byok-field-label">Model</label>
                       <input
                         className="byok-field-input"
-                        placeholder="e.g. gpt-4o, deepseek-chat, claude-3-5-sonnet, llama-3.3-70b"
+                        placeholder={DEFAULT_BYOK_MODEL}
                         value={quickModel}
                         onChange={(e) => setQuickModel(e.target.value)}
                       />
@@ -438,7 +445,7 @@ export const BillingModal = ({
                   </div>
                   <div className="byok-guidance-callout">
                     <strong>Quick Setup</strong>
-                    <p>1. Paste your key. 2. Enter model name. 3. Save. 4. Start building.</p>
+                    <p>Paste one API key, save it, and the chip pipeline can start immediately.</p>
                   </div>
                 </div>
               )}

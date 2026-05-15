@@ -56,7 +56,7 @@ const NOISE_PATTERNS = [
 function isNoise(evt: ActivityEvent): boolean {
     const msg = (evt.content || evt.message || '').trim();
     if (!msg) return true;
-    if (/^\/[a-zA-Z0-9/_.\-]+$/.test(msg)) return true;
+    if (/^\/[a-zA-Z0-9/_.-]+$/.test(msg)) return true;
     if (evt.type === 'transition') return true;
     for (const pattern of NOISE_PATTERNS) {
         if (pattern.test(msg)) return true;
@@ -72,7 +72,7 @@ function shortenPaths(text: string): string {
 /* Truncate long messages at ~120 chars */
 function truncate(text: string, max = 120): { display: string; isTruncated: boolean } {
     if (text.length <= max) return { display: text, isTruncated: false };
-    return { display: text.slice(0, max) + '…', isTruncated: true };
+    return { display: `${text.slice(0, max)}...`, isTruncated: true };
 }
 
 export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
@@ -99,7 +99,11 @@ export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
     const toggle = (i: number) =>
         setExpanded(prev => {
             const s = new Set(prev);
-            s.has(i) ? s.delete(i) : s.add(i);
+            if (s.has(i)) {
+                s.delete(i);
+            } else {
+                s.add(i);
+            }
             return s;
         });
 
@@ -128,13 +132,13 @@ export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
                             ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' });
                         }}
                     >
-                        ↓ Latest
+                        Latest
                     </button>
                 )}
             </div>
             <div className="hitl-log-body" ref={ref} onScroll={onScroll}>
                 {rows.length === 0 ? (
-                    <div className="hitl-log-empty">Waiting for agent activity…</div>
+                    <div className="hitl-log-empty">Waiting for agent activity...</div>
                 ) : (
                     rows.map((evt, i) => {
                         const type = evt.thought_type || 'thought';
@@ -164,7 +168,7 @@ export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
                                 {stage && <span className="hitl-log-badge">{stage}</span>}
                                 <span className="hitl-log-msg">
                                     {display}
-                                    {isTruncated && <span className="hitl-log-expand"> ›</span>}
+                                    {isTruncated && <span className="hitl-log-expand"> more</span>}
                                 </span>
                             </div>
                         );

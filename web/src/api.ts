@@ -15,7 +15,34 @@ export const api = axios.create({
   },
 });
 
-const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
+export const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
+
+export const getAuthHeaders = async (
+  extra: Record<string, string> = {}
+): Promise<Record<string, string>> => {
+  const headers: Record<string, string> = { ...extra };
+  if (!AUTH_ENABLED) return headers;
+
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.access_token) {
+      headers.Authorization = `Bearer ${session.access_token}`;
+    }
+  } catch {
+    // Keep unauthenticated requests possible in local/dev mode.
+  }
+
+  return headers;
+};
+
+export const getSseHeaders = async (
+  extra: Record<string, string> = {}
+): Promise<Record<string, string>> =>
+  getAuthHeaders({
+    'ngrok-skip-browser-warning': 'true',
+    Accept: 'text/event-stream',
+    ...extra,
+  });
 
 api.interceptors.request.use(async (config) => {
   if (!AUTH_ENABLED) return config;
@@ -37,10 +64,10 @@ api.interceptors.response.use(
     if (error.response) {
       const data = error.response.data;
       if (data?.detail) {
-        return Promise.reject(new Error(data.detail));
+        return Promise.reject(Object.assign(new Error(String(data.detail)), error));
       }
       if (data?.message) {
-        return Promise.reject(new Error(data.message));
+        return Promise.reject(Object.assign(new Error(String(data.message)), error));
       }
     }
     return Promise.reject(error);

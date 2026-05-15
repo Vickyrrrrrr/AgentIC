@@ -294,6 +294,22 @@ _BUILTIN_CHUNKS: List[Chunk] = [
         ),
     ),
     Chunk(
+        text="ASAP7 is a 7nm predictive FinFET PDK intended for academic research, benchmarking, "
+        "and advanced-node flow learning. It is not manufacturable. In AgentIC, use the asap7 "
+        "profile for OpenROAD-style research comparisons, keep the standard-cell library as "
+        "asap7sc7p5t, use low supply-voltage timing assumptions around 0.7V, and clearly label "
+        "results as predictive rather than foundry signoff.",
+        metadata=ChunkMetadata(
+            title="ASAP7 Advanced-Node Guidance",
+            tags=["asap7", "7nm", "finfet", "predictive-pdk", "advanced-node"],
+            domain="physical_design",
+            node="7nm",
+            pdk="asap7",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
         text="Do not treat GDS as signoff-ready until DRC is clean, LVS matches, extracted timing is reviewed, "
         "power intent is consistent, and generated reports are archived with tool versions and PDK corner data.",
         metadata=ChunkMetadata(
@@ -1086,11 +1102,14 @@ class VLSIKnowledgeBase:
 
     def __new__(cls, *args, **kwargs):
         db_path = kwargs.get("db_path") or os.environ.get("VLSI_RAG_DB_PATH", "") or str(Path.home() / ".agentic" / "vlsi_rag")
-        if db_path not in cls._instances:
+        qdrant_url = os.environ.get("VLSI_RAG_QDRANT_URL", "").strip()
+        collection_name = kwargs.get("collection_name") or (args[0] if args else "vlsi_knowledge")
+        instance_key = f"qdrant:{qdrant_url}:{collection_name}" if qdrant_url else db_path
+        if instance_key not in cls._instances:
             instance = super().__new__(cls)
             instance._initialized = False
-            cls._instances[db_path] = instance
-        return cls._instances[db_path]
+            cls._instances[instance_key] = instance
+        return cls._instances[instance_key]
 
     def __init__(
         self,
@@ -1132,9 +1151,15 @@ class VLSIKnowledgeBase:
     @property
     def client(self):
         if self._client is None:
-            self.db_path.mkdir(parents=True, exist_ok=True)
+            qdrant_url = os.environ.get("VLSI_RAG_QDRANT_URL", "").strip()
+            qdrant_api_key = os.environ.get("VLSI_RAG_QDRANT_API_KEY", "").strip() or None
             from qdrant_client import QdrantClient
-            self._client = QdrantClient(path=str(self.db_path))
+            if qdrant_url:
+                logger.info(f"Connecting to remote Qdrant at {qdrant_url}")
+                self._client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+            else:
+                self.db_path.mkdir(parents=True, exist_ok=True)
+                self._client = QdrantClient(path=str(self.db_path))
             self._ensure_collection()
         return self._client
 
@@ -1155,17 +1180,18 @@ class VLSIKnowledgeBase:
 
     def _ensure_collection(self):
         from qdrant_client.models import VectorParams, Distance
-        collections = [c.name for c in self.client.get_collections().collections]
+        client = self._client
+        collections = [c.name for c in client.get_collections().collections]
         if self.collection_name not in collections:
-            self.client.create_collection(
+            client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
                     size=self.embedding.dimension,
                     distance=Distance.COSINE,
                 ),
             )
-            self._index_builtin_chunks()
-            self._index_user_chunks()
+        self._index_builtin_chunks()
+        self._index_user_chunks()
 
     @staticmethod
     def _make_uuid(chunk_id: str) -> str:
@@ -1188,6 +1214,8 @@ class VLSIKnowledgeBase:
 
     def _index_builtin_chunks(self):
         chunks = self._ensure_indexed()
+        if chunks is None:
+            return  # Skip if we couldn't fetch existing chunks
         if not _BUILTIN_CHUNKS or any(c.chunk_id in chunks for c in _BUILTIN_CHUNKS):
             return
         points = []
@@ -1203,6 +1231,8 @@ class VLSIKnowledgeBase:
             return
         chunks = self._load_user_chunks()
         existing = self._ensure_indexed()
+        if existing is None:
+            return  # Skip to avoid duplicating chunks if lookup fails
         new_chunks = [c for c in chunks if c.chunk_id not in existing]
         if not new_chunks:
             return
@@ -1216,8 +1246,29 @@ class VLSIKnowledgeBase:
             self.client.upsert(collection_name=self.collection_name, points=points)
             logger.info(f"Indexed {len(points)} user knowledge chunks from {self.knowledge_dir}")
 
-    def _ensure_indexed(self) -> set:
-        return set()
+    def _ensure_indexed(self) -> Optional[set]:
+        try:
+            existing = set()
+            next_page = None
+            while True:
+                points, next_page = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=1000,
+                    offset=next_page,
+                    with_payload=["chunk_id"],
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    chunk_id = payload.get("chunk_id")
+                    if chunk_id:
+                        existing.add(chunk_id)
+                if next_page is None:
+                    break
+            return existing
+        except Exception as exc:
+            logger.warning(f"Could not inspect existing RAG chunks: {exc}")
+            return None
 
     def _load_user_chunks(self) -> List[Chunk]:
         if not self.knowledge_dir.is_dir():
@@ -1259,14 +1310,25 @@ class VLSIKnowledgeBase:
                 vector=vec,
                 payload={"text": chunk.text[:10000], "chunk_id": chunk.chunk_id, **meta},
             ))
-        self.client.upsert(collection_name=self.collection_name, points=points)
-        logger.info(f"Ingested {len(points)} chunks from {source}")
+        if points:
+            self.client.upsert(collection_name=self.collection_name, points=points)
+            logger.info(f"Ingested {len(points)} chunks from {source}")
 
     def ingest_file(self, filepath: str):
         path = Path(filepath)
         if not path.exists():
             logger.warning(f"File not found: {filepath}")
             return
+            
+        # Security: Apply maximum file size limit (50MB) for ingestion
+        MAX_INGEST_SIZE = 50 * 1024 * 1024
+        try:
+            if path.stat().st_size > MAX_INGEST_SIZE:
+                logger.warning(f"File {filepath} exceeds 50MB RAG ingest limit. Skipping.")
+                return
+        except OSError:
+            return
+            
         source_type = classify_source_type(filepath)
         if path.suffix.lower() == ".pdf":
             self._ingest_pdf(filepath)
