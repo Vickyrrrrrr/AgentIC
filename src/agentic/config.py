@@ -167,6 +167,22 @@ LLM_MODEL = DEFAULT_LLM_CONFIG["model"]
 LLM_BASE_URL = DEFAULT_LLM_CONFIG["base_url"]
 LLM_API_KEY = DEFAULT_LLM_CONFIG["api_key"]
 
+# =============================================================================
+# Verilog Codegen (Server-side model for AgentIC-paid builds)
+# =============================================================================
+# Used when plan_type="agentic_paid" and no BYOK key is provided.
+# Env vars: VERILOG_CODEGEN_ENABLED, VERILOG_CODEGEN_MODEL, VERILOG_CODEGEN_BASE_URL, VERILOG_CODEGEN_API_KEY
+VERILOG_CODEGEN_ENABLED = os.environ.get("VERILOG_CODEGEN_ENABLED", "0").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+VERILOG_CODEGEN_CONFIG = {
+    "model": os.environ.get("VERILOG_CODEGEN_MODEL", "").strip() or "openai/gpt-4o",
+    "base_url": _normalize_base_url(
+        os.environ.get("VERILOG_CODEGEN_BASE_URL", "").strip() or "https://api.openai.com/v1"
+    ),
+    "api_key": os.environ.get("VERILOG_CODEGEN_API_KEY", "").strip(),
+}
+
 _ROLE_TO_GROUP = {
     "architect": "build",
     "designer": "build",
@@ -367,6 +383,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
         "description": "SkyWater 130nm — most mature open PDK, best tool support",
+        "fabrication_ready": True,
+        "maturity": "production",
     },
     "gf180mcu": {
         "pdk": "gf180mcuC",
@@ -375,6 +393,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "1.8",
         "min_cell_height": "0.54",
         "description": "GlobalFoundries 180nm — automotive grade, high voltage options",
+        "fabrication_ready": False,
+        "maturity": "experimental",
     },
     "asap7": {
         "pdk": "asap7",
@@ -383,6 +403,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "0.7",
         "min_cell_height": "0.144",
         "description": "ASAP 7nm predictive PDK — research/academic, not a real foundry",
+        "fabrication_ready": False,
+        "maturity": "research",
     },
     "nangate45": {
         "pdk": "nangate45",
@@ -391,6 +413,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
         "description": "NanGate 45nm Open Cell Library — academic/research, Apache 2.0",
+        "fabrication_ready": False,
+        "maturity": "research",
     },
     "freepdk45": {
         # FreePDK45 is the NC State 45nm predictive PDK.  Its standard cell
@@ -404,6 +428,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
         "description": "FreePDK45 (NC State 45nm) + NanGate Open Cell Library — academic/research",
+        "fabrication_ready": False,
+        "maturity": "research",
     },
     "osu018": {
         "pdk": "osu018",
@@ -412,6 +438,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "1.8",
         "min_cell_height": "0.5",
         "description": "Oklahoma State 180nm — educational/research, limited cell set",
+        "fabrication_ready": False,
+        "maturity": "research",
     },
     "osu035": {
         "pdk": "osu035",
@@ -420,6 +448,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "3.3",
         "min_cell_height": "0.6",
         "description": "Oklahoma State 350nm — high voltage, easy to probe, educational",
+        "fabrication_ready": False,
+        "maturity": "research",
     },
     "openfasoc130": {
         "pdk": "openfasoc",
@@ -429,6 +459,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "min_cell_height": "0.46",
         "description": "OpenFASOC 130nm analog/generator flow — requires sky130 to be installed separately under same PDK_ROOT",
         "requires_parent_pdk": "sky130",
+        "fabrication_ready": False,
+        "maturity": "experimental",
     },
     "skywater-raw": {
         "pdk": "skywater-pdk",
@@ -437,6 +469,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
         "description": "Raw SkyWater PDK development tree — advanced users, not a packaged OpenLane PDK",
+        "fabrication_ready": False,
+        "maturity": "experimental",
     },
     "lefdef175": {
         "pdk": "lefdef175",
@@ -445,6 +479,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_vdd": "1.8",
         "min_cell_height": "0.6",
         "description": "LEF/DEF 175nm educational placeholder — manual setup required",
+        "fabrication_ready": False,
+        "maturity": "research",
     },
     "tsmc28": {
         "pdk": "tsmc28",
@@ -454,6 +490,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "min_cell_height": "0.2",
         "description": "TSMC 28nm — proprietary PDK, manual foundry access required",
         "proprietary": True,
+        "fabrication_ready": False,
+        "maturity": "proprietary",
     },
     "samsung14": {
         "pdk": "samsung14",
@@ -463,6 +501,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "min_cell_height": "0.1",
         "description": "Samsung 14nm — proprietary PDK, manual foundry access required",
         "proprietary": True,
+        "fabrication_ready": False,
+        "maturity": "proprietary",
     },
     "intel22": {
         "pdk": "intel22",
@@ -472,6 +512,8 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "min_cell_height": "0.16",
         "description": "Intel 22nm — proprietary PDK, manual foundry access required",
         "proprietary": True,
+        "fabrication_ready": False,
+        "maturity": "proprietary",
     },
     "gf22": {
         "pdk": "gf22",

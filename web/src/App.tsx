@@ -541,6 +541,8 @@ const App = () => {
                     value={selectedDesign}
                     onChange={(e) => setSelectedDesign(e.target.value)}
                     title="Select design context"
+                    aria-label="Select design context"
+                    spellCheck={false}
                   >
                     {designs.map((d) => (
                       <option key={d.name} value={d.name}>

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronDown, ChevronUp, Eye, EyeOff, Check, Fingerprint, LockKeyhole, Sparkles, Cpu, KeyRound } from 'lucide-react';
 import { API_BASE } from '../api';
 import { supabase } from '../supabaseClient';
+import { toUserError } from '../utils/errorFormatter';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
 type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: string }>;
@@ -265,7 +266,7 @@ export const BillingModal = ({
       setSaved(true);
       setTimeout(() => { onKeySaved(); onClose(); }, 600);
     } catch (err: any) {
-      setError(err.message || 'Failed to save keys.');
+      setError(toUserError(err.message || err, 'Failed to save configuration. Please try again.'));
     } finally {
       setSaving(false);
     }

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import { api } from '../api';
 import { Play, CheckCircle, Wand2, TerminalSquare, Cpu, XCircle, Layers, FileDown, Eye, ExternalLink, Beaker } from 'lucide-react';
+import { toUserError } from '../utils/errorFormatter';
 
 const IS_CLOUD_DEPLOY = import.meta.env.VITE_IS_CLOUD === 'true';
 
@@ -99,7 +100,7 @@ endmodule
                 setOutput(prev => prev + '\n❌ Syntax Failed (Verilator)\n' + res.data.logs);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + toUserError(e.response?.data?.detail || e.message, 'Syntax check failed. Please try again.'));
         }
         setLoading(null);
     };
@@ -115,7 +116,7 @@ endmodule
                 setOutput(prev => prev + '\n❌ Synthesis Failed (Yosys)\n' + res.data.logs);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + toUserError(e.response?.data?.detail || e.message, 'Synthesis failed. Please try again.'));
         }
         setLoading(null);
     };
@@ -133,7 +134,7 @@ endmodule
                 setOutput(prev => prev + '\n❌ Failed to generate testbench: ' + res.data.error);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + toUserError(e.response?.data?.detail || e.message, 'Testbench generation failed. Please try again.'));
         }
         setLoading(null);
     };
@@ -154,7 +155,7 @@ endmodule
                 setOutput(prev => prev + '\n❌ Simulation Failed\n' + res.data.logs);
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n❌ Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error: ' + toUserError(e.response?.data?.detail || e.message, 'Simulation failed. Please try again.'));
         }
         setLoading(null);
     };
@@ -209,7 +210,7 @@ endmodule
                 setOutput(prev => prev + '\n🤖 [AI Code Fixer]:\n' + (responseText || 'No response received.'));
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n❌ Error calling AI: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ Error calling AI: ' + toUserError(e.response?.data?.detail || e.message, 'AI analysis failed. Please try again.'));
         }
         setLoading(null);
     };
@@ -238,7 +239,7 @@ endmodule
                 setOutput(prev => prev + '\n❌ GTKWave failed to launch... Make sure the AgentIC backend is running on a desktop UI.');
             }
         } catch (e: any) {
-            setOutput(prev => prev + '\n❌ API Error: ' + (e.response?.data?.detail || e.message));
+            setOutput(prev => prev + '\n❌ API Error: ' + toUserError(e.response?.data?.detail || e.message, 'Unable to launch waveform viewer.'));
         }
     };
 

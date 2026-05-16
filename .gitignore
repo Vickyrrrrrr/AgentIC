@@ -108,7 +108,7 @@ benchmark
 # Temporary fix scripts
 fix_*.py
 scripts
-
+scratch
 # Security build outputs
 secure_build/
 build_secure_ip.py
@@ -120,6 +120,7 @@ test.js
 .idea/
 *.swp
 *.swo
+*.bak
 
 # OS
 .DS_Store
@@ -147,14 +148,12 @@ README_HF.md
 fix.py
 patch_eda_analyst.py
 src/agentic-workspace/debug/json_fails/20260510_193154_spec_generate.json
-.gitignore
 src/agentic-workspace/debug/json_fails/20260510_200808_spec_generate.json
 vlsirag.md
 advanced_vlsi_rag_design.md
 task_grounded_answer_synthesis.md
 eval/benchmark_results.json
 synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth_report.txt
-.gitignore
 synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth.v
 synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth.ys
 workspace_changes.diff

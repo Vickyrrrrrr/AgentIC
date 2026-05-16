@@ -25,8 +25,9 @@ export default function ElaborationCard({ options, message, onSelect, isSubmitti
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                     {options.map((opt, i) => {
                         const optionNum = i + 1;
-                        const titleKey = `OPTION_` + optionNum; // Actually let's just find the OPTION_ key
-                        const title = opt[titleKey] || opt['OPTION_1'] || opt['OPTION_2'] || opt['OPTION_3'] || `Option ${optionNum}`;
+                        // Find the actual OPTION_N key for this option (handles dynamic key names)
+                        const optionKey = Object.keys(opt).find(k => k.startsWith('OPTION_'));
+                        const title = optionKey ? opt[optionKey] : `Option ${optionNum}`;
                         const category = opt['Category'] || "Category";
                         const freq = opt['Freq'] || "Freq";
                         const details = opt['Details'] || "Details...";

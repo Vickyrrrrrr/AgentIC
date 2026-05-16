@@ -17,6 +17,7 @@ import { ChipSummary } from '../components/ChipSummary';
 import { BillingModal } from '../components/BillingModal';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { api, API_BASE, getSseHeaders } from '../api';
+import { toUserError, isNetworkError } from '../utils/errorFormatter';
 
 type Phase = 'prompt' | 'building' | 'done';
 
@@ -47,18 +48,16 @@ interface PdkOption {
     proprietary: boolean;
     status: string;
     reason: string;
+    maturity?: string;
+    fabrication_ready?: boolean;
 }
 
-const formatError = (value: unknown, fallback: string): string => {
-    if (!value) return fallback;
-    if (typeof value === 'string') return value;
-    if (typeof value === 'object') {
-        const record = value as Record<string, unknown>;
-        if (typeof record.message === 'string') return record.message;
-        if (typeof record.detail === 'string') return record.detail;
-        if (typeof record.error === 'string') return record.error;
-    }
-    return fallback;
+const PDK_MATURITY: Record<string, { label: string; warning: string; color: string }> = {
+    production: { label: "Production Ready", warning: "", color: "var(--success)" },
+    experimental: { label: "Experimental", warning: "This PDK is not mature for fabrication. Results may be unreliable.", color: "var(--accent)" },
+    research: { label: "Research Only", warning: "This is an academic/research PDK — not suitable for real chip fabrication.", color: "#d97706" },
+    proprietary: { label: "Proprietary", warning: "This PDK requires foundry access and manual setup. Not available for open fabrication.", color: "#dc2626" },
+    custom: { label: "Custom PDK", warning: "This custom PDK was detected on the server. Confirm foundry collateral and signoff flow before fabrication.", color: "#d97706" },
 };
 
 function slugify(text: string): string {
@@ -132,21 +131,23 @@ export const DesignStudio = () => {
     // Build Options
     const isHuggingFace = window.location.hostname.includes("hf.space") || window.location.hostname.includes("huggingface.co");
     const [skipOpenlane, setSkipOpenlane] = useState(isHuggingFace);
-    const [maxRetries, _setMaxRetries] = useState(5);
-    const [minCoverage, _setMinCoverage] = useState(80.0);
     const [aiModel, setAiModel] = useState<'AgentIC' | 'BYOK'>('AgentIC');
     const [pdkProfile, setPdkProfile] = useState("sky130");
     const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
-    const [maxPivots, _setMaxPivots] = useState(2);
-    const [congestionThreshold, _setCongestionThreshold] = useState(10.0);
-    const [hierarchical, _setHierarchical] = useState("auto");
-    const [tbGateMode, _setTbGateMode] = useState("strict");
-    const [tbMaxRetries, _setTbMaxRetries] = useState(3);
-    const [tbFallbackTemplate, _setTbFallbackTemplate] = useState("uvm_lite");
-    const [coverageBackend, _setCoverageBackend] = useState("auto");
-    const [coverageFallbackPolicy, _setCoverageFallbackPolicy] = useState("fail_closed");
-    const [coverageProfile, _setCoverageProfile] = useState("balanced");
     const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
+
+    // Advanced build parameters (sent to API with stable defaults, no UI controls)
+    const maxRetries = 5;
+    const minCoverage = 80.0;
+    const maxPivots = 2;
+    const congestionThreshold = 10.0;
+    const hierarchical = "auto";
+    const tbGateMode = "strict";
+    const tbMaxRetries = 3;
+    const tbFallbackTemplate = "uvm_lite";
+    const coverageBackend = "auto";
+    const coverageFallbackPolicy = "fail_closed";
+    const coverageProfile = "balanced";
 
     const abortCtrlRef = useRef<AbortController | null>(null);
     const pendingLaunchAfterByokRef = useRef(false);
@@ -256,15 +257,15 @@ export const DesignStudio = () => {
             setPhase('building');
             void startStreaming(job_id, byokKey, activeDesignName);
         } catch (e: any) {
-            if (e?.code === 'ERR_NETWORK' || !e?.response) {
-                setError('Backend is offline. Please check your connection and try again.');
+            if (isNetworkError(e)) {
+                setError('Unable to connect to the build service. Please check your connection and try again.');
             } else {
                 const detail = e?.response?.data?.detail;
                 if (typeof detail === 'object' && detail?.error === 'build_limit_reached') {
                     setShowBillingModal(true);
                     return;
                 }
-                setError(formatError(detail, 'Build failed. Check the backend logs.'));
+                setError(toUserError(detail, 'Build failed. Please try again or contact support.'));
             }
         }
     };
@@ -297,9 +298,9 @@ export const DesignStudio = () => {
                     return;
                 }
                 if ([401, 403, 404].includes(response.status)) {
-                    throw new Error(`Live stream rejected with ${response.status}`);
+                    throw new Error('Live stream unavailable. Please try again.');
                 }
-                throw new Error(`Live stream unavailable (${response.status})`);
+                throw new Error('Live stream temporarily unavailable.');
             },
             onmessage(evt) {
                 try {
@@ -324,16 +325,16 @@ export const DesignStudio = () => {
                 if (retryCount > 8) {
                     ctrl.abort();
                     setJobStatus('failed');
-                    setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+                    setError('Live connection lost. Checking final build status...');
                     void fetchResult(jid, 'failed', activeDesignName);
                     throw err;
                 }
                 return Math.min(1000 * retryCount, 5000);
             }
-        }).catch((err) => {
+        }).catch(() => {
             if (ctrl.signal.aborted) return;
             setJobStatus('failed');
-            setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+            setError('Live connection lost. Checking final build status...');
             void fetchResult(jid, 'failed', activeDesignName);
         });
     };
@@ -569,6 +570,8 @@ export const DesignStudio = () => {
                                                         proprietary: false,
                                                         status: 'ready',
                                                         reason: '',
+                                                        maturity: 'production',
+                                                        fabrication_ready: true,
                                                     } as PdkOption]).map((pdk) => (
                                                     <option key={pdk.key} value={pdk.key} disabled={!pdk.gds_ready}>
                                                         {pdk.key} {pdk.gds_ready ? 'ready' : 'not installed'}
@@ -582,6 +585,39 @@ export const DesignStudio = () => {
                                                         ? `${gdsReadyPdks.length} installed PDK target${gdsReadyPdks.length === 1 ? '' : 's'} available`
                                                         : 'No GDSII-ready PDK detected on this VPS.'}
                                             </span>
+                                            {selectedPdk && selectedPdk.maturity && selectedPdk.maturity !== 'production' && (
+                                                <div className="studio-pdk-warning" style={{
+                                                    marginTop: '0.5rem',
+                                                    padding: '0.5rem 0.75rem',
+                                                    borderRadius: '6px',
+                                                    background: 'rgba(217, 119, 6, 0.1)',
+                                                    border: '1px solid rgba(217, 119, 6, 0.3)',
+                                                    fontSize: '0.78rem',
+                                                    color: '#d97706',
+                                                    display: 'flex',
+                                                    alignItems: 'flex-start',
+                                                    gap: '0.4rem',
+                                                }}>
+                                                    <span style={{ flexShrink: 0 }}>⚠</span>
+                                                    <span>
+                                                        <strong>{PDK_MATURITY[selectedPdk.maturity]?.label || selectedPdk.maturity}:</strong>{' '}
+                                                        {PDK_MATURITY[selectedPdk.maturity]?.warning || 'This PDK may not be suitable for fabrication. Use SkyWater 130nm (sky130) for production-ready results.'}
+                                                    </span>
+                                                </div>
+                                            )}
+                                            {selectedPdk && selectedPdk.maturity === 'production' && (
+                                                <div className="studio-pdk-recommended" style={{
+                                                    marginTop: '0.5rem',
+                                                    padding: '0.4rem 0.75rem',
+                                                    borderRadius: '6px',
+                                                    background: 'rgba(34, 197, 94, 0.08)',
+                                                    border: '1px solid rgba(34, 197, 94, 0.2)',
+                                                    fontSize: '0.75rem',
+                                                    color: 'var(--success)',
+                                                }}>
+                                                    Recommended for fabrication — most mature open PDK with full tool support.
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
 

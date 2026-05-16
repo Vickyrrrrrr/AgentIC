@@ -2,12 +2,24 @@ import os
 import time
 import logging
 from celery import Celery
+from billiard.exceptions import SoftTimeLimitExceeded
 from typing import Dict, Any
 
 logger = logging.getLogger("agentic.tasks")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agentic_jobs.db")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+TASK_SOFT_TIME_LIMIT = _env_int("CELERY_TASK_SOFT_TIME_LIMIT", 3600)
+TASK_TIME_LIMIT = _env_int("CELERY_TASK_TIME_LIMIT", TASK_SOFT_TIME_LIMIT + 60)
 
 # Initialize Celery explicitly pointing to Redis for message passing
 celery_app = Celery(
@@ -24,8 +36,8 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     # Make sure we don't block the backend with extremely long VLSI builds endlessly
-    task_soft_time_limit=3600,   # 1 hour soft limit
-    task_time_limit=3660,        # 1 hour and 1 min hard kill
+    task_soft_time_limit=TASK_SOFT_TIME_LIMIT,
+    task_time_limit=TASK_TIME_LIMIT,
 )
 
 
@@ -89,6 +101,19 @@ def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
     try:
         from server.api import _run_agentic_build
         _run_agentic_build(job_id, req)
+    except SoftTimeLimitExceeded as exc:
+        message = (
+            f"Build exceeded worker soft time limit ({TASK_SOFT_TIME_LIMIT}s). "
+            "Try a smaller design or increase CELERY_TASK_SOFT_TIME_LIMIT."
+        )
+        logger.error("[task:%s] %s", job_id, message)
+        if job_id in JOB_STORE:
+            JOB_STORE[job_id]["status"] = "failed"
+            JOB_STORE[job_id]["build_status"] = "failed"
+            JOB_STORE[job_id].setdefault("result", {})["error"] = "worker_soft_time_limit_exceeded"
+            JOB_STORE[job_id].setdefault("result", {})["failure_explanation"] = message
+        _sync_job_to_db(job_id)
+        raise exc
     except Exception as exc:
         import traceback
         err_trace = traceback.format_exc()

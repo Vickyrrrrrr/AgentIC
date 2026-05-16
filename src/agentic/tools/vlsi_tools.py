@@ -2963,6 +2963,33 @@ def run_openlane(
             "OpenLane GDS Layout features are temporarily disabled on the Hugging Face backend due to Docker-in-Docker isolation policies. Please rely on the 'rtl_and_verification_mode'.",
         )
 
+    # Check Docker availability
+    try:
+        subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=10, check=True
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return (
+            False,
+            "Docker is not available on this server. OpenLane requires Docker to generate GDS layouts. "
+            "Please contact your system administrator or use verification-only mode."
+        )
+
+    # Check OpenLane image is pulled
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", OPENLANE_IMAGE],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return (
+                False,
+                f"OpenLane Docker image not found ({OPENLANE_IMAGE}). "
+                f"Pull it with: docker pull {OPENLANE_IMAGE}"
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # docker exists but image inspect failed — will be caught below
+
     # If PDK_ROOT is not set, try to find it using the same search logic as config.py
     from ..config import _candidate_pdk_roots as _pdk_roots
 
@@ -2990,6 +3017,12 @@ def run_openlane(
     if not os.path.exists(design_dir):
         return False, f"Design directory not found: {design_dir}"
 
+    # ── Docker-in-Docker volume path fix ──
+    # When running inside a container, `docker run -v /app:...` interprets /app
+    # as a HOST path. We need the actual host paths for volume mounts.
+    host_openlane_root = os.environ.get("HOST_OPENLANE_ROOT", OPENLANE_ROOT)
+    host_pdk_root = os.environ.get("HOST_PDK_ROOT", effective_pdk_root)
+
     # Direct Docker command (non-interactive)
     # Using the configured PDK variable
     cmd = [
@@ -2997,9 +3030,9 @@ def run_openlane(
         "run",
         "--rm",
         "-v",
-        f"{OPENLANE_ROOT}:/openlane",
+        f"{host_openlane_root}:/openlane",
         "-v",
-        f"{effective_pdk_root}:{effective_pdk_root}",
+        f"{host_pdk_root}:{effective_pdk_root}",
         "-e",
         f"PDK_ROOT={effective_pdk_root}",
         "-e",

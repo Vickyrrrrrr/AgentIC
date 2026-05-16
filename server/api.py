@@ -238,6 +238,20 @@ async def security_headers_middleware(request: Request, call_next):
 # ─── Job Store ───────────────────────────────────────────────────────
 # Structure: { job_id: { status, design_name, events: [], result: {}, cancelled: bool } }
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
+DEFAULT_CELERY_TASK_TIME_LIMIT = 3660
+STALE_JOB_GRACE_SECONDS = 120
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+CELERY_TASK_TIME_LIMIT_SECONDS = _env_int(
+    "CELERY_TASK_TIME_LIMIT", DEFAULT_CELERY_TASK_TIME_LIMIT
+)
 
 try:
     from .db import (
@@ -367,6 +381,61 @@ def _normalize_epoch_seconds(value: Any) -> int:
     return 0
 
 
+def _event_epoch_seconds(event: Dict[str, Any]) -> int:
+    value = event.get("timestamp")
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return 0
+    return 0
+
+
+def _last_job_activity_seconds(job: Dict[str, Any]) -> int:
+    for event in reversed(job.get("events", []) or []):
+        ts = _event_epoch_seconds(event)
+        if ts:
+            return ts
+    return _normalize_epoch_seconds(job.get("created_at"))
+
+
+def _mark_stale_running_job_failed(job_id: str, job: Dict[str, Any]) -> bool:
+    if job.get("status") not in ("queued", "running"):
+        return False
+
+    last_activity = _last_job_activity_seconds(job)
+    if not last_activity:
+        return False
+
+    stale_after = CELERY_TASK_TIME_LIMIT_SECONDS + STALE_JOB_GRACE_SECONDS
+    if int(time.time()) - last_activity < stale_after:
+        return False
+
+    state = job.get("current_state") or _job_current_state(job)
+    message = (
+        "Build stopped after exceeding the worker time limit. "
+        "The worker process was likely killed before it could write a final result."
+    )
+    job["status"] = "failed"
+    job["build_status"] = "failed"
+    job.setdefault("result", {})["error"] = "worker_time_limit_exceeded"
+    job.setdefault("result", {})["failure_explanation"] = message
+    job.setdefault("events", []).append(
+        {
+            "type": "error",
+            "state": state,
+            "message": message,
+            "step": 0,
+            "total_steps": TOTAL_STEPS,
+            "timestamp": int(time.time()),
+        }
+    )
+    _sync_job_to_db(job_id)
+    return True
+
+
 def _job_current_state(job: Any) -> str:
     events = (
         getattr(job, "events", None) if not isinstance(job, dict) else job.get("events")
@@ -451,6 +520,7 @@ def _ensure_job_access(job_id: str, profile: Optional[dict]) -> Dict[str, Any]:
         if owner_id != profile.get("id"):
             raise HTTPException(status_code=404, detail="Job not found")
 
+    _mark_stale_running_job_failed(job_id, job)
     return job
 
 
@@ -657,6 +727,8 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
                 "pdk": profile.get("pdk", key),
                 "std_cell_library": profile.get("std_cell_library", ""),
                 "description": profile.get("description", ""),
+                "maturity": profile.get("maturity", ""),
+                "fabrication_ready": bool(profile.get("fabrication_ready", False)),
                 "available": is_available,
                 "gds_ready": gds_ready,
                 "tech_ok": bool(detected.get("tech_ok", False)),
@@ -679,6 +751,8 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
                 "description": detected.get(
                     "description", "Custom user-provided PDK detected on this VPS"
                 ),
+                "maturity": detected.get("maturity", "custom"),
+                "fabrication_ready": bool(detected.get("fabrication_ready", True)),
                 "available": True,
                 "gds_ready": True,
                 "tech_ok": bool(detected.get("tech_ok", False)),
@@ -1170,10 +1244,10 @@ def _emit_event(
         "timestamp": int(time.time()),
         **(extra or {}),
     }
-    JOB_STORE[job_id]["events"].append(event)
-    _sync_job_to_db(job_id)
     # Also update current state
     JOB_STORE[job_id]["current_state"] = state
+    JOB_STORE[job_id]["events"].append(event)
+    _sync_job_to_db(job_id)
 
 
 def _emit_agent_thought(

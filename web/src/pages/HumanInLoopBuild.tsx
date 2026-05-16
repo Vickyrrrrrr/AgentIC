@@ -15,6 +15,7 @@ import { ApprovalCard } from '../components/ApprovalCard';
 import ElaborationCard from '../components/ElaborationCard';
 import { BillingModal } from '../components/BillingModal';
 import { api, API_BASE, getSseHeaders } from '../api';
+import { toUserError, isNetworkError } from '../utils/errorFormatter';
 import '../hitl.css';
 
 const PIPELINE_STAGES = [
@@ -155,18 +156,16 @@ interface PdkOption {
     proprietary: boolean;
     status: string;
     reason: string;
+    maturity?: string;
+    fabrication_ready?: boolean;
 }
 
-const formatError = (value: unknown, fallback: string): string => {
-    if (!value) return fallback;
-    if (typeof value === 'string') return value;
-    if (typeof value === 'object') {
-        const record = value as Record<string, unknown>;
-        if (typeof record.message === 'string') return record.message;
-        if (typeof record.detail === 'string') return record.detail;
-        if (typeof record.error === 'string') return record.error;
-    }
-    return fallback;
+const PDK_MATURITY: Record<string, { label: string; warning: string }> = {
+    production: { label: "Production Ready", warning: "" },
+    experimental: { label: "Experimental", warning: "This PDK is not mature for fabrication. Results may be unreliable." },
+    research: { label: "Research Only", warning: "This is an academic/research PDK — not suitable for real chip fabrication." },
+    proprietary: { label: "Proprietary", warning: "This PDK requires foundry access and manual setup. Not available for open fabrication." },
+    custom: { label: "Custom PDK", warning: "This custom PDK was detected on the server. Confirm foundry collateral and signoff flow before fabrication." },
 };
 
 function slugify(text: string): string {
@@ -335,10 +334,10 @@ export const HumanInLoopBuild = () => {
             setPhase('building');
             void startStreaming(job_id);
         } catch (e: any) {
-            if (e?.code === 'ERR_NETWORK' || !e?.response) {
-                setError('Backend is offline. Start the server with: uvicorn server.api:app --port 7860');
+            if (isNetworkError(e)) {
+                setError('Unable to connect to the build service. Please try again later.');
             } else {
-                setError(formatError(e?.response?.data?.detail, 'Build failed. Check the backend logs.'));
+                setError(toUserError(e?.response?.data?.detail, 'Build failed. Please try again or contact support.'));
             }
         }
     };
@@ -369,9 +368,9 @@ export const HumanInLoopBuild = () => {
                     return;
                 }
                 if ([401, 403, 404].includes(response.status)) {
-                    throw new Error(`Live stream rejected with ${response.status}`);
+                    throw new Error('Live stream unavailable. Please try again.');
                 }
-                throw new Error(`Live stream unavailable (${response.status})`);
+                throw new Error('Live stream temporarily unavailable.');
             },
             onmessage(evt) {
                 try {
@@ -466,16 +465,16 @@ export const HumanInLoopBuild = () => {
                 if (retryCount > 8) {
                     ctrl.abort();
                     setJobStatus('failed');
-                    setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+                    setError('Live connection lost. Checking final build status...');
                     void fetchResult(jid, 'failed');
                     throw err;
                 }
                 return Math.min(1000 * retryCount, 5000);
             }
-        }).catch((err) => {
+        }).catch(() => {
             if (ctrl.signal.aborted) return;
             setJobStatus('failed');
-            setError(err instanceof Error ? err.message : 'Live stream disconnected.');
+            setError('Live connection lost. Checking final build status...');
             void fetchResult(jid, 'failed');
         });
     }
@@ -538,7 +537,7 @@ export const HumanInLoopBuild = () => {
                 milestoneTimerRef.current = setTimeout(() => setMilestoneToast(null), 5000);
             }
         } catch (e: any) {
-            setError(e?.response?.data?.detail || 'Failed to approve');
+            setError(toUserError(e?.response?.data?.detail, 'Unable to approve. Please try again.'));
         }
         setIsSubmitting(false);
     };
@@ -577,7 +576,7 @@ export const HumanInLoopBuild = () => {
             setApprovalData(null);
             setWaitingForApproval(false);
         } catch (e: any) {
-            setError(e?.response?.data?.detail || 'Failed to reject');
+            setError(toUserError(e?.response?.data?.detail, 'Unable to submit feedback. Please try again.'));
         }
         setIsSubmitting(false);
     };
@@ -605,7 +604,7 @@ export const HumanInLoopBuild = () => {
             setElaborationData(null);
             setWaitingForApproval(false);
         } catch (e: any) {
-            setError(e?.response?.data?.detail || 'Failed to submit elaboration choice');
+            setError(toUserError(e?.response?.data?.detail, 'Unable to submit your choice. Please try again.'));
         }
         setIsSubmitting(false);
     };
@@ -826,6 +825,8 @@ export const HumanInLoopBuild = () => {
                                                             proprietary: false,
                                                             status: 'ready',
                                                             reason: '',
+                                                            maturity: 'production',
+                                                            fabrication_ready: true,
                                                         } as PdkOption]).map((pdk) => (
                                                         <option key={pdk.key} value={pdk.key} disabled={!pdk.gds_ready}>
                                                             {pdk.key} {pdk.gds_ready ? 'ready' : 'not installed'}
@@ -837,6 +838,20 @@ export const HumanInLoopBuild = () => {
                                                         ? `${selectedPdk.pdk} · ${selectedPdk.std_cell_library || 'standard cells'} · ${selectedPdk.gds_ready ? 'GDSII ready' : selectedPdk.reason}`
                                                         : 'PDKs are loaded from the VPS runtime.'}
                                                 </em>
+                                                {selectedPdk && selectedPdk.maturity && selectedPdk.maturity !== 'production' && (
+                                                    <div style={{
+                                                        marginTop: '0.4rem',
+                                                        padding: '0.4rem 0.6rem',
+                                                        borderRadius: '4px',
+                                                        background: 'rgba(217, 119, 6, 0.1)',
+                                                        border: '1px solid rgba(217, 119, 6, 0.3)',
+                                                        fontSize: '0.72rem',
+                                                        color: '#d97706',
+                                                    }}>
+                                                        <strong>{PDK_MATURITY[selectedPdk.maturity]?.label || selectedPdk.maturity}:</strong>{' '}
+                                                        {PDK_MATURITY[selectedPdk.maturity]?.warning || 'Use sky130 for fabrication-ready results.'}
+                                                    </div>
+                                                )}
                                             </label>
                                         </div>
                                     </div>
