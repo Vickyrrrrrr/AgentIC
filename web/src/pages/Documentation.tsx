@@ -477,6 +477,7 @@ const stageDescriptions: Record<string, string> = {
   ECO_PATCH: 'Apply engineering change orders — gate-level patch first, RTL micro-patch fallback. Re-enters hardening loop after successful application.',
   POWER_ANALYSIS: 'Analyze power consumption (dynamic and static) across operating modes.',
   PHYSICAL_VERIFY: 'Run physical verification including DRC (Design Rule Check) and LVS (Layout vs Schematic).',
+  POST_LAYOUT_SPICE: 'Extract parasitic SPICE from final GDS and run ngspice transistor-level checks.',
   SIGNOFF: 'Multi-dimensional check: DRC/LVS compliance, STA timing closure, power/IR-drop analysis, equivalence checking, and coverage re-validation.',
   IP_PACKAGE: 'Package the design as a reusable IP with documentation, timing models, and test fixtures.',
   SUCCESS: 'Build completed — all quality gates passed. GDSII, metrics, and documentation artifacts are finalized.',

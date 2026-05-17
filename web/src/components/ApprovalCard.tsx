@@ -25,7 +25,7 @@ const STAGE_ICONS: Record<string, string> = {
     LINT_CHECK: '✓', CDC_ANALYZE: '↔', VERIFICATION: '◉', FORMAL_VERIFY: '◈', COVERAGE_CHECK: '◎',
     REGRESSION: '↺', SDC_GEN: '⧗', SYNTHESIS: '⚡', FEASIBILITY_CHECK: '⚖', DFT_SCAN: '🔬', DFT_ATPG: '📝',
     MBIST: '💾', GLS_SIM: '🔬', FLOORPLAN: '▣', HARDENING: '⬡', TIMING_ANALYSIS: '⏱️', CONVERGENCE_REVIEW: '◎',
-    ECO_PATCH: '⟴', POWER_ANALYSIS: '⚡', PHYSICAL_VERIFY: '🔍', SIGNOFF: '✓', IP_PACKAGE: '📦', SUCCESS: '✦', FAIL: '✗',
+    ECO_PATCH: '⟴', POWER_ANALYSIS: '⚡', PHYSICAL_VERIFY: '🔍', POST_LAYOUT_SPICE: '⚡', SIGNOFF: '✓', IP_PACKAGE: '📦', SUCCESS: '✦', FAIL: '✗',
 };
 
 const ARTIFACT_TYPE_LABELS: Record<string, string> = {

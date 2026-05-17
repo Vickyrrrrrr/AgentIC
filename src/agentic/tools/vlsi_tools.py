@@ -20,6 +20,10 @@ from ..config import (
     SBY_BIN,
     YOSYS_BIN,
     EQY_BIN,
+    MAGIC_BIN,
+    NETGEN_BIN,
+    NGSPICE_BIN,
+    OPENSTA_BIN,
     SIM_BACKEND_DEFAULT,
     COVERAGE_FALLBACK_POLICY_DEFAULT,
     COVERAGE_PROFILE_DEFAULT,
@@ -238,10 +242,14 @@ def startup_self_check() -> Dict[str, Any]:
         "vvp": "vvp",
         "yosys": YOSYS_BIN,
         "sby": SBY_BIN,
+        "ngspice": NGSPICE_BIN,
     }
     optional_bins = {
         "docker": "docker",
         "eqy": EQY_BIN,
+        "magic": MAGIC_BIN,
+        "netgen": NETGEN_BIN,
+        "opensta": OPENSTA_BIN,
         "verilator_coverage": "verilator_coverage",
     }
     all_pass = True
@@ -2954,7 +2962,12 @@ def run_openlane(
     floorplan_tcl: str = "",
     pdk_name: str = "",
 ):
-    """Triggers the OpenLane flow via Docker."""
+    """Trigger the OpenLane flow.
+
+    Docker/OpenLane is the default hardening backend for both CLI and web
+    builds. A native OpenLane/OpenROAD backend can be selected explicitly with
+    AGENTIC_OPENLANE_BACKEND=native.
+    """
 
     # --- TEMPORARY HF MAINTENANCE OVERRIDE ---
     if os.environ.get("SPACE_ID"):
@@ -2962,6 +2975,111 @@ def run_openlane(
             False,
             "OpenLane GDS Layout features are temporarily disabled on the Hugging Face backend due to Docker-in-Docker isolation policies. Please rely on the 'rtl_and_verification_mode'.",
         )
+
+    if os.environ.get("AGENTIC_OPENLANE_BACKEND", "docker").strip().lower() == "native":
+        from ..config import _candidate_pdk_roots as _pdk_roots
+
+        effective_pdk_root = PDK_ROOT
+        selected_pdk = pdk_name or PDK
+        if not effective_pdk_root or not os.path.exists(effective_pdk_root):
+            for path in _pdk_roots():
+                if os.path.exists(path) and (
+                    os.path.exists(os.path.join(path, selected_pdk))
+                    or os.path.exists(os.path.join(path, "sky130A"))
+                ):
+                    effective_pdk_root = path
+                    break
+
+        if not effective_pdk_root or not os.path.exists(effective_pdk_root):
+            return False, "PDK_ROOT not found. Please set PDK_ROOT or run agentic install-pdk."
+
+        design_dir = f"{OPENLANE_ROOT}/designs/{design_name}"
+        if not os.path.exists(design_dir):
+            return False, f"Design directory not found: {design_dir}"
+
+        native_cmd = None
+        openlane_bin = shutil.which("openlane")
+        if openlane_bin:
+            native_cmd = [
+                openlane_bin,
+                "--design-dir",
+                design_dir,
+                "--tag",
+                run_tag,
+                "--overwrite",
+            ]
+            if floorplan_tcl:
+                native_cmd.extend(["--config-file", floorplan_tcl])
+        else:
+            flow_tcl = shutil.which("flow.tcl")
+            if not flow_tcl:
+                candidate = os.path.join(OPENLANE_ROOT, "flow.tcl")
+                if os.path.exists(candidate):
+                    flow_tcl = candidate
+            if flow_tcl:
+                native_cmd = [
+                    flow_tcl,
+                    "-design",
+                    design_name,
+                    "-tag",
+                    run_tag,
+                    "-overwrite",
+                    "-ignore_mismatches",
+                ]
+                if floorplan_tcl:
+                    native_cmd.extend(["-config_file", floorplan_tcl])
+
+        if not native_cmd:
+            return (
+                False,
+                "Native OpenLane was not found. Install OpenLane/OpenROAD for CLI hardening "
+                "or set AGENTIC_OPENLANE_BACKEND=docker for the web/container fallback.",
+            )
+
+        gds_path = (
+            f"{OPENLANE_ROOT}/designs/{design_name}/runs/{run_tag}/results/final/gds/{design_name}.gds"
+        )
+        env = os.environ.copy()
+        env["PDK_ROOT"] = effective_pdk_root
+        env["PDK"] = selected_pdk
+
+        if background:
+            log_file_path = os.path.join(design_dir, "harden.log")
+            try:
+                with open(log_file_path, "w") as f:
+                    subprocess.Popen(
+                        native_cmd,
+                        stdout=f,
+                        stderr=subprocess.STDOUT,
+                        cwd=OPENLANE_ROOT,
+                        env=env,
+                        start_new_session=True,
+                    )
+                return True, f"Background native OpenLane task started. Logs: {log_file_path}"
+            except Exception as e:
+                return False, f"Failed to start native OpenLane background process: {str(e)}"
+
+        try:
+            process = subprocess.run(
+                native_cmd,
+                capture_output=True,
+                text=True,
+                timeout=3600,
+                cwd=OPENLANE_ROOT,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "Native OpenLane hardening timed out (exceeded 60 mins)."
+        except (OSError, FileNotFoundError) as e:
+            return False, f"Native OpenLane command failed: {str(e)}."
+
+        if os.path.exists(gds_path):
+            return True, gds_path
+
+        error_text = process.stderr or ""
+        if process.stdout:
+            error_text = (process.stdout + "\n" + error_text).strip()
+        return False, error_text or "Native OpenLane failed without producing a GDS."
 
     # Check Docker availability
     try:

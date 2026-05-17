@@ -47,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     curl \
     docker.io \
+    ngspice \
     ca-certificates \
     fontconfig \
     fonts-dejavu \

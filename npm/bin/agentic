@@ -14,6 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const ROOT_DIR = join(__dirname, '..');
+const REPO_ROOT = join(ROOT_DIR, '..');
 const MIN_PYTHON_VERSION = '3.10';
 
 function log(msg) {
@@ -23,6 +24,71 @@ function log(msg) {
 function error(msg) {
   console.error(`[agentic] ERROR: ${msg}`);
   process.exit(1);
+}
+
+function parseEnvValue(value) {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function loadEnvFile(env, envPath, protectedKeys, loadedKeys) {
+  if (!fs.existsSync(envPath)) {
+    return;
+  }
+
+  const parsed = new Map();
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || !line.includes('=')) {
+      continue;
+    }
+
+    const key = line.slice(0, line.indexOf('=')).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      continue;
+    }
+
+    parsed.set(key, parseEnvValue(line.slice(line.indexOf('=') + 1)));
+  }
+
+  for (const [key, value] of parsed) {
+    if (protectedKeys.has(key) || loadedKeys.has(key)) {
+      continue;
+    }
+    env[key] = value;
+    loadedKeys.add(key);
+  }
+}
+
+function loadAgenticEnv() {
+  const env = { ...process.env };
+  const protectedKeys = new Set(Object.keys(process.env));
+  const loadedKeys = new Set();
+  const envFile = env.AGENTIC_ENV_FILE;
+  const candidates = [
+    envFile,
+    join(process.cwd(), '.env'),
+    join(REPO_ROOT, '.env'),
+    join(ROOT_DIR, '.env')
+  ].filter(Boolean);
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    loadEnvFile(env, candidate, protectedKeys, loadedKeys);
+  }
+
+  return env;
 }
 
 async function checkPython() {
@@ -94,10 +160,12 @@ async function installPackage() {
 
 async function runAgentic(args) {
   return new Promise((resolve, reject) => {
+    const env = loadAgenticEnv();
+    env.FORCE_COLOR = '1';
     const proc = spawn('agentic', args, {
       shell: true,
       stdio: 'inherit',
-      env: { ...process.env, FORCE_COLOR: '1' }
+      env
     });
     proc.on('close', (code) => {
       process.exit(code || 0);

@@ -30,9 +30,10 @@ const STATES_DISPLAY: Record<string, { label: string; icon: string }> = {
     ECO_PATCH: { label: 'ECO Patch', icon: '25' },
     POWER_ANALYSIS: { label: 'Power Analysis', icon: '26' },
     PHYSICAL_VERIFY: { label: 'Physical Verification', icon: '27' },
-    SIGNOFF: { label: 'DRC/LVS Signoff', icon: '28' },
-    IP_PACKAGE: { label: 'IP Packaging', icon: '29' },
-    SUCCESS: { label: 'Build Complete', icon: '30' },
+    POST_LAYOUT_SPICE: { label: 'Spice Sim', icon: '28' },
+    SIGNOFF: { label: 'DRC/LVS Signoff', icon: '29' },
+    IP_PACKAGE: { label: 'IP Packaging', icon: '30' },
+    SUCCESS: { label: 'Build Complete', icon: '31' },
 };
 
 interface BuildEvent {

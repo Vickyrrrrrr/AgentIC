@@ -31,8 +31,8 @@ const PLANS: Plan[] = [
     ],
   },
   {
-    id: 'unlimited',
-    name: 'Unlimited',
+    id: 'pro',
+    name: 'Pro (Unlimited)',
     description: 'Unlimited successful chip builds',
     build_limit: null,
     price_display: '$200',
@@ -254,7 +254,7 @@ export function Pricing() {
 
             <div className="pricing-card-header">
               <div className="pricing-plan-icon">
-                {plan.id === 'unlimited' ? <Infinity size={22} /> : <Zap size={22} />}
+                {plan.id === 'pro' ? <Infinity size={22} /> : <Zap size={22} />}
               </div>
               <h2 className="pricing-plan-name">{plan.name}</h2>
               <p className="pricing-plan-desc">{plan.description}</p>
@@ -262,7 +262,7 @@ export function Pricing() {
 
             <div className="pricing-price-wrap">
               <span className="pricing-price">{plan.price_display}</span>
-              {plan.id === 'unlimited' && (
+              {plan.id === 'pro' && (
                 <span className="pricing-price-note">one-time</span>
               )}
               {plan.id === 'starter' && (

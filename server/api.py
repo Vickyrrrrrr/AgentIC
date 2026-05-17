@@ -808,6 +808,7 @@ BUILD_STATES_ORDER = [
     "ECO_PATCH",
     "POWER_ANALYSIS",
     "PHYSICAL_VERIFY",
+    "POST_LAYOUT_SPICE",
     "SIGNOFF",
     "IP_PACKAGE",
     "SUCCESS",
@@ -842,6 +843,7 @@ STAGE_META: Dict[str, Dict[str, str]] = {
     "ECO_PATCH": {"label": "ECO Patch", "icon": "🩹"},
     "POWER_ANALYSIS": {"label": "Power Analysis", "icon": "⚡"},
     "PHYSICAL_VERIFY": {"label": "Physical Verification", "icon": "🔍"},
+    "POST_LAYOUT_SPICE": {"label": "Spice Sim", "icon": "⚡"},
     "SIGNOFF": {"label": "DRC/LVS Signoff", "icon": "✅"},
     "IP_PACKAGE": {"label": "IP Packaging", "icon": "📦"},
     "SUCCESS": {"label": "Build Complete", "icon": "🎉"},
@@ -1323,6 +1325,7 @@ class BuildRequest(BaseModel):
     design_name: str
     description: str
     skip_openlane: bool = False
+    skip_spice: bool = False
     skip_coverage: bool = False
     full_signoff: bool = False
     max_retries: int = 5
@@ -1611,6 +1614,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             max_retries=req.max_retries,
             verbose=req.show_thinking,
             skip_openlane=forced_skip_openlane,  # TEMPORARY HF MAINTENANCE OVERRIDE
+            skip_spice=req.skip_spice,
             skip_coverage=req.skip_coverage,
             full_signoff=req.full_signoff,
             min_coverage=req.min_coverage,
@@ -1795,6 +1799,7 @@ def _infer_agent_name(state: str, message: str) -> str:
         "HARDENING": "Physical Design",
         "CONVERGENCE_REVIEW": "Convergence Reviewer",
         "ECO_PATCH": "Convergence Reviewer",
+        "POST_LAYOUT_SPICE": "SPICE Simulation",
         "SIGNOFF": "Signoff Engineer",
     }
     return state_agents.get(state, "Orchestrator")
@@ -1846,6 +1851,7 @@ def _get_thinking_message(state_name: str, design_name: str) -> str:
         "HARDENING": f"Running GDSII hardening flow...",
         "CONVERGENCE_REVIEW": f"Analyzing timing and area convergence...",
         "ECO_PATCH": f"Applying engineering change orders...",
+        "POST_LAYOUT_SPICE": f"Running post-layout transistor-level SPICE simulation...",
         "SIGNOFF": f"Running DRC, LVS, and STA checks...",
     }
     return messages.get(state_name, f"Processing {state_name}...")
@@ -2065,6 +2071,7 @@ def _execute_stage(orchestrator, state_name: str):
         "ECO_PATCH": orchestrator.do_eco_patch,
         "POWER_ANALYSIS": orchestrator.do_power_analysis,
         "PHYSICAL_VERIFY": orchestrator.do_physical_verify,
+        "POST_LAYOUT_SPICE": orchestrator.do_post_layout_spice,
         "SIGNOFF": orchestrator.do_signoff,
         "IP_PACKAGE": orchestrator.do_ip_package,
     }
@@ -2516,6 +2523,12 @@ def get_build_options_contract():
                         "type": "boolean",
                         "default": False,
                         "description": "Skip the coverage stage and continue from formal verification to regression.",
+                    },
+                    {
+                        "key": "skip_spice",
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Skip post-layout ngspice simulation for faster physical iterations.",
                     },
                     {
                         "key": "max_retries",

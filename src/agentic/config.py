@@ -292,13 +292,13 @@ def detect_llm_from_env() -> list[dict]:
         provider, model, base_url, api_key, key_env_var
 
     Providers detected (priority order):
-        Anthropic  — ANTHROPIC_API_KEY  → claude-3-5-sonnet
-        OpenAI     — OPENAI_API_KEY     → gpt-4o
-        Generic       — GENERIC_API_KEY       → llama-3.3-70b
-        DeepSeek   — DEEPSEEK_API_KEY   → deepseek-chat
-        ZhipuAI    — ZHIPUAI_API_KEY    → glm-4
-        Together   — TOGETHER_API_KEY   → meta-llama-3.1-70b
-        Ollama     — localhost:11434    → auto-detected model
+        Anthropic  â€” ANTHROPIC_API_KEY  â†’ claude-3-5-sonnet
+        OpenAI     â€” OPENAI_API_KEY     â†’ gpt-4o
+        Generic       â€” GENERIC_API_KEY       â†’ llama-3.3-70b
+        DeepSeek   â€” DEEPSEEK_API_KEY   â†’ deepseek-chat
+        ZhipuAI    â€” ZHIPUAI_API_KEY    â†’ ZHIPUAI_MODEL or LLM_MODEL
+        Together   â€” TOGETHER_API_KEY   â†’ meta-llama-3.1-70b
+        Ollama     â€” localhost:11434    â†’ auto-detected model
     """
     detected = []
 
@@ -307,7 +307,15 @@ def detect_llm_from_env() -> list[dict]:
         ("anthropic", "claude-3-5-sonnet", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
         ("generic", "llama-3.3-70b", "https://api.generic.com/openai/v1", "GENERIC_API_KEY"),
         ("deepseek", "deepseek-chat", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
-        ("zhipuai", "glm-4", "https://open.bigmodel.cn/api/paas/v4", "ZHIPUAI_API_KEY"),
+        (
+            "zhipuai",
+            os.environ.get("ZHIPUAI_MODEL", "").strip()
+            or os.environ.get("LLM_MODEL", "").strip(),
+            os.environ.get("ZHIPUAI_BASE_URL", "").strip()
+            or os.environ.get("LLM_BASE_URL", "").strip()
+            or "https://api.z.ai/api/paas/v4/",
+            "ZHIPUAI_API_KEY",
+        ),
         ("together", "meta-llama-3.1-70b", "https://api.together.xyz/v1", "TOGETHER_API_KEY"),
     ]
 
@@ -316,7 +324,7 @@ def detect_llm_from_env() -> list[dict]:
         if key:
             detected.append({
                 "provider": provider,
-                "model": model,
+                "model": model or "provider-default",
                 "base_url": base_url,
                 "api_key": key,
                 "key_env_var": env_var,
@@ -364,13 +372,13 @@ def detect_llm_from_env() -> list[dict]:
 # description shown in the CLI.
 #
 # Cell library sources:
-#   sky130   / gf180mcu  — managed by Volare/Ciel, installed automatically.
-#   asap7                — https://github.com/The-OpenROAD-Project/asap7 (Apache 2.0)
-#   nangate45            — NanGate 45nm Open Cell Library via Si2 (Apache 2.0)
-#   freepdk45            — FreePDK45 + NangateOpenCellLibrary (NC State / Si2)
-#   osu018 / osu035      — Oklahoma State University educational libs (limited cells)
+#   sky130   / gf180mcu  â€” managed by Volare/Ciel, installed automatically.
+#   asap7                â€” https://github.com/The-OpenROAD-Project/asap7 (Apache 2.0)
+#   nangate45            â€” NanGate 45nm Open Cell Library via Si2 (Apache 2.0)
+#   freepdk45            â€” FreePDK45 + NangateOpenCellLibrary (NC State / Si2)
+#   osu018 / osu035      â€” Oklahoma State University educational libs (limited cells)
 #
-# NOTE: efly45 was removed — it had no publicly available cell library and its
+# NOTE: efly45 was removed â€” it had no publicly available cell library and its
 # original entry incorrectly mapped a 45nm node to sky130 (130nm) cells, which
 # produces completely wrong timing, area, and DRC results.  If a real efly45 PDK
 # becomes available in the future, add it here with its correct lib name.
@@ -382,7 +390,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
-        "description": "SkyWater 130nm — most mature open PDK, best tool support",
+        "description": "SkyWater 130nm â€” most mature open PDK, best tool support",
         "fabrication_ready": True,
         "maturity": "production",
     },
@@ -392,7 +400,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "15.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.54",
-        "description": "GlobalFoundries 180nm — automotive grade, high voltage options",
+        "description": "GlobalFoundries 180nm â€” automotive grade, high voltage options",
         "fabrication_ready": False,
         "maturity": "experimental",
     },
@@ -402,7 +410,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "5.0",
         "voltage_vdd": "0.7",
         "min_cell_height": "0.144",
-        "description": "ASAP 7nm predictive PDK — research/academic, not a real foundry",
+        "description": "ASAP 7nm predictive PDK â€” research/academic, not a real foundry",
         "fabrication_ready": False,
         "maturity": "research",
     },
@@ -412,7 +420,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
-        "description": "NanGate 45nm Open Cell Library — academic/research, Apache 2.0",
+        "description": "NanGate 45nm Open Cell Library â€” academic/research, Apache 2.0",
         "fabrication_ready": False,
         "maturity": "research",
     },
@@ -427,7 +435,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.1",
         "min_cell_height": "0.4",
-        "description": "FreePDK45 (NC State 45nm) + NanGate Open Cell Library — academic/research",
+        "description": "FreePDK45 (NC State 45nm) + NanGate Open Cell Library â€” academic/research",
         "fabrication_ready": False,
         "maturity": "research",
     },
@@ -437,7 +445,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "12.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.5",
-        "description": "Oklahoma State 180nm — educational/research, limited cell set",
+        "description": "Oklahoma State 180nm â€” educational/research, limited cell set",
         "fabrication_ready": False,
         "maturity": "research",
     },
@@ -447,7 +455,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "15.0",
         "voltage_vdd": "3.3",
         "min_cell_height": "0.6",
-        "description": "Oklahoma State 350nm — high voltage, easy to probe, educational",
+        "description": "Oklahoma State 350nm â€” high voltage, easy to probe, educational",
         "fabrication_ready": False,
         "maturity": "research",
     },
@@ -457,7 +465,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "20.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
-        "description": "OpenFASOC 130nm analog/generator flow — requires sky130 to be installed separately under same PDK_ROOT",
+        "description": "OpenFASOC 130nm analog/generator flow â€” requires sky130 to be installed separately under same PDK_ROOT",
         "requires_parent_pdk": "sky130",
         "fabrication_ready": False,
         "maturity": "experimental",
@@ -468,7 +476,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "10.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.46",
-        "description": "Raw SkyWater PDK development tree — advanced users, not a packaged OpenLane PDK",
+        "description": "Raw SkyWater PDK development tree â€” advanced users, not a packaged OpenLane PDK",
         "fabrication_ready": False,
         "maturity": "experimental",
     },
@@ -478,7 +486,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "20.0",
         "voltage_vdd": "1.8",
         "min_cell_height": "0.6",
-        "description": "LEF/DEF 175nm educational placeholder — manual setup required",
+        "description": "LEF/DEF 175nm educational placeholder â€” manual setup required",
         "fabrication_ready": False,
         "maturity": "research",
     },
@@ -488,7 +496,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "2.5",
         "voltage_vdd": "0.9",
         "min_cell_height": "0.2",
-        "description": "TSMC 28nm — proprietary PDK, manual foundry access required",
+        "description": "TSMC 28nm â€” proprietary PDK, manual foundry access required",
         "proprietary": True,
         "fabrication_ready": False,
         "maturity": "proprietary",
@@ -499,7 +507,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "1.5",
         "voltage_vdd": "0.8",
         "min_cell_height": "0.1",
-        "description": "Samsung 14nm — proprietary PDK, manual foundry access required",
+        "description": "Samsung 14nm â€” proprietary PDK, manual foundry access required",
         "proprietary": True,
         "fabrication_ready": False,
         "maturity": "proprietary",
@@ -510,7 +518,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "2.0",
         "voltage_vdd": "0.9",
         "min_cell_height": "0.16",
-        "description": "Intel 22nm — proprietary PDK, manual foundry access required",
+        "description": "Intel 22nm â€” proprietary PDK, manual foundry access required",
         "proprietary": True,
         "fabrication_ready": False,
         "maturity": "proprietary",
@@ -521,7 +529,7 @@ PDK_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_clock_period": "2.0",
         "voltage_vdd": "0.8",
         "min_cell_height": "0.16",
-        "description": "GlobalFoundries 22nm — proprietary PDK, manual foundry access required",
+        "description": "GlobalFoundries 22nm â€” proprietary PDK, manual foundry access required",
         "proprietary": True,
     },
 }
@@ -786,11 +794,10 @@ if DEFAULT_PDK_PROFILE not in PDK_PROFILES:
 PDK_ROOT = os.environ.get("PDK_ROOT", os.path.expanduser("~/.ciel"))
 PDK = os.environ.get("PDK", PDK_PROFILES[DEFAULT_PDK_PROFILE]["pdk"])
 
-# OpenLane image — auto-detect ARM64 (Oracle A1 Ampere) vs x86_64
-_ARCH = "arm64" if _platform.machine() in ("aarch64", "arm64") else "amd64"
+# OpenLane image used by the default Docker hardening backend.
 OPENLANE_IMAGE = os.environ.get(
     "OPENLANE_IMAGE",
-    f"ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-{_ARCH}",
+    "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69",
 )
 
 # Simulation/Coverage adapter defaults
@@ -832,6 +839,8 @@ def _resolve_tool_binary(bin_name: str, env_var: Optional[str] = None) -> str:
         # $OSS_CAD_SUITE_HOME/oss-cad-suite.  Keep detecting that layout so
         # existing machines recover without manual PATH surgery.
         roots.append(os.path.join(oss_home, "oss-cad-suite"))
+    roots.append(os.path.expanduser("~/oss-cad-suite"))
+    roots.append(os.path.expanduser("~/oss-cad-suite/oss-cad-suite"))
     roots.append(os.path.join(WORKSPACE_ROOT, "oss-cad-suite"))
     roots.append(os.path.join(WORKSPACE_ROOT, "oss-cad-suite", "oss-cad-suite"))
 
@@ -858,6 +867,7 @@ SV2V_BIN = _resolve_tool_binary("sv2v", env_var="SV2V_BIN")
 OPENSTA_BIN = _resolve_tool_binary("sta", env_var="OPENSTA_BIN")
 MAGIC_BIN = _resolve_tool_binary("magic", env_var="MAGIC_BIN")
 NETGEN_BIN = _resolve_tool_binary("netgen", env_var="NETGEN_BIN")
+NGSPICE_BIN = _resolve_tool_binary("ngspice", env_var="NGSPICE_BIN")
 
 
 def get_pdk_profile(profile: Optional[str]) -> Dict[str, Any]:
@@ -1211,6 +1221,7 @@ def get_toolchain_diagnostics() -> Dict[str, Any]:
         "opensta": OPENSTA_BIN,
         "magic": MAGIC_BIN,
         "netgen": NETGEN_BIN,
+        "ngspice": NGSPICE_BIN,
     }
     detected_pdks = detect_available_pdks()
     return {

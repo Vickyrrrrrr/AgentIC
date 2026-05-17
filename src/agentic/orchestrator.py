@@ -31,6 +31,7 @@ from .config import (
     SIM_BACKEND_DEFAULT,
     COVERAGE_FALLBACK_POLICY_DEFAULT,
     COVERAGE_PROFILE_DEFAULT,
+    VERILATOR_BIN,
     get_pdk_profile,
 )
 from .agents.designer import get_designer_agent
@@ -322,6 +323,7 @@ class BuildState(enum.Enum):
     ECO_PATCH = "ECO Patch"
     POWER_ANALYSIS = "Power Analysis"
     PHYSICAL_VERIFY = "Physical Verification"
+    POST_LAYOUT_SPICE = "Post-Layout SPICE Simulation"
     SIGNOFF = "DRC/LVS Signoff"
     IP_PACKAGE = "IP Packaging"
     SUCCESS = "Build Complete"
@@ -414,6 +416,7 @@ class BuildOrchestrator:
         max_retries: int = 5,
         verbose: bool = True,
         skip_openlane: bool = False,
+        skip_spice: bool = False,
         skip_coverage: bool = False,
         full_signoff: bool = False,
         min_coverage: float = 80.0,
@@ -447,6 +450,7 @@ class BuildOrchestrator:
         self.max_retries = max_retries
         self.verbose = verbose
         self.skip_openlane = skip_openlane
+        self.skip_spice = skip_spice
         self.skip_coverage = skip_coverage
         self.full_signoff = full_signoff
         self.min_coverage = min_coverage
@@ -712,6 +716,7 @@ class BuildOrchestrator:
             BuildState.SYNTHESIS,
             BuildState.FLOORPLAN,
             BuildState.HARDENING,
+            BuildState.POST_LAYOUT_SPICE,
             BuildState.SIGNOFF,
             BuildState.SUCCESS,
         }
@@ -1468,6 +1473,8 @@ class BuildOrchestrator:
                     self.do_timing_analysis()
                 elif self.state == BuildState.PHYSICAL_VERIFY:
                     self.do_physical_verify()
+                elif self.state == BuildState.POST_LAYOUT_SPICE:
+                    self.do_post_layout_spice()
                 elif self.state == BuildState.IP_PACKAGE:
                     self.do_ip_package()
                 elif self.state == BuildState.FLOORPLAN:
@@ -3284,7 +3291,7 @@ endclass
             depth = 0
             if node.dependencies:
                 depth = 1 + max(
-                    depth_map.get(dep.name, 0) for dep in node.dependencies
+                    depth_map.get(dep, 0) for dep in node.dependencies
                 )
             depth_map[node.name] = depth
 
@@ -5863,10 +5870,14 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
 
         if not test_blocks:
             self.log("No regression tests extracted. Skipping regression.", refined=True)
+            if self.strict_gates:
+                self.artifacts["regression_error"] = "No regression tests extracted"
+                self.transition(BuildState.FAIL)
+                return
             if self.skip_openlane:
                 self.transition(BuildState.SUCCESS)
             else:
-                self.transition(BuildState.HARDENING)
+                self.transition(BuildState.SDC_GEN)
             return
 
         # Run each test
@@ -5913,7 +5924,7 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
 
                 compile_result = subprocess.run(
                     [
-                        "verilator",
+                        VERILATOR_BIN or "verilator",
                         "--binary",
                         "--timing",
                         "-Wno-UNUSED",
@@ -6070,7 +6081,8 @@ REQUIREMENTS:
                 rtl_files = [rtl_main]
             else:
                 self.log("No RTL files found for synthesis.", refined=True)
-                self.transition(BuildState.DFT_SCAN)
+                self.artifacts["synth_error"] = ["No RTL files found for synthesis"]
+                self.transition(BuildState.FAIL)
                 return
 
         sdc_path = self.artifacts.get("sdc_path", "")
@@ -6158,6 +6170,9 @@ REQUIREMENTS:
 
             self.log(f"Synthesis FAILED: {'; '.join(result.errors[:2])}", refined=True)
             self.artifacts["synth_error"] = result.errors
+            if self.strict_gates:
+                self.transition(BuildState.FAIL)
+                return
             self.transition(BuildState.DFT_SCAN)
 
     def do_dft_scan(self):
@@ -6368,6 +6383,10 @@ REQUIREMENTS:
 
         if not netlist or not os.path.exists(netlist):
             self.log("No gate netlist for GLS; skipping to floorplan.", refined=True)
+            if self.strict_gates:
+                self.artifacts["gls_error"] = "No gate netlist available for GLS"
+                self.transition(BuildState.FAIL)
+                return
             self.transition(BuildState.FLOORPLAN)
             return
 
@@ -6440,6 +6459,9 @@ REQUIREMENTS:
             )
             if not sim_result.get("ok"):
                 self.artifacts["gls_warnings"] = ["GLS simulation failed"]
+                if self.strict_gates:
+                    self.transition(BuildState.FAIL)
+                    return
 
         self.transition(BuildState.FLOORPLAN)
 
@@ -6738,7 +6760,11 @@ REQUIREMENTS:
         lef_path = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/signoff/openlane/{self.name}.lef"
         if not os.path.exists(gds_path) and not os.path.exists(lef_path):
             self.log("No GDS/LEF for physical verification; proceeding.", refined=True)
-            self.transition(BuildState.SIGNOFF)
+            if self.strict_gates:
+                self.artifacts["physical_verify_error"] = "No GDS/LEF found for physical verification"
+                self.transition(BuildState.FAIL)
+                return
+            self.transition(BuildState.POST_LAYOUT_SPICE if not self.skip_spice else BuildState.SIGNOFF)
             return
 
         gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
@@ -6770,6 +6796,12 @@ REQUIREMENTS:
                         f"  DRC: {v.rule} @ ({v.x_um:.2f},{v.y_um:.2f}): {v.message}",
                         refined=True,
                     )
+            if self.strict_gates and drc_result.drc_violations > 0:
+                self.artifacts["physical_verify_error"] = (
+                    f"Magic DRC has {drc_result.drc_violations} violations"
+                )
+                self.transition(BuildState.FAIL)
+                return
         else:
             structured_errors = []
             structured_errors.extend(
@@ -6793,6 +6825,10 @@ REQUIREMENTS:
                 return
 
             self.log(f"Magic DRC failed: {'; '.join(drc_result.errors[:2])}", refined=True)
+            if self.strict_gates:
+                self.artifacts["physical_verify_error"] = drc_result.errors
+                self.transition(BuildState.FAIL)
+                return
 
         with console.status("[accent]Running Netgen LVS...[/accent]"):
             from .tools.physical_tools import run_netgen_lvs, LVSResult
@@ -6834,6 +6870,10 @@ REQUIREMENTS:
                     max_attempts=1,
                 ):
                     return
+                if self.strict_gates:
+                    self.artifacts["physical_verify_error"] = lvs_errors
+                    self.transition(BuildState.FAIL)
+                    return
         else:
             if self._attempt_backend_error_recovery(
                 "LVS",
@@ -6846,11 +6886,99 @@ REQUIREMENTS:
                 return
 
             self.log(f"Netgen LVS failed: {'; '.join(lvs_result.errors[:2])}", refined=True)
+            if self.strict_gates:
+                self.artifacts["physical_verify_error"] = lvs_result.errors
+                self.transition(BuildState.FAIL)
+                return
         self.artifacts["pv_metrics"] = {
             "drc_violations": drc_result.drc_violations,
             "lvs_errors": lvs_result.lvs_errors,
             "lvs_equivalent": lvs_result.equivalent,
         }
+
+        self.transition(BuildState.POST_LAYOUT_SPICE if not self.skip_spice else BuildState.SIGNOFF)
+
+    def do_post_layout_spice(self):
+        """Extract parasitic SPICE from GDS and run ngspice post-layout checks."""
+        if self.skip_spice:
+            self.log("Skipping Post-Layout SPICE (--skip-spice).", refined=True)
+            self.transition(BuildState.SIGNOFF)
+            return
+
+        self.log("Running Post-Layout SPICE Simulation...", refined=True)
+        run_tag = self.artifacts.get("run_tag", "agentrun")
+        pdk_name = self.pdk_profile.get("pdk", PDK)
+        pdk_root = os.environ.get("PDK_ROOT", "")
+        spice_dir = f"{OPENLANE_ROOT}/designs/{self.name}/spice"
+        os.makedirs(spice_dir, exist_ok=True)
+
+        gds_path = self.artifacts.get("gds", "")
+        if not gds_path:
+            gds_path = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/signoff/magic/{self.name}.gds"
+        if not os.path.exists(gds_path):
+            self.artifacts["spice_skipped"] = f"No GDS found for SPICE extraction: {gds_path}"
+            self.log("SPICE skipped: no post-layout GDS found.", refined=True)
+            self.transition(BuildState.SIGNOFF)
+            return
+
+        from .tools.physical_tools import extract_spice_netlist
+        from .tools.spice_tools import build_basic_post_layout_deck, run_ngspice
+
+        extraction = extract_spice_netlist(
+            gds_path=gds_path,
+            output_dir=spice_dir,
+            pdk=pdk_name,
+            pdk_root=pdk_root,
+            design_name=self.name,
+            timeout=900,
+        )
+        self.artifacts["spice_extraction"] = extraction
+        self.artifacts["spice_netlist"] = extraction.spice_netlist_path
+
+        if not extraction.ok:
+            self.artifacts["spice_error"] = extraction.errors
+            self.log(
+                f"SPICE extraction skipped/failed: {'; '.join(extraction.errors[:2])}",
+                refined=True,
+            )
+            self.transition(BuildState.SIGNOFF)
+            return
+
+        clock_period = float(
+            self.artifacts.get(
+                "clock_period_override",
+                self.artifacts.get(
+                    "sdc_clock_period_ns",
+                    self.pdk_profile.get("default_clock_period", 10.0),
+                ),
+            )
+        )
+        deck = build_basic_post_layout_deck(
+            extracted_spice_path=extraction.spice_netlist_path,
+            design_name=self.name,
+            supply_v=float(self.pdk_profile.get("voltage_vdd", 1.8) or 1.8),
+            clock_period_ns=clock_period,
+        )
+        result = run_ngspice(deck, spice_dir, deck_name=f"{self.name}_post_layout.sp")
+        self.artifacts["spice_result"] = result
+        self.artifacts["spice_deck"] = result.get("deck_path", "")
+        self.artifacts["spice_raw"] = result.get("raw_path", "")
+        self.artifacts["spice_metrics"] = result.get("metrics", {})
+
+        if result.get("ok"):
+            metrics = result.get("metrics", {})
+            peak = metrics.get("peak_power")
+            suffix = f", peak_power={peak:.3e}W" if isinstance(peak, (int, float)) else ""
+            self.log(
+                f"ngspice: PASS ({result.get('runtime_sec', 0.0):.1f}s{suffix})",
+                refined=True,
+            )
+        else:
+            errors = result.get("errors", [])
+            self.log(
+                f"ngspice completed with issues: {'; '.join(errors[:2]) or 'see sim log'}",
+                refined=True,
+            )
 
         self.transition(BuildState.SIGNOFF)
 
@@ -7718,6 +7846,28 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         else:
             self.artifacts["lec_result"] = "SKIP"
             self.log("LEC: skipped (missing RTL or gate netlist)", refined=True)
+            if self.strict_gates:
+                fab_ready = False
+
+        spice = self.artifacts.get("spice_result")
+        spice_status = "SKIP"
+        if isinstance(spice, dict):
+            spice_status = "PASS" if spice.get("ok") else "ISSUES"
+            self.log(
+                f"SPICE: {spice_status} ({spice.get('runtime_sec', 0.0):.1f}s)",
+                refined=True,
+            )
+            if self.strict_gates and not spice.get("ok"):
+                fab_ready = False
+        elif self.artifacts.get("spice_error"):
+            spice_status = "FAIL"
+            self.log(f"SPICE: failed ({'; '.join(self.artifacts['spice_error'][:2])})", refined=True)
+            if self.strict_gates:
+                fab_ready = False
+        elif self.artifacts.get("spice_skipped"):
+            self.log(f"SPICE: skipped ({self.artifacts['spice_skipped']})", refined=True)
+            if self.strict_gates:
+                fab_ready = False
 
         # ── 1. DRC / LVS ──
         with console.status(
@@ -7933,6 +8083,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                 f"Power:      {power_status}\n"
                 f"IR-Drop:    {irdrop_status}\n"
                 f"LEC:        {self.artifacts.get('lec_result', 'N/A')}\n"
+                f"SPICE:      {spice_status}\n"
                 f"TB Gates:   {self.artifacts.get('tb_gate_history_count', 0)} events (last={self.artifacts.get('tb_gate_last_action', 'N/A')})\n"
                 f"Coverage:   line={self.artifacts.get('coverage', {}).get('line_pct', 'N/A')}% "
                 f"branch={self.artifacts.get('coverage', {}).get('branch_pct', 'N/A')}% "

@@ -1,8 +1,38 @@
-# AgentIC: The Limitless AI-Driven Silicon Compiler
+# AgentIC: Autonomous AI Chip Design CLI
 
-**AgentIC** is a next-generation, physics-aware AI hardware design suite. It seamlessly bridges the gap between natural language intention and fabrication-ready GDSII chip layouts.
+**AgentIC** is a CLI-first AI hardware design system that turns a natural-language chip request into RTL, verification artifacts, timing constraints, and, when Docker/OpenLane plus an open PDK are installed, a hardening run that can produce GDSII.
 
-Whether you are designing a specialized cryptography accelerator, a machine learning NPU, or a custom RISC-V processor, AgentIC acts as your automated VLSI architecture team. Instead of manually writing thousands of lines of Verilog and debugging synthesis loops, you simply describe your chip. AgentIC handles the logic generation, verification, timing constraints, and physical routing.
+The current package is strongest for digital RTL blocks, peripherals, accelerators, small SoCs, and open-PDK experiments. It is not a magic guarantee that any arbitrary chip on any arbitrary node will close timing, DRC, LVS, power, and manufacturability without engineering review. The design goal is autonomous iteration with fail-closed gates and correction loops that follow a real VLSI flow: spec, RTL, lint/syntax, testbench, simulation, formal/coverage/regression, SDC, synthesis, DFT/power/STA, floorplan, hardening, DRC/LVS, post-layout checks, and signoff reporting.
+
+## Current CLI Status
+
+AgentIC is ready to be used as an autonomous open-source VLSI CLI for supported designs and installed open PDKs. With a complete OSS CAD Suite, Docker/OpenLane, and PDK setup, it can attempt RTL-to-GDSII hardening and produce a GDSII file for open PDK targets.
+
+It should be treated as **engineering-assist automation**, not a universal one-stop shop that can guarantee every chip on every node autonomously. Advanced analog/mixed-signal designs, full custom layout, complex memories, proprietary nodes, package/IO planning, foundry-specific signoff, and true fabrication release still require human review and foundry-qualified collateral.
+
+### CLI Correction Loops
+
+The CLI includes bounded correction and recovery loops for:
+
+- RTL syntax/lint failures via ReAct-style tool use and `IncrementalFixEngine`
+- Testbench compile, port mismatch, timing race, and simulation failures
+- Coverage closure with configurable threshold and fallback policy
+- Synthesis recovery and strategy pivoting
+- Timing recovery through clock relaxation, area expansion, and RTL rerouting
+- OpenLane hardening recovery for timing, congestion, placement/routing, DRC, LVS, antenna, and physical violations
+- Fail-closed retry budgets so the pipeline stops instead of looping forever
+
+Use `agentic doctor` before serious builds. It prints the installed tool status and the active self-healing recovery categories.
+
+### CLI Toolchain Policy
+
+The CLI can run RTL generation, syntax/lint checks, simulation, and many verification steps with the native Python and OSS CAD Suite environment. RTL-to-GDSII hardening uses Docker/OpenLane by default in both the CLI and the web app.
+
+If you intentionally want to try a native OpenLane/OpenROAD hardening backend instead of Docker, set:
+
+```bash
+export AGENTIC_OPENLANE_BACKEND=native
+```
 
 ---
 
@@ -20,9 +50,40 @@ pip install agentic-ic
 agentic doctor
 ```
 
-This checks that OSS CAD Suite, Docker, and other required tools are available. See the output for any missing dependencies.
+This checks that Python dependencies, OSS CAD Suite tools, Docker/OpenLane hardening support, PDK paths, and recovery-loop categories are available. See the output for any missing dependencies.
 
-### 3. Install a PDK
+### 3. One-command CLI setup
+
+Install the default CLI stack:
+
+```bash
+agentic setup-cli
+```
+
+Install each layer separately:
+
+```bash
+# RTL/sim/synth tools: yosys, verilator, iverilog, sby, etc.
+agentic install-oss
+
+# Direct physical signoff tools: newer Magic, Netgen, OpenSTA
+agentic install-signoff-tools
+
+# OpenLane hardening backend used for RTL-to-GDSII
+agentic install-openlane
+
+# PDKs
+agentic install-pdk sky130
+agentic install-pdk gf180mcu
+```
+
+Install all recommended auto-install PDKs in one command:
+
+```bash
+agentic setup-cli --pdks all-open-auto
+```
+
+### 4. Install a PDK
 
 AgentIC requires an open-source PDK (Process Design Kit) to build chips.
 
@@ -37,39 +98,48 @@ agentic install-pdk sky130
 agentic install-pdk gf180mcu
 ```
 
-**Supported PDKs:** `sky130`, `gf180mcu`, `asap7`, `nangate45`, `freepdk45`, `osu018`, `osu035`
+**Recommended auto-install PDKs:** `sky130`, `gf180mcu`
+
+**Research/manual entries shown by `agentic install-pdk list`:** `asap7`, `nangate45`, `freepdk45`, `osu018`, `osu035`, `openfasoc130`, `skywater-raw`, plus proprietary placeholders such as `tsmc28`, `samsung14`, `intel22`, and `gf22`. These are listed so users can register or experiment with them, but they are not guaranteed one-command complete hardening targets.
+
+Use this to choose:
+
+```bash
+agentic install-pdk list
+```
 
 ---
 
 ## PDK Comparison Guide
 
-| PDK | Node | Voltage | Max Freq | Maturity | Use Case |
-|-----|------|---------|----------|----------|----------|
-| **sky130** | 130nm | 1.8V | 150 MHz | ⭐⭐⭐ Production | **Best choice** - Complete tool support, real tapeouts |
-| **gf180mcu** | 180nm | 1.8V | 100 MHz | ⭐⭐ Production | Automotive grade, high voltage options |
-| **asap7** | 7nm | 0.7V | 1000 MHz | ⭐ Research | Research/learning 7nm flows |
-| **nangate45** | 45nm | 1.1V | 500 MHz | ⭐ Research | Academic, single corner |
-| **freepdk45** | 45nm | 1.1V | 500 MHz | ⭐ Research | NC State, educational |
-| **osu018** | 180nm | 1.8V | 100 MHz | ⭐ Educational | Limited cells, easy setup |
-| **osu035** | 350nm | 3.3V | 50 MHz | ⭐ Educational | High voltage, easy probing |
+| PDK | Node | Voltage | Typical Clock | AgentIC Tier | Use Case |
+|-----|------|---------|---------------|--------------|----------|
+| **sky130** | 130nm | 1.8V | design-dependent | Recommended auto-install | Best open digital RTL-to-GDS target for beginners and shuttle-style experiments |
+| **gf180mcu** | 180nm | 1.8V/3.3V/5V families | design-dependent | Recommended auto-install | Robust open digital RTL-to-GDS target for MCU, industrial, and high-voltage experiments |
+| **asap7** | 7nm predictive | 0.7V | research-only | Research/manual | Predictive academic studies, not a foundry-fabrication target |
+| **nangate45** | 45nm | 1.1V | research-only | Research/manual | Academic synthesis and PnR experiments |
+| **freepdk45** | 45nm | 1.1V | research-only | Manual | Educational flow collateral, requires manual setup |
+| **osu018** | 180nm | 1.8V | educational | Educational/manual | Standard-cell learning, not verified one-command OpenLane signoff |
+| **osu035** | 350nm | 3.3V | educational | Educational/manual | Standard-cell learning, not verified one-command OpenLane signoff |
 
 ### What Each PDK Supports
 
-| PDK | Synthesis | Place&Route | DRC/LVS | Real Tapeout |
-|-----|-----------|-------------|---------|--------------|
-| sky130 | ✅ | ✅ | ✅ Complete | ✅ Yes |
-| gf180mcu | ✅ | ✅ | ✅ Complete | ✅ Yes |
-| asap7 | ✅ | ✅ | ⚠️ Limited | ❌ No |
-| nangate45 | ✅ | ✅ | ⚠️ Limited | ❌ No |
-| freepdk45 | ✅ | ✅ | ⚠️ Limited | ❌ No |
-| osu018 | ✅ | ❌ | ⚠️ Limited | ❌ No |
+| PDK | One-command Install | OpenLane RTL-to-GDS | DRC/LVS Collateral | Fabrication Claim |
+|-----|---------------------|---------------------|--------------------|-------------------|
+| sky130 | Yes, via volare | Supported target | Available through open PDK/OpenLane | Possible only after clean project-specific signoff |
+| gf180mcu | Yes, via volare | Supported target | Available through open PDK/OpenLane | Possible only after clean project-specific signoff |
+| asap7 | No, force/manual only | Experimental | Limited/research | No foundry fabrication claim |
+| nangate45 | No, force/manual only | Experimental | Limited/research | No foundry fabrication claim |
+| freepdk45 | Manual | Experimental | Limited/research | No foundry fabrication claim |
+| osu018 | Manual | Not verified | Limited/educational | No foundry fabrication claim |
+| osu035 | Manual | Not verified | Limited/educational | No foundry fabrication claim |
 | osu035 | ✅ | ❌ | ⚠️ Limited | ❌ No |
 
 ### Which PDK Should You Choose?
 
 **For beginners:** Use `sky130` - everything works, lots of examples, real chip fabrication possible.
 
-**For research/learning 7nm:** Use `asap7` - simulates 7nm FinFET technology.
+**For research/learning 7nm:** Use `asap7` only as an experimental/manual target; it is predictive and not a guaranteed one-command AgentIC hardening flow.
 
 **For automotive/industrial:** Use `gf180mcu` - higher voltage, automotive grade.
 
@@ -276,7 +346,7 @@ After installation, add to your shell profile:
 export PDK_ROOT=~/.ciel   # or wherever you installed the PDK
 ```
 
-### 4. Setup AgentIC (First Run)
+### 5. Setup AgentIC (First Run)
 
 On first run, AgentIC will automatically guide you through setup. Or run it manually:
 
@@ -300,7 +370,7 @@ Any OpenAI-compatible provider works:
 | LM Studio | localhost:1234 | any local model |
 | vLLM / Zai | your-endpoint.com/v1 | meta-llama-3.1-70b |
 
-### 5. Build your first chip
+### 6. Build your first chip
 
 ```bash
 agentic build \
@@ -316,6 +386,10 @@ agentic build \
 | Command | Description |
 |---------|-------------|
 | `agentic doctor` | Check environment and toolchain |
+| `agentic setup-cli` | Install OSS CAD Suite, physical signoff tools, Docker/OpenLane image, volare, PDKs, and shell exports |
+| `agentic install-oss` | Install only OSS CAD Suite for RTL/sim/synth tools |
+| `agentic install-signoff-tools` | Install Magic 8.3.411+, Netgen, and OpenSTA for direct `drc`/`lvs`/`sta` checks |
+| `agentic install-openlane` | Pull the Docker/OpenLane hardening image |
 | `agentic install-pdk <name>` | Install a PDK (sky130, gf180mcu, etc.) |
 | `agentic install-pdk list` | Show all available PDKs |
 | `agentic login` | Interactive setup wizard (first run) |
@@ -520,8 +594,10 @@ When fixing errors, allocation shifts:
 ```
 --name TEXT           Design name (required)
 --desc TEXT           Natural language description (required)
---pdk-profile TEXT    Target PDK (auto-detected if omitted)
+--pdk TEXT            Target PDK (auto-detected if omitted)
+--pdk-path TEXT       Path to a custom PDK directory
 --skip-openlane       Stop after simulation (no GDSII hardening)
+--skip-spice          Skip post-layout ngspice extraction/simulation
 ```
 
 ### Verification options
@@ -536,6 +612,8 @@ When fixing errors, allocation shifts:
 
 ```
 --max-retries N       Max auto-fix retries (default: 5)
+--recovery-attempts N Max hardening recovery attempts (default: 5)
+--max-pivots N        Max strategy pivots before fail-closed stop
 --strict-gates/--no-strict-gates  Enable/disable fail-closed gating
 --dry-run             Validate spec without running build
 --json                Output machine-readable JSON
@@ -574,12 +652,13 @@ When fixing errors, allocation shifts:
 - **OSS CAD Suite** — verilator, iverilog, vvp, yosys, sby
   - Download: https://github.com/YosysHQ/oss-cad-suite-build/releases
   - Set: `export OSS_CAD_SUITE_HOME=/path/to/oss-cad-suite`
+- **Native OpenLane/OpenROAD** - optional backend when `AGENTIC_OPENLANE_BACKEND=native`
+- **Open PDK** - set `PDK_ROOT` or run `agentic install-pdk <name>`
+- **Docker** - required for default OpenLane RTL-to-GDSII hardening in CLI and web builds
 - **LLM API key** — OpenAI, Anthropic, Groq, or any OpenAI-compatible provider
 
 ### Optional
 
-- **Docker** — Required for OpenLane RTL→GDSII hardening
-  - Install: https://docs.docker.com/get-docker/
 - **Volare** — For automated PDK installation via volare
   - Install: `pip install volare`
 
@@ -643,7 +722,6 @@ export PDK_ROOT=~/.ciel
 
 ## Notes
 
-- Keep Docker running if you want the physical hardening flow.
 - If you only want RTL generation and verification, use `--skip-openlane`.
 - OpenLane is pulled through Docker on demand — no separate manual install needed.
 - Build outputs are written to `$OPENLANE_ROOT/designs/` (or `agentic-workspace/` by default).

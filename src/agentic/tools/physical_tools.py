@@ -24,11 +24,16 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..config import WORKSPACE_ROOT, OPENLANE_ROOT, get_pdk_tool_config, get_pdk_profile
+from ..config import (
+    WORKSPACE_ROOT,
+    OPENLANE_ROOT,
+    MAGIC_BIN,
+    NETGEN_BIN,
+    get_pdk_tool_config,
+    get_pdk_profile,
+)
 
 
-MAGIC_BIN = os.environ.get("MAGIC_BIN", "magic")
-NETGEN_BIN = os.environ.get("NETGEN_BIN", "netgen")
 ANTENNA_BIN = os.environ.get("ANTENNA_BIN", "verifyMetR")
 
 
@@ -93,6 +98,21 @@ class AntennaResult:
     max_ratio: float
     report_path: str
     errors: List[str]
+    metrics: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SpiceExtractionResult:
+    """Result from Magic parasitic SPICE extraction."""
+
+    ok: bool
+    spice_netlist_path: str
+    tcl_path: str
+    gds_path: str
+    tech_file: str
+    runtime_sec: float
+    errors: List[str]
+    diagnostics: List[str]
     metrics: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -276,6 +296,11 @@ def run_magic_drc(
     raw_output = stdout + stderr
     structured_errors = parse_drc_errors(raw_output)
     violations = _parse_magic_drc_output(raw_output, drc_report)
+    if proc.returncode != 0:
+        errors.append(
+            f"Magic DRC command failed with return code {proc.returncode}. "
+            f"See report: {drc_report}"
+        )
 
     with open(drc_report, "a") as f:
         f.write(f"\n{'=' * 60}\nMagic DRC Complete\n")
@@ -303,6 +328,120 @@ def run_magic_drc(
             "runtime_sec": runtime,
             "pdk": pdk,
             "structured_errors": structured_errors,
+        },
+    )
+
+
+def extract_spice_netlist(
+    gds_path: str,
+    tech_file: str = "",
+    output_dir: str = "",
+    pdk: str = "sky130",
+    pdk_root: Optional[str] = None,
+    design_name: Optional[str] = None,
+    timeout: int = 900,
+) -> SpiceExtractionResult:
+    """Extract a parasitic-aware SPICE netlist from a final GDS using Magic."""
+    import time
+
+    output_dir = output_dir or os.getcwd()
+    os.makedirs(output_dir, exist_ok=True)
+    design_name = design_name or os.path.splitext(os.path.basename(gds_path))[0]
+    spice_path = os.path.join(output_dir, f"{design_name}.spice")
+    tcl_path = os.path.join(output_dir, f"{design_name}_extract_spice.tcl")
+    errors: List[str] = []
+
+    if not os.path.exists(gds_path):
+        errors.append(f"GDS file not found: {gds_path}")
+        return _error_spice_extraction(errors, spice_path, tcl_path, gds_path)
+
+    if not os.path.exists(tech_file):
+        tech_file = _find_tech_file(tech_file, pdk, pdk_root or "")
+        if not tech_file:
+            errors.append(
+                f"Magic tech file not found for PDK '{pdk}'. Set --tech or PDK_ROOT."
+            )
+            return _error_spice_extraction(errors, spice_path, tcl_path, gds_path)
+
+    tcl_script = [
+        f"# Magic SPICE extraction for {design_name}",
+        f"tech load [list {tech_file}]",
+        f"gds read [list {gds_path}]",
+        f"load {design_name}",
+        "select top cell",
+        "extract do local",
+        "extract all",
+        "ext2spice lvs",
+        "ext2spice cthresh 0",
+        "ext2spice rthresh 0",
+        "ext2spice renumber off",
+        f"ext2spice -o [list {spice_path}]",
+        "quit",
+    ]
+
+    with open(tcl_path, "w") as f:
+        f.write("\n".join(tcl_script))
+
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            [MAGIC_BIN, "-dnull", "-noconsole", tcl_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=output_dir,
+        )
+        runtime = time.time() - start
+    except subprocess.TimeoutExpired:
+        return _error_spice_extraction(
+            ["Magic SPICE extraction timed out"],
+            spice_path,
+            tcl_path,
+            gds_path,
+            tech_file,
+            time.time() - start,
+        )
+    except OSError:
+        return _error_spice_extraction(
+            ["Magic binary not found. Install Magic or set MAGIC_BIN env var."],
+            spice_path,
+            tcl_path,
+            gds_path,
+            tech_file,
+        )
+
+    diagnostics = []
+    if proc.stdout:
+        diagnostics.append(proc.stdout)
+    if proc.stderr:
+        diagnostics.append(proc.stderr)
+
+    ok = (
+        proc.returncode == 0
+        and os.path.exists(spice_path)
+        and os.path.getsize(spice_path) > 0
+    )
+    if not ok:
+        errors.append(f"Magic SPICE extraction failed with return code {proc.returncode}")
+        if not os.path.exists(spice_path):
+            errors.append(f"SPICE netlist was not generated: {spice_path}")
+
+    return SpiceExtractionResult(
+        ok=ok,
+        spice_netlist_path=spice_path,
+        tcl_path=tcl_path,
+        gds_path=gds_path,
+        tech_file=tech_file,
+        runtime_sec=runtime,
+        errors=errors,
+        diagnostics=diagnostics,
+        metrics={
+            "runtime_sec": runtime,
+            "returncode": proc.returncode,
+            "spice_netlist_bytes": os.path.getsize(spice_path)
+            if os.path.exists(spice_path)
+            else 0,
+            "pdk": pdk,
         },
     )
 
@@ -356,16 +495,18 @@ def _build_magic_drc_tcl(
 
 
 def run_netgen_lvs(
-    schematic_verilog: str,
-    layout_gds: str,
-    output_dir: str,
-    tech_setup: str,
+    schematic_verilog: str = "",
+    layout_gds: str = "",
+    output_dir: str = "",
+    tech_setup: str = "",
     pdk: str = "sky130",
     pdk_root: Optional[str] = None,
     auto_physical_pins: bool = True,
     use_schematic_netlist: str = "verilog",
     timeout: int = 600,
     design_name: Optional[str] = None,
+    schematic_netlist: str = "",
+    top_module: Optional[str] = None,
 ) -> LVSResult:
     """Run independent Netgen LVS (Layout vs Schematic) check.
 
@@ -385,8 +526,9 @@ def run_netgen_lvs(
     Returns:
         LVSResult with equivalence status and mismatch details
     """
+    schematic_verilog = schematic_verilog or schematic_netlist
     os.makedirs(output_dir, exist_ok=True)
-    design_name = design_name or os.path.splitext(os.path.basename(layout_gds))[0]
+    design_name = top_module or design_name or os.path.splitext(os.path.basename(layout_gds))[0]
 
     lvs_report = os.path.join(output_dir, f"{design_name}_lvs.rpt")
     errors: List[str] = []
@@ -440,6 +582,11 @@ def run_netgen_lvs(
         return _error_lvs_result(errors, lvs_report)
 
     equiv, net_mismatches, pin_mismatches, unconn = _parse_netgen_output(stdout)
+    if proc.returncode != 0:
+        errors.append(
+            f"Netgen LVS command failed with return code {proc.returncode}. "
+            f"See report: {lvs_report}"
+        )
 
     with open(lvs_report, "w") as f:
         f.write(f"Netgen LVS Report for {design_name}\n")
@@ -710,6 +857,14 @@ def _error_drc_result(
     report_path: str,
     runtime: float = 0.0,
 ) -> DRCResult:
+    try:
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w") as f:
+            f.write("Magic DRC did not run successfully.\n\n")
+            for error in errors:
+                f.write(f"- {error}\n")
+    except OSError:
+        pass
     return DRCResult(
         ok=False,
         drc_violations=0,
@@ -731,6 +886,14 @@ def _error_lvs_result(
     report_path: str,
     runtime: float = 0.0,
 ) -> LVSResult:
+    try:
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w") as f:
+            f.write("Netgen LVS did not run successfully.\n\n")
+            for error in errors:
+                f.write(f"- {error}\n")
+    except OSError:
+        pass
     return LVSResult(
         ok=False,
         equivalent=False,
@@ -741,6 +904,27 @@ def _error_lvs_result(
         lvs_report_path=report_path,
         schematic_netlist="",
         layout_netlist="",
+        runtime_sec=runtime,
+        errors=errors,
+        diagnostics=[],
+        metrics={},
+    )
+
+
+def _error_spice_extraction(
+    errors: List[str],
+    spice_path: str,
+    tcl_path: str,
+    gds_path: str,
+    tech_file: str = "",
+    runtime: float = 0.0,
+) -> SpiceExtractionResult:
+    return SpiceExtractionResult(
+        ok=False,
+        spice_netlist_path=spice_path,
+        tcl_path=tcl_path,
+        gds_path=gds_path,
+        tech_file=tech_file,
         runtime_sec=runtime,
         errors=errors,
         diagnostics=[],

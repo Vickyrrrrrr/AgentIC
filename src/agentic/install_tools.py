@@ -94,13 +94,21 @@ def install_oss_cad_suite(target_dir):
         return False
         
     assets = release_data.get("assets", [])
-    expected_suffix = f"{os_name}-{arch}.tgz"
+    expected_prefix = f"oss-cad-suite-{os_name}-{arch}-"
+    expected_suffix = ".tgz"
     download_url = None
     filename = None
     
     for asset in assets:
         name = asset["name"]
-        if name.endswith(expected_suffix) or (os_name == "windows" and name.endswith(".exe") and "windows-x64" in name):
+        if (
+            name.startswith(expected_prefix)
+            and name.endswith(expected_suffix)
+        ) or (
+            os_name == "windows"
+            and name.endswith(".exe")
+            and "windows-x64" in name
+        ):
             download_url = asset["browser_download_url"]
             filename = name
             break

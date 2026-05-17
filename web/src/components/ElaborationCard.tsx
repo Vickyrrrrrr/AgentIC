@@ -11,7 +11,7 @@ export default function ElaborationCard({ options, message, onSelect, isSubmitti
     const [customChoice, setCustomChoice] = useState("");
 
     return (
-        <div className="approval-card" style={{ maxWidth: '450px', margin: '0 auto', boxShadow: '0 8px 16px rgba(0,0,0,0.5)' }}>
+        <div className="approval-card" style={{ maxWidth: '450px', margin: '0 auto', boxShadow: 'var(--shadow-lg)' }}>
             <div className="card-header" style={{ padding: '0.6rem 1rem' }}>
                 <span className="card-icon">⚙️</span>
                 <span className="card-title" style={{ fontSize: '0.9rem' }}>Pick Architecture</span>
@@ -38,23 +38,23 @@ export default function ElaborationCard({ options, message, onSelect, isSubmitti
                                 className="elaboration-option" 
                                 style={{ 
                                     padding: '0.5rem 0.8rem', 
-                                    border: '1px solid #444', 
+                                    border: '1px solid var(--border-mid)', 
                                     borderRadius: '6px', 
                                     cursor: 'pointer',
                                     display: 'flex',
                                     justifyContent: 'space-between',
                                     alignItems: 'center',
-                                    backgroundColor: 'rgba(255,255,255,0.03)'
+                                    backgroundColor: 'var(--bg-hover)'
                                 }} 
                                 onClick={() => !isSubmitting && onSelect(String(optionNum))}
                                 title={details}
                             >
                                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                    <strong style={{ color: '#F5781F', fontSize: '0.9rem' }}>Op {optionNum}: {title.substring(0, 30)}{title.length > 30 ? '...' : ''}</strong>
-                                    <span style={{ fontSize: '0.75rem', color: '#888' }}>{category}</span>
+                                    <strong style={{ color: 'var(--accent)', fontSize: '0.9rem' }}>Op {optionNum}: {title.substring(0, 30)}{title.length > 30 ? '...' : ''}</strong>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>{category}</span>
                                 </div>
                                 <div style={{ textAlign: 'right' }}>
-                                    <div style={{ fontWeight: 'bold', color: '#fff', fontSize: '0.85rem' }}>{freq}</div>
+                                    <div style={{ fontWeight: 'bold', color: 'var(--text)', fontSize: '0.85rem' }}>{freq}</div>
                                     <button 
                                         className="btn-approve" 
                                         style={{ marginTop: '0.3rem', padding: '0.2rem 0.6rem', fontSize: '0.75rem' }}
@@ -68,8 +68,8 @@ export default function ElaborationCard({ options, message, onSelect, isSubmitti
                     })}
                 </div>
 
-                <div className="approval-reject" style={{ marginTop: '0.8rem', borderTop: '1px solid #333', paddingTop: '0.6rem' }}>
-                    <div style={{ marginBottom: '0.3rem', color: '#888', fontSize: '0.75rem' }}>Or custom:</div>
+                <div className="approval-reject" style={{ marginTop: '0.8rem', borderTop: '1px solid var(--border)', paddingTop: '0.6rem' }}>
+                    <div style={{ marginBottom: '0.3rem', color: 'var(--text-dim)', fontSize: '0.75rem' }}>Or custom:</div>
                     <textarea 
                         className="reject-textarea" 
                         placeholder="e.g. Combine Op1 & 2..."
@@ -81,7 +81,7 @@ export default function ElaborationCard({ options, message, onSelect, isSubmitti
                     />
                     <button 
                         className="btn-reject" 
-                        style={{ marginTop: '0.4rem', width: '100%', backgroundColor: '#444', padding: '0.4rem', fontSize: '0.8rem' }}
+                        style={{ marginTop: '0.4rem', width: '100%', backgroundColor: 'var(--border-mid)', padding: '0.4rem', fontSize: '0.8rem' }}
                         onClick={() => onSelect(customChoice)}
                         disabled={isSubmitting || !customChoice.trim()}
                     >

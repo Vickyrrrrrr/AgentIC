@@ -63,8 +63,8 @@ PLANS = {
         "price_inr_paise": 167000,  # ~₹1,670 (approx $20 USD)
         "razorpay_amount_paise": 167000,
     },
-    "unlimited": {
-        "name": "Unlimited",
+    "pro": {
+        "name": "Pro (Unlimited)",
         "description": "Unlimited successful chip builds",
         "build_limit": None,  # NULL = unlimited
         "price_display": "$200",
@@ -76,6 +76,7 @@ PLANS = {
 # Legacy aliases (for existing data)
 PLAN_LIMITS = {
     "starter": 10,
+    "pro": None,
     "unlimited": None,
 }
 
@@ -336,11 +337,8 @@ async def _activate_user_plan(
         "profiles",
         f"id=eq.{user_id}",
         {
-            "plan_type": "agentic_paid",
             "plan": plan,
-            "build_limit": build_limit,
             "successful_builds": 0,
-            "razorpay_order_id": razorpay_order_id,
         },
     )
 
@@ -472,10 +470,11 @@ async def get_billing_status(profile: dict = Depends(get_current_user)):
             "test_mode": IS_TEST_MODE,
         }
 
+    plan = profile.get("plan", "free")
     return {
-        "plan_type": profile.get("plan_type", "byok"),
-        "plan": profile.get("plan"),
-        "build_limit": profile.get("build_limit"),
+        "plan_type": "byok" if plan == "byok" else "agentic_paid",
+        "plan": plan,
+        "build_limit": PLAN_LIMITS.get(plan),
         "successful_builds": profile.get("successful_builds", 0),
         "test_mode": IS_TEST_MODE,
     }

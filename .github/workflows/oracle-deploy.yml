@@ -131,11 +131,6 @@ jobs:
             # ── Tear down existing compose stack cleanly ──────────────────────
             sudo $DOCKER_COMPOSE down --remove-orphans || true
 
-            # ── Cache: reuse the agentic:local image if it exists ────────────
-            # Only remove dangling images (NOT the built agentic:local layer cache)
-            # so the 1.5GB oss-cad-suite ARM64 layer is reused on next build.
-            sudo docker image prune -f
-
             # ── Phase 1: Bring up CORE services only (no observability) ──────
             # This prevents prometheus from failing because api isn't ready yet
             echo "Starting core services..."

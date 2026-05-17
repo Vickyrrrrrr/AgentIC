@@ -16,7 +16,7 @@ STAGE_FLOW = [
     "INIT", "SPEC", "SPEC_VALIDATE", "HIERARCHY_EXPAND", "VERIFICATION_PLAN", "RTL_GEN", "RTL_FIX", "LINT_CHECK", "CDC_ANALYZE",
     "VERIFICATION", "FORMAL_VERIFY", "COVERAGE_CHECK", "REGRESSION", "SDC_GEN", "SYNTHESIS", "FEASIBILITY_CHECK",
     "DFT_SCAN", "DFT_ATPG", "MBIST", "GLS_SIM", "FLOORPLAN", "HARDENING", "TIMING_ANALYSIS", "CONVERGENCE_REVIEW",
-    "ECO_PATCH", "POWER_ANALYSIS", "PHYSICAL_VERIFY", "SIGNOFF", "IP_PACKAGE", "SUCCESS",
+    "ECO_PATCH", "POWER_ANALYSIS", "PHYSICAL_VERIFY", "POST_LAYOUT_SPICE", "SIGNOFF", "IP_PACKAGE", "SUCCESS",
 ]
 
 STAGE_DESCRIPTIONS = {
@@ -47,6 +47,7 @@ STAGE_DESCRIPTIONS = {
     "ECO_PATCH": "Apply Engineering Change Orders to fix post-layout violations",
     "POWER_ANALYSIS": "Analyze dynamic and static power consumption across operating modes",
     "PHYSICAL_VERIFY": "Run DRC (Design Rule Check) and LVS (Layout vs Schematic)",
+    "POST_LAYOUT_SPICE": "Extract parasitic SPICE from GDS and run ngspice post-layout simulation",
     "SIGNOFF": "Run DRC, LVS, STA, and power signoff checks",
     "IP_PACKAGE": "Package design as reusable IP with docs, timing models, and test fixtures",
     "SUCCESS": "Build completed successfully — all quality gates passed",
@@ -107,6 +108,7 @@ STAGE_ARTIFACT_SUFFIXES = {
     "ECO_PATCH": {".v", ".def", ".tcl", ".rpt", ".log"},
     "POWER_ANALYSIS": {".rpt", ".json", ".log"},
     "PHYSICAL_VERIFY": {".rpt", ".log", ".gds", ".def"},
+    "POST_LAYOUT_SPICE": {".sp", ".spice", ".raw", ".log", ".tcl", ".json"},
     "SIGNOFF": {".rpt", ".log", ".json", ".gds", ".def", ".lef"},
     "IP_PACKAGE": {".zip", ".tar", ".gz", ".json", ".pdf", ".docx", ".v", ".sv", ".sdc", ".gds"},
 }
@@ -479,6 +481,7 @@ STAGE_HUMAN_NAMES = {
     "ECO_PATCH": "ECO Patch",
     "POWER_ANALYSIS": "Power Analysis",
     "PHYSICAL_VERIFY": "Physical Verification",
+    "POST_LAYOUT_SPICE": "Post-Layout SPICE",
     "SIGNOFF": "DRC/LVS Signoff",
     "IP_PACKAGE": "IP Packaging",
     "SUCCESS": "Build Complete",

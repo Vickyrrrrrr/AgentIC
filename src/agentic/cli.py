@@ -62,6 +62,7 @@ _suppress_external_logging()
 # Local imports
 from .config import (
     OPENLANE_ROOT,
+    OPENLANE_IMAGE,
     LLM_MODEL,
     LLM_BASE_URL,
     LLM_API_KEY,
@@ -100,7 +101,14 @@ from .tools.synth_tools import run_yosys_synth, synth_tool
 from .tools.sta_tools import run_opensta, run_multi_corner_sta, sta_tool, parse_sdc_file
 from .tools.dft_tools import run_scan_insertion, run_testability_analysis, dft_tool
 from .tools.power_tools import run_power_analysis, power_tool
-from .tools.physical_tools import run_magic_drc, run_netgen_lvs, drc_tool, lvs_tool
+from .tools.physical_tools import (
+    extract_spice_netlist,
+    run_magic_drc,
+    run_netgen_lvs,
+    drc_tool,
+    lvs_tool,
+)
+from .tools.spice_tools import build_basic_post_layout_deck, run_ngspice
 from .tools.signoff_reporter import generate_qor_report, SignoffReporter
 
 # --- INITIALIZE ---
@@ -602,14 +610,14 @@ LICENSE_OFFLINE_GRACE_HOURS = max(
 )
 
 
-def check_dependencies(skip_openlane: bool):
+def check_dependencies(skip_openlane: bool, skip_spice: bool = False):
     """
     Verify all required EDA tools are present before starting a build.
     Uses resolved binary paths from config (OSS CAD Suite aware) rather than
     relying solely on PATH, so it correctly finds tools in OSS_CAD_SUITE_HOME.
     """
     import shutil
-    from .config import YOSYS_BIN, VERILATOR_BIN, IVERILOG_BIN, VVP_BIN
+    from .config import YOSYS_BIN, VERILATOR_BIN, IVERILOG_BIN, VVP_BIN, NGSPICE_BIN
 
     def _tool_present(binary: str) -> bool:
         """Check if binary exists at absolute path or on PATH."""
@@ -626,13 +634,17 @@ def check_dependencies(skip_openlane: bool):
             "(required for OpenLane GDSII hardening — add --skip-openlane to bypass)"
         )
 
-    # All four EDA tools must be present for RTL verification
-    for binary, label in [
+    # Core EDA tools must be present for RTL verification.
+    required_tools = [
         (YOSYS_BIN, "yosys (OSS CAD Suite)"),
         (VERILATOR_BIN, "verilator (OSS CAD Suite)"),
         (IVERILOG_BIN, "iverilog (OSS CAD Suite)"),
         (VVP_BIN, "vvp — Icarus runtime (OSS CAD Suite)"),
-    ]:
+    ]
+    if not skip_spice:
+        required_tools.append((NGSPICE_BIN, "ngspice — post-layout SPICE simulator"))
+
+    for binary, label in required_tools:
         if not _tool_present(binary):
             missing.append(f"🛠️  [bold red]{label}[/bold red]")
 
@@ -646,7 +658,9 @@ def check_dependencies(skip_openlane: bool):
                 "https://github.com/YosysHQ/oss-cad-suite-build/releases\n"
                 "[info]After installing, set:[/info] "
                 "export OSS_CAD_SUITE_HOME=/path/to/oss-cad-suite\n\n"
-                "[info]Tip: Add --skip-openlane to skip GDSII hardening (no Docker needed).[/info]",
+                "[info]For post-layout SPICE on Ubuntu/Debian:[/info] "
+                "sudo apt-get install -y ngspice\n\n"
+                "[info]Tip: Add --skip-openlane to skip GDSII hardening, or --skip-spice to skip ngspice.[/info]",
                 title="[bold red]❌ Missing Dependencies[/bold red]",
                 border_style="red",
             )
@@ -1118,7 +1132,7 @@ def login():
     )
 
     # Now trigger diagnostics to ensure they have the compilers installed
-    console.print("\n[accent]Checking local compilation tools (OSS CAD Suite, Docker)...[/accent]")
+    console.print("\n[accent]Checking local CLI compilation tools (OSS CAD Suite/OpenLane)...[/accent]")
     from .tools.vlsi_tools import startup_self_check
 
     status = startup_self_check()
@@ -1129,11 +1143,13 @@ def login():
         ):
             console.print(
                 Panel(
-                    "Automatic shell installer scripts are not bundled in the pip package.\n\n"
-                    "Install prerequisites manually:\n"
-                    "1. Install OSS CAD Suite and set OSS_CAD_SUITE_HOME\n"
-                    "2. Ensure docker is installed and running\n"
-                    "3. Re-run agentic doctor to verify",
+                    "Run the bundled CLI installer, then verify:\n\n"
+                    "  agentic setup-cli\n"
+                    "  agentic doctor\n\n"
+                    "For layer-by-layer setup:\n"
+                    "  agentic install-oss\n"
+                    "  agentic install-openlane\n"
+                    "  agentic install-pdk sky130",
                     title="🛠 Manual Setup Required",
                     border_style="warning",
                 )
@@ -1300,6 +1316,7 @@ def doctor():
     console.print(Panel("AgentIC CLI health report", title="🩺 Doctor"))
 
     required_failed = False
+    optional_failed = []
     for check in diag.get("checks", []):
         tool = check.get("tool", "unknown")
         resolved = check.get("resolved") or check.get("hint") or "n/a"
@@ -1312,6 +1329,8 @@ def doctor():
             console.print(f"  [error]✗[/error] {tool} {marker}: [info]{resolved}[/info]")
             if not optional:
                 required_failed = True
+            else:
+                optional_failed.append(tool)
 
     if creds:
         groups = [g for g in ("build", "fix", "doc") if isinstance(creds.get(g), dict)]
@@ -1345,7 +1364,16 @@ def doctor():
     if required_failed:
         raise typer.Exit(1)
 
-    console.print("\n[success]Environment checks passed.[/success]")
+    if optional_failed:
+        console.print(
+            "\n[warning]Core environment checks passed, but optional signoff tools are missing:[/warning] "
+            + ", ".join(optional_failed)
+        )
+        console.print(
+            "[info]Direct commands such as agentic drc, agentic lvs, and agentic sta need Magic, Netgen, and OpenSTA on PATH.[/info]"
+        )
+    else:
+        console.print("\n[success]Environment checks passed.[/success]")
     console.print("\n[info]To install a PDK:[/info] [accent]agentic install-pdk list[/accent]")
 
 
@@ -1353,6 +1381,9 @@ PDK_INSTALL_CONFIGS = {
     "sky130": {
         "name": "SkyWater SKY130",
         "pdk_dir": "sky130A",
+        "support_level": "recommended",
+        "auto_installable": True,
+        "flow_status": "full digital RTL-to-GDS target via volare/OpenLane",
         "description": "SkyWater 130nm — most mature open PDK",
         "install_method": "volare",
         "volare_repo": "efabless/sky130",
@@ -1366,6 +1397,9 @@ PDK_INSTALL_CONFIGS = {
     "gf180mcu": {
         "name": "GlobalFoundries GF180MCU",
         "pdk_dir": "gf180mcuC",
+        "support_level": "recommended",
+        "auto_installable": True,
+        "flow_status": "full digital RTL-to-GDS target via volare/OpenLane; validate project-specific signoff",
         "description": "GlobalFoundries 180nm — automotive grade",
         "install_method": "volare",
         "volare_repo": "The-OpenROAD-Project/gf180mcu",
@@ -1373,12 +1407,15 @@ PDK_INSTALL_CONFIGS = {
         "volare_target": "gf180mcuC",
         "download_url": "",
         "requires_volare": True,
-        "versions": ["latest"],
-        "default_version": "",
+        "versions": ["latest", "120b0bd69c745825a0b8b76f364043a1cd08bb6a"],
+        "default_version": "120b0bd69c745825a0b8b76f364043a1cd08bb6a",
     },
     "asap7": {
         "name": "ASAP7 Predictive PDK",
         "pdk_dir": "asap7",
+        "support_level": "research",
+        "auto_installable": False,
+        "flow_status": "research/predictive; not guaranteed as an AgentIC one-command hardening target",
         "description": "ASAP 7nm — cutting-edge predictive PDK",
         "install_method": "download",
         "volare_repo": "",
@@ -1397,6 +1434,9 @@ PDK_INSTALL_CONFIGS = {
     "nangate45": {
         "name": "NanGate 45nm",
         "pdk_dir": "nangate45",
+        "support_level": "research",
+        "auto_installable": False,
+        "flow_status": "research cell library; may require OpenROAD-flow-scripts/platform collateral",
         "description": "NanGate 45nm — academic/research",
         "install_method": "download",
         "volare_repo": "",
@@ -1409,6 +1449,9 @@ PDK_INSTALL_CONFIGS = {
     "osu018": {
         "name": "Oklahoma State 180nm",
         "pdk_dir": "osu018",
+        "support_level": "educational",
+        "auto_installable": False,
+        "flow_status": "educational library; not guaranteed for OpenLane signoff/hardening",
         "description": "Oklahoma State 180nm — educational/research",
         "install_method": "download",
         "volare_repo": "",
@@ -1421,6 +1464,9 @@ PDK_INSTALL_CONFIGS = {
     "osu035": {
         "name": "Oklahoma State 350nm",
         "pdk_dir": "osu035",
+        "support_level": "educational",
+        "auto_installable": False,
+        "flow_status": "educational library; not guaranteed for OpenLane signoff/hardening",
         "description": "Oklahoma State 350nm — high voltage, easy to probe",
         "install_method": "download",
         "volare_repo": "",
@@ -1433,6 +1479,9 @@ PDK_INSTALL_CONFIGS = {
     "freepdk45": {
         "name": "FreePDK45",
         "pdk_dir": "FreePDK45",
+        "support_level": "manual",
+        "auto_installable": False,
+        "flow_status": "manual install; requires external platform/collateral",
         "description": "NC State FreePDK45 + NanGate Open Cell Library",
         "install_method": "manual",
         "volare_repo": "",
@@ -1450,6 +1499,9 @@ PDK_INSTALL_CONFIGS = {
     "openfasoc130": {
         "name": "OpenFASOC 130nm analog flow",
         "pdk_dir": "openfasoc",
+        "support_level": "manual",
+        "auto_installable": False,
+        "flow_status": "manual generator flow; install sky130 first",
         "description": "OpenFASOC generator flow, typically backed by SKY130",
         "install_method": "docker/manual",
         "volare_repo": "",
@@ -1473,6 +1525,9 @@ PDK_INSTALL_CONFIGS = {
     "skywater-raw": {
         "name": "SkyWater raw development PDK",
         "pdk_dir": "skywater-pdk",
+        "support_level": "manual",
+        "auto_installable": False,
+        "flow_status": "raw source tree; not packaged OpenLane PDK",
         "description": "Raw SkyWater PDK source tree for advanced/manual flows",
         "install_method": "manual",
         "volare_repo": "",
@@ -1490,6 +1545,9 @@ PDK_INSTALL_CONFIGS = {
     "lefdef175": {
         "name": "LEF/DEF 175nm placeholder",
         "pdk_dir": "lefdef175",
+        "support_level": "manual",
+        "auto_installable": False,
+        "flow_status": "bring your own LEF/Liberty/DRC/LVS collateral",
         "description": "Educational/manual 175nm LEF/DEF placeholder",
         "install_method": "manual",
         "volare_repo": "",
@@ -1507,6 +1565,9 @@ PDK_INSTALL_CONFIGS = {
     "tsmc28": {
         "name": "TSMC 28nm",
         "pdk_dir": "tsmc28",
+        "support_level": "proprietary",
+        "auto_installable": False,
+        "flow_status": "foundry-controlled; cannot be auto-installed",
         "description": "Proprietary commercial PDK",
         "install_method": "proprietary",
         "requires_volare": False,
@@ -1522,6 +1583,9 @@ PDK_INSTALL_CONFIGS = {
     "samsung14": {
         "name": "Samsung 14nm",
         "pdk_dir": "samsung14",
+        "support_level": "proprietary",
+        "auto_installable": False,
+        "flow_status": "foundry-controlled; cannot be auto-installed",
         "description": "Proprietary commercial PDK",
         "install_method": "proprietary",
         "requires_volare": False,
@@ -1537,6 +1601,9 @@ PDK_INSTALL_CONFIGS = {
     "intel22": {
         "name": "Intel 22nm",
         "pdk_dir": "intel22",
+        "support_level": "proprietary",
+        "auto_installable": False,
+        "flow_status": "foundry-controlled; cannot be auto-installed",
         "description": "Proprietary commercial PDK",
         "install_method": "proprietary",
         "requires_volare": False,
@@ -1552,6 +1619,9 @@ PDK_INSTALL_CONFIGS = {
     "gf22": {
         "name": "GlobalFoundries 22nm",
         "pdk_dir": "gf22",
+        "support_level": "proprietary",
+        "auto_installable": False,
+        "flow_status": "foundry-controlled; cannot be auto-installed",
         "description": "Proprietary commercial PDK",
         "install_method": "proprietary",
         "requires_volare": False,
@@ -1685,6 +1755,21 @@ def _install_method_label(cfg: dict) -> str:
     if cfg.get("requires_volare"):
         return "volare"
     return cfg.get("install_method") or ("download" if cfg.get("download_url") else "manual")
+
+
+def _pdk_choice_label(cfg: dict) -> str:
+    level = str(cfg.get("support_level", "manual"))
+    if cfg.get("auto_installable"):
+        return f"[success]{level}[/success]"
+    if level == "proprietary":
+        return "[warning]proprietary[/warning]"
+    if level in {"research", "educational"}:
+        return f"[warning]{level}[/warning]"
+    return "[dim]manual[/dim]"
+
+
+def _auto_installable_pdks() -> list[str]:
+    return [key for key, cfg in PDK_INSTALL_CONFIGS.items() if cfg.get("auto_installable")]
 
 
 def _print_manual_pdk_steps(pdk_key: str, cfg: dict) -> None:
@@ -1838,6 +1923,11 @@ def _ensure_pdk_root_shell_export(install_dir: str) -> None:
         _config.PDK_ROOT = install_dir
     except Exception:
         pass
+    try:
+        from .tools import vlsi_tools as _vlsi_tools
+        _vlsi_tools.PDK_ROOT = install_dir
+    except Exception:
+        pass
 
     bashrc = os.path.expanduser("~/.bashrc")
     zshrc = os.path.expanduser("~/.zshrc")
@@ -1882,6 +1972,487 @@ def _register_custom_pdk_path(pdk_key: str, source_path: str, install_dir: str) 
 _VOLARE_SKY130_VERSION = "0fe599b2afb6708d281543108caf8310912f54af"
 
 
+def _install_volare_if_missing() -> bool:
+    """Install volare in the active Python environment if it is missing."""
+    import subprocess
+
+    volare_ok, volare_version = _check_volare_available()
+    if volare_ok:
+        console.print(f"[success]Volare already installed ({volare_version}) - skipping.[/success]")
+        return False
+
+    console.print("[warning]Volare not found. Installing via pip...[/warning]")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "volare"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[error]Failed to install volare:[/error]\n{result.stderr}")
+        raise typer.Exit(1)
+    console.print("[success]Volare installed successfully.[/success]")
+    return True
+
+
+def _write_cli_shell_exports(target_dir: str, pdk_root: str, include_oss: bool = True) -> None:
+    """Append AgentIC CLI environment exports to common shell rc files."""
+    rc_files = [os.path.expanduser("~/.bashrc")]
+    zshrc = os.path.expanduser("~/.zshrc")
+    if os.path.exists(zshrc):
+        rc_files.append(zshrc)
+
+    exports = []
+    if include_oss:
+        exports.append((f"export OSS_CAD_SUITE_HOME={target_dir}", f"export OSS_CAD_SUITE_HOME={target_dir}"))
+        exports.append((f"export PATH=\"{target_dir}/bin:$PATH\"", f"export PATH=\"{target_dir}/bin:$PATH\""))
+    exports.append((f"export PDK_ROOT={pdk_root}", f"export PDK_ROOT={pdk_root}"))
+
+    for rcfile in rc_files:
+        existing = ""
+        if os.path.exists(rcfile):
+            with open(rcfile, "r", encoding="utf-8") as f:
+                existing = f.read()
+
+        added = 0
+        for marker, line in exports:
+            if marker not in existing:
+                with open(rcfile, "a", encoding="utf-8") as f:
+                    if existing and not existing.endswith("\n"):
+                        f.write("\n")
+                    f.write(f"# AgentIC CLI auto-config\n{line}\n")
+                existing += f"\n{line}\n"
+                added += 1
+
+        if added:
+            console.print(f"[success]Updated {rcfile} ({added} lines added).[/success]")
+        else:
+            console.print(f"[dim]{rcfile} already up to date.[/dim]")
+
+
+def _refresh_runtime_tool_paths(target_dir: str, pdk_root: str) -> None:
+    """Refresh already-imported AgentIC modules after installer env changes."""
+    os.environ["OSS_CAD_SUITE_HOME"] = target_dir
+    os.environ["PATH"] = f"{target_dir}/bin{os.pathsep}{os.environ.get('PATH', '')}"
+    os.environ["PDK_ROOT"] = pdk_root
+
+    try:
+        from . import config as _config
+
+        _config.OSS_CAD_SUITE_ROOT = target_dir
+        _config.PDK_ROOT = pdk_root
+        for attr, bin_name in {
+            "SBY_BIN": "sby",
+            "YOSYS_BIN": "yosys",
+            "EQY_BIN": "eqy",
+            "VERILATOR_BIN": "verilator",
+            "IVERILOG_BIN": "iverilog",
+            "VVP_BIN": "vvp",
+            "SV2V_BIN": "sv2v",
+            "OPENSTA_BIN": "sta",
+            "MAGIC_BIN": "magic",
+            "NETGEN_BIN": "netgen",
+            "NGSPICE_BIN": "ngspice",
+        }.items():
+            setattr(_config, attr, _config._resolve_tool_binary(bin_name, env_var=attr))
+    except Exception:
+        return
+
+    try:
+        from .tools import vlsi_tools as _vlsi_tools
+
+        for attr in (
+            "PDK_ROOT",
+            "SBY_BIN",
+            "YOSYS_BIN",
+            "EQY_BIN",
+            "NGSPICE_BIN",
+        ):
+            if hasattr(_config, attr):
+                setattr(_vlsi_tools, attr, getattr(_config, attr))
+    except Exception:
+        pass
+
+
+def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = False) -> bool:
+    """Ensure the Docker OpenLane image used for hardening is available."""
+    import shutil
+    import subprocess
+
+    docker = shutil.which("docker")
+    if not docker:
+        console.print(
+            Panel(
+                "Docker is required for AgentIC's default RTL-to-GDSII hardening backend.\n"
+                "Install Docker, start the daemon, then run:\n\n"
+                f"  agentic install-openlane --image {image}",
+                title="Docker Not Found",
+                border_style="error",
+            )
+        )
+        raise typer.Exit(1)
+
+    info = subprocess.run([docker, "info"], capture_output=True, text=True, timeout=30)
+    if info.returncode != 0:
+        console.print(
+            Panel(
+                (info.stderr or info.stdout or "Docker daemon is not reachable.").strip(),
+                title="Docker Not Running",
+                border_style="error",
+            )
+        )
+        raise typer.Exit(1)
+
+    if not force:
+        inspect = subprocess.run(
+            [docker, "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if inspect.returncode == 0:
+            console.print(f"[success]OpenLane Docker image already present:[/success] {image}")
+            return False
+
+    console.print(f"[accent]Pulling OpenLane Docker image:[/accent] {image}")
+    pull = subprocess.run([docker, "pull", image], text=True)
+    if pull.returncode != 0:
+        console.print(f"[error]Failed to pull OpenLane image:[/error] {image}")
+        raise typer.Exit(1)
+
+    console.print(f"[success]OpenLane Docker image installed:[/success] {image}")
+    return True
+
+
+def _write_signoff_shell_exports(prefix: str, pdk_root: str) -> None:
+    """Persist physical signoff tool paths for direct DRC/LVS/STA commands."""
+    import shutil
+
+    prefix = os.path.abspath(os.path.expanduser(prefix))
+    pdk_root = os.path.abspath(os.path.expanduser(pdk_root))
+    magic_bin = os.path.join(prefix, "bin", "magic")
+    netgen_bin = shutil.which("netgen") or "/usr/bin/netgen"
+    sta_bin = shutil.which("sta") or "/usr/bin/sta"
+
+    exports = [
+        (f"export PATH=\"{prefix}/bin:$PATH\"", f"export PATH=\"{prefix}/bin:$PATH\""),
+        (f"export MAGIC_BIN={magic_bin}", f"export MAGIC_BIN={magic_bin}"),
+        (f"export NETGEN_BIN={netgen_bin}", f"export NETGEN_BIN={netgen_bin}"),
+        (f"export OPENSTA_BIN={sta_bin}", f"export OPENSTA_BIN={sta_bin}"),
+        (f"export PDK_ROOT={pdk_root}", f"export PDK_ROOT={pdk_root}"),
+    ]
+
+    rc_files = [os.path.expanduser("~/.bashrc")]
+    zshrc = os.path.expanduser("~/.zshrc")
+    if os.path.exists(zshrc):
+        rc_files.append(zshrc)
+
+    for rcfile in rc_files:
+        existing = ""
+        if os.path.exists(rcfile):
+            with open(rcfile, "r", encoding="utf-8") as f:
+                existing = f.read()
+        added = 0
+        for marker, line in exports:
+            if marker not in existing:
+                with open(rcfile, "a", encoding="utf-8") as f:
+                    if existing and not existing.endswith("\n"):
+                        f.write("\n")
+                    f.write(f"# AgentIC physical signoff tools\n{line}\n")
+                existing += f"\n{line}\n"
+                added += 1
+        if added:
+            console.print(f"[success]Updated {rcfile} ({added} signoff lines added).[/success]")
+        else:
+            console.print(f"[dim]{rcfile} already has AgentIC signoff exports.[/dim]")
+
+
+def _magic_version_ok(binary: str, minimum: tuple[int, int, int] = (8, 3, 411)) -> bool:
+    import re
+    import subprocess
+
+    if not binary or not os.path.exists(os.path.expanduser(binary)):
+        return False
+    try:
+        proc = subprocess.run(
+            [os.path.expanduser(binary), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except OSError:
+        return False
+    text = f"{proc.stdout}\n{proc.stderr}"
+    match = re.search(r"(\d+)\.(\d+)(?:\s+revision|\.)\s*(\d+)", text)
+    if not match:
+        return False
+    version = tuple(int(part) for part in match.groups())
+    return version >= minimum
+
+
+@app.command("install-signoff-tools")
+def install_signoff_tools(
+    prefix: str = typer.Option(
+        os.path.expanduser("~/eda"),
+        "--prefix",
+        "-p",
+        help="Install newer Magic under this prefix",
+    ),
+    source_dir: str = typer.Option(
+        os.path.expanduser("~/eda-src/magic"),
+        "--source-dir",
+        help="Magic source checkout directory",
+    ),
+    pdk_root: str = typer.Option(
+        os.path.expanduser("~/.ciel"),
+        "--pdk-root",
+        help="PDK root to persist for signoff commands",
+    ),
+    skip_apt: bool = typer.Option(
+        False,
+        "--skip-apt",
+        help="Skip apt package install for dependencies, netgen, and OpenSTA",
+    ),
+    skip_magic_build: bool = typer.Option(
+        False,
+        "--skip-magic-build",
+        help="Skip building newer Magic from source",
+    ),
+    force_magic: bool = typer.Option(
+        False,
+        "--force-magic",
+        help="Rebuild Magic even if the installed prefix already has a new enough version",
+    ),
+    no_shell: bool = typer.Option(
+        False,
+        "--no-shell",
+        help="Do not update ~/.bashrc or ~/.zshrc",
+    ),
+):
+    """Install physical signoff tools used by agentic drc/lvs/sta.
+
+    Installs/checks:
+    - Magic 8.3.411+ from source for SKY130/GF180 Magic tech files
+    - Netgen for LVS
+    - OpenSTA command `sta` for timing checks
+    """
+    import platform
+    import shutil
+    import subprocess
+
+    if platform.system().lower() != "linux":
+        console.print(
+            Panel(
+                "Automatic signoff tool installation is currently supported on Linux/WSL.\n"
+                "On Windows, run this command inside WSL.",
+                title="Unsupported Platform",
+                border_style="error",
+            )
+        )
+        raise typer.Exit(1)
+
+    prefix_abs = os.path.abspath(os.path.expanduser(prefix))
+    source_abs = os.path.abspath(os.path.expanduser(source_dir))
+    pdk_root_abs = os.path.abspath(os.path.expanduser(pdk_root))
+    magic_bin = os.path.join(prefix_abs, "bin", "magic")
+
+    console.print(
+        Panel(
+            f"Magic prefix: {prefix_abs}\n"
+            f"Magic source: {source_abs}\n"
+            f"PDK root: {pdk_root_abs}",
+            title="Installing Physical Signoff Tools",
+        )
+    )
+
+    if not skip_apt:
+        if not shutil.which("apt-get"):
+            console.print("[warning]apt-get not found; skipping apt package installation.[/warning]")
+        else:
+            packages = [
+                "git",
+                "build-essential",
+                "autoconf",
+                "automake",
+                "m4",
+                "csh",
+                "tcsh",
+                "tcl-dev",
+                "tk-dev",
+                "libcairo2-dev",
+                "libx11-dev",
+                "libxrender-dev",
+                "libxpm-dev",
+                "libreadline-dev",
+                "netgen",
+                "opensta",
+            ]
+            console.print("[accent]Installing apt dependencies, Netgen, and OpenSTA...[/accent]")
+            update = subprocess.run(["sudo", "apt-get", "update"])
+            if update.returncode != 0:
+                console.print("[error]apt-get update failed.[/error]")
+                raise typer.Exit(update.returncode)
+            install = subprocess.run(["sudo", "apt-get", "install", "-y", *packages])
+            if install.returncode != 0:
+                console.print("[error]apt-get install failed.[/error]")
+                raise typer.Exit(install.returncode)
+    else:
+        console.print("[dim]Skipped apt packages (--skip-apt).[/dim]")
+
+    if not skip_magic_build:
+        if _magic_version_ok(magic_bin) and not force_magic:
+            console.print(f"[success]Magic is already new enough:[/success] {magic_bin}")
+        else:
+            os.makedirs(os.path.dirname(source_abs), exist_ok=True)
+            if os.path.exists(source_abs):
+                console.print(f"[accent]Using existing Magic source checkout:[/accent] {source_abs}")
+            else:
+                console.print("[accent]Cloning Magic source...[/accent]")
+                clone = subprocess.run(
+                    ["git", "clone", "https://github.com/RTimothyEdwards/magic.git", source_abs]
+                )
+                if clone.returncode != 0:
+                    console.print("[error]Magic source clone failed.[/error]")
+                    raise typer.Exit(clone.returncode)
+
+            os.makedirs(prefix_abs, exist_ok=True)
+            console.print("[accent]Configuring Magic...[/accent]")
+            configure = subprocess.run(["./configure", f"--prefix={prefix_abs}"], cwd=source_abs)
+            if configure.returncode != 0:
+                console.print("[error]Magic configure failed.[/error]")
+                raise typer.Exit(configure.returncode)
+            console.print("[accent]Building Magic...[/accent]")
+            make = subprocess.run(["make"], cwd=source_abs)
+            if make.returncode != 0:
+                console.print("[error]Magic build failed.[/error]")
+                raise typer.Exit(make.returncode)
+            console.print("[accent]Installing Magic...[/accent]")
+            install = subprocess.run(["make", "install"], cwd=source_abs)
+            if install.returncode != 0:
+                console.print("[error]Magic install failed.[/error]")
+                raise typer.Exit(install.returncode)
+    else:
+        console.print("[dim]Skipped Magic source build (--skip-magic-build).[/dim]")
+
+    os.environ["PATH"] = f"{prefix_abs}/bin{os.pathsep}{os.environ.get('PATH', '')}"
+    os.environ["MAGIC_BIN"] = magic_bin
+    os.environ["NETGEN_BIN"] = shutil.which("netgen") or "/usr/bin/netgen"
+    os.environ["OPENSTA_BIN"] = shutil.which("sta") or "/usr/bin/sta"
+    os.environ["PDK_ROOT"] = pdk_root_abs
+
+    if not no_shell:
+        _write_signoff_shell_exports(prefix_abs, pdk_root_abs)
+
+    console.print(
+        Panel(
+            "Signoff tool setup finished.\n\n"
+            "Run:\n"
+            "  source ~/.bashrc\n"
+            "  agentic doctor\n"
+            "  magic --version\n"
+            "  which netgen\n"
+            "  which sta",
+            title="Physical Signoff Tools Ready",
+            border_style="success",
+        )
+    )
+
+
+@app.command("install-oss")
+def install_oss(
+    target_dir: str = typer.Option(
+        os.path.expanduser("~/oss-cad-suite"),
+        "--target",
+        "-t",
+        help="Directory to install OSS CAD Suite into",
+    ),
+    pdk_root: str = typer.Option(
+        os.path.expanduser("~/.ciel"),
+        "--pdk-root",
+        help="PDK root to write into shell configuration",
+    ),
+    no_shell: bool = typer.Option(
+        False,
+        "--no-shell",
+        help="Do not update ~/.bashrc or ~/.zshrc",
+    ),
+):
+    """Install OSS CAD Suite with one command for RTL/sim/synth tooling."""
+    from .install_tools import install_oss_cad_suite
+
+    target = os.path.abspath(os.path.expanduser(target_dir))
+    pdk_root_abs = os.path.abspath(os.path.expanduser(pdk_root))
+    if _is_toolchain_present():
+        console.print("[success]OSS CAD Suite already detected.[/success]")
+    else:
+        os.makedirs(target, exist_ok=True)
+        if not install_oss_cad_suite(target):
+            raise typer.Exit(1)
+
+    _refresh_runtime_tool_paths(target, pdk_root_abs)
+    if not no_shell:
+        _write_cli_shell_exports(target, pdk_root_abs, include_oss=True)
+    console.print("[success]OSS CAD Suite setup complete.[/success]")
+
+
+@app.command("install-openlane")
+def install_openlane(
+    image: str = typer.Option(
+        OPENLANE_IMAGE,
+        "--image",
+        help="Docker image used for AgentIC OpenLane hardening",
+    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Pull even if the image exists"),
+):
+    """Install/pull the Docker OpenLane backend used for RTL-to-GDSII hardening."""
+    _install_openlane_docker_image(image=image, force=force)
+
+
+@app.command("setup-cli")
+def setup_cli(
+    target_dir: str = typer.Option(
+        os.path.expanduser("~/oss-cad-suite"),
+        "--target",
+        "-t",
+        help="Directory to install OSS CAD Suite into",
+    ),
+    pdk_root: str = typer.Option(
+        os.path.expanduser("~/.ciel"),
+        "--pdk-root",
+        help="Directory to install PDKs into",
+    ),
+    pdks: str = typer.Option(
+        "sky130",
+        "--pdks",
+        help="Comma-separated PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs",
+    ),
+    skip_oss: bool = typer.Option(False, "--skip-oss", help="Skip OSS CAD Suite install"),
+    skip_openlane: bool = typer.Option(False, "--skip-openlane", help="Skip Docker/OpenLane image pull"),
+    skip_signoff_tools: bool = typer.Option(
+        False,
+        "--skip-signoff-tools",
+        help="Skip Magic/Netgen/OpenSTA physical signoff tool setup",
+    ),
+    skip_pdk: bool = typer.Option(False, "--skip-pdk", help="Skip PDK installation"),
+    openlane_image: str = typer.Option(
+        OPENLANE_IMAGE,
+        "--openlane-image",
+        help="Docker image used for OpenLane hardening",
+    ),
+):
+    """Install the complete AgentIC CLI stack in one command."""
+    install_tools(
+        target_dir=target_dir,
+        pdk_root=pdk_root,
+        skip_pdk=skip_pdk,
+        skip_oss=skip_oss,
+        skip_hardening=skip_openlane,
+        skip_signoff_tools=skip_signoff_tools,
+        pdks=pdks,
+        env_file="",
+        openlane_image=openlane_image,
+    )
+
+
 @app.command("install-tools")
 def install_tools(
     target_dir: str = typer.Option(
@@ -1905,10 +2476,25 @@ def install_tools(
         "--skip-oss",
         help="Skip OSS CAD Suite installation",
     ),
+    skip_hardening: bool = typer.Option(
+        False,
+        "--skip-hardening",
+        help="Skip Docker/OpenLane image setup",
+    ),
+    skip_signoff_tools: bool = typer.Option(
+        False,
+        "--skip-signoff-tools",
+        help="Skip Magic/Netgen/OpenSTA install for direct drc/lvs/sta commands",
+    ),
     pdks: str = typer.Option(
         "sky130",
         "--pdks",
-        help="Comma-separated PDKs to install, or 'all-open-auto'.",
+        help="Comma-separated PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs.",
+    ),
+    openlane_image: str = typer.Option(
+        OPENLANE_IMAGE,
+        "--openlane-image",
+        help="Docker image to pull for OpenLane hardening",
     ),
     env_file: str = typer.Option(
         "",
@@ -1916,14 +2502,18 @@ def install_tools(
         help="Write local-LLM .env template to this path",
     ),
 ):
-    """One-shot setup: install OSS CAD Suite, volare, PDKs, and shell env.
+    """One-shot setup: install OSS CAD Suite, signoff tools, Docker/OpenLane, volare, PDKs, and shell env.
 
     Examples:
         agentic install-tools
+        agentic setup-cli --pdks sky130,gf180mcu
+        agentic install-oss
+        agentic install-openlane
         agentic install-tools --target /opt/oss-cad-suite --pdk-root /opt/pdks
         agentic install-tools --pdks sky130,gf180mcu,asap7
         agentic install-tools --pdks all-open-auto
         agentic install-tools --skip-pdk
+        agentic install-tools --skip-hardening
         agentic install-tools --env-file /root/my-project/.env
     """
     import shutil
@@ -1935,11 +2525,13 @@ def install_tools(
     target_dir = os.path.abspath(os.path.expanduser(target_dir))
     pdk_root = os.path.abspath(os.path.expanduser(pdk_root))
 
+    total_steps = 5 if not skip_signoff_tools else 4
+
     # ── 1. OSS CAD Suite ──────────────────────────────────────────────────
     if not skip_oss:
         console.print(
             Panel(
-                "[accent]Step 1/3: OSS CAD Suite[/accent]\n"
+                f"[accent]Step 1/{total_steps}: OSS CAD Suite[/accent]\n"
                 f"Target: {target_dir}",
                 title="🔧 Installing EDA Tools",
             )
@@ -1958,10 +2550,42 @@ def install_tools(
     else:
         console.print("[dim]Skipped OSS CAD Suite (--skip-oss).[/dim]")
 
+    if not skip_signoff_tools:
+        console.print(
+            Panel(
+                f"[accent]Step 2/{total_steps}: Physical Signoff Tools[/accent]\n"
+                "Magic 8.3.411+, Netgen, OpenSTA",
+                title="Installing Signoff Tools",
+            )
+        )
+        install_signoff_tools(
+            prefix=os.path.expanduser("~/eda"),
+            source_dir=os.path.expanduser("~/eda-src/magic"),
+            pdk_root=pdk_root,
+            skip_apt=False,
+            skip_magic_build=False,
+            force_magic=False,
+            no_shell=False,
+        )
+    else:
+        console.print("[dim]Skipped physical signoff tools (--skip-signoff-tools).[/dim]")
+
+    if not skip_hardening:
+        console.print(
+            Panel(
+                f"[accent]Step {3 if not skip_signoff_tools else 2}/{total_steps}: Docker/OpenLane Hardening Backend[/accent]\n"
+                f"Image: {openlane_image}",
+                title="Installing OpenLane",
+            )
+        )
+        _install_openlane_docker_image(image=openlane_image, force=False)
+    else:
+        console.print("[dim]Skipped Docker/OpenLane setup (--skip-hardening).[/dim]")
+
     # ── 2. Volare ─────────────────────────────────────────────────────────
     console.print(
         Panel(
-            "[accent]Step 2/3: Volare PDK Manager[/accent]",
+            f"[accent]Step {4 if not skip_signoff_tools else 3}/{total_steps}: Volare PDK Manager[/accent]",
             title="📦 Installing Volare",
         )
     )
@@ -1971,7 +2595,7 @@ def install_tools(
     else:
         console.print("[warning]Volare not found. Installing via pip...[/warning]")
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "git+https://github.com/efabless/volare.git"],
+            [sys.executable, "-m", "pip", "install", "volare"],
             capture_output=True,
             text=True,
         )
@@ -1991,11 +2615,11 @@ def install_tools(
         if not requested_pdks:
             requested_pdks = ["sky130"]
         if requested_pdks == ["all-open-auto"]:
-            requested_pdks = ["sky130", "gf180mcu", "asap7", "nangate45", "osu018", "osu035"]
+            requested_pdks = _auto_installable_pdks()
 
         console.print(
             Panel(
-                "[accent]Step 3/3: PDK Installation[/accent]\n"
+                f"[accent]Step {5 if not skip_signoff_tools else 4}/{total_steps}: PDK Installation[/accent]\n"
                 f"Target: {pdk_root}\n"
                 f"PDKs: {', '.join(requested_pdks)}",
                 title="🧱 Installing PDK",
@@ -2059,9 +2683,9 @@ def install_tools(
 
     # Apply to current process so doctor works immediately
     if not skip_oss:
-        os.environ["OSS_CAD_SUITE_HOME"] = target_dir
-        os.environ["PATH"] = f"{target_dir}/bin:{os.environ.get('PATH', '')}"
-    os.environ["PDK_ROOT"] = pdk_root
+        _refresh_runtime_tool_paths(target_dir, pdk_root)
+    else:
+        os.environ["PDK_ROOT"] = pdk_root
 
     # ── 5. Optional .env file ─────────────────────────────────────────────
     if env_file:
@@ -2101,7 +2725,9 @@ def install_tools(
                     'VERILOG_CODEGEN_BASE_URL="http://localhost:8000/v1"\n\n'
                     '# --- PDK ---\n'
                     f'PDK_ROOT="{pdk_root}"\n'
-                    'PDK="sky130A"\n'
+                    'PDK="sky130A"\n\n'
+                    '# --- EDA tool overrides ---\n'
+                    'NGSPICE_BIN="ngspice"\n'
                 )
             console.print(f"[success]Created local-LLM .env at {env_path}[/success]")
         else:
@@ -2175,9 +2801,10 @@ def install_pdk(
         table.add_column("PDK", style="#d97757 bold", width=12)
         table.add_column("Name", style="info")
         table.add_column("Technology", style="dim")
+        table.add_column("Tier", width=14)
         table.add_column("Status", width=12)
         table.add_column("Install Method", style="dim")
-        table.add_column("Description", style="dim")
+        table.add_column("Flow Status", style="dim")
 
         for key, cfg in PDK_INSTALL_CONFIGS.items():
             is_installed = key in installed
@@ -2189,13 +2816,19 @@ def install_pdk(
                 key,
                 cfg["name"],
                 cfg["pdk_dir"],
+                _pdk_choice_label(cfg),
                 status,
                 install_method,
-                cfg["description"],
+                cfg.get("flow_status") or cfg["description"],
             )
 
         console.print(table)
-        console.print("\n[info]To install:[/info] [accent]agentic install-pdk <name>[/accent]")
+        console.print(
+            "\n[info]Recommended one-command install targets:[/info] "
+            f"[accent]{', '.join(_auto_installable_pdks())}[/accent]"
+        )
+        console.print("[info]To install one:[/info] [accent]agentic install-pdk sky130[/accent]")
+        console.print("[info]To install all recommended:[/info] [accent]agentic setup-cli --pdks all-open-auto[/accent]")
         console.print("[info]After install, verify with:[/info] [accent]agentic doctor[/accent]")
         return
 
@@ -2251,6 +2884,20 @@ def install_pdk(
 
     if cfg.get("proprietary"):
         _print_manual_pdk_steps(pdk_key, cfg)
+        return
+
+    if not cfg.get("auto_installable") and cfg.get("install_method") == "download" and not force:
+        console.print(
+            Panel(
+                f"[warning]{cfg['name']} is listed as {cfg.get('support_level', 'research')} collateral, "
+                "not a verified one-command AgentIC hardening target.[/warning]\n\n"
+                f"Flow status: {cfg.get('flow_status', cfg.get('description', 'unknown'))}\n\n"
+                "Use [accent]--force[/accent] if you intentionally want AgentIC to download and register "
+                "this research/educational PDK anyway.",
+                title="Experimental PDK",
+                border_style="warning",
+            )
+        )
         return
 
     if is_installed and not force:
@@ -2496,6 +3143,24 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
     return f"openai/{model}"
 
 
+def _llm_extra_body_from_env() -> Optional[dict]:
+    """Read provider request extras from env without tying code to a model name."""
+    raw = os.environ.get("LLM_EXTRA_BODY_JSON", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("LLM_EXTRA_BODY_JSON must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM_EXTRA_BODY_JSON must decode to a JSON object")
+    return parsed
+
+
+def _role_extra_body(cfg: dict) -> Optional[dict]:
+    return cfg.get("extra_body") or _llm_extra_body_from_env()
+
+
 def get_llm(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
@@ -2549,13 +3214,8 @@ def get_llm(
     # Format model string with provider prefix
     model = _format_model_for_provider(model, base_url)
 
-    # Detect provider-specific extra_body
-    extra_body = {}
-    model_lower = model.lower()
-    if "glm5" in model_lower or "glm-5" in model_lower:
-        extra_body = {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
-    elif "deepseek-v3" in model_lower:
-        extra_body = {"chat_template_kwargs": {"thinking": True}}
+    # Optional provider-specific extra_body, configured via environment.
+    extra_body = _llm_extra_body_from_env()
 
     try:
         llm = LLM(
@@ -2566,7 +3226,7 @@ def get_llm(
             top_p=0.7,
             max_tokens=max_tokens,
             timeout=300,
-            extra_body=extra_body if extra_body else None,
+            extra_body=extra_body,
         )
 
         # Test the connection with rate limiting for Z.AI
@@ -3101,6 +3761,11 @@ def build(
     skip_openlane: bool = typer.Option(
         False, "--skip-openlane", help="Stop after simulation (no RTL→GDSII hardening)"
     ),
+    skip_spice: bool = typer.Option(
+        False,
+        "--skip-spice",
+        help="Bypass post-layout ngspice extraction/simulation during physical signoff",
+    ),
     skip_coverage: bool = typer.Option(
         False,
         "--skip-coverage",
@@ -3198,7 +3863,7 @@ def build(
     _print_banner()
     _ensure_setup(skip_toolchain_prompt=skip_openlane)
     verify_license()
-    check_dependencies(skip_openlane)
+    check_dependencies(skip_openlane, skip_spice=skip_spice)
 
     # ── PDK Auto-Detection & Selection ─────────────────────────────────────
     from .config import PDKError, resolve_pdk, validate_pdk_installation
@@ -3428,8 +4093,9 @@ def build(
 
     for role in roles:
         cfg = get_role_llm_config(role)
+        role_model = _format_model_for_provider(cfg["model"], cfg.get("base_url", ""))
         llm_kwargs = dict(
-            model=cfg["model"],
+            model=role_model,
             api_key=cfg["api_key"],
             temperature=0.6,
             max_tokens=int(os.environ.get("LLM_MAX_TOKENS", 8192)),
@@ -3437,8 +4103,9 @@ def build(
         )
         if cfg.get("base_url"):
             llm_kwargs["base_url"] = cfg["base_url"]
-        if "extra_body" in cfg:
-            llm_kwargs["extra_body"] = cfg["extra_body"]
+        extra_body = _role_extra_body(cfg)
+        if extra_body:
+            llm_kwargs["extra_body"] = extra_body
 
         try:
             role_llms[role] = LLM(**llm_kwargs)
@@ -3456,6 +4123,7 @@ def build(
         max_retries=max_retries,
         verbose=show_thinking,
         skip_openlane=skip_openlane,
+        skip_spice=skip_spice,
         skip_coverage=skip_coverage,
         full_signoff=full_signoff,
         min_coverage=min_coverage,
@@ -3495,6 +4163,87 @@ def build(
                 "stages_completed": [s.name for s in orchestrator.state_history],
             }
         )
+
+
+@app.command("spice")
+def spice(
+    layout_gds: str = typer.Argument(..., help="Existing GDS layout to extract and simulate"),
+    output_dir: str = typer.Option("", "--output-dir", "-o", help="Directory for SPICE artifacts"),
+    tech_file: str = typer.Option("", "--tech", help="Magic technology file"),
+    pdk: str = typer.Option("sky130", "--pdk", help="Target PDK profile/name"),
+    design_name: str = typer.Option("", "--name", "-n", help="Top-level design name"),
+    deck: str = typer.Option("", "--deck", help="Optional existing ngspice deck to run"),
+    timeout: int = typer.Option(900, "--timeout", help="Tool timeout in seconds"),
+):
+    """Extract parasitic SPICE from an existing GDS and run ngspice."""
+    verify_license()
+    gds_path = os.path.abspath(os.path.expanduser(layout_gds))
+    if not os.path.exists(gds_path):
+        console.print(f"[error]GDS not found: {gds_path}[/error]")
+        raise typer.Exit(1)
+
+    name = design_name or os.path.splitext(os.path.basename(gds_path))[0]
+    out_dir = os.path.abspath(
+        os.path.expanduser(output_dir or os.path.join(os.getcwd(), "spice", name))
+    )
+    os.makedirs(out_dir, exist_ok=True)
+
+    console.print(f"[accent]Extracting SPICE[/accent] from {gds_path}")
+    extraction = extract_spice_netlist(
+        gds_path=gds_path,
+        tech_file=os.path.abspath(os.path.expanduser(tech_file)) if tech_file else "",
+        output_dir=out_dir,
+        pdk=pdk,
+        pdk_root=os.environ.get("PDK_ROOT", ""),
+        design_name=name,
+        timeout=timeout,
+    )
+    if not extraction.ok:
+        console.print(
+            Panel(
+                "\n".join(extraction.errors),
+                title="SPICE Extraction Failed",
+                border_style="error",
+            )
+        )
+        raise typer.Exit(1)
+
+    deck_path_or_text = (
+        os.path.abspath(os.path.expanduser(deck))
+        if deck
+        else build_basic_post_layout_deck(extraction.spice_netlist_path, name)
+    )
+    console.print(f"[accent]Running ngspice[/accent] in {out_dir}")
+    result = run_ngspice(
+        deck_path_or_text,
+        out_dir,
+        deck_name=f"{name}_post_layout.sp",
+        timeout=timeout,
+    )
+
+    if result.get("ok"):
+        measurements = result.get("measurements", {})
+        summary = "\n".join(f"{k}: {v:.6g}" for k, v in measurements.items())
+        if not summary:
+            summary = "No .measure values found."
+        console.print(
+            Panel(
+                f"Deck: {result.get('deck_path')}\n"
+                f"Log: {result.get('log_path')}\n"
+                f"Raw: {result.get('raw_path')}\n\n{summary}",
+                title="ngspice PASS",
+                border_style="success",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "\n".join(result.get("errors", [])) or f"See log: {result.get('log_path')}",
+                title="ngspice Failed",
+                border_style="error",
+            )
+        )
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -3675,6 +4424,8 @@ def sta(
 
             with open(result.summary_path) as f:
                 console.print_json(f.read())
+        if not result.all_corners_pass:
+            raise typer.Exit(1)
     else:
         result = run_opensta(
             netlist=netlist,
@@ -3708,6 +4459,8 @@ def sta(
                     "critical_paths": len(result.critical_paths),
                 }
             )
+        if not result.ok:
+            raise typer.Exit(1)
 
 
 @app.command("dft")
@@ -3929,6 +4682,9 @@ def drc(
         console.print(f"  [success]✓ DRC PASS — 0 violations[/success]")
     else:
         console.print(f"  [error]✗ DRC FAIL — {result.drc_violations} violations[/error]")
+        if result.errors:
+            for error in result.errors:
+                console.print(f"    [error]{error}[/error]")
 
     console.print(f"  Runtime: {result.runtime_sec:.1f}s | Report: {result.drc_report_path}")
     if result.violations:
@@ -3942,8 +4698,11 @@ def drc(
                 "drc_violations": result.drc_violations,
                 "violations": [{"layer": v.layer, "message": v.message} for v in result.violations],
                 "runtime_sec": result.runtime_sec,
+                "errors": result.errors,
             }
         )
+    if not result.ok:
+        raise typer.Exit(1)
 
 
 @app.command("lvs")
@@ -4006,6 +4765,9 @@ def lvs(
             f"  Net mismatches: {result.net_mismatches} | Pin mismatches: {result.pin_mismatches}"
         )
         console.print(f"  Unconnected nets: {result.unconnected_nets}")
+        if result.errors:
+            for error in result.errors:
+                console.print(f"    [error]{error}[/error]")
 
     console.print(f"  Runtime: {result.runtime_sec:.1f}s | Report: {result.lvs_report_path}")
 
@@ -4017,8 +4779,11 @@ def lvs(
                 "net_mismatches": result.net_mismatches,
                 "pin_mismatches": result.pin_mismatches,
                 "runtime_sec": result.runtime_sec,
+                "errors": result.errors,
             }
         )
+    if not result.ok:
+        raise typer.Exit(1)
 
 
 @app.command("report")

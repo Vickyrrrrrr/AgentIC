@@ -267,17 +267,9 @@ endmodule
     }, [viewerOpen, vcdData]);
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px)', gap: '0', boxSizing: 'border-box' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 64px)', gap: '0', boxSizing: 'border-box' }}>
             {/* ── Toolbar ── */}
-            <div style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                padding: '0.75rem 1.25rem',
-                borderBottom: '1px solid var(--border)',
-                background: 'color-mix(in srgb, var(--bg-card) 90%, transparent)',
-                backdropFilter: 'blur(8px)',
-                flexShrink: 0,
-                animation: 'reveal-up 0.3s var(--ease) both',
-            }}>
+            <div className="eda-toolbar" style={{ animation: 'reveal-up 0.3s var(--ease) both' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
                     <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0, fontSize: '1.1rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
                         <Cpu size={20} style={{ color: 'var(--accent)' }} />
@@ -367,32 +359,27 @@ endmodule
             {/* ── Editor + Console ── */}
             <div style={{ display: 'flex', gap: 0, flex: 1, minHeight: 0 }}>
                 {viewerOpen ? (
-                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#0f172a', borderRight: '1px solid var(--border)' }}>
-                        <div style={{ padding: '0.45rem 1rem', background: '#1e293b', borderBottom: '1px solid #334155', fontWeight: 600, fontSize: '0.82rem', color: '#94a3b8', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div className="eda-viewer-panel">
+                        <div className="eda-viewer-header">
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                 <ExternalLink size={14}/> VCDrom Viewer
                             </div>
                             <button
                                 onClick={() => setViewerOpen(false)}
-                                style={{ background: '#334155', border: 'none', borderRadius: '4px', color: '#e2e8f0', padding: '0.15rem 0.5rem', cursor: 'pointer', fontSize: '0.72rem' }}>
+                                className="eda-viewer-close-btn">
                                 Close
                             </button>
                         </div>
                         <iframe
                             id="vcdIframe"
                             src="/vcdrom/index.html"
-                            style={{ flex: 1, border: 'none', background: 'white' }}
+                            style={{ flex: 1, border: 'none', background: 'var(--bg-card)' }}
                             title="VCD Viewer"
                         />
                     </div>
                 ) : (
                     <div style={{ flex: 1.2, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: '1px solid var(--border)' }}>
-                        <div style={{
-                            padding: '0.4rem 1rem', borderBottom: '1px solid var(--border)',
-                            fontWeight: 600, fontSize: '0.82rem', color: 'var(--text-dim)',
-                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                            background: 'color-mix(in srgb, var(--bg-card) 90%, transparent)',
-                        }}>
+                        <div className="eda-panel-header">
                             <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', display: 'inline-block' }} />
                                 testbench.sv
@@ -421,27 +408,19 @@ endmodule
                 )}
 
                 {/* Console */}
-                <div style={{ flex: 0.8, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#0f172a' }}>
-                    <div style={{
-                        padding: '0.4rem 1rem', background: '#1e293b', borderBottom: '1px solid #334155',
-                        fontWeight: 600, fontSize: '0.82rem', color: '#94a3b8',
-                        display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'space-between'
-                    }}>
+                <div className="eda-console">
+                    <div className="eda-console-header">
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <TerminalSquare size={14}/> Console
                         </div>
                         <button
                             onClick={() => setOutput('')}
-                            style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '0' }}
+                            className="eda-console-clear-btn"
                             title="Clear Console">
                             <XCircle size={14} />
                         </button>
                     </div>
-                    <div style={{
-                        flex: 1, padding: '0.75rem 1rem', overflowY: 'auto',
-                        color: '#e2e8f0', fontFamily: "'Fira Code', monospace", fontSize: '0.82rem',
-                        whiteSpace: 'pre-wrap', lineHeight: '1.6',
-                    }}>
+                    <div className="eda-console-body">
                         {output || '$ System ready.\n  Write Verilog → click Syntax / Synthesize / Simulate\n  AI Fixer auto-diagnoses & repairs your code'}
                     </div>
                 </div>

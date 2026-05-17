@@ -558,7 +558,7 @@ export const DesignStudio = () => {
                                                 }}
                                             >
                                                 {(pdkOptions.length
-                                                    ? pdkOptions
+                                                    ? pdkOptions.filter(p => p.gds_ready)
                                                     : [{
                                                         key: 'sky130',
                                                         pdk: 'sky130A',
@@ -573,8 +573,8 @@ export const DesignStudio = () => {
                                                         maturity: 'production',
                                                         fabrication_ready: true,
                                                     } as PdkOption]).map((pdk) => (
-                                                    <option key={pdk.key} value={pdk.key} disabled={!pdk.gds_ready}>
-                                                        {pdk.key} {pdk.gds_ready ? 'ready' : 'not installed'}
+                                                    <option key={pdk.key} value={pdk.key}>
+                                                        {pdk.key}
                                                     </option>
                                                 ))}
                                             </select>
@@ -590,10 +590,10 @@ export const DesignStudio = () => {
                                                     marginTop: '0.5rem',
                                                     padding: '0.5rem 0.75rem',
                                                     borderRadius: '6px',
-                                                    background: 'rgba(217, 119, 6, 0.1)',
-                                                    border: '1px solid rgba(217, 119, 6, 0.3)',
+                                                    background: 'color-mix(in srgb, var(--accent) 10%, transparent)',
+                                                    border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
                                                     fontSize: '0.78rem',
-                                                    color: '#d97706',
+                                                    color: 'var(--accent)',
                                                     display: 'flex',
                                                     alignItems: 'flex-start',
                                                     gap: '0.4rem',
@@ -610,8 +610,8 @@ export const DesignStudio = () => {
                                                     marginTop: '0.5rem',
                                                     padding: '0.4rem 0.75rem',
                                                     borderRadius: '6px',
-                                                    background: 'rgba(34, 197, 94, 0.08)',
-                                                    border: '1px solid rgba(34, 197, 94, 0.2)',
+                                                    background: 'color-mix(in srgb, var(--success) 10%, transparent)',
+                                                    border: '1px solid color-mix(in srgb, var(--success) 20%, transparent)',
                                                     fontSize: '0.75rem',
                                                     color: 'var(--success)',
                                                 }}>

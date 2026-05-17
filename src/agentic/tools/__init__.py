@@ -78,6 +78,7 @@ from .power_tools import (
 )
 
 from .physical_tools import (
+    extract_spice_netlist,
     run_magic_drc,
     run_netgen_lvs,
     run_antenna_check,
@@ -86,6 +87,14 @@ from .physical_tools import (
     DRCResult,
     LVSResult,
     AntennaResult,
+    SpiceExtractionResult,
+)
+
+from .spice_tools import (
+    run_ngspice,
+    build_basic_post_layout_deck,
+    parse_ngspice_measurements,
+    NgspiceResult,
 )
 
 from .signoff_reporter import (
@@ -148,6 +157,7 @@ __all__ = [
     "IRDropResult",
     "SPEFNet",
     # Physical
+    "extract_spice_netlist",
     "run_magic_drc",
     "run_netgen_lvs",
     "run_antenna_check",
@@ -156,6 +166,12 @@ __all__ = [
     "DRCResult",
     "LVSResult",
     "AntennaResult",
+    "SpiceExtractionResult",
+    # SPICE
+    "run_ngspice",
+    "build_basic_post_layout_deck",
+    "parse_ngspice_measurements",
+    "NgspiceResult",
     # Reports
     "generate_qor_report",
     "SignoffReporter",

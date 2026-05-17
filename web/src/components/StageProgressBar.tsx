@@ -28,6 +28,7 @@ const STAGES = [
     { key: 'ECO_PATCH', label: 'ECO Patch' },
     { key: 'POWER_ANALYSIS', label: 'Power Analysis' },
     { key: 'PHYSICAL_VERIFY', label: 'Physical Verify' },
+    { key: 'POST_LAYOUT_SPICE', label: 'SPICE Sim' },
     { key: 'SIGNOFF', label: 'Signoff' },
     { key: 'IP_PACKAGE', label: 'IP Package' },
 ];
@@ -61,6 +62,7 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
     ECO_PATCH:         'Patching for final sign-off',
     POWER_ANALYSIS:    'Analyzing power consumption',
     PHYSICAL_VERIFY:   'Running physical verification checks',
+    POST_LAYOUT_SPICE: 'Running transistor-level SPICE checks',
     SIGNOFF:           'Final LVS/DRC checks',
     IP_PACKAGE:       'Packaging IP for reuse',
 };
