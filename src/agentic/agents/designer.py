@@ -57,6 +57,14 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   • When adding signals of width W, the result can be W+1 bits — declare accordingly.
   • Index into arrays with the minimum-width signal: for 16-entry ROM use [3:0], not [15:0].
 
+  PHYSICAL DESIGN (PD) RULES (CRITICAL FOR ANY NODE):
+  ───────────────────────────────────────────────────
+  • Clock Domain Crossing (CDC): Always use multi-stage synchronizers (e.g., 2-flop or 3-flop) when moving signals between asynchronous clock domains.
+  • High Fanout Nets: For nets driving many sinks (e.g., global resets or enables), avoid single-driver bottlenecks. Assume OpenLane/CTS will handle buffers, but duplicate registers at RTL if fanout > 1000.
+  • Macros & Memory: NEVER synthesize large memory arrays (RAMs/ROMs) > 1KB into flip-flops. Always use parameterized block RAM instantiations or standard foundry SRAM macro wrappers (e.g., OpenRAM).
+  • Reset Trees: Be mindful of reset fanout and recovery times. Use active-low asynchronous resets but synchronize de-assertion to the clock domain (async assert, sync deassert).
+  • Power & Tie-Cells: Do not hardcode 1'b1 or 1'b0 heavily in critical datapaths if it causes routing congestion; let synthesis infer tie-high/tie-low standard cells.
+
   NO PROSE (CRITICAL):
   ────────────────────
   • Output ONLY pure Verilog code.

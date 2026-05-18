@@ -387,12 +387,16 @@ class ArchitectModule:
         if target_pdk_profile:
             pdk_name = target_pdk_profile.get("profile", "unknown")
             voltage = target_pdk_profile.get("voltage_vdd", "unknown")
-            # Try to grab frequency limits if injected into the profile dictionary, or fallback to heuristics
             clock_ns = target_pdk_profile.get("default_clock_period", "unknown")
+            
             sections.append(f"\n## Target PDK Constraints (CRITICAL for Pipelining)")
             sections.append(f"Target node: {pdk_name} ({voltage}V).")
-            sections.append(f"Target clock period is {clock_ns}ns.")
-            sections.append(f"You MUST adapt your pipelining logic to this timeframe. Do NOT write single-cycle logic blocks that result in overly long critical paths.")
+            
+            if "asap7" in pdk_name or "asap5" in pdk_name or "asap2" in pdk_name or "open28" in pdk_name:
+                sections.append(f"Advanced FinFET/GAAFET Node Warning: Expect severe wire RC delays and routing congestion. Heavily pipeline your datapaths. Do not synthesize large RAMs to flip-flops.")
+            elif "gf180" in pdk_name or "osu" in pdk_name:
+                sections.append(f"Legacy Node Warning: Logic delays dominate wire delays. Optimize logic depth.")
+            
             sections.append(f"If the clock period is aggressive for {pdk_name}, ensure intermediate pipeline registers are utilized heavily.\n")
 
         sections.append(f"Description: {sid.description}")
