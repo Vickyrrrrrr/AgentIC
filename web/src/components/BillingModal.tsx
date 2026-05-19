@@ -7,6 +7,8 @@ import { toUserError } from '../utils/errorFormatter';
 
 type GroupKey = 'group1' | 'group2' | 'group3';
 type GroupState = Record<GroupKey, { model: string; apiKey: string; baseUrl: string }>;
+type ByokServerGroup = { model?: string; api_key?: string; base_url?: string };
+type ByokConfigPayload = Record<GroupKey, { model: string; api_key: string; base_url: string }>;
 
 type ModalMode = 'agentic' | 'byok';
 
@@ -109,12 +111,14 @@ export const BillingModal = ({
   isOpen,
   onClose,
   onKeySaved,
+  initialMode = 'byok',
 }: {
   isOpen: boolean;
   onClose: () => void;
   onKeySaved: () => void;
+  initialMode?: ModalMode;
 }) => {
-  const [mode, setMode] = useState<ModalMode>('byok');
+  const [mode, setMode] = useState<ModalMode>(initialMode);
   const [groups, setGroups] = useState<GroupState>(DEFAULT_GROUPS);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -125,7 +129,7 @@ export const BillingModal = ({
   const [saved, setSaved] = useState(false);
   const [agenticPlan, setAgenticPlan] = useState<{ plan_type: string; plan: string; build_limit: number | null } | null>(null);
 
-  const applyParsed = (parsed: any) => {
+  const applyParsed = (parsed: Partial<Record<GroupKey, ByokServerGroup>>) => {
     const nextGroups: GroupState = {
       group1: { model: parsed.group1?.model || DEFAULT_BYOK_MODEL, apiKey: parsed.group1?.api_key || '', baseUrl: parsed.group1?.base_url || DEFAULT_BYOK_BASE_URL },
       group2: { model: parsed.group2?.model || DEFAULT_BYOK_MODEL, apiKey: parsed.group2?.api_key || '', baseUrl: parsed.group2?.base_url || DEFAULT_BYOK_BASE_URL },
@@ -146,6 +150,7 @@ export const BillingModal = ({
   useEffect(() => {
     if (!isOpen) { setSaved(false); return; }
     setError('');
+    setMode(initialMode);
 
     // Load current plan/billing status
     const loadBillingStatus = async () => {
@@ -159,7 +164,7 @@ export const BillingModal = ({
             build_limit: data.build_limit,
           });
         }
-      } catch (_e) {
+      } catch {
         // ignore
       }
     };
@@ -181,7 +186,7 @@ export const BillingModal = ({
             }
           }
         }
-      } catch (_e) {
+      } catch {
         // fall through
       }
 
@@ -198,7 +203,7 @@ export const BillingModal = ({
         }
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') applyParsed(parsed);
-      } catch (_e) {
+      } catch {
         setGroups(DEFAULT_GROUPS);
         setQuickKey('');
         setQuickModel(DEFAULT_BYOK_MODEL);
@@ -209,7 +214,7 @@ export const BillingModal = ({
 
     loadBillingStatus();
     loadKeys();
-  }, [isOpen]);
+  }, [isOpen, initialMode]);
 
   const hasAnyKey = quickMode
     ? quickKey.trim().length > 0
@@ -224,7 +229,7 @@ export const BillingModal = ({
     setSaving(true);
     setError('');
 
-    let payload: any;
+    let payload: ByokConfigPayload;
     if (quickMode) {
       const common = {
         model: quickModel.trim() || DEFAULT_BYOK_MODEL,
@@ -265,8 +270,8 @@ export const BillingModal = ({
 
       setSaved(true);
       setTimeout(() => { onKeySaved(); onClose(); }, 600);
-    } catch (err: any) {
-      setError(toUserError(err.message || err, 'Failed to save configuration. Please try again.'));
+    } catch (err: unknown) {
+      setError(toUserError(err instanceof Error ? err.message : err, 'Failed to save configuration. Please try again.'));
     } finally {
       setSaving(false);
     }
@@ -288,9 +293,9 @@ export const BillingModal = ({
           {/* Header */}
           <div className="byok-header">
             <div>
-              <h2 className="byok-title">Configure Build</h2>
+              <h2 className="byok-title">Model Settings</h2>
               <p className="byok-subtitle">
-                Choose how you want to run your chip builds.
+                Choose Infinite or connect your own OpenAI-compatible model.
               </p>
             </div>
             <button className="byok-close" onClick={onClose} aria-label="Close">
@@ -305,7 +310,7 @@ export const BillingModal = ({
               onClick={() => setMode('agentic')}
             >
               <Cpu size={15} />
-              AgentIC Model
+              Infinite
             </button>
             <button
               className={`byok-mode-tab${mode === 'byok' ? ' active' : ''}`}
@@ -323,15 +328,15 @@ export const BillingModal = ({
                 <div className="byok-onboarding-card">
                   <span className="byok-onboarding-icon"><Fingerprint size={16} /></span>
                   <div>
-                    <strong>Powered by AgentIC's RTL generation model</strong>
-                    <p>Uses AgentIC's optimized code generation model — no API key needed.</p>
+                    <strong>Hosted Infinite model</strong>
+                    <p>AgentIC runs the chip pipeline with its tuned RTL generation model. No user key required.</p>
                   </div>
                 </div>
                 <div className="byok-onboarding-card">
                   <span className="byok-onboarding-icon"><Sparkles size={16} /></span>
                   <div>
-                    <strong>Pay per successful chip build</strong>
-                    <p>Choose a plan that fits your needs — 10 builds or unlimited.</p>
+                    <strong>Requires AgentIC paid</strong>
+                    <p>Subscribe once, then launch autonomous builds with the hosted model.</p>
                   </div>
                 </div>
               </div>
@@ -356,7 +361,7 @@ export const BillingModal = ({
               ) : (
                 <div className="byok-agentic-cta">
                   <p className="byok-agentic-hint">
-                    Select a plan to use AgentIC's built-in RTL generation model. No API key required.
+                    Subscribe to AgentIC paid to use Infinite for autonomous chip builds. BYOK remains available with your own provider key.
                   </p>
                   <button
                     className="byok-agentic-btn"

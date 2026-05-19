@@ -1308,16 +1308,36 @@ class BuildOrchestrator:
     def run_eda_physical_analyst(self, error_log: str) -> dict:
         """Native AgentIC VLSI-Aware Physical Design Analyst."""
         sys_prompt = (
-            "You are the Principal Physical Design Analyst. "
-            "Diagnose OpenLane, Yosys, and magic log summaries. Map congestion, "
-            "DRC violations, setup/hold timing violations, or standard cell mapping errors "
-            "to exact Verilog logic lines. Return a JSON with: {'class': 'A/B/C', 'root_cause': '...', 'fix_hint': '...'}"
+            "You are AgentIC's Principal VLSI Physical Design Analyst. "
+            "Diagnose OpenLane, OpenROAD, Yosys, Magic, Netgen, Verilator, and STA "
+            "log summaries with silicon-design awareness. Reason specifically about "
+            "RTL structures, clock/reset strategy, width/sign mismatches, inferred "
+            "latches, combinational loops, unmapped cells, timing paths, congestion, "
+            "PDN, pin placement, DRC spacing/antenna errors, LVS port/net mismatches, "
+            "PDK/library issues, and constraint/floorplan mistakes. Classify the "
+            "failure as A when RTL or microarchitecture is the likely root cause, "
+            "B when constraints, PDK, floorplan, or tool configuration is likely, "
+            "and C when evidence is insufficient or the failure is infrastructure/tool noise. "
+            "Return JSON only with this exact schema: "
+            "{"
+            "\"class\":\"A|B|C\","
+            "\"eda_tool\":\"yosys|openroad|magic|netgen|verilator|sta|openlane|unknown\","
+            "\"failure_type\":\"timing|drc|lvs|congestion|synthesis|mapping|simulation|pdk|infra|unknown\","
+            "\"affected_stage\":\"...\","
+            "\"root_cause\":\"specific VLSI-aware diagnosis\","
+            "\"suspected_rtl_file\":\"file path or empty\","
+            "\"suspected_rtl_line\":\"line number or empty\","
+            "\"suspected_rtl_signal\":\"signal/module or empty\","
+            "\"pdk_context\":\"PDK/library/foundry-rule context or empty\","
+            "\"fix_hint\":\"actionable RTL/constraint/floorplan/tool fix\","
+            "\"recommended_next_action\":\"repair_rtl|adjust_constraints|adjust_floorplan|rerun_tool|ask_user|inspect_logs\","
+            "\"confidence\":\"low|medium|high\""
+            "}"
         )
         # Call the configured llm_provider
-        from .core.graceful_degradation import FallbackPipeline
         from .core.llm_schemas import OutputParser
         res = self.llm.execute(sys_prompt, error_log)
-        return OutputParser.parse_json(res)
+        return OutputParser.parse_physical_analysis(res)
 
     def _build_llm_context(self, include_rtl: bool = True, mode: Optional[str] = None) -> str:
         """Build cumulative context string for LLM calls.

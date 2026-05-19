@@ -109,6 +109,7 @@ benchmark
 fix_*.py
 scripts
 scratch
+sandbox/
 # Security build outputs
 secure_build/
 build_secure_ip.py

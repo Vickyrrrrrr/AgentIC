@@ -22,6 +22,8 @@ import {
   ClipboardList,
   Settings2,
   Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
@@ -174,7 +176,7 @@ const PAGE_META: Record<PageKey, { title: string; subtitle: string }> = {
 
 const App = () => {
   const [session, setSession] = useState<Session | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [authLoading, setAuthLoading] = useState(AUTH_ENABLED);
   const [selectedPage, setSelectedPage] = useState<PageKey>('Home');
   const [showPricing, setShowPricing] = useState(() =>
     typeof window !== 'undefined' && window.location.pathname === '/pricing'
@@ -186,13 +188,13 @@ const App = () => {
   const [showBillingModal, setShowBillingModal] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('agentic-theme');
-    return saved === 'dark' ? 'dark' : 'light';
+    return saved === 'light' || saved === 'dark' ? saved : 'dark';
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   useEffect(() => {
     if (!AUTH_ENABLED) {
-      setAuthLoading(false);
       return;
     }
     supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => {
@@ -363,7 +365,7 @@ const App = () => {
       <div style={{ position: 'relative' }}>
         <LandingPage onAuthSuccess={() => {}} />
         <button
-          onClick={() => setSession({ user: { email: 'dev@localhost' } } as any)}
+          onClick={() => setSession({ user: { email: 'dev@localhost' } } as unknown as Session)}
           style={{
             position: 'fixed', bottom: '1rem', right: '1rem',
             background: '#27272A', color: '#71717A',
@@ -468,7 +470,7 @@ const App = () => {
   return (
     <QueryClientProvider client={queryClient}>
       <ErrorBoundary>
-        <div className="app-shell workspace-shell">
+        <div className={`app-shell workspace-shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
           {/* Mobile sidebar overlay */}
           <div
             className={`sidebar-overlay${mobileMenuOpen ? ' active' : ''}`}
@@ -482,6 +484,14 @@ const App = () => {
                 <div className="app-brand-title">AgentIC</div>
                 <div className="app-brand-sub">Autonomous Silicon Workspace</div>
               </div>
+              <button
+                className="app-sidebar-collapse"
+                onClick={() => setSidebarCollapsed((value) => !value)}
+                title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              >
+                {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+              </button>
             </div>
 
             {NAV_GROUPS.map((group) => (

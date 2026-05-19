@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Check, Zap, Infinity, ArrowLeft, Cpu, KeyRound, AlertCircle } from 'lucide-react';
+import { Check, Zap, Infinity as InfinityIcon, ArrowLeft, Cpu, KeyRound, AlertCircle } from 'lucide-react';
+import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../supabaseClient';
 import { api } from '../api';
 
@@ -13,6 +14,30 @@ type Plan = {
   features: string[];
   popular?: boolean;
 };
+
+type RazorpayPaymentResponse = {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+};
+
+type RazorpayCheckoutOptions = {
+  key: string;
+  order_id: string;
+  name: string;
+  description: string;
+  handler: (response: RazorpayPaymentResponse) => Promise<void>;
+  theme?: { color?: string; overlay_close?: boolean };
+  modal?: { ondismiss?: () => void };
+};
+
+type RazorpayConstructor = new (options: RazorpayCheckoutOptions) => { open: () => void };
+
+declare global {
+  interface Window {
+    Razorpay?: RazorpayConstructor;
+  }
+}
 
 const PLANS: Plan[] = [
   {
@@ -52,13 +77,13 @@ const PLANS: Plan[] = [
 export function Pricing() {
   const [loading, setLoading] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [session, setSession] = useState<any>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [testMode, setTestMode] = useState(false);
   const [currentPlan, setCurrentPlan] = useState<string | null>(null);
   const [currentPlanType, setCurrentPlanType] = useState<string | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }: { data: { session: unknown } }) => setSession(data.session as any));
+    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => setSession(data.session));
     loadBillingStatus();
   }, []);
 
@@ -70,7 +95,7 @@ export function Pricing() {
         setCurrentPlanType(data.plan_type);
         setTestMode(data.test_mode || false);
       }
-    } catch (_e) {
+    } catch {
       // ignore
     }
   };
@@ -116,7 +141,7 @@ export function Pricing() {
         setCurrentPlanType('agentic_paid');
       } else {
         // Production mode: open Razorpay checkout
-        const Razorpay = (window as any).Razorpay;
+        const Razorpay = window.Razorpay;
         if (!Razorpay) {
           setMessage({ type: 'error', text: 'Payment SDK not loaded. Please refresh the page or use test mode.' });
           setLoading(null);
@@ -127,8 +152,8 @@ export function Pricing() {
           order_id: order.order_id,
           name: 'AgentIC',
           description: `${order.plan_name} — ${order.amount_display}`,
-          handler: async (response: any) => {
-            const { data: _verifyData, status: verifyStatus } = await api.post('/billing/verify-payment', {
+          handler: async (response: RazorpayPaymentResponse) => {
+            const { status: verifyStatus } = await api.post('/billing/verify-payment', {
               razorpay_order_id: response.razorpay_order_id,
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_signature: response.razorpay_signature,
@@ -148,8 +173,8 @@ export function Pricing() {
         });
         rzp.open();
       }
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'Something went wrong. Please try again.' });
+    } catch (err: unknown) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Something went wrong. Please try again.' });
     } finally {
       setLoading(null);
     }
@@ -173,8 +198,8 @@ export function Pricing() {
       setMessage({ type: 'success', text: data.message });
       setCurrentPlan(planId);
       setCurrentPlanType('agentic_paid');
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message });
+    } catch (err: unknown) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to activate plan.' });
     } finally {
       setLoading(null);
     }
@@ -200,9 +225,9 @@ export function Pricing() {
           Back
         </button>
         <div className="pricing-title-wrap">
-          <h1 className="pricing-title">Plans &amp; Pricing</h1>
+          <h1 className="pricing-title">Use Infinite for chip builds</h1>
           <p className="pricing-subtitle">
-            Pay per successful chip build. Choose the plan that fits your needs.
+            Minimal pricing for the hosted AgentIC model. BYOK stays available when you prefer your own model.
           </p>
         </div>
       </div>
@@ -224,7 +249,7 @@ export function Pricing() {
           <div className="pricing-current-badge pricing-current-badge--byok">
             <KeyRound size={15} />
             <span>
-              You're on <strong>BYOK mode</strong>. Switch to AgentIC Model to use built-in RTL generation.
+              You're on <strong>BYOK mode</strong>. Subscribe to use Infinite without managing model keys.
             </span>
           </div>
         </div>
@@ -254,7 +279,7 @@ export function Pricing() {
 
             <div className="pricing-card-header">
               <div className="pricing-plan-icon">
-                {plan.id === 'pro' ? <Infinity size={22} /> : <Zap size={22} />}
+                {plan.id === 'pro' ? <InfinityIcon size={22} /> : <Zap size={22} />}
               </div>
               <h2 className="pricing-plan-name">{plan.name}</h2>
               <p className="pricing-plan-desc">{plan.description}</p>
@@ -321,8 +346,8 @@ export function Pricing() {
             <Cpu size={20} />
           </div>
           <div>
-            <strong>AgentIC Model</strong>
-            <p>Uses AgentIC's built-in RTL generation model. No API key needed. Pay per successful build.</p>
+            <strong>Infinite</strong>
+            <p>AgentIC hosted model for autonomous chip generation. No model key setup required.</p>
           </div>
         </div>
         <div className="pricing-compare-vs">vs</div>
@@ -332,7 +357,7 @@ export function Pricing() {
           </div>
           <div>
             <strong>Bring Your Own Key</strong>
-            <p>Use your own LLM API keys. Unlimited builds. Pay for your own API usage directly.</p>
+            <p>Use your own model and API keys. You manage provider billing directly.</p>
           </div>
         </div>
       </div>

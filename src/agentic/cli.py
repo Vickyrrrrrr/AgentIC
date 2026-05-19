@@ -3215,11 +3215,14 @@ def _llm_extra_body_from_env() -> Optional[dict]:
         return None
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError("LLM_EXTRA_BODY_JSON must be valid JSON") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM_EXTRA_BODY_JSON must decode to a JSON object")
-    return parsed
+        if isinstance(parsed, dict):
+            return parsed
+        console.print("[warning]LLM_EXTRA_BODY_JSON must decode to a JSON object, ignoring.[/warning]")
+        return None
+    except json.JSONDecodeError:
+        console.print("[warning]Ignoring invalid LLM_EXTRA_BODY_JSON (must be valid JSON).[/warning]")
+        return None
+
 
 
 def _role_extra_body(cfg: dict) -> Optional[dict]:
