@@ -46,7 +46,6 @@ services:
       - ./server:/app/server
       - ./src:/app/src
       - ./knowledge:/app/knowledge:ro
-      - ./web/dist:/app/web/dist
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HOME}/.ciel:/home/appuser/.ciel
       - ${HOME}/.volare:/home/appuser/.volare
