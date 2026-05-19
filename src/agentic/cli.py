@@ -1231,8 +1231,8 @@ def configure():
             test_llm = LLM(**kwargs)
             test_llm.call([{"role": "user", "content": "hi"}])
             return True
-        except Exception as e:
-            console.print(f"  [warning]Connection failed: {e}[/warning]")
+        except Exception:
+            console.print("  [warning]Connection failed: Authentication failed or provider unavailable. Please check your API key, Model, and Base URL.[/warning]")
             return False
 
     def _prompt_key(
@@ -1429,6 +1429,66 @@ PDK_INSTALL_CONFIGS = {
             "git clone https://github.com/The-OpenROAD-Project/asap7.git",
             "export PDK_ROOT=$HOME/.ciel",
             "mkdir -p $PDK_ROOT && cp -R asap7 $PDK_ROOT/asap7",
+        ],
+    },
+    "asap5": {
+        "name": "ASAP5 Predictive PDK",
+        "pdk_dir": "asap5",
+        "support_level": "research",
+        "auto_installable": False,
+        "flow_status": "predictive/research; requires user-provided OpenROAD/OpenLane-compatible collateral",
+        "description": "ASAP 5nm predictive FinFET node",
+        "install_method": "manual",
+        "volare_repo": "",
+        "volare_target": "",
+        "download_url": "",
+        "requires_volare": False,
+        "versions": ["manual"],
+        "default_version": "manual",
+        "manual_steps": [
+            "Install or generate ASAP5-compatible Liberty, LEF, tech, DRC, and LVS files.",
+            "Place the PDK at $PDK_ROOT/asap5/ with libs.ref/asap5sc/ and libs.tech/ when possible.",
+            "Run agentic install-pdk asap5 --check before hardening.",
+        ],
+    },
+    "asap2": {
+        "name": "ASAP2 Predictive PDK",
+        "pdk_dir": "asap2",
+        "support_level": "research",
+        "auto_installable": False,
+        "flow_status": "predictive/research; requires user-provided OpenROAD/OpenLane-compatible collateral",
+        "description": "ASAP 2nm predictive GAAFET node",
+        "install_method": "manual",
+        "volare_repo": "",
+        "volare_target": "",
+        "download_url": "",
+        "requires_volare": False,
+        "versions": ["manual"],
+        "default_version": "manual",
+        "manual_steps": [
+            "Install or generate ASAP2-compatible Liberty, LEF, tech, DRC, and LVS files.",
+            "Place the PDK at $PDK_ROOT/asap2/ with libs.ref/asap2sc/ and libs.tech/ when possible.",
+            "Run agentic install-pdk asap2 --check before hardening.",
+        ],
+    },
+    "open28": {
+        "name": "Open 28nm experimental PDK",
+        "pdk_dir": "open28",
+        "support_level": "experimental",
+        "auto_installable": False,
+        "flow_status": "experimental open flow; requires PDK collateral compatible with OpenROAD/OpenLane",
+        "description": "Open 28nm experimental digital flow",
+        "install_method": "manual",
+        "volare_repo": "",
+        "volare_target": "",
+        "download_url": "",
+        "requires_volare": False,
+        "versions": ["manual"],
+        "default_version": "manual",
+        "manual_steps": [
+            "Place Liberty, LEF, tech, DRC, and LVS collateral at $PDK_ROOT/open28/.",
+            "Use libs.ref/open28_stdcells/ and libs.tech/ layout when possible.",
+            "Run agentic install-pdk open28 --check before hardening.",
         ],
     },
     "nangate45": {
@@ -1643,8 +1703,13 @@ PDK_INSTALL_ALIASES = {
     "sky130a": "sky130",
     "sky130": "sky130",
     "asap7": "asap7",
+    "asap5": "asap5",
+    "asap2": "asap2",
     "nangate45": "nangate45",
     "freepdk45": "freepdk45",
+    "open28": "open28",
+    "open-28": "open28",
+    "open28nm": "open28",
     "osu018": "osu018",
     "osu035": "osu035",
     "openfasoc": "openfasoc130",
@@ -2719,10 +2784,10 @@ def install_tools(
                     'ROLE_DOCUMENTER_BASE_URL="http://localhost:8000/v1"\n'
                     'ROLE_REASONER_MODEL="local-llm"\n'
                     'ROLE_REASONER_BASE_URL="http://localhost:8000/v1"\n\n'
-                    '# --- Verilog Codegen ---\n'
-                    'VERILOG_CODEGEN_ENABLED=1\n'
-                    'VERILOG_CODEGEN_MODEL="local-llm"\n'
-                    'VERILOG_CODEGEN_BASE_URL="http://localhost:8000/v1"\n\n'
+                    '# --- AgentIC Model ---\n'
+                    'AGENTIC_MODEL_ENABLED=1\n'
+                    'AGENTIC_MODEL_MODEL="local-llm"\n'
+                    'AGENTIC_MODEL_BASE_URL="http://localhost:8000/v1"\n\n'
                     '# --- PDK ---\n'
                     f'PDK_ROOT="{pdk_root}"\n'
                     'PDK="sky130A"\n\n'
@@ -3800,6 +3865,11 @@ def build(
     pdk_path: str = typer.Option(
         "", "--pdk-path", help="Path to a custom PDK directory to use for this build"
     ),
+    macro_manifest: str = typer.Option(
+        "",
+        "--macro-manifest",
+        help="Path to generic hard-macro/IP manifest with LEF/GDS/lib/blackbox collateral",
+    ),
     max_pivots: int = typer.Option(
         2, "--max-pivots", min=0, help="Maximum strategy pivots before fail-closed"
     ),
@@ -3832,7 +3902,7 @@ def build(
     no_golden_templates: bool = typer.Option(
         False,
         "--no-golden-templates",
-        help="Disable golden template matching; force LLM to generate RTL from scratch",
+        help="Disable golden template matching; default is disabled unless AGENTIC_DISABLE_GOLDEN_TEMPLATES=0",
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Output machine-readable JSON results for CI/CD integration"
@@ -3876,6 +3946,13 @@ def build(
         os.environ["PDK_ROOT"] = os.path.dirname(custom_path)
         if not pdk:
             pdk = os.path.basename(custom_path)
+
+    macro_manifest_path = ""
+    if macro_manifest:
+        macro_manifest_path = os.path.abspath(os.path.expanduser(macro_manifest))
+        if not os.path.isfile(macro_manifest_path):
+            console.print(f"[error]Macro manifest not found: {macro_manifest_path}[/error]")
+            raise typer.Exit(1)
 
     detected = detect_available_pdks()
     pdk_profile: str = ""
@@ -4020,7 +4097,11 @@ def build(
 
         llm = get_llm()
         spec_gen = HardwareSpecGenerator(llm)
-        spec, issues = spec_gen.generate(desc, _design_name)
+        spec, issues = spec_gen.generate(
+            design_name=_design_name,
+            description=desc,
+            target_pdk=pdk_profile or "sky130",
+        )
         if issues:
             console.print(f"[warning]Spec issues:[/warning]")
             for issue in issues:
@@ -4142,6 +4223,9 @@ def build(
         thinking_level=thinking_level,
     )
     orchestrator.hardening_recovery_attempts_max = recovery_attempts
+    if macro_manifest_path:
+        orchestrator.macro_manifest_path = macro_manifest_path
+        orchestrator.artifacts["macro_manifest_path"] = macro_manifest_path
 
     orchestrator.run()
 

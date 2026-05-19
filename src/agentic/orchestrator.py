@@ -27,12 +27,15 @@ from .config import (
     LLM_BASE_URL,
     LLM_API_KEY,
     PDK,
+    PDK_ROOT,
     WORKSPACE_ROOT,
     SIM_BACKEND_DEFAULT,
     COVERAGE_FALLBACK_POLICY_DEFAULT,
     COVERAGE_PROFILE_DEFAULT,
     VERILATOR_BIN,
     get_pdk_profile,
+    get_pdk_tool_config,
+    get_pdk_flow_capabilities,
 )
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
@@ -57,6 +60,14 @@ from .core.usage_tracker import UsageTracker, get_usage_tracker
 from .core.incremental_fixer import IncrementalFixEngine, ErrorAnalysis, ErrorType
 from .core.hardware_knowledge import HardwareKnowledgeBase
 from .core.vlsi_rag import VLSIKnowledgeBase
+from .core.macro_registry import (
+    MacroManifest,
+    discover_macro_manifest,
+    macro_openlane_tcl,
+    macro_placement_cfg,
+    macro_prompt_guidance,
+    validate_macro_manifest,
+)
 from .tools.retrieval_tool import vlsi_search, vlsi_ask, pdk_rule_lookup, expand_abbr
 from .core.context_evolution import MultiAgentContextEvolver
 from .core.eda_capabilities import detect_eda_capabilities
@@ -446,7 +457,10 @@ class BuildOrchestrator:
         self.role_llms = role_llms or {}
         self.human_in_loop = human_in_loop
         self.event_sink = event_sink  # Web API hook: callable(event_dict) or None
-        self.no_golden_templates = no_golden_templates
+        disable_golden_default = os.getenv(
+            "AGENTIC_DISABLE_GOLDEN_TEMPLATES", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.no_golden_templates = no_golden_templates or disable_golden_default
         self.max_retries = max_retries
         self.verbose = verbose
         self.skip_openlane = skip_openlane
@@ -456,6 +470,12 @@ class BuildOrchestrator:
         self.min_coverage = min_coverage
         self.strict_gates = strict_gates
         self.pdk_profile = get_pdk_profile(pdk_profile)
+        self.pdk_tool_config = get_pdk_tool_config(
+            self.pdk_profile.get("profile", pdk_profile)
+        )
+        self.pdk_flow_capabilities = get_pdk_flow_capabilities(
+            self.pdk_profile.get("profile", pdk_profile)
+        )
         self.max_pivots = max_pivots
         self.congestion_threshold = congestion_threshold
         self.hierarchical_mode = hierarchical_mode
@@ -506,6 +526,10 @@ class BuildOrchestrator:
         self.tb_failure_fingerprint_history: Dict[str, int] = {}
         self.tb_recovery_counts: Dict[str, int] = {}
         self.artifacts: Dict[str, Any] = {}  # Store paths to gathered files
+        self.artifacts["pdk_tool_config"] = dict(self.pdk_tool_config)
+        self.artifacts["pdk_flow_capabilities"] = dict(self.pdk_flow_capabilities)
+        self.macro_manifest_path = ""
+        self._macro_manifest: Optional[MacroManifest] = None
         self.artifact_bus: Dict[str, ArtifactRef] = {}
         self.stage_contract_history: List[Dict[str, Any]] = []
         self.retry_metadata: Dict[str, int] = {
@@ -819,6 +843,86 @@ class BuildOrchestrator:
 
     def _get_artifact(self, key: str, default: Any = None) -> Any:
         return self.artifacts.get(key, default)
+
+    def _flow_caps(self) -> Dict[str, Any]:
+        """Return cached node capability data, refreshing old checkpoints if needed."""
+        caps = getattr(self, "pdk_flow_capabilities", None)
+        if not caps:
+            profile_key = self.pdk_profile.get("profile", self.pdk_profile.get("pdk", PDK))
+            caps = get_pdk_flow_capabilities(profile_key)
+            self.pdk_flow_capabilities = caps
+        self.artifacts["pdk_flow_capabilities"] = dict(caps)
+        return caps
+
+    def _node_aware_floorplan_defaults(
+        self, line_count: int, cell_count_est: int
+    ) -> Tuple[int, int, float]:
+        """Compute conservative die/util/routing defaults from PDK capability data."""
+        caps = self._flow_caps()
+        lc_area = float(caps.get("lc_area_um2", 0.054) or 0.054)
+        min_die = int(caps.get("min_die_um", 250) or 250)
+        default_util = int(caps.get("default_core_util", 40) or 40)
+        max_util = int(caps.get("max_core_util", 50) or 50)
+        util = max(25, min(max_util, default_util))
+
+        # Estimated standard-cell area plus whitespace, routing tracks, CTS, and filler.
+        util_fraction = max(0.25, util / 100.0)
+        core_area = max(1.0, cell_count_est * lc_area)
+        die_from_cells = int((core_area / util_fraction) ** 0.5 * 2.2)
+        rtl_floor = 300 if line_count < 100 else 500 if line_count < 300 else 800
+        if caps.get("advanced_node"):
+            rtl_floor = max(min_die, int(rtl_floor * 0.45))
+        elif caps.get("legacy_node"):
+            rtl_floor = max(min_die, int(rtl_floor * 1.10))
+        else:
+            rtl_floor = max(min_die, rtl_floor)
+
+        die = max(min_die, rtl_floor, die_from_cells)
+        return die, util, float(caps.get("grt_adjustment", 0.20) or 0.20)
+
+    def _pdk_guidance_text(self) -> str:
+        caps = self._flow_caps()
+        fields = [
+            f"PDK profile: {caps.get('profile')} ({caps.get('pdk')})",
+            f"Node class: {caps.get('node_class')} | node_nm={caps.get('node_nm')}",
+            f"Metal layers: {caps.get('metal_layers')} | max routing layer: {caps.get('max_routing_layer') or 'PDK default'}",
+            f"Recommended utilization: <= {caps.get('max_core_util')}% | GRT adjustment: {caps.get('grt_adjustment')}",
+            f"Flow status: {caps.get('flow_status')}",
+            f"Guidance: {caps.get('rtl_guidance')}",
+        ]
+        return "\n".join(f"- {item}" for item in fields)
+
+    def _openlane_node_tcl(self, util: int) -> str:
+        caps = self._flow_caps()
+        env_layer = os.environ.get("AGENTIC_OPENLANE_MAX_ROUTING_LAYER", "").strip()
+        artifact_layer = str(self.artifacts.get("openlane_max_routing_layer", "") or "").strip()
+        advisory_layer = str(caps.get("max_routing_layer", "") or "").strip()
+        max_layer = artifact_layer or env_layer or advisory_layer
+        enforce_layer = bool(caps.get("enforce_max_routing_layer", False))
+        enforce_layer = enforce_layer or bool(artifact_layer or env_layer)
+        enforce_layer = enforce_layer or os.environ.get(
+            "AGENTIC_ENFORCE_MAX_ROUTING_LAYER", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        grt_adjustment = float(caps.get("grt_adjustment", 0.20) or 0.20)
+        density = min(0.85, max(0.25, util / 100 + (0.08 if caps.get("advanced_node") else 0.05)))
+        lines = [
+            "# Node-aware routing and placement",
+            f"set ::env(PL_TARGET_DENSITY) {density:.2f}",
+            f"set ::env(GRT_ADJUSTMENT) {grt_adjustment:.2f}",
+        ]
+        if max_layer and enforce_layer:
+            lines.append(f'set ::env(RT_MAX_LAYER) "{max_layer}"')
+        elif advisory_layer:
+            lines.append(f"# Advisory max routing layer from PDK profile: {advisory_layer}")
+        if caps.get("advanced_node"):
+            lines.extend(
+                [
+                    "set ::env(PL_RESIZER_DESIGN_OPTIMIZATIONS) 1",
+                    "set ::env(PL_RESIZER_TIMING_OPTIMIZATIONS) 1",
+                    "set ::env(GLB_RESIZER_TIMING_OPTIMIZATIONS) 1",
+                ]
+            )
+        return "\n".join(lines)
 
     def _require_artifact(self, key: str, *, consumer: str, message: str) -> Any:
         if key in self.artifacts and self.artifacts[key] not in (None, "", {}):
@@ -1900,6 +2004,15 @@ SPECIFICATION SECTIONS (Markdown):
                 refined=True,
             )
             self.logger.warning(f"HardwareSpecGenerator error: {e}")
+            if os.environ.get("AGENTIC_REQUIRE_LLM_SPEC", "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                self.errors.append(f"Required LLM spec generation failed: {e}")
+                self.state = BuildState.FAIL
+                return
             # Create a minimal hw_spec so downstream stages can still run
             self.artifacts["hw_spec"] = {
                 "design_category": "CONTROL",
@@ -3633,6 +3746,12 @@ STRATEGY GUIDELINES:
 LOGIC DECOUPLING HINT:
 {self.artifacts.get("logic_decoupling_hint", "N/A")}
 
+TARGET NODE / PDK GUIDANCE:
+{self._pdk_guidance_text()}
+
+HARD MACRO / DESIGN PLUGIN GUIDANCE:
+{self._macro_prompt_guidance() or "No external hard macros declared for this build."}
+
 RETRIEVED HARDWARE KNOWLEDGE AND EVOLVED BUILD CONTEXT:
 {self._build_llm_context(include_rtl=False, mode="generation_mode")}
 
@@ -5121,6 +5240,16 @@ Return the complete module with ONLY the minimal fix applied.
     def do_formal_verify(self):
         """Runs formal property verification using SymbiYosys."""
         self.log("Starting Formal Property Verification...", refined=True)
+        if os.getenv("AGENTIC_SKIP_FORMAL", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            self.artifacts["formal_result"] = "SKIP"
+            self.log("Skipping formal verification (AGENTIC_SKIP_FORMAL=1).", refined=True)
+            self.transition(BuildState.COVERAGE_CHECK)
+            return
 
         rtl_path = self.artifacts.get("rtl_path")
         if not rtl_path:
@@ -7059,11 +7188,13 @@ REQUIREMENTS:
         rtl_code = self.artifacts.get("rtl_code", "")
         line_count = max(1, len([l for l in rtl_code.splitlines() if l.strip()]))
         cell_count_est = max(100, line_count * 4)
+        flow_caps = self._flow_caps()
 
         # --- LLM-assisted floorplan estimation with safe fallback ---
         # Heuristic defaults (used as fallback if LLM fails)
-        heuristic_die = 300 if line_count < 100 else 500 if line_count < 300 else 800
-        heuristic_util = 40 if line_count >= 200 else 50
+        heuristic_die, heuristic_util, heuristic_grt_adjustment = self._node_aware_floorplan_defaults(
+            line_count, cell_count_est
+        )
         heuristic_clk = self.artifacts.get(
             "clock_period_override",
             self.pdk_profile.get("default_clock_period", "10.0"),
@@ -7085,6 +7216,10 @@ REQUIREMENTS:
 DESIGN METRICS:
 - RTL: {line_count} non-blank lines, {module_count} modules, ~{cell_count_est} estimated cells
 - PDK: {self.pdk_profile.get("profile", "sky130")} ({self.pdk_profile.get("pdk", "sky130A")})
+- Node class: {flow_caps.get("node_class")} | metal layers: {flow_caps.get("metal_layers")} | lc_area_um2: {flow_caps.get("lc_area_um2")}
+- Utilization guidance: default {flow_caps.get("default_core_util")}% / max {flow_caps.get("max_core_util")}%
+- Routing guidance: max layer {flow_caps.get("max_routing_layer") or "PDK default"} / GRT adjustment {flow_caps.get("grt_adjustment")}
+- RTL guidance: {flow_caps.get("rtl_guidance")}
 - Previous convergence: {[{"wns": s.wns, "cong": s.congestion, "area": s.area_um2} for s in self.convergence_history[-2:]] if self.convergence_history else "First attempt"}
 - Floorplan attempt: {self.floorplan_attempts}
 
@@ -7121,7 +7256,7 @@ REASONING: <1-line explanation>""",
                         llm_die = int(
                             re.search(r"\d+", est_line_s.replace("DIE_AREA:", "")).group()
                         )
-                        llm_die = max(200, min(2000, llm_die))
+                        llm_die = max(int(flow_caps.get("min_die_um", 200)), min(2000, llm_die))
                     except (ValueError, AttributeError):
                         pass
                 elif est_line_s.startswith("UTILIZATION:"):
@@ -7129,7 +7264,7 @@ REASONING: <1-line explanation>""",
                         llm_util = int(
                             re.search(r"\d+", est_line_s.replace("UTILIZATION:", "")).group()
                         )
-                        llm_util = max(30, min(70, llm_util))
+                        llm_util = max(25, min(int(flow_caps.get("max_core_util", 50)), llm_util))
                     except (ValueError, AttributeError):
                         pass
                 elif est_line_s.startswith("CLOCK_PERIOD:"):
@@ -7167,17 +7302,42 @@ REASONING: <1-line explanation>""",
 
         area_scale = self.artifacts.get("area_scale", 1.0)
         die = int(base_die * area_scale)
+        util = max(25, min(int(flow_caps.get("max_core_util", 50)), int(util)))
+
+        macro_manifest = self._get_macro_manifest()
+        macro_tcl = macro_openlane_tcl(macro_manifest)
+        macro_placement_text = macro_placement_cfg(macro_manifest)
+        if macro_placement_text:
+            macro_placement_cfg_path = os.path.join(src_dir, "macro_placement.cfg")
+            with open(macro_placement_cfg_path, "w") as f:
+                f.write(macro_placement_text)
+            self.artifacts["macro_placement_cfg"] = macro_placement_cfg_path
 
         macro_placement_tcl = os.path.join(src_dir, "macro_placement.tcl")
         with open(macro_placement_tcl, "w") as f:
-            f.write(
-                "# Auto-generated macro placement skeleton\n"
-                f"# die_area={die}x{die} cell_count_est={cell_count_est}\n"
-                "set macros {}\n"
-                "foreach m $macros {\n"
-                "  # placeholder for macro coordinates\n"
-                "}\n"
-            )
+            if macro_placement_text:
+                f.write(
+                    "# Auto-generated macro placement summary\n"
+                    f"# die_area={die}x{die} cell_count_est={cell_count_est}\n"
+                    f"# OpenLane placement cfg: {self.artifacts['macro_placement_cfg']}\n"
+                )
+                for macro in macro_manifest.macros:
+                    if macro.placement:
+                        inst = macro.instance or macro.name
+                        f.write(
+                            f"# {inst} ({macro.kind}) -> "
+                            f"{macro.placement.x:g} {macro.placement.y:g} {macro.placement.orient}\n"
+                        )
+            else:
+                f.write(
+                    "# Auto-generated macro placement skeleton\n"
+                    f"# die_area={die}x{die} cell_count_est={cell_count_est}\n"
+                    "# Declare macros in macro_manifest.json to generate macro_placement.cfg\n"
+                    "set macros {}\n"
+                    "foreach m $macros {\n"
+                    "  # placeholder for macro coordinates\n"
+                    "}\n"
+                )
 
         floorplan_tcl = os.path.join(src_dir, f"{self.name}_floorplan.tcl")
         sdc_injection = (
@@ -7192,6 +7352,7 @@ REASONING: <1-line explanation>""",
                 f'set ::env(PDK) "{self.pdk_profile.get("pdk", PDK)}"\n'
                 f'set ::env(STD_CELL_LIBRARY) "{self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")}"\n'
                 f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]\n"
+                f"{macro_tcl}"
                 f"{sdc_injection}"
                 'set ::env(SYNTH_STRATEGY) "AREA 0"\n'
                 "set ::env(SYNTH_SIZING) 1\n"
@@ -7199,10 +7360,9 @@ REASONING: <1-line explanation>""",
                 'set ::env(FP_SIZING) "absolute"\n'
                 f'set ::env(DIE_AREA) "0 0 {die} {die}"\n'
                 f"set ::env(FP_CORE_UTIL) {util}\n"
-                f"set ::env(PL_TARGET_DENSITY) {util / 100 + 0.05:.2f}\n"
                 f'set ::env(CLOCK_PERIOD) "{clock_period}"\n'
                 f'set ::env(CLOCK_PORT) "clk"\n'
-                "set ::env(GRT_ADJUSTMENT) 0.15\n"
+                f"{self._openlane_node_tcl(util)}\n"
             )
 
         self.artifacts["macro_placement_tcl"] = macro_placement_tcl
@@ -7211,6 +7371,11 @@ REASONING: <1-line explanation>""",
             "die_area": die,
             "cell_count_est": cell_count_est,
             "clock_period": clock_period,
+            "utilization": util,
+            "node_class": flow_caps.get("node_class"),
+            "metal_layers": flow_caps.get("metal_layers"),
+            "max_routing_layer": flow_caps.get("max_routing_layer"),
+            "grt_adjustment": heuristic_grt_adjustment,
             "attempt": self.floorplan_attempts,
         }
         self.transition(BuildState.HARDENING)
@@ -7266,6 +7431,53 @@ REASONING: <1-line explanation>""",
             refined=True,
         )
         self.transition(BuildState.RTL_GEN, preserve_retries=True)
+
+    def _get_macro_manifest(self) -> MacroManifest:
+        """Load the optional generic hard-macro manifest for this design."""
+        cached = getattr(self, "_macro_manifest", None)
+        if cached is not None:
+            return cached
+
+        design_root = self.artifacts.get("root") or f"{OPENLANE_ROOT}/designs/{self.name}"
+        manifest_data = self.artifacts.get("macro_manifest")
+        explicit_path = (
+            self.artifacts.get("macro_manifest_path")
+            or getattr(self, "macro_manifest_path", "")
+            or os.getenv("AGENTIC_MACRO_MANIFEST", "")
+        )
+
+        try:
+            if isinstance(manifest_data, MacroManifest):
+                manifest = manifest_data
+            elif isinstance(manifest_data, dict):
+                manifest = MacroManifest.from_dict(
+                    manifest_data,
+                    base_dir=manifest_data.get("base_dir") or design_root,
+                    manifest_path=manifest_data.get("manifest_path", ""),
+                )
+            else:
+                manifest = discover_macro_manifest(design_root, explicit_path)
+        except Exception as exc:
+            self.log(f"Macro manifest load failed: {exc}", refined=True)
+            manifest = MacroManifest(base_dir=design_root)
+
+        warnings = validate_macro_manifest(manifest)
+        if warnings:
+            self.artifacts["macro_manifest_warnings"] = warnings
+            for warning in warnings[:5]:
+                self.log(f"Macro manifest warning: {warning}", refined=True)
+            if len(warnings) > 5:
+                self.log(f"Macro manifest has {len(warnings) - 5} more warnings.", refined=True)
+
+        self.artifacts["macro_manifest"] = manifest.to_dict()
+        self._macro_manifest = manifest
+        return manifest
+
+    def _macro_openlane_tcl(self) -> str:
+        return macro_openlane_tcl(self._get_macro_manifest())
+
+    def _macro_prompt_guidance(self) -> str:
+        return macro_prompt_guidance(self._get_macro_manifest())
 
     def do_convergence_review(self):
         """Assess congestion/timing convergence and prevent futile loops."""
@@ -7578,6 +7790,8 @@ REASONING: <1-line explanation>""",
         except Exception as e:
             self.log(f"Post-OpenLane DFT error: {e}", refined=True)
             self.logger.warning(f"Post-OpenLane DFT exception: {e}")
+
+    def _generate_openlane_config(self):
         """Generate OpenLane config.tcl with current recovery-adjusted parameters.
         
         Pulls SDC clock period from generated SDC file, applies any recovery overrides
@@ -7597,6 +7811,7 @@ REASONING: <1-line explanation>""",
 
         std_cell_lib = self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")
         pdk_name = self.pdk_profile.get("pdk", PDK)
+        flow_caps = self._flow_caps()
 
         # Priority: recovery override > SDC extracted > PDK default
         clock_period = str(
@@ -7605,10 +7820,14 @@ REASONING: <1-line explanation>""",
             or self.pdk_profile.get("default_clock_period", "10.0")
         )
         synth_strategy = self.artifacts.get("synth_strategy_override", "AREA 0")
+        macro_tcl = self._macro_openlane_tcl()
 
         floor_meta = self.artifacts.get("floorplan_meta", {})
         die = self.artifacts.get("die_area_override") or int(floor_meta.get("die_area", 500))
-        util = self.artifacts.get("core_util_override") or (40 if die >= 500 else 50)
+        default_util = int(flow_caps.get("default_core_util", 40) or 40)
+        max_util = int(flow_caps.get("max_core_util", 50) or 50)
+        util = int(self.artifacts.get("core_util_override") or floor_meta.get("utilization", default_util))
+        util = max(25, min(max_util, util))
 
         # Add SDC file reference if available
         sdc_ref = ""
@@ -7627,6 +7846,7 @@ set ::env(STD_CELL_LIBRARY) "{std_cell_lib}"
 
 # Verilog Files (glob all .v files — supports multi-module designs)
 set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]
+{macro_tcl}
 
 # Clock Configuration
 set ::env(CLOCK_PORT) "{clock_port}"
@@ -7640,10 +7860,8 @@ set ::env(SYNTH_SIZING) 1
 set ::env(FP_SIZING) "absolute"
 set ::env(DIE_AREA) "0 0 {die} {die}"
 set ::env(FP_CORE_UTIL) {util}
-set ::env(PL_TARGET_DENSITY) {util / 100 + 0.05:.2f}
 
-# Routing
-set ::env(GRT_ADJUSTMENT) 0.15
+{self._openlane_node_tcl(util)}
 
 # Magic
 set ::env(MAGIC_DRC_USE_GDS) 1

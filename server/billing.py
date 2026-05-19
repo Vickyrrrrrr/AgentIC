@@ -198,16 +198,32 @@ async def create_order(
     order = resp.json()
 
     if AUTH_ENABLED:
-        await _supabase_insert(
-            "payments",
-            {
-                "user_id": req.user_id,
-                "razorpay_order_id": order["id"],
-                "amount_paise": amount,
-                "plan": req.plan,
-                "status": "pending",
-            },
-        )
+        try:
+            await _supabase_insert(
+                "payments",
+                {
+                    "user_id": req.user_id,
+                    "razorpay_order_id": order["id"],
+                    "amount_paise": amount,
+                    "plan": req.plan,
+                    "status": "pending",
+                },
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400 and req.plan == "pro":
+                # Fallback to legacy 'unlimited' value for payments constraint compatibility
+                await _supabase_insert(
+                    "payments",
+                    {
+                        "user_id": req.user_id,
+                        "razorpay_order_id": order["id"],
+                        "amount_paise": amount,
+                        "plan": "unlimited",
+                        "status": "pending",
+                    },
+                )
+            else:
+                raise
 
     return {
         "order_id": order["id"],
@@ -319,16 +335,31 @@ async def _activate_user_plan(
 
     # Update or insert payment record
     try:
-        await _supabase_insert(
-            "payments",
-            {
-                "user_id": user_id,
-                "razorpay_order_id": razorpay_order_id,
-                "razorpay_payment_id": razorpay_payment_id,
-                "plan": plan,
-                "status": "captured",
-            },
-        )
+        try:
+            await _supabase_insert(
+                "payments",
+                {
+                    "user_id": user_id,
+                    "razorpay_order_id": razorpay_order_id,
+                    "razorpay_payment_id": razorpay_payment_id,
+                    "plan": plan,
+                    "status": "captured",
+                },
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400 and plan == "pro":
+                await _supabase_insert(
+                    "payments",
+                    {
+                        "user_id": user_id,
+                        "razorpay_order_id": razorpay_order_id,
+                        "razorpay_payment_id": razorpay_payment_id,
+                        "plan": "unlimited",
+                        "status": "captured",
+                    },
+                )
+            else:
+                raise
     except Exception:
         pass
 

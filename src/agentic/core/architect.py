@@ -131,6 +131,18 @@ class StructuredSpecDict:
                 errors.append(f"Sub-module '{sm.name}' has FSM but no '{self.clock_name}' port")
         return len(errors) == 0, errors
 
+    def top_submodule(self) -> Optional[SubModuleDef]:
+        for sm in self.sub_modules:
+            if sm.name == self.top_module or sm.name == self.design_name:
+                return sm
+        return self.sub_modules[0] if self.sub_modules else None
+
+    def all_port_names(self) -> set:
+        names = set()
+        for sm in self.sub_modules:
+            names.update(p.name for p in sm.ports if p.name)
+        return names
+
 
 # ─── Decomposer Prompt Templates ─────────────────────────────────────
 
@@ -212,6 +224,330 @@ class ArchitectModule:
         self.verbose = verbose
         self.max_retries = max_retries
 
+    FEATURE_LIBRARY: Dict[str, Dict[str, Any]] = {
+        "gpio": {
+            "keywords": ["gpio"],
+            "ports": {"gpio"},
+            "terms": {"gpio"},
+            "summary": "GPIO direction/output/input and multiplexing",
+        },
+        "pwm": {
+            "keywords": ["pwm"],
+            "ports": {"pwm_out"},
+            "terms": {"pwm"},
+            "summary": "PWM period/duty/enable generation",
+        },
+        "uart": {
+            "keywords": ["uart"],
+            "ports": {"uart_rx", "uart_tx"},
+            "terms": {"uart"},
+            "summary": "UART RX/TX control/status datapath",
+        },
+        "spi": {
+            "keywords": ["spi"],
+            "ports": {"spi_sclk", "spi_mosi", "spi_miso", "spi_cs_n"},
+            "terms": {"spi"},
+            "summary": "SPI serial clock, chip select, transmit, and receive datapath",
+        },
+        "i2c": {
+            "keywords": ["i2c", "i²c"],
+            "ports": {"i2c_scl", "i2c_sda"},
+            "terms": {"i2c"},
+            "summary": "I2C open-drain serial clock/data controller interface",
+        },
+        "apb": {
+            "keywords": ["apb"],
+            "ports": {"paddr", "psel", "penable", "pwrite", "pwdata", "prdata", "pready", "pslverr"},
+            "terms": {"apb"},
+            "summary": "AMBA APB register bus interface",
+        },
+        "axi_lite": {
+            "keywords": ["axi-lite", "axi4-lite", "axi lite", "axil"],
+            "ports": {
+                "axi_awaddr",
+                "axi_awvalid",
+                "axi_awready",
+                "axi_wdata",
+                "axi_wvalid",
+                "axi_wready",
+                "axi_bvalid",
+                "axi_bready",
+                "axi_araddr",
+                "axi_arvalid",
+                "axi_arready",
+                "axi_rdata",
+                "axi_rvalid",
+                "axi_rready",
+            },
+            "terms": {"axi"},
+            "summary": "AXI4-Lite slave register interface",
+        },
+        "wishbone": {
+            "keywords": ["wishbone"],
+            "ports": {"wb_adr_i", "wb_dat_i", "wb_dat_o", "wb_we_i", "wb_stb_i", "wb_cyc_i", "wb_ack_o"},
+            "terms": {"wishbone"},
+            "summary": "Wishbone-compatible register interface",
+        },
+        "fifo": {
+            "keywords": ["fifo"],
+            "ports": {"data_in", "data_out", "wr_en", "rd_en", "full", "empty"},
+            "terms": {"fifo"},
+            "summary": "FIFO storage with write/read enables and full/empty status",
+        },
+        "memory": {
+            "keywords": ["sram", "ram", "memory", "scratchpad"],
+            "ports": {"mem_addr", "mem_wdata", "mem_rdata", "mem_we", "mem_en"},
+            "terms": {"memory", "sram", "ram"},
+            "summary": "Memory interface suitable for SRAM compiler or memory macro integration",
+        },
+        "processor": {
+            "keywords": ["risc-v", "riscv", "rv32", "processor", "cpu"],
+            "ports": {"instr_addr", "instr_rdata", "data_addr", "data_wdata", "data_rdata", "data_we", "irq"},
+            "terms": {"processor", "cpu", "risc"},
+            "summary": "Processor core instruction/data interface and interrupt input",
+        },
+        "alu": {
+            "keywords": ["alu"],
+            "ports": {"operand_a", "operand_b", "opcode", "result", "valid"},
+            "terms": {"alu"},
+            "summary": "Arithmetic logic datapath with opcode-controlled operation",
+        },
+        "mac": {
+            "keywords": ["multiply accumulate", "multiply-accumulate"],
+            "ports": {"operand_a", "operand_b", "accum_out", "valid"},
+            "terms": {"mac", "multiply", "accumulate"},
+            "summary": "Multiply-accumulate datapath with registered output",
+        },
+        "aes": {
+            "keywords": ["aes"],
+            "ports": {"key", "plaintext", "ciphertext", "start", "done"},
+            "terms": {"aes"},
+            "summary": "AES crypto datapath/control interface",
+        },
+        "dma": {
+            "keywords": ["dma"],
+            "ports": {"src_addr", "dst_addr", "length", "start", "done"},
+            "terms": {"dma"},
+            "summary": "DMA source/destination/length control interface",
+        },
+        "watchdog": {
+            "keywords": ["watchdog"],
+            "ports": {"watchdog_reset_req"},
+            "terms": {"watchdog"},
+            "summary": "Watchdog enable/kick/timeout reset request",
+        },
+        "timer": {
+            "keywords": ["timer", "500 microsecond", "500 microseconds"],
+            "ports": {"timer_tick_500us"},
+            "terms": {"timer"},
+            "summary": "Timer tick generation from a configurable divider",
+        },
+        "reset_io": {
+            "keywords": ["reset i/o", "reset io", "reset pin"],
+            "ports": {"reset_io_n"},
+            "terms": {"reset"},
+            "summary": "Reset pin with readable status after release",
+        },
+        "converter": {
+            "keywords": ["adc", "converter", "sampled-data"],
+            "ports": {"conv_sample_valid", "conv_sample_data"},
+            "terms": {"converter", "sample"},
+            "summary": "Digital sampled-data converter interface for hard macro or off-chip converter",
+        },
+    }
+
+    PORT_WIDTHS: Dict[str, str] = {
+        "gpio": "8",
+        "pwm_out": "3",
+        "conv_sample_data": "12",
+        "paddr": "32",
+        "pwdata": "32",
+        "prdata": "32",
+        "axi_awaddr": "32",
+        "axi_wdata": "32",
+        "axi_araddr": "32",
+        "axi_rdata": "32",
+        "wb_adr_i": "32",
+        "wb_dat_i": "32",
+        "wb_dat_o": "32",
+        "data_in": "32",
+        "data_out": "32",
+        "mem_addr": "16",
+        "mem_wdata": "32",
+        "mem_rdata": "32",
+        "instr_addr": "32",
+        "instr_rdata": "32",
+        "data_addr": "32",
+        "data_wdata": "32",
+        "data_rdata": "32",
+        "irq": "8",
+        "operand_a": "32",
+        "operand_b": "32",
+        "opcode": "4",
+        "result": "32",
+        "accum_out": "32",
+        "key": "128",
+        "plaintext": "128",
+        "ciphertext": "128",
+        "src_addr": "32",
+        "dst_addr": "32",
+        "length": "32",
+    }
+
+    INPUT_PORTS = {
+        "uart_rx",
+        "spi_miso",
+        "conv_sample_valid",
+        "conv_sample_data",
+        "paddr",
+        "psel",
+        "penable",
+        "pwrite",
+        "pwdata",
+        "axi_awaddr",
+        "axi_awvalid",
+        "axi_wdata",
+        "axi_wvalid",
+        "axi_bready",
+        "axi_araddr",
+        "axi_arvalid",
+        "axi_rready",
+        "wb_adr_i",
+        "wb_dat_i",
+        "wb_we_i",
+        "wb_stb_i",
+        "wb_cyc_i",
+        "data_in",
+        "wr_en",
+        "rd_en",
+        "mem_addr",
+        "mem_wdata",
+        "mem_we",
+        "mem_en",
+        "instr_rdata",
+        "data_rdata",
+        "irq",
+        "operand_a",
+        "operand_b",
+        "opcode",
+        "key",
+        "plaintext",
+        "src_addr",
+        "dst_addr",
+        "length",
+        "start",
+    }
+
+    INOUT_PORTS = {"gpio", "reset_io_n", "i2c_scl", "i2c_sda"}
+
+    @staticmethod
+    def _keyword_present(desc: str, keyword: str) -> bool:
+        if re.search(r"[^\w]", keyword):
+            return keyword in desc
+        return re.search(rf"\b{re.escape(keyword)}\b", desc) is not None
+
+    @staticmethod
+    def _feature_expectations(spec_text: str) -> Dict[str, Dict[str, Any]]:
+        desc = spec_text.lower()
+        expectations: Dict[str, Dict[str, Any]] = {}
+        for feature, metadata in ArchitectModule.FEATURE_LIBRARY.items():
+            if any(ArchitectModule._keyword_present(desc, keyword) for keyword in metadata["keywords"]):
+                expectations[feature] = {
+                    "ports": set(metadata["ports"]),
+                    "terms": set(metadata["terms"]),
+                    "summary": metadata["summary"],
+                }
+        return expectations
+
+    @staticmethod
+    def _port_width_for(name: str, spec_text: str) -> str:
+        return ArchitectModule.PORT_WIDTHS.get(name, "1")
+
+    @staticmethod
+    def _port_direction_for(name: str) -> str:
+        if name in ArchitectModule.INOUT_PORTS:
+            return "inout"
+        if name in ArchitectModule.INPUT_PORTS:
+            return "input"
+        return "output"
+
+    @staticmethod
+    def _infer_chip_family(expectations: Dict[str, Dict[str, Any]]) -> str:
+        features = set(expectations)
+        if "processor" in features:
+            return "processor_soc"
+        if "aes" in features:
+            return "crypto_accelerator"
+        if {"alu", "mac"} & features:
+            return "datapath_accelerator"
+        if "fifo" in features:
+            return "fifo_peripheral"
+        if "memory" in features:
+            return "memory_subsystem"
+        if features & {"gpio", "pwm", "uart", "spi", "i2c", "timer", "watchdog", "converter", "reset_io"}:
+            return "peripheral_controller"
+        return "custom_digital"
+
+    @staticmethod
+    def _interface_protocol_for(expectations: Dict[str, Dict[str, Any]]) -> str:
+        if "axi_lite" in expectations:
+            return "AXI4-Lite"
+        if "apb" in expectations:
+            return "APB"
+        if "wishbone" in expectations:
+            return "Wishbone"
+        return "custom register interface"
+
+    def validate_sid_against_spec(
+        self, sid: StructuredSpecDict, spec_text: str
+    ) -> Tuple[bool, List[str]]:
+        """Semantic SID validation: ensure JSON matches the actual user request."""
+        errors: List[str] = []
+        desc = spec_text.lower()
+
+        if sid.top_module != sid.design_name:
+            errors.append(
+                f"top_module '{sid.top_module}' does not match design_name '{sid.design_name}'"
+            )
+        if sid.chip_family.strip().lower() in {"", "unknown", "generic"} and len(spec_text.split()) > 8:
+            errors.append("chip_family is unknown for a detailed chip request")
+
+        top = sid.top_submodule()
+        if top is None:
+            errors.append("SID has no top-level submodule")
+            return False, errors
+
+        top_ports = {p.name for p in top.ports if p.name}
+        all_ports = sid.all_port_names()
+        if sid.clock_name not in all_ports or sid.reset_name not in all_ports:
+            errors.append(f"SID must include clock '{sid.clock_name}' and reset '{sid.reset_name}' ports")
+        if len(top_ports - {sid.clock_name, sid.reset_name}) < 2:
+            errors.append("top module has too few meaningful ports for the requested chip")
+
+        if "async" in desc and sid.reset_style != "async":
+            errors.append("spec requests async reset but SID reset_style is not async")
+
+        module_text = " ".join(
+            [
+                sid.chip_family,
+                sid.description,
+                sid.interface_protocol,
+                " ".join(sm.name for sm in sid.sub_modules),
+                " ".join(sm.description for sm in sid.sub_modules),
+                " ".join(sm.functional_logic for sm in sid.sub_modules),
+            ]
+        ).lower()
+        for feature, expectation in self._feature_expectations(spec_text).items():
+            missing_ports = expectation["ports"] - all_ports
+            if missing_ports:
+                errors.append(
+                    f"SID missing {feature} port(s): {', '.join(sorted(missing_ports))}"
+                )
+            if not any(term in module_text for term in expectation["terms"]):
+                errors.append(f"SID does not describe required feature: {feature}")
+
+        return len(errors) == 0, errors
+
     def decompose(self, design_name: str, spec_text: str,
                   save_path: Optional[str] = None) -> StructuredSpecDict:
         """
@@ -269,11 +605,19 @@ class ArchitectModule:
                 raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
                 sid = self._parse_response(raw, design_name)
                 
-                # Validate
+                # Validate structure and semantic coverage against the actual request.
                 ok, errs = sid.validate()
                 if not ok:
                     last_error = "Validation errors:\n" + "\n".join(f"  - {e}" for e in errs)
                     logger.warning(f"[Architect] Validation failed: {errs}")
+                    sid = None
+                    continue
+                ok, errs = self.validate_sid_against_spec(sid, spec_text)
+                if not ok:
+                    last_error = "Semantic SID validation errors:\n" + "\n".join(
+                        f"  - {e}" for e in errs
+                    )
+                    logger.warning(f"[Architect] Semantic validation failed: {errs}")
                     sid = None
                     continue
 
@@ -289,6 +633,23 @@ class ArchitectModule:
         if sid is None:
             # Fallback: create a minimal SID from the spec text
             logger.warning("[Architect] All attempts failed — generating fallback SID")
+            require_llm_sid = os.environ.get("AGENTIC_REQUIRE_LLM_SID", "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            require_llm_spec = os.environ.get("AGENTIC_REQUIRE_LLM_SPEC", "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if require_llm_sid or require_llm_spec:
+                raise RuntimeError(
+                    "LLM SID decomposition failed and fallback is disabled "
+                    "(AGENTIC_REQUIRE_LLM_SID/AGENTIC_REQUIRE_LLM_SPEC)."
+                )
             sid = self._fallback_sid(design_name, spec_text)
 
         # Persist artifact
@@ -326,26 +687,71 @@ class ArchitectModule:
         return StructuredSpecDict.from_json(json.dumps(data))
 
     def _fallback_sid(self, design_name: str, spec_text: str) -> StructuredSpecDict:
-        """Generate a minimal SID when LLM decomposition fails."""
-        return StructuredSpecDict(
-            design_name=design_name,
-            chip_family="unknown",
-            description=spec_text[:2000],
-            top_module=design_name,
-            reset_style="sync",
-            parameters=[],
-            sub_modules=[
+        """Generate a deterministic SID when LLM decomposition fails or is inaccurate."""
+        expectations = self._feature_expectations(spec_text)
+        desc = spec_text.lower()
+        top_ports = [
+            PortDef(name="clk", direction="input", width="1", description="System clock"),
+            PortDef(name="rst_n", direction="input", width="1", description="Active-low reset"),
+        ]
+        for feature in expectations.values():
+            for port_name in sorted(feature["ports"]):
+                top_ports.append(
+                    PortDef(
+                        name=port_name,
+                        direction=self._port_direction_for(port_name),
+                        width=self._port_width_for(port_name, spec_text),
+                        description=feature["summary"],
+                    )
+                )
+
+        submodules = [
+            SubModuleDef(
+                name=design_name,
+                description=spec_text[:2000],
+                ports=top_ports,
+                functional_logic=(
+                    "Top-level integration of requested digital interfaces, control/status registers, "
+                    "datapath blocks, reset handling, and macro-facing ports."
+                ),
+                instantiates=[f"{name}_block" for name in expectations],
+            )
+        ]
+        for name, feature in expectations.items():
+            submodules.append(
                 SubModuleDef(
-                    name=design_name,
-                    description=spec_text[:2000],
+                    name=f"{name}_block",
+                    description=feature["summary"],
                     ports=[
                         PortDef(name="clk", direction="input", width="1", description="System clock"),
-                        PortDef(name="rst_n", direction="input", width="1", description="Active-low reset"),
+                        PortDef(
+                            name="rst_n",
+                            direction="input",
+                            width="1",
+                            description="Active-low reset",
+                        ),
                     ],
-                    functional_logic=spec_text[:2000],
+                    functional_logic=feature["summary"],
                 )
+            )
+
+        feature_names = ", ".join(sorted(expectations)) or "custom digital logic"
+        chip_family = self._infer_chip_family(expectations)
+        reset_style = "async" if "async" in desc else "sync"
+        return StructuredSpecDict(
+            design_name=design_name,
+            chip_family=chip_family,
+            description=spec_text[:2000],
+            top_module=design_name,
+            reset_style=reset_style,
+            parameters=[],
+            sub_modules=submodules,
+            interface_protocol=self._interface_protocol_for(expectations),
+            timing_notes="Deterministic SID fallback; verify final pad ring and macro collateral before fabrication.",
+            verification_hints=[
+                "SID generated by deterministic semantic fallback after LLM SID failed validation.",
+                f"Verify requested feature behavior and interfaces: {feature_names}.",
             ],
-            verification_hints=["Requires manual specification review — auto-decomposition failed"],
         )
 
     def enrich_with_pdf(self, pdf_path: str) -> str:

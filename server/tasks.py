@@ -77,7 +77,11 @@ def run_agentic_build_task(self, job_id: str, request_data: Dict[str, Any]):
             "stages": {},
             "build_status": "running",
             "cancelled": False,
+            "plan_type": req.plan_type,
         }
+
+    # Ensure plan_type is always synchronized in the worker process
+    JOB_STORE[job_id]["plan_type"] = req.plan_type
 
     # ── 2. Inject byok_key so _run_agentic_build can route LLM calls ─────────
     if req.api_key and not JOB_STORE[job_id].get("byok_key"):

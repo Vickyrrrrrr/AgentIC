@@ -1,17 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-    // ArrowRight,
-    Bot,
-    Cpu,
-    Fingerprint,
-    KeyRound,
-    // Layers3,
-    Rocket,
-    // ShieldCheck,
-    Sparkles,
-    // Waypoints,
-} from 'lucide-react';
+import { Rocket } from 'lucide-react';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
 import { BillingModal } from '../components/BillingModal';
@@ -52,8 +41,6 @@ interface PdkOption {
     fabrication_ready?: boolean;
 }
 
-
-
 function slugify(text: string): string {
     return text
         .toLowerCase()
@@ -64,25 +51,6 @@ function slugify(text: string): string {
         .join('_')
         .substring(0, 48);
 }
-
-const QUICK_STARTS = [
-    {
-        title: 'RISC compute core',
-        prompt: '8-bit RISC CPU with Harvard architecture',
-        note: 'Balanced control core with instruction and data separation.',
-    },
-    {
-        title: 'DMA fabric',
-        prompt: 'AXI4 DMA engine with 4 channels',
-        note: 'Throughput-focused transport block for embedded systems.',
-    },
-    {
-        title: 'Peripheral controller',
-        prompt: 'UART controller at 115200 baud',
-        note: 'Fast path for a clean verification-first peripheral bring-up.',
-    },
-];
-
 
 
 export const DesignStudio = () => {
@@ -145,12 +113,16 @@ export const DesignStudio = () => {
             setIsTyping(false);
         }
     };
+
     const [designName, setDesignName] = useState('');
     const [jobId, setJobId] = useState('');
     const [events, setEvents] = useState<BuildEvent[]>([]);
     const [jobStatus, setJobStatus] = useState<'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'cancelling'>('queued');
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState('');
+
+    // Polled partial silicon artifacts
+    const [artifacts, setArtifacts] = useState<any[]>([]);
 
     // Billing / Profile State
     const [profile, setProfile] = useState<{
@@ -174,7 +146,7 @@ export const DesignStudio = () => {
     const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
     const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
 
-    // Advanced build parameters (sent to API with stable defaults, no UI controls)
+    // Advanced build parameters
     const maxRetries = 5;
     const minCoverage = 80.0;
     const maxPivots = 2;
@@ -193,86 +165,85 @@ export const DesignStudio = () => {
     // Auto-generate design name from prompt
     useEffect(() => {
         if (prompt.length > 8) {
-            setDesignName(slugify(prompt));
+            const clean = slugify(prompt);
+            if (clean && clean.length > 2) {
+                setDesignName(clean);
+            }
         }
     }, [prompt]);
 
-    // Fetch Profile Limits
+    // Fetch workspace profile details
     useEffect(() => {
-        // Load profile + billing status in parallel
         Promise.allSettled([
             api.get('/profile'),
-            api.get('/billing/status'),
+            api.get('/billing/status')
         ]).then(([profileRes, billingRes]) => {
             const prof = profileRes.status === 'fulfilled' ? profileRes.value.data : null;
             const billing = billingRes.status === 'fulfilled' ? billingRes.value.data : null;
             if (prof && billing) {
                 setProfile({ ...prof, plan_type: billing.plan_type, build_limit: billing.build_limit });
-                if (billing.plan_type !== 'agentic_paid') setAiModel('BYOK');
             } else if (prof) {
                 setProfile(prof);
-                setAiModel('BYOK');
             }
-        }).catch(() => setProfile(null));
+        });
     }, []);
 
-    const hasLocalByok = Boolean(localStorage.getItem('agentic_byok_key'));
-    const hasServerByok = Boolean(profile?.has_byok_key);
     const isAgenticPaid = profile?.plan_type === 'agentic_paid';
-    const hasActivePlan = isAgenticPaid || hasLocalByok || hasServerByok;
-    const launchStatus = isAgenticPaid ? 'AgentIC Model active' : hasActivePlan ? 'BYOK configured' : 'Configure required';
-    const launchModeLabel = skipOpenlane ? 'Verification-first run' : 'Full silicon path';
-    const selectedPdk = pdkOptions.find((pdk) => pdk.key === pdkProfile);
-    // const gdsReadyPdks = pdkOptions.filter((pdk) => pdk.gds_ready);
-    const workspaceSuccessfulBuilds = profile?.workspace_successful_builds ?? profile?.successful_builds ?? 0;
-    const usageLabel = profile
-        ? `${workspaceSuccessfulBuilds} successful · ${profile.total_builds ?? 0} total builds on ${profile.plan ?? 'local'}`
-        : 'Local workspace mode';
+    const hasLocalByok = profile?.has_byok_key;
+    const hasServerByok = localStorage.getItem('agentic_byok_key') !== null;
+    const hasByokConfigured = hasLocalByok || hasServerByok;
 
+    let launchStatus = 'BYOK Key Unconfigured';
+    if (isAgenticPaid) launchStatus = 'AgentIC Active';
+    else if (hasByokConfigured) launchStatus = 'BYOK Active';
+
+    let launchModeLabel = 'Operator BYOK';
+    if (aiModel === 'AgentIC' && isAgenticPaid) {
+        launchModeLabel = 'AgentIC Cloud';
+    }
+
+    let usageLabel = 'Enterprise Tier';
+    if (profile?.auth_enabled) {
+        const buildLimit = profile?.build_limit;
+        const totalBuilds = (profile?.workspace_successful_builds !== undefined) 
+            ? profile.workspace_successful_builds 
+            : (profile?.successful_builds || 0);
+        if (buildLimit !== null && buildLimit !== undefined) {
+            usageLabel = `Usage: ${totalBuilds} / ${buildLimit} successful builds`;
+        } else {
+            usageLabel = `Usage: ${totalBuilds} successful builds`;
+        }
+    }
+
+    const selectedPdk = pdkOptions.find(p => p.key === pdkProfile);
 
     const handleLaunch = async () => {
         if (!prompt.trim()) return;
-        setError('');
-        setEvents([]);
-        setResult(null);
-        setJobStatus('queued');
 
-        const byokRaw = localStorage.getItem('agentic_byok_key');
-        const hasByokNow = Boolean(byokRaw) || hasServerByok;
         const effectiveAiModel = aiModel === 'AgentIC' && !isAgenticPaid ? 'BYOK' : aiModel;
+        const byokRaw = localStorage.getItem('agentic_byok_key');
+        const byokKey = byokRaw ? JSON.parse(byokRaw) : null;
 
-        // Guard: require BYOK configured if BYOK mode is selected
-        if (effectiveAiModel === 'BYOK' && !hasByokNow) {
+        if (effectiveAiModel === 'BYOK' && !byokKey && !hasLocalByok) {
             pendingLaunchAfterByokRef.current = true;
             setShowBillingModal(true);
             return;
         }
 
-        // Billing Guard: enforce build limit for AgentIC-paid users
-        if (aiModel === 'AgentIC' && profile) {
-            const { successful_builds, build_limit } = profile;
-            if (build_limit !== null && build_limit !== undefined && (successful_builds ?? 0) >= build_limit) {
-                setShowBillingModal(true);
-                return;
-            }
-        }
+        const requestedDesignName = designName.trim() || 'unnamed_design';
+        setError('');
+        setResult(null);
 
         try {
-            // Build the BYOK payload if user has BYOK configured
-            const byokKey = byokRaw ? JSON.parse(byokRaw) : null;
-
-            const requestedDesignName = designName || slugify(prompt);
-            const res = await api.post(`/build`, {
+            const res = await api.post('/build', {
                 design_name: requestedDesignName,
-                description: prompt,
+                prompt: prompt,
                 skip_openlane: skipOpenlane,
-                skip_coverage: false,
-                full_signoff: false,
+                plan_type: effectiveAiModel === 'AgentIC' ? 'agentic_paid' : 'byok',
+                api_key: byokKey ? JSON.stringify(byokKey) : null,
+                pdk: pdkProfile,
                 max_retries: maxRetries,
-                show_thinking: false,
                 min_coverage: minCoverage,
-                strict_gates: false,
-                pdk_profile: pdkProfile,
                 max_pivots: maxPivots,
                 congestion_threshold: congestionThreshold,
                 hierarchical: hierarchical,
@@ -282,11 +253,8 @@ export const DesignStudio = () => {
                 coverage_backend: coverageBackend,
                 coverage_fallback_policy: coverageFallbackPolicy,
                 coverage_profile: coverageProfile,
-                // Send BYOK key as JSON string in body
-                api_key: byokKey ? JSON.stringify(byokKey) : null,
-                // Tell backend which path: agentic_paid or byok
-                plan_type: effectiveAiModel === 'AgentIC' ? 'agentic_paid' : 'byok',
             });
+
             const { job_id, design_name: serverDesignName } = res.data;
             const activeDesignName = serverDesignName || requestedDesignName;
             setJobId(job_id);
@@ -308,6 +276,18 @@ export const DesignStudio = () => {
         }
     };
 
+    const triggerArtifactFetch = async (targetDesignName = designName) => {
+        if (!targetDesignName) return;
+        try {
+            const res = await api.get(`/build/artifacts/${targetDesignName}`);
+            if (res.data && Array.isArray(res.data.artifacts)) {
+                setArtifacts(res.data.artifacts);
+            }
+        } catch (err) {
+            console.error('Failed to fetch artifacts:', err);
+        }
+    };
+
     const startStreaming = async (jid: string, byokKey: any = null, activeDesignName = designName) => {
         if (abortCtrlRef.current) abortCtrlRef.current.abort();
         const ctrl = new AbortController();
@@ -317,7 +297,6 @@ export const DesignStudio = () => {
         setEvents([]);
 
         const extraHeaders: Record<string, string> = {};
-        // Forward BYOK key as header for SSE stream
         if (byokKey) {
             extraHeaders['X-LLM-API-Key'] = JSON.stringify(byokKey);
         }
@@ -355,6 +334,9 @@ export const DesignStudio = () => {
                         return [...prev, data];
                     });
                     setJobStatus(data.type === 'error' ? 'failed' : 'running');
+
+                    // Dynamically fetch intermediate files only when build events or logs arrive!
+                    void triggerArtifactFetch(activeDesignName);
                 } catch { /* ignore parse errors */ }
             },
             onerror(err) {
@@ -384,8 +366,8 @@ export const DesignStudio = () => {
             setResult(res.data.result);
         } catch { /* result might not exist if failed early */ }
         setPhase('done');
+        void triggerArtifactFetch(activeDesignName);
 
-        // Browser notification
         if ('Notification' in window && Notification.permission === 'granted') {
             new Notification('AgentIC chip build complete', {
                 body: `Your chip "${activeDesignName}" finished ${status === 'done' ? 'successfully.' : 'with errors.'}`,
@@ -429,418 +411,361 @@ export const DesignStudio = () => {
         return () => abortCtrlRef.current?.abort();
     }, []);
 
+    // Load initial artifacts when building or done phase becomes active
+    useEffect(() => {
+        if (jobId && (phase === 'building' || phase === 'done')) {
+            void triggerArtifactFetch(designName);
+        } else {
+            setArtifacts([]);
+        }
+    }, [jobId, phase, designName]);
+
     return (
-        <div className="studio-root">
-            <AnimatePresence mode="wait">
+        <div className="studio-root" style={{ background: '#09090b', height: 'calc(100vh - 62px)', overflowY: 'auto' }}>
+            <div className="studio-launch-shell" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1rem 2rem' }}>
+                <section className="studio-launch-header" style={{ marginBottom: '1rem', borderBottom: '1px solid #27272a', paddingBottom: '0.75rem' }}>
+                    <div className="studio-launch-copy">
+                        <span className="studio-kicker" style={{ color: '#a1a1aa', fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                            Silicon Workstation
+                        </span>
+                        <h1 className="studio-launch-title" style={{ fontSize: '1.25rem', color: '#f4f4f5', fontWeight: 700, marginTop: '0.2rem' }}>Disciplined Physical Silicon Co-Design Workspace</h1>
+                    </div>
+                    <div className="studio-launch-actions" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                        <button className="studio-control-btn studio-control-btn--primary" onClick={() => setShowBillingModal(true)} style={{ background: '#18181b', border: '1px solid #27272a', color: '#f4f4f5', borderRadius: '4px', padding: '0.4rem 0.8rem', fontSize: '0.78rem' }}>
+                            Configure BYOK
+                        </button>
+                        <div className="studio-status-cluster" style={{ display: 'flex', gap: '0.5rem' }}>
+                            <span className={`studio-status-pill ${(hasLocalByok || hasServerByok) ? 'is-ready' : 'is-warn'}`} style={{ background: '#18181b', border: '1px solid #27272a', color: '#a1a1aa', borderRadius: '4px', padding: '0.4rem 0.6rem', fontSize: '0.78rem' }}>
+                                {launchStatus}
+                            </span>
+                            <span className="studio-status-pill" style={{ background: '#18181b', border: '1px solid #27272a', color: '#a1a1aa', borderRadius: '4px', padding: '0.4rem 0.6rem', fontSize: '0.78rem' }}>
+                                {launchModeLabel}
+                            </span>
+                        </div>
+                    </div>
+                </section>
 
-                {/* ── PHASE A: Prompt ──────────────────────────── */}
-                {phase === 'prompt' && (
-                    <motion.div
-                        key="prompt"
-                        className="prompt-screen-modern"
-                        initial={{ opacity: 0, y: 40 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -40 }}
-                        transition={{ duration: 0.5 }}
-                    >
-                        <div className="studio-launch-shell">
-                            <section className="studio-launch-header">
-                                <div className="studio-launch-copy">
-                                    <span className="studio-kicker">
-                                        <Sparkles size={14} />
-                                        QUICK BUILD STUDIO
-                                    </span>
-                                    <h1 className="studio-launch-title">Describe the system. Launch a disciplined silicon run.</h1>
-                                    <p className="studio-launch-subtitle">
-                                        AgentIC turns a natural-language specification into a structured build with verification,
-                                        operator-safe BYOK routing, and an optional path to fabrication-ready artifacts.
-                                    </p>
-                                </div>
-                                <div className="studio-launch-actions">
-                                    <button className="studio-control-btn studio-control-btn--primary" onClick={() => setShowBillingModal(true)}>
-                                        <KeyRound size={16} />
-                                        Configure BYOK
-                                    </button>
-                                    <div className="studio-status-cluster">
-                                        <span className={`studio-status-pill ${(hasLocalByok || hasServerByok) ? 'is-ready' : 'is-warn'}`}>
-                                            <Fingerprint size={14} />
-                                            {launchStatus}
-                                        </span>
-                                        <span className="studio-status-pill">
-                                            <Cpu size={14} />
-                                            {launchModeLabel}
-                                        </span>
-                                    </div>
-                                </div>
-                            </section>
+                <div className="studio-launch-grid" style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.9fr', gap: '1.5rem', height: 'calc(100vh - 170px)', minHeight: '600px' }}>
+                    {/* Left Panel: Chat Terminal (Persistent in all phases!) */}
+                    <section className="studio-compose-card" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1rem', overflow: 'hidden', background: '#18181b', border: '1px solid #27272a', borderRadius: '4px' }}>
+                        <div className="studio-section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexShrink: 0 }}>
+                            <div>
+                                <span className="studio-section-label" style={{ fontFamily: 'monospace', fontSize: '0.72rem', color: '#a1a1aa', textTransform: 'uppercase' }}>Silicon AI Copilot</span>
+                                <h2 className="studio-section-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', color: '#f4f4f5', marginTop: '0.1rem' }}>
+                                    VLSI Expert Terminal
+                                </h2>
+                            </div>
+                            <span className="studio-muted-chip" style={{ fontFamily: 'monospace', fontSize: '0.72rem', color: '#71717a' }}>{usageLabel}</span>
+                        </div>
 
-                            <div className="studio-launch-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '1.5rem', height: 'calc(100vh - 180px)', minHeight: '650px' }}>
-                                {/* Left Panel: Chat Terminal */}
-                                <section className="studio-compose-card" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1.5rem', overflow: 'hidden' }}>
-                                    <div className="studio-section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexShrink: 0 }}>
-                                        <div>
-                                            <span className="studio-section-label">Silicon AI Copilot</span>
-                                            <h2 className="studio-section-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                                <Bot size={20} style={{ color: 'var(--accent)' }} />
-                                                VLSI Expert Terminal
-                                            </h2>
+                        {/* Monospace Developer Terminal Panel */}
+                        <div style={{
+                            flex: 1,
+                            overflowY: 'auto',
+                            padding: '1rem',
+                            background: '#09090b',
+                            border: '1px solid #27272a',
+                            borderRadius: '4px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '1rem',
+                            fontFamily: 'monospace',
+                            fontSize: '0.78rem',
+                            marginBottom: '0.75rem',
+                        }}>
+                            {chatHistory.map((msg, idx) => (
+                                <div
+                                    key={idx}
+                                    style={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '0.25rem',
+                                        maxWidth: '100%',
+                                    }}
+                                >
+                                    {msg.role === 'user' ? (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                                            <div style={{ color: '#60a5fa', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem', fontFamily: 'monospace' }}>
+                                                <span>[operator] ~ $</span>
+                                            </div>
+                                            <div style={{ color: '#e4e4e7', paddingLeft: '0.5rem', whiteSpace: 'pre-wrap', lineHeight: '1.45', fontFamily: 'monospace' }}>{msg.content}</div>
                                         </div>
-                                        <span className="studio-muted-chip">{usageLabel}</span>
-                                    </div>
-
-                                    {/* Chat History List */}
-                                    <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem', display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1rem' }}>
-                                        {chatHistory.map((msg, idx) => (
-                                            <div
-                                                key={idx}
-                                                style={{
-                                                    display: 'flex',
-                                                    justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                                                    alignItems: 'flex-start',
-                                                    gap: '0.75rem',
-                                                    maxWidth: '100%'
-                                                }}
-                                            >
-                                                {msg.role === 'assistant' && (
-                                                    <div style={{
-                                                        width: '32px', height: '32px', borderRadius: '8px',
-                                                        background: 'linear-gradient(135deg, var(--accent) 0%, #3b82f6 100%)',
-                                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                        flexShrink: 0, boxShadow: '0 4px 12px rgba(59, 130, 246, 0.25)'
-                                                    }}>
-                                                        <Bot size={16} style={{ color: '#fff' }} />
-                                                    </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                                            <div style={{ color: '#a1a1aa', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem', fontFamily: 'monospace' }}>
+                                                <span>[copilot] ~</span>
+                                            </div>
+                                            <div style={{ color: '#f4f4f5', paddingLeft: '0.5rem', whiteSpace: 'pre-wrap', lineHeight: '1.45', fontFamily: 'monospace' }}>
+                                                {msg.content}
+                                                {idx === chatHistory.length - 1 && isTyping && (
+                                                    <span className="cursor-blink" style={{ marginLeft: '2px', fontWeight: 'bold' }}>▋</span>
                                                 )}
-                                                <div
-                                                    style={{
-                                                        background: msg.role === 'user' 
-                                                            ? 'linear-gradient(135deg, var(--accent) 0%, #1d4ed8 100%)' 
-                                                            : 'rgba(39, 39, 42, 0.65)',
-                                                        border: msg.role === 'user' ? 'none' : '1px solid rgba(63, 63, 70, 0.5)',
-                                                        color: msg.role === 'user' ? '#fff' : 'rgba(255, 255, 255, 0.9)',
-                                                        padding: '0.85rem 1.1rem',
-                                                        borderRadius: '12px',
-                                                        borderTopRightRadius: msg.role === 'user' ? '2px' : '12px',
-                                                        borderTopLeftRadius: msg.role === 'assistant' ? '2px' : '12px',
-                                                        fontSize: '0.86rem',
-                                                        lineHeight: '1.45',
-                                                        maxWidth: '82%',
-                                                        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)',
-                                                        backdropFilter: msg.role === 'user' ? 'none' : 'blur(8px)',
-                                                        whiteSpace: 'pre-wrap',
-                                                        wordBreak: 'break-word',
-                                                    }}
-                                                >
-                                                    {msg.content}
-                                                </div>
                                             </div>
-                                        ))}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                            <div ref={chatEndRef} />
+                        </div>
 
-                                        {isTyping && (
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                                <div style={{
-                                                    width: '32px', height: '32px', borderRadius: '8px',
-                                                    background: 'rgba(39, 39, 42, 0.65)',
-                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                    flexShrink: 0, border: '1px solid rgba(63, 63, 70, 0.5)'
-                                                }}>
-                                                    <Bot size={16} style={{ color: 'var(--accent)' }} />
-                                                </div>
-                                                <div style={{
-                                                    background: 'rgba(39, 39, 42, 0.4)',
-                                                    border: '1px solid rgba(63, 63, 70, 0.3)',
-                                                    padding: '0.75rem 1rem',
-                                                    borderRadius: '12px',
-                                                    borderTopLeftRadius: '2px',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '0.4rem'
-                                                }}>
-                                                    <span className="premium-loader-dot" style={{ width: '6px', height: '6px', background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
-                                                    <span className="premium-loader-dot" style={{ width: '6px', height: '6px', background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
-                                                    <span className="premium-loader-dot" style={{ width: '6px', height: '6px', background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
-                                                </div>
-                                            </div>
-                                        )}
-                                        <div ref={chatEndRef} />
+                        {/* Monospace Executive Input Area */}
+                        <div style={{ flexShrink: 0 }}>
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', background: '#09090b', border: '1px solid #27272a', borderRadius: '4px', padding: '0.4rem 0.6rem' }}>
+                                <span style={{ color: '#a1a1aa', fontFamily: 'monospace', fontSize: '0.78rem', userSelect: 'none' }}>$</span>
+                                <input
+                                    type="text"
+                                    value={chatInput}
+                                    onChange={e => setChatInput(e.target.value)}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter' && chatInput.trim() && !isTyping) {
+                                            void handleSendChat();
+                                        }
+                                    }}
+                                    placeholder="Execute natural-language silicon codegen pipeline directives..."
+                                    style={{
+                                        flex: 1,
+                                        background: 'transparent',
+                                        border: 'none',
+                                        color: '#f4f4f5',
+                                        fontFamily: 'monospace',
+                                        fontSize: '0.78rem',
+                                        outline: 'none',
+                                    }}
+                                />
+                                <button
+                                    onClick={() => chatInput.trim() && !isTyping && handleSendChat()}
+                                    disabled={!chatInput.trim() || isTyping}
+                                    style={{
+                                        background: chatInput.trim() ? '#27272a' : 'transparent',
+                                        border: '1px solid #27272a',
+                                        color: chatInput.trim() ? '#f4f4f5' : '#52525b',
+                                        padding: '0.2rem 0.6rem',
+                                        borderRadius: '3px',
+                                        fontSize: '0.74rem',
+                                        fontFamily: 'monospace',
+                                        fontWeight: '600',
+                                        cursor: chatInput.trim() ? 'pointer' : 'not-allowed',
+                                        transition: 'all 0.1s ease'
+                                    }}
+                                >
+                                    EXEC
+                                </button>
+                            </div>
+                        </div>
+                    </section>
+
+                    {/* Right Panel: Dynamic Workspace View (State-driven switches!) */}
+                    <AnimatePresence mode="wait">
+                        {phase === 'prompt' && (
+                            <motion.aside
+                                key="prompt"
+                                className="studio-briefing-card"
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -20 }}
+                                transition={{ duration: 0.2 }}
+                                style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1rem', overflowY: 'auto', background: '#18181b', border: '1px solid #27272a', borderRadius: '4px' }}
+                            >
+                                <div className="studio-section-heading studio-section-heading--stacked" style={{ marginBottom: '0.75rem', flexShrink: 0 }}>
+                                    <span className="studio-section-label" style={{ fontFamily: 'monospace', fontSize: '0.72rem', color: '#a1a1aa' }}>Silicon Specification Brief</span>
+                                    <h2 className="studio-section-title" style={{ fontSize: '0.9rem', color: '#f4f4f5' }}>Execution Controls</h2>
+                                </div>
+
+                                {/* Editable Identifier & Summary Block */}
+                                <div style={{ background: '#09090b', border: '1px solid #27272a', borderRadius: '4px', padding: '0.75rem', marginBottom: '0.75rem' }}>
+                                    <div style={{ marginBottom: '0.5rem' }}>
+                                        <label style={{ display: 'block', fontSize: '0.7rem', color: '#a1a1aa', textTransform: 'uppercase', marginBottom: '0.2rem', fontFamily: 'monospace' }}>Design Identifier</label>
+                                        <input
+                                            type="text"
+                                            value={designName}
+                                            onChange={e => setDesignName(e.target.value)}
+                                            placeholder="e.g. spi_controller"
+                                            style={{
+                                                width: '100%',
+                                                background: '#18181b',
+                                                border: '1px solid #27272a',
+                                                borderRadius: '3px',
+                                                color: '#f4f4f5',
+                                                fontSize: '0.78rem',
+                                                padding: '0.35rem 0.5rem',
+                                                outline: 'none',
+                                                fontFamily: 'monospace',
+                                            }}
+                                        />
                                     </div>
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.7rem', color: '#a1a1aa', textTransform: 'uppercase', marginBottom: '0.2rem', fontFamily: 'monospace' }}>Compiled Specification Prompt</label>
+                                        <textarea
+                                            value={prompt}
+                                            onChange={e => setPrompt(e.target.value)}
+                                            placeholder="Copilot will generate final spec here as you chat, or you can paste one directly."
+                                            rows={5}
+                                            style={{
+                                                width: '100%',
+                                                background: '#18181b',
+                                                border: '1px solid #27272a',
+                                                borderRadius: '3px',
+                                                color: '#f4f4f5',
+                                                fontSize: '0.78rem',
+                                                padding: '0.4rem 0.5rem',
+                                                outline: 'none',
+                                                resize: 'none',
+                                                lineHeight: '1.4',
+                                                fontFamily: 'monospace',
+                                            }}
+                                        />
+                                    </div>
+                                </div>
 
-                                    {/* Bottom Quick-actions & Input Bar */}
-                                    <div style={{ flexShrink: 0 }}>
-                                        {chatHistory.length <= 1 && (
-                                            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', overflowX: 'auto', paddingBottom: '0.25rem' }}>
-                                                {QUICK_STARTS.map((qs) => (
-                                                    <button
-                                                        key={qs.title}
-                                                        onClick={() => {
-                                                            setChatInput(`I want to design a ${qs.prompt.toLowerCase()}`);
-                                                        }}
-                                                        style={{
-                                                            background: 'rgba(24, 24, 27, 0.8)',
-                                                            border: '1px solid rgba(63, 63, 70, 0.6)',
-                                                            borderRadius: '20px',
-                                                            padding: '0.4rem 0.85rem',
-                                                            fontSize: '0.75rem',
-                                                            color: 'rgba(255, 255, 255, 0.75)',
-                                                            cursor: 'pointer',
-                                                            whiteSpace: 'nowrap',
-                                                        }}
-                                                    >
-                                                        {qs.title}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                        <div style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            background: 'rgba(24, 24, 27, 0.8)',
-                                            border: '1px solid rgba(63, 63, 70, 0.8)',
-                                            borderRadius: '10px',
-                                            padding: '0.35rem 0.5rem 0.35rem 1rem',
-                                            boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.1)',
-                                        }}>
-                                            <input
-                                                type="text"
-                                                placeholder="Ask Copilot to build or modify a silicon architecture..."
-                                                value={chatInput}
-                                                onChange={e => setChatInput(e.target.value)}
-                                                onKeyDown={e => {
-                                                    if (e.key === 'Enter') handleSendChat();
-                                                }}
-                                                style={{
-                                                    flex: 1,
-                                                    background: 'transparent',
-                                                    border: 'none',
-                                                    color: '#fff',
-                                                    fontSize: '0.85rem',
-                                                    outline: 'none',
-                                                    padding: '0.4rem 0'
-                                                }}
-                                                disabled={isTyping}
-                                            />
+                                {/* Quick config options */}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem', marginBottom: '1rem' }}>
+                                    <div>
+                                        <span className="studio-field-label" style={{ marginBottom: '0.2rem', fontFamily: 'monospace', fontSize: '0.7rem', textTransform: 'uppercase', color: '#a1a1aa', display: 'block' }}>Execution Mode</span>
+                                        <div className="studio-chip-row" style={{ display: 'flex', gap: '0.4rem' }}>
                                             <button
-                                                onClick={handleSendChat}
-                                                disabled={!chatInput.trim() || isTyping}
-                                                style={{
-                                                    background: chatInput.trim() ? 'var(--accent)' : 'rgba(63, 63, 70, 0.5)',
-                                                    color: '#fff',
-                                                    border: 'none',
-                                                    borderRadius: '8px',
-                                                    padding: '0.45rem 1rem',
-                                                    fontSize: '0.8rem',
-                                                    fontWeight: '600',
-                                                    cursor: chatInput.trim() ? 'pointer' : 'not-allowed',
-                                                }}
+                                                className={`studio-chip-btn ${aiModel === 'AgentIC' ? 'is-active' : ''}`}
+                                                onClick={() => isAgenticPaid ? setAiModel('AgentIC') : setShowBillingModal(true)}
+                                                style={{ flex: 1, padding: '0.35rem', fontSize: '0.74rem', background: aiModel === 'AgentIC' ? '#27272a' : 'transparent', border: '1px solid #27272a', color: '#f4f4f5', cursor: 'pointer', borderRadius: '3px', fontFamily: 'monospace' }}
                                             >
-                                                Send
+                                                AgentIC Paid
+                                            </button>
+                                            <button
+                                                className={`studio-chip-btn ${aiModel === 'BYOK' ? 'is-active' : ''}`}
+                                                onClick={() => setAiModel('BYOK')}
+                                                style={{ flex: 1, padding: '0.35rem', fontSize: '0.74rem', background: aiModel === 'BYOK' ? '#27272a' : 'transparent', border: '1px solid #27272a', color: '#f4f4f5', cursor: 'pointer', borderRadius: '3px', fontFamily: 'monospace' }}
+                                            >
+                                                Operator BYOK
                                             </button>
                                         </div>
                                     </div>
-                                </section>
 
-                                {/* Right Panel: Spec Brief & Launch */}
-                                <aside className="studio-briefing-card" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1.5rem', overflowY: 'auto' }}>
-                                    <div className="studio-section-heading studio-section-heading--stacked" style={{ marginBottom: '1.25rem', flexShrink: 0 }}>
-                                        <span className="studio-section-label">Silicon Specification Brief</span>
-                                        <h2 className="studio-section-title">Execution Controls</h2>
-                                    </div>
-
-                                    {/* Editable Identifier & Summary Block */}
-                                    <div style={{ background: 'rgba(24, 24, 27, 0.4)', border: '1px solid rgba(63, 63, 70, 0.4)', borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
-                                        <div style={{ marginBottom: '0.75rem' }}>
-                                            <label style={{ display: 'block', fontSize: '0.72rem', color: 'rgba(255, 255, 255, 0.4)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Design Identifier</label>
-                                            <input
-                                                type="text"
-                                                value={designName}
-                                                onChange={e => setDesignName(e.target.value)}
-                                                placeholder="e.g. spi_controller"
-                                                style={{
-                                                    width: '100%',
-                                                    background: 'rgba(39, 39, 42, 0.6)',
-                                                    border: '1px solid rgba(63, 63, 70, 0.8)',
-                                                    borderRadius: '6px',
-                                                    color: '#fff',
-                                                    fontSize: '0.82rem',
-                                                    padding: '0.4rem 0.6rem',
-                                                    outline: 'none',
-                                                }}
-                                            />
-                                        </div>
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '0.72rem', color: 'rgba(255, 255, 255, 0.4)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Compiled Specification Prompt</label>
-                                            <textarea
-                                                value={prompt}
-                                                onChange={e => setPrompt(e.target.value)}
-                                                placeholder="Copilot will generate final spec here as you chat, or you can paste one directly."
-                                                rows={4}
-                                                style={{
-                                                    width: '100%',
-                                                    background: 'rgba(39, 39, 42, 0.6)',
-                                                    border: '1px solid rgba(63, 63, 70, 0.8)',
-                                                    borderRadius: '6px',
-                                                    color: 'rgba(255, 255, 255, 0.85)',
-                                                    fontSize: '0.78rem',
-                                                    padding: '0.5rem 0.6rem',
-                                                    outline: 'none',
-                                                    resize: 'none',
-                                                    lineHeight: '1.4'
-                                                }}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    {/* Quick config options */}
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem', marginBottom: '1.25rem' }}>
-                                        <div>
-                                            <span className="studio-field-label" style={{ marginBottom: '0.25rem' }}>Execution Mode</span>
-                                            <div className="studio-chip-row" style={{ gap: '0.4rem' }}>
-                                                <button
-                                                    className={`studio-chip-btn ${aiModel === 'AgentIC' ? 'is-active' : ''}`}
-                                                    onClick={() => isAgenticPaid ? setAiModel('AgentIC') : setShowBillingModal(true)}
-                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
-                                                >
-                                                    AgentIC Paid
-                                                </button>
-                                                <button
-                                                    className={`studio-chip-btn ${aiModel === 'BYOK' ? 'is-active' : ''}`}
-                                                    onClick={() => setAiModel('BYOK')}
-                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
-                                                >
-                                                    Operator BYOK
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <span className="studio-field-label" style={{ marginBottom: '0.25rem' }}>Delivery Scope</span>
-                                            <div className="studio-chip-row" style={{ gap: '0.4rem' }}>
-                                                <button
-                                                    className={`studio-chip-btn ${skipOpenlane ? 'is-active' : ''}`}
-                                                    onClick={() => setSkipOpenlane(true)}
-                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
-                                                >
-                                                    Verification Only
-                                                </button>
-                                                <button
-                                                    className={`studio-chip-btn ${!skipOpenlane ? 'is-active' : ''}`}
-                                                    onClick={() => {
-                                                        if (selectedPdk && !selectedPdk.gds_ready) {
-                                                            setError(`${selectedPdk.key} is not ready for GDSII on this VPS.`);
-                                                        } else {
-                                                            setSkipOpenlane(false);
-                                                        }
-                                                    }}
-                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
-                                                >
-                                                    Full Silicon Path
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <span className="studio-field-label" style={{ marginBottom: '0.25rem' }}>PDK Target</span>
-                                            <select
-                                                className="studio-select"
-                                                value={pdkProfile}
-                                                onChange={(e) => setPdkProfile(e.target.value)}
-                                                style={{ width: '100%', padding: '0.4rem 0.6rem', fontSize: '0.78rem', background: 'rgba(39, 39, 42, 0.6)', border: '1px solid rgba(63, 63, 70, 0.8)', color: '#fff', borderRadius: '6px' }}
+                                    <div>
+                                        <span className="studio-field-label" style={{ marginBottom: '0.2rem', fontFamily: 'monospace', fontSize: '0.7rem', textTransform: 'uppercase', color: '#a1a1aa', display: 'block' }}>Delivery Scope</span>
+                                        <div className="studio-chip-row" style={{ display: 'flex', gap: '0.4rem' }}>
+                                            <button
+                                                className={`studio-chip-btn ${skipOpenlane ? 'is-active' : ''}`}
+                                                onClick={() => setSkipOpenlane(true)}
+                                                style={{ flex: 1, padding: '0.35rem', fontSize: '0.74rem', background: skipOpenlane ? '#27272a' : 'transparent', border: '1px solid #27272a', color: '#f4f4f5', cursor: 'pointer', borderRadius: '3px', fontFamily: 'monospace' }}
                                             >
-                                                {(pdkOptions.length ? pdkOptions.filter(p => p.gds_ready) : [{key: 'sky130'}]).map((p) => (
-                                                    <option key={p.key} value={p.key}>{p.key}</option>
-                                                ))}
-                                            </select>
+                                                Verification Only
+                                            </button>
+                                            <button
+                                                className={`studio-chip-btn ${!skipOpenlane ? 'is-active' : ''}`}
+                                                onClick={() => {
+                                                    if (selectedPdk && !selectedPdk.gds_ready) {
+                                                        setError(`${selectedPdk.key} is not ready for GDSII on this VPS.`);
+                                                    } else {
+                                                        setSkipOpenlane(false);
+                                                    }
+                                                }}
+                                                style={{ flex: 1, padding: '0.35rem', fontSize: '0.74rem', background: !skipOpenlane ? '#27272a' : 'transparent', border: '1px solid #27272a', color: '#f4f4f5', cursor: 'pointer', borderRadius: '3px', fontFamily: 'monospace' }}
+                                            >
+                                                Full Silicon Path
+                                            </button>
                                         </div>
                                     </div>
 
-                                    {error ? <div className="studio-error-banner" style={{ marginBottom: '1rem' }}>{error}</div> : null}
-
-                                    {/* Glowing Silicon Launch Button */}
-                                    <div style={{ marginTop: 'auto', flexShrink: 0 }}>
-                                        <button
-                                            className="studio-launch-btn"
-                                            onClick={handleLaunch}
-                                            disabled={!prompt.trim()}
-                                            style={{
-                                                width: '100%',
-                                                padding: '0.9rem',
-                                                fontSize: '0.9rem',
-                                                fontWeight: '700',
-                                                textTransform: 'uppercase',
-                                                letterSpacing: '1px',
-                                                borderRadius: '8px',
-                                                background: prompt.trim() 
-                                                    ? 'linear-gradient(135deg, #3b82f6 0%, var(--accent) 50%, #1d4ed8 100%)' 
-                                                    : 'rgba(63, 63, 70, 0.4)',
-                                                border: 'none',
-                                                color: prompt.trim() ? '#fff' : 'rgba(255, 255, 255, 0.35)',
-                                                cursor: prompt.trim() ? 'pointer' : 'not-allowed',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                gap: '0.6rem',
-                                                boxShadow: prompt.trim() ? '0 4px 20px rgba(59, 130, 246, 0.4)' : 'none',
-                                                transition: 'all 0.3s'
-                                            }}
+                                    <div>
+                                        <span className="studio-field-label" style={{ marginBottom: '0.2rem', fontFamily: 'monospace', fontSize: '0.7rem', textTransform: 'uppercase', color: '#a1a1aa', display: 'block' }}>PDK Target</span>
+                                        <select
+                                            className="studio-select"
+                                            value={pdkProfile}
+                                            onChange={(e) => setPdkProfile(e.target.value)}
+                                            style={{ width: '100%', padding: '0.35rem 0.5rem', fontSize: '0.74rem', background: '#09090b', border: '1px solid #27272a', color: '#f4f4f5', borderRadius: '3px', fontFamily: 'monospace', outline: 'none' }}
                                         >
-                                            <Rocket size={18} />
-                                            Launch Autonomous Build
-                                        </button>
+                                            {(pdkOptions.length ? pdkOptions.filter(p => p.gds_ready) : [{key: 'sky130'}]).map((p) => (
+                                                <option key={p.key} value={p.key}>{p.key}</option>
+                                            ))}
+                                        </select>
                                     </div>
-                                </aside>
-                            </div>
-                        </div>
-                    </motion.div>
-                )}
+                                </div>
 
-                {/* ── PHASE B: Building ────────────────────────── */}
-                {phase === 'building' && (
-                    <motion.div
-                        key="building"
-                        initial={{ opacity: 0, x: 40 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -40 }}
-                        transition={{ duration: 0.4 }}
-                    >
-                        <BuildMonitor
-                            designName={designName}
-                            jobId={jobId}
-                            events={events}
-                            jobStatus={jobStatus}
-                            stageSchema={stageSchema}
-                        />
-                    </motion.div>
-                )}
+                                {error ? <div className="studio-error-banner" style={{ marginBottom: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#ef4444', padding: '0.5rem', borderRadius: '3px', fontSize: '0.74rem', fontFamily: 'monospace' }}>{error}</div> : null}
 
-                {/* ── PHASE C: Result ──────────────────────────── */}
-                {phase === 'done' && (
-                    <motion.div
-                        key="done"
-                        initial={{ opacity: 0, scale: 0.96 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.5 }}
-                    >
-                        <ChipSummary
-                            designName={designName}
-                            result={result}
-                            jobStatus={jobStatus}
-                            events={events}
-                            jobId={jobId}
-                            onReset={handleReset}
-                        />
-                    </motion.div>
-                )}
+                                {/* Flat Industrial Silicon Launch Button */}
+                                <div style={{ marginTop: 'auto', flexShrink: 0 }}>
+                                    <button
+                                        className="studio-launch-btn"
+                                        onClick={handleLaunch}
+                                        disabled={!prompt.trim()}
+                                        style={{
+                                            width: '100%',
+                                            padding: '0.75rem',
+                                            fontSize: '0.8rem',
+                                            fontWeight: '700',
+                                            textTransform: 'uppercase',
+                                            letterSpacing: '1px',
+                                            borderRadius: '4px',
+                                            background: prompt.trim() ? '#27272a' : '#18181b',
+                                            border: '1px solid #3f3f46',
+                                            color: prompt.trim() ? '#f4f4f5' : '#52525b',
+                                            cursor: prompt.trim() ? 'pointer' : 'not-allowed',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            gap: '0.5rem',
+                                            fontFamily: 'monospace',
+                                            transition: 'all 0.15s ease'
+                                        }}
+                                    >
+                                        <Rocket size={16} />
+                                        Launch Autonomous Build Run
+                                    </button>
+                                </div>
+                            </motion.aside>
+                        )}
 
-            </AnimatePresence>
+                        {phase === 'building' && (
+                            <motion.aside
+                                key="building"
+                                className="studio-briefing-card"
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -20 }}
+                                transition={{ duration: 0.2 }}
+                                style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1rem', overflowY: 'auto', background: '#18181b', border: '1px solid #27272a', borderRadius: '4px' }}
+                            >
+                                <BuildMonitor
+                                    designName={designName}
+                                    jobId={jobId}
+                                    events={events}
+                                    jobStatus={jobStatus}
+                                    stageSchema={stageSchema}
+                                    onReset={handleReset}
+                                    artifacts={artifacts}
+                                />
+                            </motion.aside>
+                        )}
+
+                        {phase === 'done' && (
+                            <motion.aside
+                                key="done"
+                                className="studio-briefing-card"
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -20 }}
+                                transition={{ duration: 0.2 }}
+                                style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1rem', overflowY: 'auto', background: '#18181b', border: '1px solid #27272a', borderRadius: '4px' }}
+                            >
+                                <ChipSummary
+                                    designName={designName}
+                                    result={result}
+                                    jobStatus={jobStatus}
+                                    events={events}
+                                    jobId={jobId}
+                                    onReset={handleReset}
+                                />
+                            </motion.aside>
+                        )}
+                    </AnimatePresence>
+                </div>
+            </div>
 
             <BillingModal 
                 isOpen={showBillingModal}
                 onClose={() => setShowBillingModal(false)}
                 onKeySaved={() => {
                     setAiModel('BYOK');
-                    // Refresh profile + billing status
                     Promise.allSettled([
                         api.get('/profile'),
                         api.get('/billing/status'),

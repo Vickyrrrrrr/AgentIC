@@ -19,6 +19,7 @@ Stages:
 
 import json
 import logging
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -438,6 +439,128 @@ class HardwareSpecGenerator:
         self.verbose = verbose
         self.max_retries = max_retries
 
+    @staticmethod
+    def _strip_provider_prefix(model: str) -> str:
+        if "/" in model and model.split("/", 1)[0] in {
+            "openai",
+            "azure",
+            "generic",
+            "openrouter",
+            "together_ai",
+            "deepseek",
+            "ollama",
+        }:
+            return model.split("/", 1)[1]
+        return model
+
+    @staticmethod
+    def _extra_body_from_env() -> Dict[str, Any]:
+        raw = os.environ.get("LLM_EXTRA_BODY_JSON", "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            logger.warning("[SpecGen] Ignoring invalid LLM_EXTRA_BODY_JSON")
+            return {}
+
+    def _direct_llm_call(self, prompt: str, system: str) -> Optional[str]:
+        """Call an OpenAI-compatible endpoint directly for spec JSON generation.
+
+        CrewAI is still used elsewhere, but the spec stage must be transparent and
+        fail fast. This path uses the already-configured LLM/base_url/api_key and
+        avoids silently falling into deterministic fallback because of CrewAI
+        provider adapter behavior.
+        """
+        if os.environ.get("AGENTIC_SPECGEN_DIRECT_LLM", "1").strip().lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            return None
+
+        model = getattr(self.llm, "model", "") if self.llm else ""
+        base_url = getattr(self.llm, "base_url", "") if self.llm else ""
+        api_key = getattr(self.llm, "api_key", "") if self.llm else ""
+        model = model or os.environ.get("LLM_MODEL", "")
+        base_url = base_url or os.environ.get("LLM_BASE_URL", "")
+        api_key = api_key or os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+        if not model or not base_url or not api_key:
+            return None
+
+        try:
+            from openai import OpenAI
+
+            timeout_s = float(os.environ.get("AGENTIC_SPECGEN_LLM_TIMEOUT", "90"))
+            max_tokens = int(
+                os.environ.get(
+                    "AGENTIC_SPECGEN_MAX_TOKENS",
+                    str(max(4096, int(getattr(self.llm, "max_tokens", 4096) or 4096))),
+                )
+            )
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+            response = client.chat.completions.create(
+                model=self._strip_provider_prefix(model),
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=float(getattr(self.llm, "temperature", 0.2) or 0.2),
+                max_tokens=max_tokens,
+                extra_body=self._extra_body_from_env(),
+            )
+            message = response.choices[0].message
+            content = (message.content or "").strip()
+            if content:
+                return content
+            reasoning = getattr(message, "reasoning_content", "") or ""
+            if reasoning.strip():
+                logger.warning(
+                    "[SpecGen] Direct LLM returned reasoning but empty final content; "
+                    "increase AGENTIC_SPECGEN_MAX_TOKENS or disable thinking at provider."
+                )
+            return None
+        except Exception as exc:
+            logger.warning(f"[SpecGen] Direct LLM call failed: {exc}")
+            return None
+
+    def _crew_llm_call(self, agent: Agent, task: Task) -> str:
+        return str(Crew(agents=[agent], tasks=[task]).kickoff())
+
+    def _llm_call(self, prompt: str, system: str, agent: Agent, task: Task) -> str:
+        direct = self._direct_llm_call(prompt, system)
+        if direct:
+            return direct
+        return self._crew_llm_call(agent, task)
+
+    def _compact_spec_prompt(
+        self,
+        design_name: str,
+        description: str,
+        target_pdk: str,
+        category: str,
+        base_sid: Optional[str] = None,
+    ) -> str:
+        sid_note = ""
+        if base_sid:
+            sid_note = (
+                " Preserve/refine the existing SID architecture; do not collapse to a minimal template."
+            )
+        return f"""\
+Return ONLY compact JSON for a VLSI hardware spec. No markdown.
+Design {design_name}, category {category}, target {target_pdk}.
+Requirement: {description[:4500]}{sid_note}
+Keys: design_category, top_module_name, target_pdk, target_frequency_mhz,
+mandatory_fields_status, ports, submodules, behavioral_contract, warnings.
+ports items: name,direction,data_type,description. Always include clk and rst_n.
+submodules items: name,description,ports.
+behavioral_contract items: given,when,then,within.
+If ADC/DAC/PLL/analog is requested, specify digital control/status or macro-facing interface only.
+Preserve requested widths, reset style, timers, watchdogs, buses, muxing, and standard ASIC naming.
+"""
+
     def generate(
         self,
         design_name: str,
@@ -571,7 +694,12 @@ Return ONLY this JSON (no markdown, no commentary):
                 expected_output="JSON with 3 design options",
                 agent=agent,
             )
-            raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
+            raw = self._llm_call(
+                prompt=prompt,
+                system="You are a senior VLSI architect. Return only valid JSON.",
+                agent=agent,
+                task=task,
+            )
             data, _ = robust_json_extract(
                 raw, context="spec_elaboration", required_keys=["options"]
             )
@@ -650,7 +778,12 @@ Return ONLY this JSON (no markdown, no commentary):
         )
 
         try:
-            raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
+            raw = self._llm_call(
+                prompt=prompt,
+                system="You are a senior VLSI design classifier. Return only valid JSON.",
+                agent=agent,
+                task=task,
+            )
             data, success = robust_json_extract(
                 raw, context="spec_classify", required_keys=["category"]
             )
@@ -821,6 +954,14 @@ Return ONLY this JSON (no markdown, no commentary):
             + sid_context
         )
 
+        compact_prompt = self._compact_spec_prompt(
+            design_name=design_name,
+            description=description,
+            target_pdk=target_pdk,
+            category=category,
+            base_sid=base_sid,
+        )
+
         last_error = ""
         for attempt in range(1, self.max_retries + 1):
             logger.info(f"[SpecGen] Full spec attempt {attempt}/{self.max_retries}")
@@ -850,9 +991,17 @@ Return ONLY this JSON (no markdown, no commentary):
             )
 
             try:
-                raw = str(Crew(agents=[agent], tasks=[task]).kickoff())
+                raw = self._llm_call(
+                    prompt=compact_prompt + retry_context,
+                    system=(
+                        "You are a principal VLSI architect generating complete, "
+                        "implementation-ready hardware specifications. Return only valid JSON."
+                    ),
+                    agent=agent,
+                    task=task,
+                )
                 data, success = robust_json_extract(
-                    raw, context="spec_generate", required_keys=["submodules"]
+                    raw, context="spec_generate", required_keys=["ports"]
                 )
 
                 if not success or data is None:
@@ -887,9 +1036,25 @@ Return ONLY this JSON (no markdown, no commentary):
         # Fallback: generate minimal spec (even if base_sid is provided)
         # We previously raised RuntimeError in high-reliability mode, but we need
         # to ensure it always falls back to avoid complete pipeline failure.
-        logger.warning(f"[SpecGen] All attempts failed (base_sid present: {bool(base_sid)}) — generating minimal fallback spec")
+        logger.warning(
+            f"[SpecGen] All attempts failed (base_sid present: {bool(base_sid)}) — "
+            "generating deterministic keyword fallback spec"
+        )
+        require_llm = os.environ.get("AGENTIC_REQUIRE_LLM_SPEC", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if require_llm:
+            raise RuntimeError(
+                "LLM spec generation failed and AGENTIC_REQUIRE_LLM_SPEC=1. "
+                f"Last error: {last_error or 'unknown'}"
+            )
         spec = self._fallback_spec(design_name, description, category, target_pdk)
-        issues.append("Spec generation fell back to minimal template — manual review required")
+        if last_error:
+            issues.append(f"LLM spec generation failed after retries: {last_error}")
+        issues.append("Spec generation used deterministic fallback — manual review recommended")
         return spec, issues
 
     def _parse_spec(
@@ -965,16 +1130,195 @@ Return ONLY this JSON (no markdown, no commentary):
     def _validate_spec(self, spec, mandatory, valid_subs) -> List[str]:
         """Validate the spec for sanity."""
         v_issues = []
-        if not spec.ports:
+        meaningful_ports = [
+            p for p in spec.ports if p.name not in {"clk", "rst_n"} and p.name.strip()
+        ]
+        if not spec.ports or not meaningful_ports:
             v_issues.append("No ports defined")
-        if not spec.submodules:
-            v_issues.append("No submodules defined")
+        if not spec.behavioral_contract:
+            v_issues.append("No behavioral contract defined")
+        v_issues.extend(self._validate_against_description(spec, spec.design_description))
         return v_issues
 
+    @staticmethod
+    def _normalized_port_names(spec: HardwareSpec) -> set:
+        names = set()
+        for port in spec.ports:
+            name = (port.name or "").strip().lower()
+            if not name:
+                continue
+            names.add(name)
+            names.add(re.sub(r"\[[^\]]+\]", "", name).strip())
+        return names
+
+    @staticmethod
+    def _port_declares_width(port: PortSpec, width: int) -> bool:
+        text = f"{port.name} {port.data_type}".lower()
+        hi = width - 1
+        return f"[{hi}:0]" in text or f"[0:{hi}]" in text
+
+    def _has_bus_or_indexed_ports(self, spec: HardwareSpec, base: str, width: int) -> bool:
+        ports = self._normalized_port_names(spec)
+        if any(
+            re.sub(r"\[[^\]]+\]", "", (p.name or "").lower()).strip() == base
+            and self._port_declares_width(p, width)
+            for p in spec.ports
+        ):
+            return True
+        indexed = {
+            f"{base}_{i}" for i in range(width)
+        } | {
+            f"{base}{i}" for i in range(width)
+        }
+        return indexed.issubset(ports)
+
+    def _validate_against_description(self, spec: HardwareSpec, description: str) -> List[str]:
+        """Reject LLM specs that drift away from explicit user-facing requirements."""
+        desc = (description or "").lower()
+        issues: List[str] = []
+        ports = self._normalized_port_names(spec)
+        searchable = " ".join(
+            [spec.design_category, spec.top_module_name]
+            + [p.name for p in spec.ports]
+            + [s.name for s in spec.submodules]
+            + [s.description for s in spec.submodules]
+            + [str(b) for b in spec.behavioral_contract]
+        ).lower()
+
+        required_terms = {
+            "gpio": ["gpio"],
+            "pwm": ["pwm"],
+            "uart": ["uart"],
+            "timer": ["timer"],
+            "watchdog": ["watchdog", "wdt"],
+            "converter": ["converter", "adc", "sample"],
+        }
+        for feature, aliases in required_terms.items():
+            if any(alias in desc for alias in aliases) and not any(alias in searchable for alias in aliases):
+                issues.append(f"Spec missing requested feature semantics: {feature}")
+
+        explicit_ports = ["uart_rx", "uart_tx", "reset_io_n"]
+        for port in explicit_ports:
+            if port in desc and port not in ports:
+                issues.append(f"Spec missing explicit requested top-level port: {port}")
+
+        gpio_match = re.search(r"gpio\s*\[\s*(\d+)\s*:\s*0\s*\]", desc)
+        if gpio_match:
+            width = int(gpio_match.group(1)) + 1
+            if not self._has_bus_or_indexed_ports(spec, "gpio", width):
+                issues.append(f"Spec must preserve requested gpio[{width - 1}:0] width")
+
+        pwm_match = re.search(r"pwm_out\s*\[\s*(\d+)\s*:\s*0\s*\]", desc)
+        if pwm_match:
+            width = int(pwm_match.group(1)) + 1
+            if not self._has_bus_or_indexed_ports(spec, "pwm_out", width) and not self._has_bus_or_indexed_ports(spec, "pwm", width):
+                issues.append(f"Spec must preserve requested pwm_out[{width - 1}:0] width")
+
+        if "20 external pads" in desc or "20-pin" in desc or "20 pin" in desc:
+            if "vccd" in ports or "vssd" in ports or "vcca" in ports:
+                issues.append(
+                    "Spec introduced process-specific supply port names not requested by the package intent"
+                )
+
+        return issues
+
     def _fallback_spec(self, design_name, description, category, target_pdk) -> HardwareSpec:
+        desc = description.lower()
+        ports = [
+            PortSpec("clk", "input", "logic", "System clock"),
+            PortSpec("rst_n", "input", "logic", "Active-low reset"),
+        ]
+        submodules: List[SubModuleSpec] = []
+        contracts = [
+            BehavioralStatement(
+                given="rst_n is low",
+                when="a clock edge occurs or reset is asserted",
+                then="all control/status registers return to documented reset values",
+                within="1 cycle",
+            )
+        ]
+
+        def add_port(name: str, direction: str, data_type: str, purpose: str) -> None:
+            if name not in {p.name for p in ports}:
+                ports.append(PortSpec(name, direction, data_type, purpose))
+
+        def add_submodule(name: str, summary: str) -> None:
+            if name not in {s.name for s in submodules}:
+                submodules.append(SubModuleSpec(name=name, description=summary, ports=[]))
+
+        if "gpio" in desc:
+            add_port("gpio", "inout", "logic [7:0]", "Eight multiplexed GPIO pins")
+            add_submodule("gpio_controller", "GPIO direction, output, input, and mux control")
+            contracts.append(
+                BehavioralStatement(
+                    given="a GPIO pin is configured as output",
+                    when="software writes the GPIO output register",
+                    then="the corresponding pad drives the programmed value unless muxed to a peripheral",
+                    within="1 cycle",
+                )
+            )
+        if "pwm" in desc:
+            add_port("pwm_out", "output", "logic [2:0]", "Three PWM channel outputs")
+            add_submodule("pwm_controller", "Programmable period/duty PWM generation")
+            contracts.append(
+                BehavioralStatement(
+                    given="a PWM channel is enabled",
+                    when="its counter is below the configured duty value",
+                    then="the PWM output is high, otherwise it is low",
+                    within="1 cycle",
+                )
+            )
+        if "uart" in desc:
+            add_port("uart_rx", "input", "logic", "UART receive pin")
+            add_port("uart_tx", "output", "logic", "UART transmit pin")
+            add_submodule("uart_controller", "UART RX/TX control and status datapath")
+            contracts.append(
+                BehavioralStatement(
+                    given="UART transmit data is written while TX is idle",
+                    when="the baud divider advances",
+                    then="uart_tx emits start, data, and stop bits in order",
+                    within="one UART frame",
+                )
+            )
+        if "watchdog" in desc:
+            add_port("watchdog_reset_req", "output", "logic", "Watchdog timeout reset request")
+            add_submodule("watchdog_timer", "Configurable watchdog counter with kick and timeout")
+            contracts.append(
+                BehavioralStatement(
+                    given="watchdog is enabled and not kicked",
+                    when="the watchdog counter reaches its timeout value",
+                    then="watchdog_reset_req asserts",
+                    within="1 cycle",
+                )
+            )
+        if "timer" in desc or "500 microsecond" in desc or "500 microseconds" in desc:
+            add_port("timer_tick_500us", "output", "logic", "Internal 500 microsecond timer tick")
+            add_submodule("timer_block", "Clock divider and 500 microsecond tick generation")
+        if "reset" in desc:
+            add_port("reset_io_n", "inout", "logic", "Reset pin that can be read after release")
+        if "adc" in desc or "12-bit" in desc or "converter" in desc:
+            add_port("conv_sample_valid", "input", "logic", "Sample valid from converter interface")
+            add_port("conv_sample_data", "input", "logic [11:0]", "12-bit sampled-data converter result")
+            add_submodule(
+                "converter_controller",
+                "Digital sampled-data converter control/status interface for a hard macro or off-chip converter",
+            )
+
         return HardwareSpec(
             design_category=category,
             top_module_name=design_name,
             target_pdk=target_pdk,
+            ports=ports,
+            submodules=submodules or [
+                SubModuleSpec(
+                    name=f"{design_name}_core",
+                    description="Top-level control logic inferred from the user description",
+                    ports=[],
+                )
+            ],
+            behavioral_contract=contracts,
             design_description=description,
+            warnings=[
+                "Deterministic fallback spec was generated because LLM structured spec output was invalid or incomplete."
+            ],
         )

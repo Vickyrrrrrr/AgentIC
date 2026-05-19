@@ -34,7 +34,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from collections import Counter
 from openai import OpenAI
 
-from ..config import WORKSPACE_ROOT
+from ..config import WORKSPACE_ROOT, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +310,115 @@ _BUILTIN_CHUNKS: List[Chunk] = [
         ),
     ),
     Chunk(
+        text="ASAP5 is a 5nm predictive FinFET-style research node. Treat it as a technology-scaling "
+        "and OpenROAD-style benchmarking target, not a foundry tapeout kit. For AgentIC flows, use "
+        "conservative advanced-node assumptions: low utilization, heavy timing optimization, short "
+        "local interconnect, pipelined wide datapaths, register slicing on long buses, memory macros "
+        "instead of flip-flop RAMs above about 1KB, and explicit reporting that results are predictive.",
+        metadata=ChunkMetadata(
+            title="ASAP5 Predictive 5nm Guidance",
+            tags=["asap5", "5nm", "finfet", "predictive-pdk", "advanced-node", "openroad"],
+            domain="physical_design",
+            node="5nm",
+            pdk="asap5",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
+        text="ASAP2 represents a 2nm predictive GAAFET/GAA-style research target. At this class of "
+        "node, interconnect RC, pin access, routing congestion, variability, and power density dominate "
+        "many implementation decisions. AgentIC should not promise fabrication readiness for ASAP2; it "
+        "should use it for predictive experiments only. RTL should favor localized control, bounded fanout, "
+        "deep pipelining for arithmetic and wide datapaths, valid-ready or FIFO decoupling between blocks, "
+        "and SRAM/compiler macros for memories rather than synthesizing large arrays into registers.",
+        metadata=ChunkMetadata(
+            title="ASAP2 Predictive 2nm GAA Guidance",
+            tags=["asap2", "2nm", "gaa", "gaafet", "nanosheet", "predictive-pdk", "advanced-node"],
+            domain="physical_design",
+            node="2nm",
+            pdk="asap2",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
+        text="Open28 is an experimental 28nm open-flow profile. It is closer to a mature planar-node "
+        "digital flow than 2nm/5nm predictive nodes, but it still requires real PDK collateral before "
+        "hardening: Liberty timing, LEF abstracts, technology LEF, standard-cell Verilog, DRC decks, LVS "
+        "setup, extraction rules, and verified corners. Use moderate utilization, check clock and reset "
+        "fanout, avoid very large flat combinational blocks, and verify timing after placement/routing.",
+        metadata=ChunkMetadata(
+            title="Open28 Experimental 28nm Guidance",
+            tags=["open28", "28nm", "open-pdk", "openroad", "physical-design"],
+            domain="physical_design",
+            node="28nm",
+            pdk="open28",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
+        text="Advanced-node RTL must be physical-aware. For 2nm, 3nm, 5nm, 7nm, and dense 28nm flows, "
+        "avoid single-cycle wide arithmetic unless explicitly required, avoid global high-fanout enables, "
+        "register long outputs, pipeline multiply-accumulate datapaths, keep CDC crossings explicit, and "
+        "prefer ready-valid decoupling so timing closure can insert or preserve pipeline boundaries. Do not "
+        "use behavioral arrays as large memories; instantiate or wrap SRAM macros when storage exceeds about 1KB.",
+        metadata=ChunkMetadata(
+            title="Advanced-Node Physical-Aware RTL Rules",
+            tags=["advanced-node", "rtl", "pipeline", "fanout", "memory-macro", "timing"],
+            domain="rtl",
+            node="5nm",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
+        text="Advanced-node physical implementation is constrained by wire RC delay, via resistance, "
+        "pin access, routing tracks, power grid density, and multi-corner variation. Floorplans should "
+        "start with lower core utilization than older nodes, reserve whitespace for routing and clock "
+        "tree buffering, keep macros on clean channels, constrain clock periods realistically, and use "
+        "timing-driven placement and resizer optimization. If congestion persists, expand area before "
+        "attempting aggressive RTL rewrites; if WNS stagnates, pipeline or decouple the critical path.",
+        metadata=ChunkMetadata(
+            title="Advanced-Node Floorplan and Routing Closure",
+            tags=["advanced-node", "floorplan", "routing", "congestion", "wire-rc", "sta"],
+            domain="physical_design",
+            node="5nm",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
+        text="Advanced-node signoff requires more than GDS generation. A credible tapeout package needs "
+        "clean DRC, clean LVS, extracted parasitics, multi-corner multi-mode STA, antenna checks, IR drop "
+        "and electromigration review, power intent consistency, clock-domain and reset-domain checks, DFT "
+        "coverage, and archived tool/PDK versions. Commercial foundry nodes require authorized NDA PDK "
+        "collateral; predictive nodes such as ASAP2, ASAP5, ASAP7, and FreePDK45 are not manufacturable signoff kits.",
+        metadata=ChunkMetadata(
+            title="Advanced-Node Signoff Checklist",
+            tags=["advanced-node", "signoff", "drc", "lvs", "sta", "ir-drop", "em", "pdk"],
+            domain="physical_design",
+            node="5nm",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
+        text="A robust asynchronous FIFO uses binary read/write pointers locally, converts them to Gray "
+        "code before crossing clock domains, synchronizes Gray pointers with two or more flip-flops, and "
+        "derives full and empty from synchronized opposite-domain pointers. Do not synchronize a multi-bit "
+        "binary pointer bit-by-bit. Reset deassertion must be synchronized per clock domain, and RAM storage "
+        "should be inferred or macro-backed according to the target technology.",
+        metadata=ChunkMetadata(
+            title="Async FIFO Gray-Pointer RTL Pattern",
+            tags=["rtl", "verilog", "async-fifo", "cdc", "gray-code", "synchronizer"],
+            domain="rtl",
+            source="builtin",
+            source_type="builtin",
+        ),
+    ),
+    Chunk(
         text="Do not treat GDS as signoff-ready until DRC is clean, LVS matches, extracted timing is reviewed, "
         "power intent is consistent, and generated reports are archived with tool versions and PDK corner data.",
         metadata=ChunkMetadata(
@@ -389,8 +498,9 @@ def classify_domain(text: str) -> str:
 
 
 def classify_node(text: str) -> str:
+    haystack = text.lower()
     for node in VLSI_NODES:
-        if node in text:
+        if node in haystack:
             return node
     return "general"
 
@@ -415,6 +525,8 @@ def classify_source_type(filepath: str) -> str:
     if ext == ".tcl":
         return "pdk_doc"
     if ext == ".lef":
+        return "pdk_lef"
+    if ext in (".tech", ".tf", ".lyt", ".lyp", ".map", ".rules", ".rule", ".drc", ".lvs", ".rst"):
         return "pdk_doc"
     return "user_doc"
 
@@ -428,6 +540,378 @@ def _infer_tags(name: str, text: str) -> List[str]:
         "power", "analog", "finfet", "clock", "sta",
     ]
     return [tag for tag in known if tag in haystack] or ["hardware"]
+
+
+PDK_TEXT_SUFFIXES = {
+    ".md", ".txt", ".rst",
+    ".sv", ".v",
+    ".sdc", ".tcl",
+    ".lib", ".lef",
+    ".sp", ".spice", ".cdl",
+    ".tech", ".tf", ".lyt", ".lyp", ".map",
+    ".rules", ".rule", ".drc", ".lvs",
+}
+
+PDK_NAME_ALIASES = {
+    "sky130": ["sky130", "skywater130", "skywater-pdk"],
+    "gf180mcu": ["gf180mcu", "gf180", "globalfoundries180"],
+    "asap7": ["asap7"],
+    "asap5": ["asap5"],
+    "asap2": ["asap2"],
+    "open28": ["open28"],
+    "freepdk45": ["freepdk45"],
+    "nangate45": ["nangate45", "nangate"],
+    "tsmc28": ["tsmc28"],
+    "samsung14": ["samsung14"],
+    "intel22": ["intel22"],
+    "gf22": ["gf22"],
+}
+
+PDK_NODE_HINTS = {
+    "sky130": "130nm",
+    "gf180mcu": "180nm",
+    "asap7": "7nm",
+    "asap5": "5nm",
+    "asap2": "2nm",
+    "open28": "28nm",
+    "freepdk45": "45nm",
+    "nangate45": "45nm",
+    "tsmc28": "28nm",
+    "samsung14": "14nm",
+    "intel22": "22nm",
+    "gf22": "22nm",
+}
+
+
+def _infer_pdk_from_path(source: str) -> str:
+    haystack = str(source).lower().replace("\\", "/")
+    for canonical, aliases in PDK_NAME_ALIASES.items():
+        if any(alias in haystack for alias in aliases):
+            return canonical
+    return ""
+
+
+def _infer_node_from_path_or_text(source: str, text: str = "", pdk: str = "") -> str:
+    if pdk and pdk in PDK_NODE_HINTS:
+        return PDK_NODE_HINTS[pdk]
+    path_node = classify_node(str(source).lower())
+    if path_node != "general":
+        return path_node
+    return classify_node(text.lower())
+
+
+def _dedupe_preserve_order(values: List[str]) -> List[str]:
+    seen = set()
+    result = []
+    for value in values:
+        clean = str(value).strip().strip('"')
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
+
+
+def _sample(values: List[str], limit: int = 24) -> str:
+    unique = _dedupe_preserve_order(values)
+    if not unique:
+        return "none detected"
+    suffix = "" if len(unique) <= limit else f" ... (+{len(unique) - limit} more)"
+    return ", ".join(unique[:limit]) + suffix
+
+
+def _metadata_for_structured_pdk(
+    source: str,
+    source_type: str,
+    title: str,
+    text: str,
+    tags: List[str],
+    domain: str = "",
+) -> ChunkMetadata:
+    pdk = _infer_pdk_from_path(source)
+    node = _infer_node_from_path_or_text(source, text, pdk)
+    return ChunkMetadata(
+        source=source,
+        source_type=source_type,
+        domain=domain or classify_domain(text),
+        node=node,
+        pdk=pdk,
+        title=title,
+        tags=_dedupe_preserve_order(tags + _infer_tags(Path(source).name, text)),
+        content_kind="pdk_structured_summary",
+    )
+
+
+def _annotate_chunks_from_source(chunks: List[Chunk], source: str) -> List[Chunk]:
+    pdk = _infer_pdk_from_path(source)
+    for chunk in chunks:
+        if pdk and not chunk.metadata.pdk:
+            chunk.metadata.pdk = pdk
+        if chunk.metadata.node in ("", "general"):
+            chunk.metadata.node = _infer_node_from_path_or_text(source, chunk.text, chunk.metadata.pdk)
+    return chunks
+
+
+def extract_pdk_structured_chunks(text: str, source: str, source_type: str) -> List[Chunk]:
+    """Extract compact, high-signal facts from PDK collateral.
+
+    These summaries give retrieval a deterministic anchor for exact PDK facts such as
+    Liberty cells, LEF routing layers, SPICE subcircuits, and technology rule files.
+    The original file is still chunked separately for deeper local context.
+    """
+    if not text or source_type not in {"pdk_liberty", "pdk_lef", "pdk_spice", "pdk_verilog", "pdk_doc"}:
+        return []
+    if source_type == "pdk_liberty":
+        return _extract_liberty_summary(text, source)
+    if source_type == "pdk_lef":
+        return _extract_lef_summary(text, source)
+    if source_type == "pdk_spice":
+        return _extract_spice_summary(text, source)
+    if source_type == "pdk_verilog":
+        return _extract_verilog_summary(text, source)
+    return _extract_tech_doc_summary(text, source)
+
+
+def _extract_liberty_summary(text: str, source: str) -> List[Chunk]:
+    libraries = re.findall(r"\blibrary\s*\(\s*([^)]+?)\s*\)", text, flags=re.IGNORECASE)
+    cells = re.findall(r"^\s*cell\s*\(\s*([^)]+?)\s*\)", text, flags=re.IGNORECASE | re.MULTILINE)
+    pins = re.findall(r"^\s*pin\s*\(\s*([^)]+?)\s*\)", text, flags=re.IGNORECASE | re.MULTILINE)
+    ff_cells: List[str] = []
+    latch_cells: List[str] = []
+    current_cell = ""
+    for line in text.splitlines():
+        cell_match = re.match(r"^\s*cell\s*\(\s*([^)]+?)\s*\)", line, flags=re.IGNORECASE)
+        if cell_match:
+            current_cell = cell_match.group(1).strip()
+            continue
+        if current_cell and re.search(r"\bff\s*\(", line, flags=re.IGNORECASE):
+            ff_cells.append(current_cell)
+        if current_cell and re.search(r"\blatch\s*\(", line, flags=re.IGNORECASE):
+            latch_cells.append(current_cell)
+    units = {}
+    for key in [
+        "time_unit", "voltage_unit", "current_unit", "pulling_resistance_unit",
+        "capacitive_load_unit", "leakage_power_unit",
+    ]:
+        match = re.search(rf"\b{key}\s*:\s*([^;]+);", text, flags=re.IGNORECASE)
+        if match:
+            units[key] = match.group(1).strip().strip('"')
+    voltage = re.search(r"\b(?:nom_voltage|voltage)\s*:\s*([0-9.]+)", text, flags=re.IGNORECASE)
+    timing_arcs = len(re.findall(r"\btiming\s*\(", text, flags=re.IGNORECASE))
+    cell_count = len(_dedupe_preserve_order(cells))
+    if not libraries and not cells and not units:
+        return []
+    summary = "\n".join([
+        f"PDK Liberty structured summary for {source}",
+        f"libraries: {_sample(libraries)}",
+        f"standard cells: {cell_count}",
+        f"sample cells: {_sample(cells)}",
+        f"sequential ff cells: {len(_dedupe_preserve_order(ff_cells))}; sample: {_sample(ff_cells, 12)}",
+        f"latch cells: {len(_dedupe_preserve_order(latch_cells))}; sample: {_sample(latch_cells, 12)}",
+        f"pins detected: {len(_dedupe_preserve_order(pins))}; sample pins: {_sample(pins, 12)}",
+        f"timing arcs: {timing_arcs}",
+        f"units: {json.dumps(units, sort_keys=True)}",
+        f"nominal voltage: {voltage.group(1) if voltage else 'not detected'}",
+        "Use this before generic books when answering library, timing, cell, pin, PVT, or synthesis questions.",
+    ])
+    return [Chunk(
+        text=summary,
+        metadata=_metadata_for_structured_pdk(
+            source=source,
+            source_type="pdk_liberty",
+            title=f"PDK Liberty Summary: {_sample(libraries, 1)}",
+            text=summary,
+            tags=["pdk", "liberty", "timing", "stdcell", "pvt", "synthesis"],
+            domain="timing",
+        ),
+    )]
+
+
+def _extract_lef_summary(text: str, source: str) -> List[Chunk]:
+    version = re.search(r"^\s*VERSION\s+([^;]+);", text, flags=re.IGNORECASE | re.MULTILINE)
+    units = re.search(
+        r"UNITS\s+.*?DATABASE\s+MICRONS\s+([0-9.]+)\s*;",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    manufacturing_grid = re.search(
+        r"^\s*MANUFACTURINGGRID\s+([^;]+);",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    sites = re.findall(r"^\s*SITE\s+(\S+)", text, flags=re.IGNORECASE | re.MULTILINE)
+    macros = re.findall(r"^\s*MACRO\s+(\S+)", text, flags=re.IGNORECASE | re.MULTILINE)
+    layers = []
+    current_layer = None
+    for line in text.splitlines():
+        layer_match = re.match(r"^\s*LAYER\s+(\S+)", line, flags=re.IGNORECASE)
+        if layer_match and current_layer is None:
+            current_layer = {
+                "name": layer_match.group(1),
+                "type": "",
+                "direction": "",
+                "pitch": "",
+                "width": "",
+            }
+            continue
+        if current_layer is None:
+            continue
+        end_match = re.match(r"^\s*END\s+(\S+)", line, flags=re.IGNORECASE)
+        if end_match and end_match.group(1) == current_layer["name"]:
+            layers.append(current_layer)
+            current_layer = None
+            continue
+        for key, pattern in {
+            "type": r"\bTYPE\s+(\S+)\s*;",
+            "direction": r"\bDIRECTION\s+(\S+)\s*;",
+            "pitch": r"\bPITCH\s+([^;]+);",
+            "width": r"\bWIDTH\s+([^;]+);",
+        }.items():
+            match = re.search(pattern, line, flags=re.IGNORECASE)
+            if match:
+                current_layer[key] = match.group(1).strip()
+    routing_layers = [l for l in layers if l["type"].upper() == "ROUTING"]
+    cut_layers = [l for l in layers if l["type"].upper() == "CUT"]
+    if not layers and not macros and not sites:
+        return []
+    layer_lines = [
+        f"{l['name']} type={l['type'] or 'unknown'} direction={l['direction'] or 'n/a'} "
+        f"pitch={l['pitch'] or 'n/a'} width={l['width'] or 'n/a'}"
+        for l in layers[:40]
+    ]
+    summary = "\n".join([
+        f"PDK LEF structured summary for {source}",
+        f"LEF version: {version.group(1).strip() if version else 'not detected'}",
+        f"database microns: {units.group(1) if units else 'not detected'}",
+        f"manufacturing grid: {manufacturing_grid.group(1).strip() if manufacturing_grid else 'not detected'}",
+        f"routing layers ({len(routing_layers)}): {_sample([l['name'] for l in routing_layers])}",
+        f"cut layers ({len(cut_layers)}): {_sample([l['name'] for l in cut_layers])}",
+        f"sites ({len(_dedupe_preserve_order(sites))}): {_sample(sites)}",
+        f"macros ({len(_dedupe_preserve_order(macros))}): {_sample(macros)}",
+        "layer details:",
+        *layer_lines,
+        "Use this before generic books when answering metal stack, routing layer, pitch, width, via, site, macro, or placement questions.",
+    ])
+    return [Chunk(
+        text=summary,
+        metadata=_metadata_for_structured_pdk(
+            source=source,
+            source_type="pdk_lef",
+            title="PDK LEF Layer/Site Summary",
+            text=summary,
+            tags=["pdk", "lef", "physical", "routing", "metal", "macro", "site"],
+            domain="physical_design",
+        ),
+    )]
+
+
+def _extract_spice_summary(text: str, source: str) -> List[Chunk]:
+    subckts = re.findall(r"^\s*\.subckt\s+(\S+)", text, flags=re.IGNORECASE | re.MULTILINE)
+    models = re.findall(r"^\s*\.model\s+(\S+)\s+(\S+)", text, flags=re.IGNORECASE | re.MULTILINE)
+    includes = re.findall(r"^\s*\.include\s+(.+)$", text, flags=re.IGNORECASE | re.MULTILINE)
+    source_lower = source.lower()
+    is_corner_or_parameter = "/corners/" in source_lower or "/parameters/" in source_lower
+    if not subckts and not models and not (includes and is_corner_or_parameter):
+        return []
+    model_types = [m[1] for m in models]
+    summary = "\n".join([
+        f"PDK SPICE/CDL structured summary for {source}",
+        f"subcircuits ({len(_dedupe_preserve_order(subckts))}): {_sample(subckts)}",
+        f"models ({len(models)}): {_sample([m[0] for m in models])}",
+        f"model types: {_sample(model_types)}",
+        f"includes: {_sample(includes, 12)}",
+        "Use this before generic books when answering device model, extracted netlist, LVS, subcircuit, or analog simulation questions.",
+    ])
+    return [Chunk(
+        text=summary,
+        metadata=_metadata_for_structured_pdk(
+            source=source,
+            source_type="pdk_spice",
+            title="PDK SPICE Corner/Include Summary" if includes and not (subckts or models) else "PDK SPICE/CDL Model Summary",
+            text=summary,
+            tags=["pdk", "spice", "cdl", "lvs", "model", "subckt", "analog", "corner", "parameter"],
+            domain="analog",
+        ),
+    )]
+
+
+def _extract_verilog_summary(text: str, source: str) -> List[Chunk]:
+    modules = re.findall(r"^\s*module\s+([a-zA-Z_][a-zA-Z0-9_$]*)", text, flags=re.MULTILINE)
+    primitives = re.findall(r"^\s*primitive\s+([a-zA-Z_][a-zA-Z0-9_$]*)", text, flags=re.MULTILINE)
+    specifies = len(re.findall(r"\bspecify\b", text))
+    if not modules and not primitives:
+        return []
+    summary = "\n".join([
+        f"PDK Verilog model structured summary for {source}",
+        f"modules ({len(_dedupe_preserve_order(modules))}): {_sample(modules)}",
+        f"primitives ({len(_dedupe_preserve_order(primitives))}): {_sample(primitives)}",
+        f"specify timing blocks: {specifies}",
+        "Use this before generic books when answering simulation model, standard-cell Verilog, primitive, specify, or gate-level netlist questions.",
+    ])
+    return [Chunk(
+        text=summary,
+        metadata=_metadata_for_structured_pdk(
+            source=source,
+            source_type="pdk_verilog",
+            title="PDK Verilog Model Summary",
+            text=summary,
+            tags=["pdk", "verilog", "simulation", "stdcell", "specify"],
+            domain="rtl",
+        ),
+    )]
+
+
+def _extract_tech_doc_summary(text: str, source: str) -> List[Chunk]:
+    lower_source = Path(source).name.lower()
+    if not any(token in lower_source for token in ["drc", "lvs", "tech", "rule", "layer", "magic", "klayout"]):
+        return []
+    layers = re.findall(r"\b(?:layer|LAYER)\s+([a-zA-Z][a-zA-Z0-9_.$/-]*)", text)
+    drc_terms = re.findall(r"\b(?:width|spacing|enclosure|extension|area|density|antenna|via|cut)\b", text, flags=re.IGNORECASE)
+    lvs_terms = re.findall(r"\b(?:extract|device|subckt|netgen|equate|permute|property)\b", text, flags=re.IGNORECASE)
+    if not layers and not drc_terms and not lvs_terms:
+        return []
+    domain = "physical_design" if len(drc_terms) >= len(lvs_terms) else "analog"
+    summary = "\n".join([
+        f"PDK technology/rule structured summary for {source}",
+        f"layers mentioned: {_sample(layers)}",
+        f"DRC rule keywords: {_sample(drc_terms, 16)}",
+        f"LVS/extraction keywords: {_sample(lvs_terms, 16)}",
+        "Use this before generic books when answering DRC, LVS, layer, extraction, rule-deck, or technology-file questions.",
+    ])
+    return [Chunk(
+        text=summary,
+        metadata=_metadata_for_structured_pdk(
+            source=source,
+            source_type="pdk_doc",
+            title="PDK Technology/Rule Summary",
+            text=summary,
+            tags=["pdk", "technology", "drc", "lvs", "layer", "rules"],
+            domain=domain,
+        ),
+    )]
+
+
+def boost_structured_pdk_hits(query: str, hits: List[RetrievalHit]) -> List[RetrievalHit]:
+    if not hits:
+        return []
+    query_terms = set(re.findall(r"[a-zA-Z0-9_]+", query.lower()))
+    pdk_terms = {
+        "pdk", "liberty", "lib", "lef", "metal", "layer", "layers", "routing",
+        "pitch", "width", "site", "macro", "cell", "cells", "pin", "pins",
+        "timing", "pvt", "drc", "lvs", "spice", "cdl", "subckt", "model",
+        "models", "technology", "rule", "rules", "node", "asap7", "sky130",
+        "gf180", "gf180mcu", "freepdk45", "open28", "asap5", "asap2",
+    }
+    if not query_terms.intersection(pdk_terms):
+        return hits
+    for hit in hits:
+        meta = hit.chunk.metadata
+        if meta.content_kind == "pdk_structured_summary":
+            hit.score += 0.45
+            if meta.pdk and meta.pdk.lower() in query.lower():
+                hit.score += 0.20
+            if meta.node != "general" and meta.node.lower() in query.lower():
+                hit.score += 0.10
+    return sorted(hits, key=lambda h: h.score, reverse=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -562,6 +1046,7 @@ CHUNK_CONFIG = {
     "pdk_doc":      {"chunk_size": 400,  "overlap": 80},
     "pdk_spice":    {"chunk_size": 800,  "overlap": 0},
     "pdk_liberty":  {"chunk_size": 500,  "overlap": 0},
+    "pdk_lef":      {"chunk_size": 700,  "overlap": 0},
     "pdk_verilog":  {"chunk_size": 600,  "overlap": 0},
     "paper":        {"chunk_size": 500,  "overlap": 100},
     "user_doc":     {"chunk_size": 500,  "overlap": 80},
@@ -600,7 +1085,7 @@ def smart_chunk(text: str, source: str = "", source_type: str = "user_doc",
         chunks = _chunk_by_verilog_module(text, source)
     elif source_type == "pdk_spice":
         chunks = _chunk_by_subcircuit(text, source)
-    elif source_type in ("pdk_doc",):
+    elif source_type in ("pdk_doc", "pdk_lef"):
         chunks = _chunk_by_paragraph(text, source, chunk_size, overlap)
     else:
         chunks = _chunk_by_structure(text, source, chunk_size, overlap)
@@ -627,7 +1112,7 @@ def smart_chunk(text: str, source: str = "", source_type: str = "user_doc",
         chunk.metadata.node = classify_node(chunk.text)
         chunk.metadata.tags = _infer_tags(Path(source).name, chunk.text)
 
-    return final
+    return _annotate_chunks_from_source(final, source)
 
 
 def _chunk_by_paragraph(text: str, source: str, chunk_size: int, overlap: int) -> List[Chunk]:
@@ -1216,15 +1701,18 @@ class VLSIKnowledgeBase:
         chunks = self._ensure_indexed()
         if chunks is None:
             return  # Skip if we couldn't fetch existing chunks
-        if not _BUILTIN_CHUNKS or any(c.chunk_id in chunks for c in _BUILTIN_CHUNKS):
+        if not _BUILTIN_CHUNKS:
+            return
+        new_chunks = [c for c in _BUILTIN_CHUNKS if c.chunk_id not in chunks]
+        if not new_chunks:
             return
         points = []
-        for chunk in _BUILTIN_CHUNKS:
+        for chunk in new_chunks:
             chunk.vector = self.embedding.embed(chunk.text, mode="passage")
             points.append(self._point_from_chunk(chunk))
         if points:
             self.client.upsert(collection_name=self.collection_name, points=points)
-            logger.info(f"Indexed {len(points)} builtin VLSI knowledge chunks")
+            logger.info(f"Indexed {len(points)} new builtin VLSI knowledge chunks")
 
     def _index_user_chunks(self):
         if not self.knowledge_dir.is_dir():
@@ -1275,14 +1763,16 @@ class VLSIKnowledgeBase:
             return []
         chunks: List[Chunk] = []
         for path in sorted(self.knowledge_dir.rglob("*")):
-            if path.suffix.lower() not in {".md", ".txt", ".sv", ".v", ".sdc", ".tcl"}:
+            if path.suffix.lower() not in PDK_TEXT_SUFFIXES:
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             source_type = classify_source_type(str(path))
+            structured_chunks = extract_pdk_structured_chunks(text, source=str(path), source_type=source_type)
             file_chunks = smart_chunk(text, source=str(path), source_type=source_type)
+            file_chunks = structured_chunks + file_chunks
             chunks.extend(file_chunks)
         return chunks
 
@@ -1295,7 +1785,8 @@ class VLSIKnowledgeBase:
         source_type: str = "user_doc",
         metadata: Optional[dict] = None,
     ):
-        chunks = smart_chunk(text, source=source, source_type=source_type)
+        chunks = extract_pdk_structured_chunks(text, source=source, source_type=source_type)
+        chunks.extend(smart_chunk(text, source=source, source_type=source_type))
         texts = [c.text for c in chunks]
         vectors = self.embedding.embed_batch(texts, mode="passage")
         from qdrant_client.models import PointStruct
@@ -1432,6 +1923,8 @@ class VLSIKnowledgeBase:
             )
             all_hits.extend(hits)
 
+        all_hits.extend(self._structured_fact_search(query=query, pdk=pdk, top_k=top_k * 4))
+
         merged = self._merge_hits_with_bm25(
             query=query,
             vector_hits=all_hits,
@@ -1441,8 +1934,10 @@ class VLSIKnowledgeBase:
             pdk_filter=pdk,
             source_type_filter=source_types,
         )
+        merged = boost_structured_pdk_hits(query, merged)
 
         reranked = self.reranker.rerank(query, merged, query_domain=query_domain, top_k=top_k * 2)
+        reranked = boost_structured_pdk_hits(query, reranked)
 
         need_second, reason = needs_second_pass(reranked, query)
         if need_second:
@@ -1458,6 +1953,7 @@ class VLSIKnowledgeBase:
             reranked.extend(relaxed)
             reranked = self._merge_hits_with_bm25(query, reranked, top_k=top_k * 3)
             reranked = self.reranker.rerank(query, reranked, top_k=top_k * 2)
+            reranked = boost_structured_pdk_hits(query, reranked)
 
         compressed = compress_context(reranked, max_chunks=top_k + 2)
 
@@ -1483,6 +1979,107 @@ class VLSIKnowledgeBase:
             source_types=source_types,
             top_k=top_k,
         )
+
+    def _structured_fact_search(
+        self,
+        query: str,
+        pdk: Optional[str],
+        top_k: int,
+    ) -> List[RetrievalHit]:
+        """Lexically force-consider compact PDK summaries for PDK fact queries."""
+        query_terms = set(re.findall(r"[a-zA-Z0-9_]+", query.lower()))
+        if not query_terms:
+            return []
+        pdk_terms = {
+            "pdk", "liberty", "lib", "lef", "metal", "layer", "layers", "routing",
+            "pitch", "width", "site", "macro", "cell", "cells", "pin", "pins",
+            "timing", "pvt", "drc", "lvs", "spice", "cdl", "subckt", "model",
+            "models", "technology", "rule", "rules", "node", "voltage", "corner",
+            "corners", "verilog", "primitive", "sky130", "asap7", "gf180",
+        }
+        if not query_terms.intersection(pdk_terms):
+            return []
+
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            conditions = [
+                FieldCondition(key="content_kind", match=MatchValue(value="pdk_structured_summary"))
+            ]
+            if pdk:
+                conditions.append(FieldCondition(key="pdk", match=MatchValue(value=pdk)))
+            scroll_filter = Filter(must=conditions)
+
+            hits: List[RetrievalHit] = []
+            next_page = None
+            while True:
+                points, next_page = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=scroll_filter,
+                    limit=256,
+                    offset=next_page,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    text = payload.get("text", "")
+                    title = payload.get("title", "")
+                    source = payload.get("source", "")
+                    haystack = f"{title} {source} {text}".lower()
+                    text_terms = set(re.findall(r"[a-zA-Z0-9_]+", haystack))
+                    overlap = query_terms.intersection(text_terms)
+                    if not overlap:
+                        continue
+                    score = 0.55 + min(2.5, len(overlap) * 0.25)
+                    if pdk and pdk.lower() in haystack:
+                        score += 0.35
+                    source_type = payload.get("source_type", "")
+                    if "liberty" in query_terms and source_type == "pdk_liberty":
+                        score += 1.0
+                    if "lef" in query_terms and source_type == "pdk_lef":
+                        score += 1.0
+                    if query_terms.intersection({"drc", "lvs", "rule", "rules"}) and source_type == "pdk_doc":
+                        score += 1.0
+                    if query_terms.intersection({"spice", "cdl", "subckt", "model", "models"}) and source_type == "pdk_spice":
+                        score += 1.0
+                    if query_terms.intersection({"corner", "corners", "pvt"}) and "/corners/" in haystack:
+                        score += 1.5
+                    if query_terms.intersection({"parameter", "parameters"}) and "/parameters/" in haystack:
+                        score += 1.5
+                    if query_terms.intersection({"verilog", "primitive"}) and source_type == "pdk_verilog":
+                        score += 1.0
+
+                    hits.append(RetrievalHit(
+                        chunk=Chunk(
+                            text=text,
+                            metadata=ChunkMetadata(
+                                source=source,
+                                source_type=source_type,
+                                domain=payload.get("domain", ""),
+                                node=payload.get("node", ""),
+                                pdk=payload.get("pdk", ""),
+                                page=payload.get("page", 0),
+                                title=title,
+                                tags=payload.get("tags", []),
+                                parent_id=payload.get("parent_id", ""),
+                                chapter=payload.get("chapter", ""),
+                                section=payload.get("section", ""),
+                                author=payload.get("author", ""),
+                                year=payload.get("year", 0),
+                                content_kind=payload.get("content_kind", ""),
+                            ),
+                            chunk_id=payload.get("chunk_id", ""),
+                        ),
+                        score=score,
+                        method="structured",
+                    ))
+                if next_page is None:
+                    break
+            hits.sort(key=lambda hit: hit.score, reverse=True)
+            return hits[:top_k]
+        except Exception as e:
+            logger.warning(f"Structured PDK fact search failed: {e}")
+            return []
 
     def _vector_search(
         self,
@@ -1524,6 +2121,7 @@ class VLSIKnowledgeBase:
                             section=r.payload.get("section", ""),
                             author=r.payload.get("author", ""),
                             year=r.payload.get("year", 0),
+                            content_kind=r.payload.get("content_kind", ""),
                         ),
                         chunk_id=r.payload.get("chunk_id", ""),
                     ),
@@ -1591,6 +2189,9 @@ class VLSIKnowledgeBase:
                                 parent_id=meta_dict.get("parent_id", ""),
                                 chapter=meta_dict.get("chapter", ""),
                                 section=meta_dict.get("section", ""),
+                                author=meta_dict.get("author", ""),
+                                year=meta_dict.get("year", 0),
+                                content_kind=meta_dict.get("content_kind", ""),
                             ),
                             chunk_id=cid,
                         ),
@@ -1668,6 +2269,9 @@ class VLSIKnowledgeBase:
                     parent_id=meta.get("parent_id", ""),
                     chapter=meta.get("chapter", ""),
                     section=meta.get("section", ""),
+                    author=meta.get("author", ""),
+                    year=meta.get("year", 0),
+                    content_kind=meta.get("content_kind", ""),
                 ),
                 chunk_id=payload.get("chunk_id", ""),
             )
@@ -1774,10 +2378,34 @@ class VLSIKnowledgeBase:
     _PROPRIETARY_PDKS = {"tsmc", "samsung", "intel", "globalfoundries", "smic", "umc"}
 
     def _synthesis_llm(self) -> OpenAI:
+        base_url = (
+            os.getenv("VLSI_RAG_SYNTHESIS_BASE_URL", "").strip()
+            or os.getenv("NVIDIA_BASE_URL", "").strip()
+            or LLM_BASE_URL
+            or self.NVIDIA_BASE_URL
+        )
+        api_key = (
+            os.getenv("VLSI_RAG_SYNTHESIS_API_KEY", "").strip()
+            or self.NVIDIA_API_KEY
+            or LLM_API_KEY
+        )
         return OpenAI(
-            base_url=self.NVIDIA_BASE_URL,
-            api_key=self.NVIDIA_API_KEY,
+            base_url=base_url,
+            api_key=api_key,
             timeout=120,
+        )
+
+    def _synthesis_model(self, fallback: bool = False) -> str:
+        if fallback:
+            return (
+                os.getenv("VLSI_RAG_SYNTHESIS_FALLBACK_MODEL", "").strip()
+                or self.SYNTHESIS_FALLBACK
+            )
+        return (
+            os.getenv("VLSI_RAG_SYNTHESIS_MODEL", "").strip()
+            or os.getenv("NVIDIA_SYNTHESIS_MODEL", "").strip()
+            or LLM_MODEL
+            or self.SYNTHESIS_MODEL
         )
 
     def generate_grounded_answer(
@@ -1864,7 +2492,7 @@ class VLSIKnowledgeBase:
         try:
             client = self._synthesis_llm()
             response = client.chat.completions.create(
-                model=self.SYNTHESIS_MODEL,
+                model=self._synthesis_model(),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -1876,12 +2504,9 @@ class VLSIKnowledgeBase:
             answer_text = response.choices[0].message.content or ""
         except Exception:
             try:
-                client = OpenAI(
-                    base_url=self.NVIDIA_BASE_URL,
-                    api_key=self.NVIDIA_API_KEY,
-                )
+                client = self._synthesis_llm()
                 response = client.chat.completions.create(
-                    model=self.SYNTHESIS_FALLBACK,
+                    model=self._synthesis_model(fallback=True),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},

@@ -1051,6 +1051,10 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
             )
             if base_url:
                 llm_kwargs["base_url"] = base_url
+            if "azure/" in model.lower():
+                api_version = os.getenv("AZURE_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
+                if api_version:
+                    llm_kwargs["api_version"] = api_version
             llm = LLM(**llm_kwargs)
             return llm, f"AgentIC ({model})"
         except Exception as e:
@@ -1091,6 +1095,10 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
         )
         if base_url:
             llm_kwargs["base_url"] = base_url
+        if "azure/" in model.lower():
+            api_version = os.getenv("AZURE_API_VERSION")
+            if api_version:
+                llm_kwargs["api_version"] = api_version
         if "deepseek" in model.lower():
             llm_kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
         llm = LLM(**llm_kwargs)
@@ -1117,6 +1125,10 @@ def _get_role_llm_map(
         )
         if base_url:
             llm_kwargs["base_url"] = base_url
+        if "azure/" in model.lower():
+            api_version = os.getenv("AZURE_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
+            if api_version:
+                llm_kwargs["api_version"] = api_version
         shared_llm = LLM(**llm_kwargs)
         logger.info("AgentIC Compute Routing Map: ALL ROLES -> AgentIC (%s)", model)
         return {
@@ -1159,6 +1171,10 @@ def _get_role_llm_map(
         )
         if resolved.get("base_url"):
             llm_kwargs["base_url"] = resolved["base_url"]
+        if "azure/" in resolved["model"].lower():
+            api_version = os.getenv("AZURE_API_VERSION")
+            if api_version:
+                llm_kwargs["api_version"] = api_version
         if "extra_body" in resolved:
             llm_kwargs["extra_body"] = resolved["extra_body"]
 
@@ -1346,6 +1362,15 @@ class BuildRequest(BaseModel):
     skip_stages: List[str] = []
     plan_type: str = "byok"
 
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    plan_type: str = "byok"
+    api_key: Optional[str] = None
 
 class RagQueryRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=4000)
@@ -2686,6 +2711,109 @@ def get_doc_content(doc_id: str):
     }
 
 
+@app.post("/chat/converse")
+@limiter.limit("20/minute")
+async def chat_converse(
+    req: ChatRequest, request: Request, profile: dict = Depends(get_current_user)
+):
+    """Stateless chat conversation with the VLSI Expert Copilot.
+    Uses the model configured under your plan (Azure serverless credits or BYOK).
+    """
+    header_key = request.headers.get("X-LLM-API-Key")
+    if header_key:
+        req.api_key = header_key
+
+    is_agentic_paid = req.plan_type == "agentic_paid"
+    byok_key = None
+    if req.api_key:
+        try:
+            byok_key = _normalize_byok_config(json.loads(req.api_key))
+        except json.JSONDecodeError:
+            byok_key = _normalize_byok_config({
+                "group1": {"api_key": req.api_key},
+                "group2": {"api_key": req.api_key},
+                "group3": {"api_key": req.api_key},
+            })
+    elif not is_agentic_paid:
+        byok_key = _normalize_byok_config(get_byok_config_for_user(profile))
+
+    try:
+        llm, model_info = _get_llm(byok_config=byok_key, is_agentic_paid=is_agentic_paid)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    system_prompt = (
+        "You are the AgentIC VLSI Copilot, an expert AI chip architect and silicon compiler engineer.\n"
+        "Your mission is to help developers define, refine, and perfect their hardware specifications "
+        "before launching an autonomous silicon build on the AgentIC platform.\n\n"
+        "AgentIC Autonomous Silicon Pipeline Capabilities:\n"
+        "- Supports: SkyWater 130nm (sky130) production-ready open source PDK.\n"
+        "- Front-End: Multi-agent specifications, Verilog RTL code generation, and recursive syntax self-healing.\n"
+        "- Verification: Verilator simulation, SVA (SystemVerilog Assertions), testbench generation, and code coverage analysis.\n"
+        "- Back-End (Silicon Path): Synthesis (Yosys), Placement & Routing (OpenROAD), and GDSII generation (OpenLane).\n\n"
+        "Instructions:\n"
+        "1. Answer questions about digital circuit design, hardware interfaces, and physical synthesis.\n"
+        "2. Help the user specify details like bus architectures (AXI, APB, Wishbone), clock frequency, inputs/outputs, and verification parameters.\n"
+        "3. Provide technical explanations but keep responses extremely clear and professional.\n"
+        "4. Avoid excessive length. Focus on hardware practicality and fabrication readiness.\n"
+        "5. Once you and the user have finalized the architecture and spec of the hardware block, instruct the user to click the 'Launch Build' button on the right to start the fully autonomous run."
+    )
+
+    messages_payload = [{"role": "system", "content": system_prompt}]
+    for msg in req.messages:
+        messages_payload.append({"role": msg.role, "content": msg.content})
+
+    # Direct extraction of LLM properties to prevent attribute errors on wrapper objects
+    model_name = "gpt-4o"
+    api_key = None
+    base_url = None
+    api_version = None
+
+    if is_agentic_paid:
+        from agentic.config import VERILOG_CODEGEN_CONFIG
+        cfg = VERILOG_CODEGEN_CONFIG
+        model_name = cfg.get("model", "").strip() or "gpt-4o"
+        api_key = cfg.get("api_key", "").strip()
+        base_url = cfg.get("base_url", "").strip()
+        if "azure/" in model_name.lower():
+            api_version = os.getenv("AZURE_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
+    elif byok_key:
+        for group_name in ("group1", "group2", "group3"):
+            group = byok_key.get(group_name, {})
+            key = group.get("api_key", "").strip()
+            if key and key not in ("NA", "mock-key", ""):
+                api_key = key
+                model_name = group.get("model", "").strip() or model_name
+                base_url = group.get("base_url", "").strip() or base_url
+                if "azure/" in model_name.lower():
+                    api_version = os.getenv("AZURE_API_VERSION")
+                break
+
+    # Normalize model name for litellm
+    model_name = _normalize_model_name(model_name, base_url)
+
+    try:
+        from litellm import completion
+        
+        llm_kwargs = {
+            "model": model_name,
+            "messages": messages_payload,
+            "temperature": 0.5,
+        }
+        if api_key:
+            llm_kwargs["api_key"] = api_key
+        if base_url:
+            llm_kwargs["base_url"] = base_url
+        if api_version:
+            llm_kwargs["api_version"] = api_version
+            
+        response = completion(**llm_kwargs)
+        reply = response.choices[0].message.content
+        return {"reply": reply, "model": model_name}
+    except Exception as e:
+        logger.error(f"Chat completion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Copilot logic failed: {e}")
+
 @app.post("/build")
 @limiter.limit("5/minute")
 async def trigger_build(
@@ -2783,7 +2911,7 @@ async def trigger_build(
         "user_profile": profile,
         "byok_key": byok_key,
         "plan_type": req.plan_type,
-        "human_in_loop": bool(req.human_in_loop),
+        "human_in_loop": False,
         "stages": {},  # stage_name -> stage_complete payload
         "build_status": "running",
     }

@@ -1,6 +1,7 @@
 import json
 import os
 import platform as _platform
+import re
 import tempfile
 from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
@@ -157,7 +158,9 @@ _DEFAULT_LLM_CONFIG = {
         or "https://api.openai.com/v1"
     ),
     "api_key": (
-        os.environ.get("LLM_API_KEY", "").strip() or _DEFAULT_GROUP.get("api_key", "")
+        os.environ.get("OPENAI_API_KEY", "").strip() or 
+        os.environ.get("LLM_API_KEY", "").strip() or 
+        _DEFAULT_GROUP.get("api_key", "")
     ),
 }
 
@@ -168,19 +171,29 @@ LLM_BASE_URL = DEFAULT_LLM_CONFIG["base_url"]
 LLM_API_KEY = DEFAULT_LLM_CONFIG["api_key"]
 
 # =============================================================================
-# Verilog Codegen (Server-side model for AgentIC-paid builds)
+# AgentIC Model (Server-side model for AgentIC-paid builds)
 # =============================================================================
 # Used when plan_type="agentic_paid" and no BYOK key is provided.
-# Env vars: VERILOG_CODEGEN_ENABLED, VERILOG_CODEGEN_MODEL, VERILOG_CODEGEN_BASE_URL, VERILOG_CODEGEN_API_KEY
-VERILOG_CODEGEN_ENABLED = os.environ.get("VERILOG_CODEGEN_ENABLED", "0").strip().lower() in (
+# Env vars: AGENTIC_MODEL_ENABLED, AGENTIC_MODEL_MODEL, AGENTIC_MODEL_BASE_URL, AGENTIC_MODEL_API_KEY
+AGENTIC_MODEL_ENABLED = os.environ.get("AGENTIC_MODEL_ENABLED", "0").strip().lower() in (
     "1", "true", "yes", "on"
 )
+# Robust aliases for VERILOG_CODEGEN across branches
+VERILOG_CODEGEN_ENABLED = os.environ.get("VERILOG_CODEGEN_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on") or AGENTIC_MODEL_ENABLED
 VERILOG_CODEGEN_CONFIG = {
-    "model": os.environ.get("VERILOG_CODEGEN_MODEL", "").strip() or "openai/gpt-4o",
+    "model": os.environ.get("VERILOG_CODEGEN_MODEL", "").strip() or os.environ.get("AGENTIC_MODEL_MODEL", "").strip() or AGENTIC_MODEL_CONFIG["model"],
     "base_url": _normalize_base_url(
-        os.environ.get("VERILOG_CODEGEN_BASE_URL", "").strip() or "https://api.openai.com/v1"
+        os.environ.get("VERILOG_CODEGEN_BASE_URL", "").strip() or os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip() or AGENTIC_MODEL_CONFIG["base_url"]
     ),
-    "api_key": os.environ.get("VERILOG_CODEGEN_API_KEY", "").strip(),
+    "api_key": os.environ.get("VERILOG_CODEGEN_API_KEY", "").strip() or os.environ.get("AGENTIC_MODEL_API_KEY", "").strip() or AGENTIC_MODEL_CONFIG["api_key"],
+}
+
+AGENTIC_MODEL_CONFIG = {
+    "model": os.environ.get("AGENTIC_MODEL_MODEL", "").strip() or DEFAULT_LLM_CONFIG["model"],
+    "base_url": _normalize_base_url(
+        os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip() or DEFAULT_LLM_CONFIG["base_url"]
+    ),
+    "api_key": os.environ.get("AGENTIC_MODEL_API_KEY", "").strip() or DEFAULT_LLM_CONFIG["api_key"],
 }
 
 _ROLE_TO_GROUP = {
@@ -666,6 +679,16 @@ def _custom_pdk_profile(name: str, root_path: Optional[str] = None) -> Dict[str,
     }
 
 
+def _infer_node_nm(*values: str) -> Optional[int]:
+    """Infer process node from profile names like sky130, open28, or samsung14."""
+    combined = " ".join(str(v or "") for v in values).lower()
+    matches = re.findall(r"(?<!\d)(\d{1,3})\s*(?:nm|n)?(?!\d)", combined)
+    if not matches:
+        return None
+    plausible = [int(m) for m in matches if 1 <= int(m) <= 1000]
+    return min(plausible) if plausible else None
+
+
 def detect_available_pdks() -> Dict[str, Dict[str, Any]]:
     """Auto-detect which PDKs are installed on this system.
 
@@ -795,8 +818,13 @@ _PDK_ALIASES = {
     "gf180": "gf180mcu",
     "gf180mcuc": "gf180mcu",
     "asap7": "asap7",
+    "asap5": "asap5",
+    "asap2": "asap2",
     "nangate45": "nangate45",
     "freepdk45": "freepdk45",
+    "open28": "open28",
+    "open-28": "open28",
+    "open28nm": "open28",
     "osu018": "osu018",
     "osu035": "osu035",
     "sky130": "sky130",
@@ -929,6 +957,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 200,
         "metal_layers": 6,
         "lc_area_um2": 0.054,
+        "openlane_max_routing_layer": "met5",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 250,
+        "default_core_util": 45,
+        "max_core_util": 55,
+        "grt_adjustment": 0.15,
         "drc_rules": "sky130A.drc",
         "lvs_rules": "sky130A.lvs",
         "timing_libs": ["libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"],
@@ -938,6 +972,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 125,
         "metal_layers": 5,
         "lc_area_um2": 0.036,
+        "openlane_max_routing_layer": "Metal5",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 300,
+        "default_core_util": 40,
+        "max_core_util": 50,
+        "grt_adjustment": 0.18,
         "drc_rules": "gf180mcu.drc",
         "lvs_rules": "gf180mcu.lvs",
         "timing_libs": ["libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/*.lib"],
@@ -947,6 +987,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 1200,
         "metal_layers": 9,
         "lc_area_um2": 0.005,
+        "openlane_max_routing_layer": "M9",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 100,
+        "default_core_util": 35,
+        "max_core_util": 45,
+        "grt_adjustment": 0.25,
         "drc_rules": "asap7.drc",
         "lvs_rules": "asap7.lvs",
         "timing_libs": ["libs.ref/asap7sc7p5t/lib/*.lib"],
@@ -960,6 +1006,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 600,
         "metal_layers": 10,
         "lc_area_um2": 0.028,
+        "openlane_max_routing_layer": "metal10",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 150,
+        "default_core_util": 40,
+        "max_core_util": 55,
+        "grt_adjustment": 0.20,
         "drc_rules": "nangate45.drc",
         "lvs_rules": "nangate45.lvs",
         "timing_libs": ["libs.ref/NangateOpenCellLibrary/lib/*.lib"],
@@ -969,6 +1021,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 600,
         "metal_layers": 10,
         "lc_area_um2": 0.028,
+        "openlane_max_routing_layer": "metal10",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 150,
+        "default_core_util": 40,
+        "max_core_util": 55,
+        "grt_adjustment": 0.20,
         "drc_rules": "FreePDK45.drc",
         "lvs_rules": "FreePDK45.lvs",
         "timing_libs": ["libs.ref/NangateOpenCellLibrary/lib/*.lib"],
@@ -978,6 +1036,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 125,
         "metal_layers": 6,
         "lc_area_um2": 0.036,
+        "openlane_max_routing_layer": "Metal6",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 300,
+        "default_core_util": 40,
+        "max_core_util": 50,
+        "grt_adjustment": 0.18,
         "drc_rules": "osu018.drc",
         "lvs_rules": "osu018.lvs",
         "timing_libs": ["libs.ref/osu018_stdcells/lib/*.lib"],
@@ -987,6 +1051,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 3000,
         "metal_layers": 10,
         "lc_area_um2": 0.008,
+        "openlane_max_routing_layer": "M10",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 90,
+        "default_core_util": 35,
+        "max_core_util": 45,
+        "grt_adjustment": 0.28,
         "drc_rules": "asap5.drc",
         "lvs_rules": "asap5.lvs",
         "timing_libs": ["libs.ref/asap5sc/lib/*.lib"],
@@ -996,6 +1066,12 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 5000,
         "metal_layers": 12,
         "lc_area_um2": 0.003,
+        "openlane_max_routing_layer": "M12",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 80,
+        "default_core_util": 32,
+        "max_core_util": 42,
+        "grt_adjustment": 0.30,
         "drc_rules": "asap2.drc",
         "lvs_rules": "asap2.lvs",
         "timing_libs": ["libs.ref/asap2sc/lib/*.lib"],
@@ -1005,9 +1081,79 @@ PDK_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upper_limit_mhz": 1200,
         "metal_layers": 8,
         "lc_area_um2": 0.015,
+        "openlane_max_routing_layer": "M8",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 120,
+        "default_core_util": 35,
+        "max_core_util": 48,
+        "grt_adjustment": 0.24,
         "drc_rules": "open28.drc",
         "lvs_rules": "open28.lvs",
         "timing_libs": ["libs.ref/open28_stdcells/lib/*.lib"],
+    },
+    "tsmc28": {
+        "max_reliable_mhz": 1200,
+        "upper_limit_mhz": 1800,
+        "metal_layers": 8,
+        "lc_area_um2": 0.015,
+        "openlane_max_routing_layer": "",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 120,
+        "default_core_util": 35,
+        "max_core_util": 48,
+        "grt_adjustment": 0.24,
+        "drc_rules": "tsmc28.drc",
+        "lvs_rules": "tsmc28.lvs",
+        "timing_libs": ["libs.ref/tsmc28_stdcell/lib/*.lib"],
+        "manual_collateral_required": True,
+    },
+    "samsung14": {
+        "max_reliable_mhz": 1600,
+        "upper_limit_mhz": 2400,
+        "metal_layers": 10,
+        "lc_area_um2": 0.008,
+        "openlane_max_routing_layer": "",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 100,
+        "default_core_util": 32,
+        "max_core_util": 42,
+        "grt_adjustment": 0.28,
+        "drc_rules": "samsung14.drc",
+        "lvs_rules": "samsung14.lvs",
+        "timing_libs": ["libs.ref/samsung14_stdcell/lib/*.lib"],
+        "manual_collateral_required": True,
+    },
+    "intel22": {
+        "max_reliable_mhz": 1400,
+        "upper_limit_mhz": 2000,
+        "metal_layers": 9,
+        "lc_area_um2": 0.012,
+        "openlane_max_routing_layer": "",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 110,
+        "default_core_util": 35,
+        "max_core_util": 45,
+        "grt_adjustment": 0.26,
+        "drc_rules": "intel22.drc",
+        "lvs_rules": "intel22.lvs",
+        "timing_libs": ["libs.ref/intel22_stdcell/lib/*.lib"],
+        "manual_collateral_required": True,
+    },
+    "gf22": {
+        "max_reliable_mhz": 1400,
+        "upper_limit_mhz": 2000,
+        "metal_layers": 9,
+        "lc_area_um2": 0.012,
+        "openlane_max_routing_layer": "",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 110,
+        "default_core_util": 35,
+        "max_core_util": 45,
+        "grt_adjustment": 0.26,
+        "drc_rules": "gf22.drc",
+        "lvs_rules": "gf22.lvs",
+        "timing_libs": ["libs.ref/gf22_stdcell/lib/*.lib"],
+        "manual_collateral_required": True,
     },
 }
 
@@ -1030,6 +1176,12 @@ def get_pdk_tool_config(pdk: Optional[str] = None) -> Dict[str, Any]:
         "voltage_vdd": profile.get("voltage_vdd", "1.8"),
         "min_cell_height": profile.get("min_cell_height", "0.46"),
         "lc_area_um2": 0.054,
+        "openlane_max_routing_layer": "",
+        "enforce_openlane_max_routing_layer": False,
+        "min_die_um": 250,
+        "default_core_util": 40,
+        "max_core_util": 50,
+        "grt_adjustment": 0.20,
         "drc_rules": f"{profile.get('pdk', pdk or PDK)}.drc",
         "lvs_rules": f"{profile.get('pdk', pdk or PDK)}.lvs",
         "timing_libs": [],
@@ -1041,6 +1193,87 @@ def get_pdk_tool_config(pdk: Optional[str] = None) -> Dict[str, Any]:
     config["std_cell_library"] = profile.get("std_cell_library", config["std_cell_library"])
     config["voltage_vdd"] = profile.get("voltage_vdd", config["voltage_vdd"])
     return config
+
+
+def get_pdk_flow_capabilities(pdk: Optional[str] = None) -> Dict[str, Any]:
+    """Return node-aware guidance used by autonomous RTL-to-GDS flow stages.
+
+    This is deliberately capability-oriented rather than vendor-specific: known
+    PDKs get tuned defaults, while custom/proprietary PDKs still receive safe
+    conservative behavior as soon as their collateral is discoverable.
+    """
+    profile = get_pdk_profile(pdk or DEFAULT_PDK_PROFILE)
+    tool = get_pdk_tool_config(pdk or profile.get("profile") or profile.get("pdk"))
+    node_nm = _infer_node_nm(
+        profile.get("profile", ""),
+        profile.get("pdk", ""),
+        profile.get("description", ""),
+    )
+    profile_key = profile.get("profile", _normalize_pdk_key(pdk or "custom"))
+    maturity = profile.get("maturity", "custom" if profile.get("custom") else "unknown")
+    advanced_node = bool(tool.get("advanced_node")) or (
+        node_nm is not None and node_nm <= 28
+    ) or profile_key.startswith("asap")
+    legacy_node = bool(node_nm is not None and node_nm >= 130)
+    proprietary = bool(profile.get("proprietary") or tool.get("manual_collateral_required"))
+    custom = bool(profile.get("custom"))
+
+    if advanced_node:
+        node_class = "advanced"
+        rc_risk = "high"
+        rtl_guidance = (
+            "Treat wires and routing congestion as first-order constraints: pipeline wide "
+            "datapaths, keep fanout local, and map memories to macros."
+        )
+    elif legacy_node:
+        node_class = "legacy"
+        rc_risk = "moderate"
+        rtl_guidance = (
+            "Logic depth is usually more important than wire RC: keep combinational cones "
+            "short, but use fewer speculative pipeline stages than advanced nodes."
+        )
+    else:
+        node_class = "generic"
+        rc_risk = "unknown"
+        rtl_guidance = (
+            "Use conservative timing, explicit resets, bounded fanout, and memory macros "
+            "for large arrays until PDK-specific data proves tighter limits."
+        )
+
+    collateral_ready = bool(profile.get("available")) and bool(profile.get("tech_ok", True))
+    flow_status = "ready" if collateral_ready else "requires_pdk_collateral"
+    if proprietary:
+        flow_status = "requires_authorized_foundry_collateral"
+    elif custom and not collateral_ready:
+        flow_status = "requires_custom_pdk_validation"
+
+    return {
+        "profile": profile_key,
+        "pdk": profile.get("pdk", pdk or PDK),
+        "std_cell_library": profile.get("std_cell_library", ""),
+        "node_nm": node_nm,
+        "node_class": node_class,
+        "maturity": maturity,
+        "advanced_node": advanced_node,
+        "legacy_node": legacy_node,
+        "proprietary": proprietary,
+        "custom": custom,
+        "flow_status": flow_status,
+        "fabrication_ready": bool(profile.get("fabrication_ready")) and collateral_ready,
+        "collateral_ready": collateral_ready,
+        "wire_rc_risk": rc_risk,
+        "metal_layers": int(tool.get("metal_layers", 6) or 6),
+        "max_routing_layer": str(tool.get("openlane_max_routing_layer", "") or ""),
+        "enforce_max_routing_layer": bool(tool.get("enforce_openlane_max_routing_layer", False)),
+        "lc_area_um2": float(tool.get("lc_area_um2", 0.054) or 0.054),
+        "min_die_um": int(tool.get("min_die_um", 250) or 250),
+        "default_core_util": int(tool.get("default_core_util", 40) or 40),
+        "max_core_util": int(tool.get("max_core_util", 50) or 50),
+        "grt_adjustment": float(tool.get("grt_adjustment", 0.20) or 0.20),
+        "memory_macro_threshold_bytes": 1024,
+        "rtl_guidance": rtl_guidance,
+        "tool_config": tool,
+    }
 
 
 class PDKError(Exception):

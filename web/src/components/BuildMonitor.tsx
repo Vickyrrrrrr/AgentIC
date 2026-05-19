@@ -57,12 +57,55 @@ interface Props {
     events: BuildEvent[];
     jobStatus: string;
     stageSchema?: StageSchemaItem[];
+    onReset?: () => void;
+    artifacts?: any[];
 }
 
-export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobStatus, stageSchema }) => {
+export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobStatus, stageSchema, onReset, artifacts }) => {
     const logsRef = useRef<HTMLDivElement>(null);
     const [cancelling, setCancelling] = React.useState(false);
     const [localCancelled, setLocalCancelled] = React.useState(false);
+
+    // Flat Silicon Artifacts Viewer States
+    const [selectedFile, setSelectedFile] = React.useState<string>('');
+    const [fileContent, setFileContent] = React.useState<string>('');
+    const [loadingFile, setLoadingFile] = React.useState<boolean>(false);
+
+    // Fetch selected artifact content dynamically
+    React.useEffect(() => {
+        if (!selectedFile) {
+            setFileContent('');
+            return;
+        }
+        setLoadingFile(true);
+        api.get(`/build/artifacts/${designName}/${selectedFile}`)
+            .then(res => {
+                setFileContent(typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2));
+                setLoadingFile(false);
+            })
+            .catch(() => {
+                setFileContent('Error loading file contents.');
+                setLoadingFile(false);
+            });
+    }, [selectedFile, designName]);
+
+    // Download individual file securely
+    const handleDownloadFile = async (filename: string) => {
+        try {
+            const res = await api.get(`/build/artifacts/${designName}/${filename}`, { responseType: 'text' });
+            const blob = new Blob([res.data], { type: 'text/plain' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error('Failed to download file:', err);
+        }
+    };
 
     const mergedDisplay: Record<string, { label: string; icon: string }> = React.useMemo(() => {
         if (!stageSchema || stageSchema.length === 0) return STATES_DISPLAY;
@@ -191,11 +234,52 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                             >
                                 {cancelling ? 'Stopping...' : 'Cancel'}
                             </button>
+                            {onReset && (
+                                <button
+                                    onClick={onReset}
+                                    style={{
+                                        background: 'rgba(239, 68, 68, 0.1)',
+                                        border: '1px solid rgba(239, 68, 68, 0.35)',
+                                        color: '#ef4444',
+                                        borderRadius: '4px',
+                                        padding: '0.3rem 0.65rem',
+                                        fontSize: '0.72rem',
+                                        cursor: 'pointer',
+                                        fontFamily: 'monospace',
+                                        fontWeight: 600,
+                                        marginLeft: '0.5rem',
+                                        transition: 'all 0.15s ease'
+                                    }}
+                                >
+                                    FORCE RESET
+                                </button>
+                            )}
                         </>
                     ) : (
-                        <span style={{ color: effectiveJobStatus === 'done' ? 'var(--success)' : 'var(--fail)', fontWeight: 600 }}>
-                            {effectiveJobStatus === 'done' ? 'Complete' : effectiveJobStatus === 'cancelled' ? 'Cancelled' : 'Failed'}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                            <span style={{ color: effectiveJobStatus === 'done' ? 'var(--success)' : 'var(--fail)', fontWeight: 600 }}>
+                                {effectiveJobStatus === 'done' ? 'Complete' : effectiveJobStatus === 'cancelled' ? 'Cancelled' : 'Failed'}
+                            </span>
+                            {onReset && (
+                                <button
+                                    onClick={onReset}
+                                    style={{
+                                        background: 'rgba(59, 130, 246, 0.12)',
+                                        border: '1px solid rgba(59, 130, 246, 0.45)',
+                                        color: '#60a5fa',
+                                        borderRadius: '4px',
+                                        padding: '0.32rem 0.75rem',
+                                        fontSize: '0.74rem',
+                                        cursor: 'pointer',
+                                        fontFamily: 'monospace',
+                                        fontWeight: 600,
+                                        transition: 'all 0.15s ease'
+                                    }}
+                                >
+                                    BACK TO STUDIO
+                                </button>
+                            )}
+                        </div>
                     )}
                 </div>
             </div>
@@ -205,19 +289,19 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                 {/* Checkpoint Timeline removed to maximize terminal width */}
 
                 {/* Live Terminal */}
-                <div className="terminal-column">
-                    <div className="section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="terminal-column" style={{ background: '#18181b', border: '1px solid #27272a', borderRadius: '4px', boxShadow: 'none' }}>
+                    <div className="section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#a1a1aa' }}>
                         <span>Live Log</span>
                         {!isDone && logEvents.length > 0 && (
-                            <div className="active-actor-pill">
-                                <span className={activeActor === 'agentic' ? 'actor-indicator-agent' : 'actor-indicator-tool'} />
+                            <div className="active-actor-pill" style={{ background: '#09090b', border: '1px solid #27272a', borderRadius: '4px', color: '#a1a1aa' }}>
+                                <span className={activeActor === 'agentic' ? 'actor-indicator-agent' : 'actor-indicator-tool'} style={{ boxShadow: 'none' }} />
                                 Active: {activeActor}
                             </div>
                         )}
                     </div>
-                    <div className="live-terminal" ref={logsRef}>
+                    <div className="live-terminal" ref={logsRef} style={{ background: '#09090b', borderRadius: '4px', border: '1px solid #27272a' }}>
                         {logEvents.length === 0 ? (
-                            <span className="terminal-waiting">Waiting for AgentIC to start...</span>
+                            <span className="terminal-waiting" style={{ color: '#52525b' }}>Waiting for AgentIC to start...</span>
                         ) : (
                             <>
                                 {processedLogs.map((msg, i) => {
@@ -246,9 +330,9 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                                     );
                                 })}
                                 {!isDone && (
-                                    <div className="terminal-prompt">
-                                        <span className="prompt-char">$</span>
-                                        <span className="cursor-blink">_</span>
+                                    <div className="terminal-prompt" style={{ color: '#a1a1aa' }}>
+                                        <span className="prompt-char" style={{ color: '#a1a1aa' }}>$</span>
+                                        <span className="cursor-blink">▋</span>
                                     </div>
                                 )}
                             </>
@@ -256,24 +340,140 @@ export const BuildMonitor: React.FC<Props> = ({ designName, jobId, events, jobSt
                     </div>
 
                     {/* Progress */}
-                    <div className="progress-bar-wrap">
+                    <div className="progress-bar-wrap" style={{ background: '#27272a', borderRadius: '2px' }}>
                         <div
                             className="progress-bar-fill"
-                            style={{ width: `${(currentStep / stateOrder.length) * 100}%` }}
+                            style={{ width: `${(currentStep / stateOrder.length) * 100}%`, background: '#a1a1aa', borderRadius: '2px' }}
                         />
                     </div>
-                    <div className="progress-label">
+                    <div className="progress-label" style={{ color: '#a1a1aa', fontFamily: 'monospace' }}>
                         {Math.round((currentStep / stateOrder.length) * 100)}% complete
                     </div>
+
+                    {/* Real-time Flat Tabbed Artifacts Viewer */}
+                    {artifacts && artifacts.length > 0 && (
+                        <div style={{
+                            marginTop: '1.25rem',
+                            borderTop: '1px solid #27272a',
+                            paddingTop: '1.25rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.75rem',
+                        }}>
+                            <div style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                            }}>
+                                <span style={{
+                                    fontFamily: 'monospace',
+                                    fontSize: '0.72rem',
+                                    letterSpacing: '0.12em',
+                                    textTransform: 'uppercase',
+                                    color: '#a1a1aa',
+                                    fontWeight: 700
+                                }}>
+                                    Generated Silicon Artifacts
+                                </span>
+                                <span style={{ fontSize: '0.7rem', color: '#52525b', fontFamily: 'monospace' }}>
+                                    ({artifacts.length} files detected)
+                                </span>
+                            </div>
+
+                            {/* Horizontal Tabs Scroll */}
+                            <div style={{
+                                display: 'flex',
+                                gap: '0.4rem',
+                                overflowX: 'auto',
+                                paddingBottom: '0.4rem',
+                            }}>
+                                {artifacts.map((art, idx) => (
+                                    <button
+                                        key={idx}
+                                        onClick={() => setSelectedFile(selectedFile === art.name ? '' : art.name)}
+                                        style={{
+                                            background: selectedFile === art.name ? '#27272a' : 'transparent',
+                                            border: '1px solid #27272a',
+                                            color: selectedFile === art.name ? '#f4f4f5' : '#a1a1aa',
+                                            fontFamily: 'monospace',
+                                            fontSize: '0.74rem',
+                                            padding: '0.35rem 0.7rem',
+                                            borderRadius: '3px',
+                                            cursor: 'pointer',
+                                            whiteSpace: 'nowrap',
+                                            transition: 'all 0.1s ease',
+                                        }}
+                                    >
+                                        📄 {art.name}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Code Viewer Panel */}
+                            {selectedFile && (
+                                <div style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    border: '1px solid #27272a',
+                                    borderRadius: '4px',
+                                    background: '#09090b',
+                                    overflow: 'hidden',
+                                    animation: 'fadeIn 0.15s ease-out',
+                                }}>
+                                    <div style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        background: '#18181b',
+                                        padding: '0.45rem 0.8rem',
+                                        borderBottom: '1px solid #27272a',
+                                    }}>
+                                        <span style={{ fontFamily: 'monospace', fontSize: '0.75rem', color: '#a1a1aa', fontWeight: 600 }}>
+                                            {selectedFile}
+                                        </span>
+                                        <button
+                                            onClick={() => handleDownloadFile(selectedFile)}
+                                            style={{
+                                                background: 'transparent',
+                                                border: 'none',
+                                                color: '#60a5fa',
+                                                fontFamily: 'monospace',
+                                                fontSize: '0.72rem',
+                                                cursor: 'pointer',
+                                                textDecoration: 'underline',
+                                                padding: 0,
+                                            }}
+                                        >
+                                            [DOWNLOAD]
+                                        </button>
+                                    </div>
+                                    <pre style={{
+                                        margin: 0,
+                                        padding: '0.85rem',
+                                        maxHeight: '200px',
+                                        overflowY: 'auto',
+                                        fontFamily: 'monospace',
+                                        fontSize: '0.75rem',
+                                        color: '#e4e4e7',
+                                        background: '#09090b',
+                                        lineHeight: '1.45',
+                                        whiteSpace: 'pre-wrap',
+                                        textAlign: 'left',
+                                    }}>
+                                        {loadingFile ? 'Fetching artifact content...' : fileContent}
+                                    </pre>
+                                </div>
+                             )}
+                        </div>
+                    )}
                 </div>
             </div>
 
             {/* Footer */}
             {!isDone && (
-                <div className="monitor-footer">
+                <div className="monitor-footer" style={{ borderTop: '1px solid #27272a', paddingTop: '0.75rem', color: '#a1a1aa', fontFamily: 'monospace', fontSize: '0.75rem' }}>
                     <span className="spinner-small" />
-                    AgentIC is building your chip autonomously. This takes 10-30 min.
-                    You can leave this tab open; the live log will keep reconnecting if the network blips.
+                    AgentIC is building your chip autonomously.
                 </div>
             )}
         </div>
