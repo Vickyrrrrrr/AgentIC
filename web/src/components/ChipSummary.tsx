@@ -272,7 +272,7 @@ export const ChipSummary: React.FC<Props> = ({ designName, result, jobStatus, ev
             )}
 
             {/* ── Convergence History ─────────────────── */}
-            {convergence.length > 0 && (
+            {Array.isArray(convergence) && convergence.length > 0 && (
                 <div className="cs-section">
                     <h2 className="cs-section-title">Convergence History</h2>
                     <div className="cs-table-wrap">

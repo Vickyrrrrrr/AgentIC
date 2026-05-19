@@ -263,7 +263,7 @@ export const DesignStudio = () => {
             if (prof && billing) setProfile({ ...prof, plan_type: billing.plan_type });
             else if (prof) setProfile(prof);
             if (schemaRes.status === 'fulfilled') setStageSchema(schemaRes.value.data?.stages || []);
-            if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value.data || []);
+            if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value.data?.jobs || []);
             if (pdksRes.status === 'fulfilled') {
                 const pdks: PdkOption[] = pdksRes.value.data?.pdks || [];
                 const defaultPdk = pdksRes.value.data?.default || 'sky130';
@@ -597,7 +597,7 @@ export const DesignStudio = () => {
                 <div className="studio-min-projects">
                     <div className="studio-min-section-title">Projects</div>
                     <div className="studio-min-project-title"><Folder size={16} /> AgentIC</div>
-                    {jobs.length === 0 ? (
+                    {!Array.isArray(jobs) || jobs.length === 0 ? (
                         <span className="studio-min-muted">No conversations yet</span>
                     ) : (
                         jobs.slice(0, 6).map((job) => (

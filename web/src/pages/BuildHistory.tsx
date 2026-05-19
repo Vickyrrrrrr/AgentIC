@@ -130,7 +130,7 @@ export const BuildHistory: React.FC<BuildHistoryProps> = ({
               <tbody>
                 {filteredJobs.map((job) => (
                   <tr key={job.job_id}>
-                    <td className="bh-job-id">{job.job_id.slice(0, 8)}...</td>
+                    <td className="bh-job-id">{String(job.job_id || '').slice(0, 8)}...</td>
                     <td>{job.design_name || '-'}</td>
                     <td>
                       <span className="bh-status" style={{ color: statusColor(job.status), borderColor: statusColor(job.status) }}>
