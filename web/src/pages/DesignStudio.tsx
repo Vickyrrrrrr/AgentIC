@@ -1,16 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    ArrowRight,
+    // ArrowRight,
     Bot,
     Cpu,
     Fingerprint,
     KeyRound,
-    Layers3,
+    // Layers3,
     Rocket,
-    ShieldCheck,
+    // ShieldCheck,
     Sparkles,
-    Waypoints,
+    // Waypoints,
 } from 'lucide-react';
 import { BuildMonitor } from '../components/BuildMonitor';
 import { ChipSummary } from '../components/ChipSummary';
@@ -52,13 +52,7 @@ interface PdkOption {
     fabrication_ready?: boolean;
 }
 
-const PDK_MATURITY: Record<string, { label: string; warning: string; color: string }> = {
-    production: { label: "Production Ready", warning: "", color: "var(--success)" },
-    experimental: { label: "Experimental", warning: "This PDK is not mature for fabrication. Results may be unreliable.", color: "var(--accent)" },
-    research: { label: "Research Only", warning: "This is an academic/research PDK — not suitable for real chip fabrication.", color: "#d97706" },
-    proprietary: { label: "Proprietary", warning: "This PDK requires foundry access and manual setup. Not available for open fabrication.", color: "#dc2626" },
-    custom: { label: "Custom PDK", warning: "This custom PDK was detected on the server. Confirm foundry collateral and signoff flow before fabrication.", color: "#d97706" },
-};
+
 
 function slugify(text: string): string {
     return text
@@ -89,24 +83,68 @@ const QUICK_STARTS = [
     },
 ];
 
-const DELIVERY_MODES = [
-    {
-        title: 'Verification-first',
-        detail: 'RTL generation, lint, simulation, and coverage-focused validation.',
-    },
-    {
-        title: 'Silicon path',
-        detail: 'Carry the design into physical implementation and signoff artifacts when enabled.',
-    },
-    {
-        title: 'BYOK protected',
-        detail: 'Public deployments require the operator to provide a valid LLM key before launch.',
-    },
-];
+
 
 export const DesignStudio = () => {
     const [phase, setPhase] = useState<Phase>('prompt');
     const [prompt, setPrompt] = useState('');
+    
+    // Chat Copilot States
+    const [chatHistory, setChatHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([
+        {
+            role: 'assistant',
+            content: "Hello! I am your AgentIC VLSI Copilot. I can help you design, refine, and perfect your custom silicon architecture before launching an autonomous run.\n\nWhat kind of hardware block or digital circuit would you like to design today? For example, we can build an AXI4 DMA Fabric, an SPI Controller, or a custom RISC compute core."
+        }
+    ]);
+    const [chatInput, setChatInput] = useState('');
+    const [isTyping, setIsTyping] = useState(false);
+    const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [chatHistory, isTyping]);
+
+    const handleSendChat = async () => {
+        if (!chatInput.trim() || isTyping) return;
+        
+        const userMsg = chatInput.trim();
+        setChatInput('');
+        const updatedHistory = [...chatHistory, { role: 'user' as const, content: userMsg }];
+        setChatHistory(updatedHistory);
+        setIsTyping(true);
+
+        // Keep latest chat input as the running description prompt
+        setPrompt(userMsg);
+
+        try {
+            const byokRaw = localStorage.getItem('agentic_byok_key');
+            const byokKey = byokRaw ? JSON.parse(byokRaw) : null;
+            const effectiveAiModel = aiModel === 'AgentIC' && !isAgenticPaid ? 'BYOK' : aiModel;
+
+            const res = await api.post('/chat/converse', {
+                messages: updatedHistory.map(m => ({ role: m.role, content: m.content })),
+                plan_type: effectiveAiModel === 'AgentIC' ? 'agentic_paid' : 'byok',
+                api_key: byokKey ? JSON.stringify(byokKey) : null,
+            });
+
+            setChatHistory(prev => [...prev, { role: 'assistant' as const, content: res.data.reply }]);
+            
+            // Search copilot response for a code block to update prompt
+            if (res.data.reply.includes("```")) {
+                const parts = res.data.reply.split("```");
+                if (parts.length > 1) {
+                    const code = parts[1].replace(/^(verilog|sv|markdown|text|json)?\n/, '');
+                    if (code.length > 30) {
+                        setPrompt(code);
+                    }
+                }
+            }
+        } catch (e) {
+            setChatHistory(prev => [...prev, { role: 'assistant' as const, content: "My apologies, I encountered a connection issue. Please check your network and API keys, and try again." }]);
+        } finally {
+            setIsTyping(false);
+        }
+    };
     const [designName, setDesignName] = useState('');
     const [jobId, setJobId] = useState('');
     const [events, setEvents] = useState<BuildEvent[]>([]);
@@ -185,7 +223,7 @@ export const DesignStudio = () => {
     const launchStatus = isAgenticPaid ? 'AgentIC Model active' : hasActivePlan ? 'BYOK configured' : 'Configure required';
     const launchModeLabel = skipOpenlane ? 'Verification-first run' : 'Full silicon path';
     const selectedPdk = pdkOptions.find((pdk) => pdk.key === pdkProfile);
-    const gdsReadyPdks = pdkOptions.filter((pdk) => pdk.gds_ready);
+    // const gdsReadyPdks = pdkOptions.filter((pdk) => pdk.gds_ready);
     const workspaceSuccessfulBuilds = profile?.workspace_successful_builds ?? profile?.successful_builds ?? 0;
     const usageLabel = profile
         ? `${workspaceSuccessfulBuilds} successful · ${profile.total_builds ?? 0} total builds on ${profile.plan ?? 'local'}`
@@ -436,246 +474,319 @@ export const DesignStudio = () => {
                                 </div>
                             </section>
 
-                            <div className="studio-launch-grid">
-                                <section className="studio-compose-card">
-                                    <div className="studio-section-heading">
+                            <div className="studio-launch-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '1.5rem', height: 'calc(100vh - 180px)', minHeight: '650px' }}>
+                                {/* Left Panel: Chat Terminal */}
+                                <section className="studio-compose-card" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1.5rem', overflow: 'hidden' }}>
+                                    <div className="studio-section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexShrink: 0 }}>
                                         <div>
-                                            <span className="studio-section-label">Build Brief</span>
-                                            <h2 className="studio-section-title">Specification input</h2>
+                                            <span className="studio-section-label">Silicon AI Copilot</span>
+                                            <h2 className="studio-section-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                <Bot size={20} style={{ color: 'var(--accent)' }} />
+                                                VLSI Expert Terminal
+                                            </h2>
                                         </div>
                                         <span className="studio-muted-chip">{usageLabel}</span>
                                     </div>
 
-                                    <label className="studio-field-label" htmlFor="design-prompt">
-                                        Describe the circuit in plain English
-                                    </label>
-                                    <div className="studio-textarea-wrap">
-                                        <Bot size={18} className="studio-textarea-icon" />
-                                        <textarea
-                                            id="design-prompt"
-                                            className="studio-textarea"
-                                            placeholder="Example: A low-power UART bridge with FIFO buffering, parity checks, and an APB register interface."
-                                            value={prompt}
-                                            onChange={e => setPrompt(e.target.value)}
-                                            rows={5}
-                                            onInput={(e) => {
-                                                const target = e.currentTarget;
-                                                target.style.height = 'auto';
-                                                target.style.height = `${Math.min(target.scrollHeight, 320)}px`;
-                                            }}
-                                            onKeyDown={(e) => {
-                                                if (e.key === 'Enter' && !e.shiftKey) {
-                                                    e.preventDefault();
-                                                    if (prompt.trim()) handleLaunch();
-                                                }
-                                            }}
-                                            autoFocus
-                                        />
-                                    </div>
-
-                                    <div className="studio-design-row">
-                                        <div className="studio-design-card">
-                                            <span className="studio-field-label">Design identifier</span>
-                                            <span className="studio-design-value">
-                                                {designName || 'Generated automatically after you describe the system'}
-                                            </span>
-                                        </div>
-                                        <div className="studio-design-card">
-                                            <span className="studio-field-label">Execution mode</span>
-                                            <span className="studio-design-value">{aiModel === 'BYOK' ? 'Bring your own model key' : 'AgentIC-managed orchestration'}</span>
-                                        </div>
-                                    </div>
-
-                                    <div className="studio-option-groups">
-                                        <div className="studio-option-group">
-                                            <span className="studio-field-label">Routing mode</span>
-                                            <div className="studio-chip-row">
-                                                <button
-                                                    className={`studio-chip-btn ${aiModel === 'AgentIC' ? 'is-active' : ''}`}
-                                                    onClick={() => {
-                                                        if (!isAgenticPaid) {
-                                                            setAiModel('BYOK');
-                                                            setShowBillingModal(true);
-                                                        } else {
-                                                            setAiModel('AgentIC');
-                                                        }
+                                    {/* Chat History List */}
+                                    <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem', display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1rem' }}>
+                                        {chatHistory.map((msg, idx) => (
+                                            <div
+                                                key={idx}
+                                                style={{
+                                                    display: 'flex',
+                                                    justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                                                    alignItems: 'flex-start',
+                                                    gap: '0.75rem',
+                                                    maxWidth: '100%'
+                                                }}
+                                            >
+                                                {msg.role === 'assistant' && (
+                                                    <div style={{
+                                                        width: '32px', height: '32px', borderRadius: '8px',
+                                                        background: 'linear-gradient(135deg, var(--accent) 0%, #3b82f6 100%)',
+                                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                        flexShrink: 0, boxShadow: '0 4px 12px rgba(59, 130, 246, 0.25)'
+                                                    }}>
+                                                        <Bot size={16} style={{ color: '#fff' }} />
+                                                    </div>
+                                                )}
+                                                <div
+                                                    style={{
+                                                        background: msg.role === 'user' 
+                                                            ? 'linear-gradient(135deg, var(--accent) 0%, #1d4ed8 100%)' 
+                                                            : 'rgba(39, 39, 42, 0.65)',
+                                                        border: msg.role === 'user' ? 'none' : '1px solid rgba(63, 63, 70, 0.5)',
+                                                        color: msg.role === 'user' ? '#fff' : 'rgba(255, 255, 255, 0.9)',
+                                                        padding: '0.85rem 1.1rem',
+                                                        borderRadius: '12px',
+                                                        borderTopRightRadius: msg.role === 'user' ? '2px' : '12px',
+                                                        borderTopLeftRadius: msg.role === 'assistant' ? '2px' : '12px',
+                                                        fontSize: '0.86rem',
+                                                        lineHeight: '1.45',
+                                                        maxWidth: '82%',
+                                                        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)',
+                                                        backdropFilter: msg.role === 'user' ? 'none' : 'blur(8px)',
+                                                        whiteSpace: 'pre-wrap',
+                                                        wordBreak: 'break-word',
                                                     }}
                                                 >
-                                                    <Rocket size={15} />
-                                                    AgentIC orchestration
+                                                    {msg.content}
+                                                </div>
+                                            </div>
+                                        ))}
+
+                                        {isTyping && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                <div style={{
+                                                    width: '32px', height: '32px', borderRadius: '8px',
+                                                    background: 'rgba(39, 39, 42, 0.65)',
+                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                    flexShrink: 0, border: '1px solid rgba(63, 63, 70, 0.5)'
+                                                }}>
+                                                    <Bot size={16} style={{ color: 'var(--accent)' }} />
+                                                </div>
+                                                <div style={{
+                                                    background: 'rgba(39, 39, 42, 0.4)',
+                                                    border: '1px solid rgba(63, 63, 70, 0.3)',
+                                                    padding: '0.75rem 1rem',
+                                                    borderRadius: '12px',
+                                                    borderTopLeftRadius: '2px',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '0.4rem'
+                                                }}>
+                                                    <span className="premium-loader-dot" style={{ width: '6px', height: '6px', background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
+                                                    <span className="premium-loader-dot" style={{ width: '6px', height: '6px', background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
+                                                    <span className="premium-loader-dot" style={{ width: '6px', height: '6px', background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
+                                                </div>
+                                            </div>
+                                        )}
+                                        <div ref={chatEndRef} />
+                                    </div>
+
+                                    {/* Bottom Quick-actions & Input Bar */}
+                                    <div style={{ flexShrink: 0 }}>
+                                        {chatHistory.length <= 1 && (
+                                            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', overflowX: 'auto', paddingBottom: '0.25rem' }}>
+                                                {QUICK_STARTS.map((qs) => (
+                                                    <button
+                                                        key={qs.title}
+                                                        onClick={() => {
+                                                            setChatInput(`I want to design a ${qs.prompt.toLowerCase()}`);
+                                                        }}
+                                                        style={{
+                                                            background: 'rgba(24, 24, 27, 0.8)',
+                                                            border: '1px solid rgba(63, 63, 70, 0.6)',
+                                                            borderRadius: '20px',
+                                                            padding: '0.4rem 0.85rem',
+                                                            fontSize: '0.75rem',
+                                                            color: 'rgba(255, 255, 255, 0.75)',
+                                                            cursor: 'pointer',
+                                                            whiteSpace: 'nowrap',
+                                                        }}
+                                                    >
+                                                        {qs.title}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        <div style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            background: 'rgba(24, 24, 27, 0.8)',
+                                            border: '1px solid rgba(63, 63, 70, 0.8)',
+                                            borderRadius: '10px',
+                                            padding: '0.35rem 0.5rem 0.35rem 1rem',
+                                            boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.1)',
+                                        }}>
+                                            <input
+                                                type="text"
+                                                placeholder="Ask Copilot to build or modify a silicon architecture..."
+                                                value={chatInput}
+                                                onChange={e => setChatInput(e.target.value)}
+                                                onKeyDown={e => {
+                                                    if (e.key === 'Enter') handleSendChat();
+                                                }}
+                                                style={{
+                                                    flex: 1,
+                                                    background: 'transparent',
+                                                    border: 'none',
+                                                    color: '#fff',
+                                                    fontSize: '0.85rem',
+                                                    outline: 'none',
+                                                    padding: '0.4rem 0'
+                                                }}
+                                                disabled={isTyping}
+                                            />
+                                            <button
+                                                onClick={handleSendChat}
+                                                disabled={!chatInput.trim() || isTyping}
+                                                style={{
+                                                    background: chatInput.trim() ? 'var(--accent)' : 'rgba(63, 63, 70, 0.5)',
+                                                    color: '#fff',
+                                                    border: 'none',
+                                                    borderRadius: '8px',
+                                                    padding: '0.45rem 1rem',
+                                                    fontSize: '0.8rem',
+                                                    fontWeight: '600',
+                                                    cursor: chatInput.trim() ? 'pointer' : 'not-allowed',
+                                                }}
+                                            >
+                                                Send
+                                            </button>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                {/* Right Panel: Spec Brief & Launch */}
+                                <aside className="studio-briefing-card" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '1.5rem', overflowY: 'auto' }}>
+                                    <div className="studio-section-heading studio-section-heading--stacked" style={{ marginBottom: '1.25rem', flexShrink: 0 }}>
+                                        <span className="studio-section-label">Silicon Specification Brief</span>
+                                        <h2 className="studio-section-title">Execution Controls</h2>
+                                    </div>
+
+                                    {/* Editable Identifier & Summary Block */}
+                                    <div style={{ background: 'rgba(24, 24, 27, 0.4)', border: '1px solid rgba(63, 63, 70, 0.4)', borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
+                                        <div style={{ marginBottom: '0.75rem' }}>
+                                            <label style={{ display: 'block', fontSize: '0.72rem', color: 'rgba(255, 255, 255, 0.4)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Design Identifier</label>
+                                            <input
+                                                type="text"
+                                                value={designName}
+                                                onChange={e => setDesignName(e.target.value)}
+                                                placeholder="e.g. spi_controller"
+                                                style={{
+                                                    width: '100%',
+                                                    background: 'rgba(39, 39, 42, 0.6)',
+                                                    border: '1px solid rgba(63, 63, 70, 0.8)',
+                                                    borderRadius: '6px',
+                                                    color: '#fff',
+                                                    fontSize: '0.82rem',
+                                                    padding: '0.4rem 0.6rem',
+                                                    outline: 'none',
+                                                }}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label style={{ display: 'block', fontSize: '0.72rem', color: 'rgba(255, 255, 255, 0.4)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Compiled Specification Prompt</label>
+                                            <textarea
+                                                value={prompt}
+                                                onChange={e => setPrompt(e.target.value)}
+                                                placeholder="Copilot will generate final spec here as you chat, or you can paste one directly."
+                                                rows={4}
+                                                style={{
+                                                    width: '100%',
+                                                    background: 'rgba(39, 39, 42, 0.6)',
+                                                    border: '1px solid rgba(63, 63, 70, 0.8)',
+                                                    borderRadius: '6px',
+                                                    color: 'rgba(255, 255, 255, 0.85)',
+                                                    fontSize: '0.78rem',
+                                                    padding: '0.5rem 0.6rem',
+                                                    outline: 'none',
+                                                    resize: 'none',
+                                                    lineHeight: '1.4'
+                                                }}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {/* Quick config options */}
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem', marginBottom: '1.25rem' }}>
+                                        <div>
+                                            <span className="studio-field-label" style={{ marginBottom: '0.25rem' }}>Execution Mode</span>
+                                            <div className="studio-chip-row" style={{ gap: '0.4rem' }}>
+                                                <button
+                                                    className={`studio-chip-btn ${aiModel === 'AgentIC' ? 'is-active' : ''}`}
+                                                    onClick={() => isAgenticPaid ? setAiModel('AgentIC') : setShowBillingModal(true)}
+                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
+                                                >
+                                                    AgentIC Paid
                                                 </button>
                                                 <button
                                                     className={`studio-chip-btn ${aiModel === 'BYOK' ? 'is-active' : ''}`}
                                                     onClick={() => setAiModel('BYOK')}
+                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
                                                 >
-                                                    <KeyRound size={15} />
                                                     Operator BYOK
                                                 </button>
                                             </div>
                                         </div>
 
-                                        <div className="studio-option-group">
-                                            <span className="studio-field-label">Delivery scope</span>
-                                            <div className="studio-chip-row">
+                                        <div>
+                                            <span className="studio-field-label" style={{ marginBottom: '0.25rem' }}>Delivery Scope</span>
+                                            <div className="studio-chip-row" style={{ gap: '0.4rem' }}>
                                                 <button
                                                     className={`studio-chip-btn ${skipOpenlane ? 'is-active' : ''}`}
                                                     onClick={() => setSkipOpenlane(true)}
-                                                    title="Stop after verification"
+                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
                                                 >
-                                                    <ShieldCheck size={15} />
-                                                    Verification-first
+                                                    Verification Only
                                                 </button>
                                                 <button
                                                     className={`studio-chip-btn ${!skipOpenlane ? 'is-active' : ''}`}
                                                     onClick={() => {
-                                                        if (isHuggingFace) {
-                                                            alert("GDS Layout is temporarily under maintenance on the cloud platform. It will be available back in a few days. Using RTL & Verification mode for now.");
-                                                        } else if (selectedPdk && !selectedPdk.gds_ready) {
-                                                            setError(`${selectedPdk.key} is not ready for GDSII on this VPS. Install the PDK first or choose an installed PDK.`);
+                                                        if (selectedPdk && !selectedPdk.gds_ready) {
+                                                            setError(`${selectedPdk.key} is not ready for GDSII on this VPS.`);
                                                         } else {
                                                             setSkipOpenlane(false);
                                                         }
                                                     }}
-                                                    title={isHuggingFace ? "Full silicon flow to GDS (Under Cloud Maintenance)" : "Full silicon flow to GDS"}
+                                                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.75rem' }}
                                                 >
-                                                    <Layers3 size={15} />
-                                                    {isHuggingFace ? 'Full signoff unavailable on cloud' : 'Full silicon path'}
+                                                    Full Silicon Path
                                                 </button>
                                             </div>
                                         </div>
 
-                                        <div className="studio-option-group">
-                                            <span className="studio-field-label">PDK target</span>
+                                        <div>
+                                            <span className="studio-field-label" style={{ marginBottom: '0.25rem' }}>PDK Target</span>
                                             <select
                                                 className="studio-select"
                                                 value={pdkProfile}
-                                                onChange={(event) => {
-                                                    const next = event.target.value;
-                                                    setPdkProfile(next);
-                                                    const nextPdk = pdkOptions.find((pdk) => pdk.key === next);
-                                                    if (nextPdk?.gds_ready) setError('');
-                                                    if (!nextPdk?.gds_ready) setSkipOpenlane(true);
-                                                }}
+                                                onChange={(e) => setPdkProfile(e.target.value)}
+                                                style={{ width: '100%', padding: '0.4rem 0.6rem', fontSize: '0.78rem', background: 'rgba(39, 39, 42, 0.6)', border: '1px solid rgba(63, 63, 70, 0.8)', color: '#fff', borderRadius: '6px' }}
                                             >
-                                                {(pdkOptions.length
-                                                    ? pdkOptions.filter(p => p.gds_ready)
-                                                    : [{
-                                                        key: 'sky130',
-                                                        pdk: 'sky130A',
-                                                        std_cell_library: 'sky130_fd_sc_hd',
-                                                        description: 'SkyWater 130nm',
-                                                        available: true,
-                                                        gds_ready: true,
-                                                        tech_ok: true,
-                                                        proprietary: false,
-                                                        status: 'ready',
-                                                        reason: '',
-                                                        maturity: 'production',
-                                                        fabrication_ready: true,
-                                                    } as PdkOption]).map((pdk) => (
-                                                    <option key={pdk.key} value={pdk.key}>
-                                                        {pdk.key}
-                                                    </option>
+                                                {(pdkOptions.length ? pdkOptions.filter(p => p.gds_ready) : [{key: 'sky130'}]).map((p) => (
+                                                    <option key={p.key} value={p.key}>{p.key}</option>
                                                 ))}
                                             </select>
-                                            <span className="studio-option-hint">
-                                                {selectedPdk
-                                                    ? `${selectedPdk.pdk} · ${selectedPdk.std_cell_library || 'standard cells'} · ${selectedPdk.gds_ready ? 'GDSII ready' : selectedPdk.reason}`
-                                                    : gdsReadyPdks.length
-                                                        ? `${gdsReadyPdks.length} installed PDK target${gdsReadyPdks.length === 1 ? '' : 's'} available`
-                                                        : 'No GDSII-ready PDK detected on this VPS.'}
-                                            </span>
-                                            {selectedPdk && selectedPdk.maturity && selectedPdk.maturity !== 'production' && (
-                                                <div className="studio-pdk-warning" style={{
-                                                    marginTop: '0.5rem',
-                                                    padding: '0.5rem 0.75rem',
-                                                    borderRadius: '6px',
-                                                    background: 'color-mix(in srgb, var(--accent) 10%, transparent)',
-                                                    border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
-                                                    fontSize: '0.78rem',
-                                                    color: 'var(--accent)',
-                                                    display: 'flex',
-                                                    alignItems: 'flex-start',
-                                                    gap: '0.4rem',
-                                                }}>
-                                                    <span style={{ flexShrink: 0 }}>⚠</span>
-                                                    <span>
-                                                        <strong>{PDK_MATURITY[selectedPdk.maturity]?.label || selectedPdk.maturity}:</strong>{' '}
-                                                        {PDK_MATURITY[selectedPdk.maturity]?.warning || 'This PDK may not be suitable for fabrication. Use SkyWater 130nm (sky130) for production-ready results.'}
-                                                    </span>
-                                                </div>
-                                            )}
-                                            {selectedPdk && selectedPdk.maturity === 'production' && (
-                                                <div className="studio-pdk-recommended" style={{
-                                                    marginTop: '0.5rem',
-                                                    padding: '0.4rem 0.75rem',
-                                                    borderRadius: '6px',
-                                                    background: 'color-mix(in srgb, var(--success) 10%, transparent)',
-                                                    border: '1px solid color-mix(in srgb, var(--success) 20%, transparent)',
-                                                    fontSize: '0.75rem',
-                                                    color: 'var(--success)',
-                                                }}>
-                                                    Recommended for fabrication — most mature open PDK with full tool support.
-                                                </div>
-                                            )}
                                         </div>
                                     </div>
 
-                                    {error ? <div className="studio-error-banner">{error}</div> : null}
+                                    {error ? <div className="studio-error-banner" style={{ marginBottom: '1rem' }}>{error}</div> : null}
 
-                                    <div className="studio-launch-row">
+                                    {/* Glowing Silicon Launch Button */}
+                                    <div style={{ marginTop: 'auto', flexShrink: 0 }}>
                                         <button
                                             className="studio-launch-btn"
                                             onClick={handleLaunch}
                                             disabled={!prompt.trim()}
+                                            style={{
+                                                width: '100%',
+                                                padding: '0.9rem',
+                                                fontSize: '0.9rem',
+                                                fontWeight: '700',
+                                                textTransform: 'uppercase',
+                                                letterSpacing: '1px',
+                                                borderRadius: '8px',
+                                                background: prompt.trim() 
+                                                    ? 'linear-gradient(135deg, #3b82f6 0%, var(--accent) 50%, #1d4ed8 100%)' 
+                                                    : 'rgba(63, 63, 70, 0.4)',
+                                                border: 'none',
+                                                color: prompt.trim() ? '#fff' : 'rgba(255, 255, 255, 0.35)',
+                                                cursor: prompt.trim() ? 'pointer' : 'not-allowed',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                gap: '0.6rem',
+                                                boxShadow: prompt.trim() ? '0 4px 20px rgba(59, 130, 246, 0.4)' : 'none',
+                                                transition: 'all 0.3s'
+                                            }}
                                         >
-                                            Launch Build
-                                            <ArrowRight size={16} />
+                                            <Rocket size={18} />
+                                            Launch Autonomous Build
                                         </button>
-                                        <p className="studio-launch-note">
-                                            Press <span>Enter</span> to launch, or <span>Shift + Enter</span> for a new line.
-                                        </p>
-                                    </div>
-                                </section>
-
-                                <aside className="studio-briefing-card">
-                                    <div className="studio-section-heading studio-section-heading--stacked">
-                                        <span className="studio-section-label">Execution Brief</span>
-                                        <h2 className="studio-section-title">How this run will behave</h2>
-                                    </div>
-
-                                    <div className="studio-briefing-list">
-                                        {DELIVERY_MODES.map((mode, index) => (
-                                            <div key={mode.title} className="studio-briefing-item">
-                                                <span className="studio-briefing-index">0{index + 1}</span>
-                                                <div>
-                                                    <h3>{mode.title}</h3>
-                                                    <p>{mode.detail}</p>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-
-                                    <div className="studio-quickstart-block">
-                                        <div className="studio-quickstart-head">
-                                            <Waypoints size={16} />
-                                            <span>Quick starts</span>
-                                        </div>
-                                        <div className="studio-quickstart-list">
-                                            {QUICK_STARTS.map((example) => (
-                                                <button
-                                                    key={example.prompt}
-                                                    className="studio-example-card"
-                                                    onClick={() => setPrompt(example.prompt)}
-                                                >
-                                                    <div className="studio-example-copy">
-                                                        <strong>{example.title}</strong>
-                                                        <span>{example.note}</span>
-                                                    </div>
-                                                    <p>{example.prompt}</p>
-                                                </button>
-                                            ))}
-                                        </div>
                                     </div>
                                 </aside>
                             </div>

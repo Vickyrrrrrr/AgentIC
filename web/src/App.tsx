@@ -13,7 +13,7 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Home,
   Zap,
-  Users,
+  // Users,
   BarChart2,
   BookOpen,
   Scaling,
@@ -107,7 +107,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { page: 'Home', label: 'Overview', icon: Home },
       { page: 'Design Studio', label: 'Quick Build', icon: Zap },
-      { page: 'HITL Build', label: 'HITL Pipeline', icon: Users },
+      // { page: 'HITL Build', label: 'HITL Pipeline', icon: Users },
       { page: 'Build History', label: 'Jobs & History', icon: ClipboardList },
     ],
   },
