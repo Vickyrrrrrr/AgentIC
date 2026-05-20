@@ -83,8 +83,7 @@ ENV PDK_ROOT=/app/pdk
 COPY requirements.txt .
 
 # Pre-install CPU-only PyTorch so pip doesn't fetch massive multi-GB NVIDIA CUDA drivers
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
+RUN pip install --upgrade pip && \
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
     pip install -r requirements.txt && \
     pip install 'apscheduler>=3.10.0'

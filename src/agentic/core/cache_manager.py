@@ -93,15 +93,15 @@ class LLMResponseCache:
     - Usage statistics
 
     Cost Estimation:
-    - openai/gpt-4o: $0.005/1K tokens
+    - openai/infinity: $0.005/1K tokens
     - anthropic/claude-3-5-sonnet: $0.003/1K tokens
     - generic/llama-3.3-70b: $0.00059/1K tokens
     """
 
     # Cost per 1K tokens by provider/model
     TOKEN_COSTS = {
-        ("openai", "gpt-4o"): 0.005,
-        ("openai", "gpt-4o-mini"): 0.00015,
+        ("openai", "infinity"): 0.005,
+        ("openai", "infinity-mini"): 0.00015,
         ("openai", "gpt-4-turbo"): 0.01,
         ("anthropic", "claude-3-5-sonnet"): 0.003,
         ("anthropic", "claude-3-opus"): 0.015,
@@ -225,7 +225,7 @@ class LLMResponseCache:
 
         Args:
             prompt: The full prompt that was sent to LLM
-            model: Model name (e.g., 'gpt-4o')
+            model: Model name (e.g., 'infinity')
             provider: Provider name (e.g., 'openai')
             validate: If True, check TTL validity
 
@@ -532,8 +532,8 @@ class LLMResponseCache:
                     FROM llm_cache, (
                         SELECT AVG(
                             CASE 
-                                WHEN provider = 'openai' AND model = 'gpt-4o' THEN 0.005
-                                WHEN provider = 'openai' AND model = 'gpt-4o-mini' THEN 0.00015
+                                WHEN provider = 'openai' AND model = 'infinity' THEN 0.005
+                                WHEN provider = 'openai' AND model = 'infinity-mini' THEN 0.00015
                                 WHEN provider = 'anthropic' AND model LIKE '%sonnet%' THEN 0.003
                                 WHEN provider = 'generic' THEN 0.00059
                                 ELSE 0.005

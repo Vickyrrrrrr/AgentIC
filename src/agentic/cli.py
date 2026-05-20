@@ -1057,7 +1057,7 @@ def login():
         provider_table.add_column("Provider", style="#d97757 bold", width=18)
         provider_table.add_column("Base URL (if custom)", style="info")
         provider_table.add_column("Example Model", style="dim")
-        provider_table.add_row("OpenAI", "api.openai.com/v1", "gpt-4o")
+        provider_table.add_row("OpenAI", "api.openai.com/v1", "infinity")
         provider_table.add_row("Anthropic", "(none needed)", "claude-3-5-sonnet")
         provider_table.add_row("Generic", "api.generic.com/openai/v1", "llama-3.3-70b")
         provider_table.add_row("Ollama", "localhost:11434", "qwen2.5-coder:7b")
@@ -1089,15 +1089,15 @@ def login():
 
         model = Prompt.ask(
             "\n[accent]Default Model[/accent]\n"
-            "[dim]Press Enter for default (gpt-4o) or specify your model[/dim]",
-            default=existing.get("model", "gpt-4o"),
+            "[dim]Press Enter for default (infinity) or specify your model[/dim]",
+            default=existing.get("model", "infinity"),
         )
 
     credentials["llm_api_key"] = llm_api_key.strip()
     credentials = {k: v for k, v in credentials.items() if v is not None}
 
     build_group = {
-        "model": model.strip() or "gpt-4o",
+        "model": model.strip() or "infinity",
         "base_url": base_url or "https://api.openai.com/v1",
         "api_key": credentials.get("llm_api_key", ""),
     }
@@ -1111,7 +1111,7 @@ def login():
     save_user_credentials(existing)
     _apply_runtime_keys(existing)
 
-    provider_info = f"Model: [accent]{model or 'gpt-4o'}[/accent]"
+    provider_info = f"Model: [accent]{model or 'infinity'}[/accent]"
     if base_url:
         provider_info += f" | Endpoint: [accent]{base_url}[/accent]"
     else:
@@ -1196,7 +1196,7 @@ def configure():
 
     suggestions = [
         ("Claude", "claude-3-5-sonnet-20250620", "Best overall reasoning, SystemVerilog and FSMs"),
-        ("GPT-4", "gpt-4o", "Excellent zero-shot RTL generation & debugging"),
+        ("GPT-4", "infinity", "Excellent zero-shot RTL generation & debugging"),
         ("Qwen / DeepSeek", "qwen2.5-coder-32b-instruct", "Extremely capable custom/local code models"),
     ]
     for role, model, best_for in suggestions:
@@ -1216,7 +1216,7 @@ def configure():
                     "generic/",
                     "ollama/",
                     "anthropic/",
-                    "azure/",
+                    "infinity/",
                     "together_ai/",
                     "mistral/",
                     "generic_nim/",
@@ -1244,7 +1244,7 @@ def configure():
         """Prompt for model + base_url + api_key. Returns (model, base_url, api_key)."""
         if existing_model:
             console.print(f"  Current model: [info]{existing_model}[/info]")
-        model = typer.prompt(f"  {label} model", default=existing_model or "gpt-4o").strip()
+        model = typer.prompt(f"  {label} model", default=existing_model or "infinity").strip()
 
         console.print("  Base URL (blank for standard OpenAI/Anthropic etc.):")
         base_url = typer.prompt("  >", default=existing_base or "").strip()
@@ -3169,7 +3169,7 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
     Ensure the model string is compatible with the provider.
 
     LiteLLM requires provider prefixes for non-OpenAI endpoints:
-      - openai/gpt-4o
+      - openai/infinity
       - anthropic/claude-3-5-sonnet
       - generic/llama-3.3-70b
       - openai/llama-3.1-70b  (custom endpoint with OpenAI-compatible API)
@@ -3179,7 +3179,7 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
     model = (model or "").strip()
 
     # Already has a provider prefix (check if first part is a known provider)
-    known_providers = ["openai", "anthropic", "generic", "together", "azure", "ollama", "huggingface", "vertex_ai", "bedrock", "groq"]
+    known_providers = ["openai", "anthropic", "generic", "together", "infinity", "ollama", "huggingface", "vertex_ai", "bedrock", "groq"]
     if "/" in model and any(model.startswith(p + "/") for p in known_providers):
         return model
 
@@ -3194,8 +3194,8 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
         return f"openai/{model}"
     if "together" in base_lower:
         return f"together/{model}"
-    if "azure" in base_lower:
-        return f"azure/{model}"
+    if "infinity" in base_lower:
+        return f"infinity/{model}"
 
     # Localhost/vLLM/internal endpoints — keep model name as-is (no prefix)
     if "localhost" in base_lower or "127.0.0.1" in base_lower or "0.0.0.0" in base_lower:
@@ -3246,7 +3246,7 @@ def get_llm(
       3. credentials.json (build group)
 
     Args:
-        model: Override model name (e.g. "gpt-4o", "claude-3-5-sonnet")
+        model: Override model name (e.g. "infinity", "claude-3-5-sonnet")
         base_url: Override endpoint (e.g. "https://api.generic.com/openai/v1")
         api_key: Override API key
         temperature: Sampling temperature (default 0.2)
@@ -3271,7 +3271,7 @@ def get_llm(
     cfg = resolve_llm_config(
         env_var_prefix="LLM",
         credential_group="build",
-        fallback_model="openai/gpt-4o",
+        fallback_model="openai/infinity",
         fallback_base_url="https://api.openai.com/v1",
     )
 

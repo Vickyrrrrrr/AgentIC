@@ -115,7 +115,7 @@ class ProviderManager:
         "openai": ProviderConfig(
             name="openai",
             priority=2,
-            models=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+            models=["infinity", "infinity-mini", "gpt-4-turbo"],
             rate_limit=RateLimitConfig(
                 requests_per_minute=500,
                 tokens_per_minute=150000,
@@ -141,7 +141,7 @@ class ProviderManager:
         "openrouter": ProviderConfig(
             name="openrouter",
             priority=4,
-            models=["anthropic/claude-3.5-sonnet", "openai/gpt-4o"],
+            models=["anthropic/claude-3.5-sonnet", "openai/infinity"],
             rate_limit=RateLimitConfig(
                 requests_per_minute=60,
                 tokens_per_minute=120000,

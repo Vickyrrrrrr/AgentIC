@@ -30,7 +30,7 @@ _KNOWN_MODEL_PREFIXES = (
     "ollama/",
     "anthropic/",
     "nvidia_nim/",
-    "azure/",
+    "infinity/",
     "huggingface/",
     "together_ai/",
     "mistral/",

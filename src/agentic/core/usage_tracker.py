@@ -16,7 +16,7 @@ Usage:
     # Record an API call
     tracker.record_call(
         provider="openai",
-        model="gpt-4o",
+        model="infinity",
         prompt_tokens=1000,
         completion_tokens=500,
         cache_hit=False,
@@ -86,8 +86,8 @@ class UsageTracker:
 
     # Cost per 1K tokens by provider/model
     TOKEN_COSTS = {
-        ("openai", "gpt-4o"): 0.005,
-        ("openai", "gpt-4o-mini"): 0.00015,
+        ("openai", "infinity"): 0.005,
+        ("openai", "infinity-mini"): 0.00015,
         ("openai", "gpt-4-turbo"): 0.01,
         ("anthropic", "claude-3-5-sonnet"): 0.003,
         ("anthropic", "claude-3-5-haiku"): 0.00025,
@@ -180,7 +180,7 @@ class UsageTracker:
 
         Args:
             provider: Provider name (e.g., 'openai')
-            model: Model name (e.g., 'gpt-4o')
+            model: Model name (e.g., 'infinity')
             prompt_tokens: Number of prompt tokens
             completion_tokens: Number of completion tokens
             cache_hit: Whether response came from cache

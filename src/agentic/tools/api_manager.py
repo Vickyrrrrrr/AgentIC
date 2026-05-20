@@ -63,7 +63,7 @@ class ModelStrategy:
 _PROVIDER_MODEL_DEFAULTS: Dict[str, List[ModelStrategy]] = {
     "openai": [
         ModelStrategy(
-            model="gpt-4o",
+            model="infinity",
             provider="openai",
             temperature=0.6,
             max_tokens=16384,
@@ -72,7 +72,7 @@ _PROVIDER_MODEL_DEFAULTS: Dict[str, List[ModelStrategy]] = {
             cost_tier="high",
         ),
         ModelStrategy(
-            model="gpt-4o-mini",
+            model="infinity-mini",
             provider="openai",
             temperature=0.6,
             max_tokens=16384,
@@ -161,7 +161,7 @@ _PROVIDER_MODEL_DEFAULTS: Dict[str, List[ModelStrategy]] = {
 
 
 def _normalize_model(model_str: str) -> Tuple[str, str]:
-    """Extract provider from model string (e.g. 'openai/gpt-4o' → 'openai')."""
+    """Extract provider from model string (e.g. 'openai/infinity' → 'openai')."""
     if "/" in model_str:
         provider = model_str.split("/")[0].lower()
     else:
@@ -269,7 +269,7 @@ class ApiManager:
 
     def _init_single_key(self, api_key: str, base_url: str, model: str) -> None:
         """Use one API key + model for everything."""
-        model = model or LLM_MODEL or "openai/gpt-4o"
+        model = model or LLM_MODEL or "openai/infinity"
         base_url = base_url or LLM_BASE_URL or ""
 
         # Resolve provider
@@ -562,7 +562,7 @@ class ApiManager:
                 from crewai import LLM
 
                 kwargs = dict(
-                    model=cfg.get("model", "gpt-4o"),
+                    model=cfg.get("model", "infinity"),
                     api_key=api_key,
                     temperature=0.1,
                     max_tokens=8,

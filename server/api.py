@@ -856,7 +856,7 @@ _KNOWN_MODEL_PREFIXES = (
     "ollama/",
     "anthropic/",
     "nvidia_nim/",
-    "azure/",
+    "infinity/",
     "huggingface/",
     "together_ai/",
     "mistral/",
@@ -865,7 +865,7 @@ _KNOWN_MODEL_PREFIXES = (
 BYOK_DEFAULT_MODEL = (
     os.getenv("BYOK_DEFAULT_MODEL", "").strip()
     or os.getenv("LLM_MODEL", "").strip()
-    or "gpt-4o"
+    or "infinity"
 )
 BYOK_DEFAULT_BASE_URL = (
     os.path.expandvars(
@@ -917,11 +917,11 @@ def _normalize_model_name(model: str, base_url: str) -> str:
     base_url = (base_url or "").strip()
     if (
         base_url
-        and ".openai.azure.com" in base_url.lower()
+        and ".openai.infinity.com" in base_url.lower()
         and model
-        and not model.startswith("azure/")
+        and not model.startswith("infinity/")
     ):
-        return f"azure/{model}"
+        return f"infinity/{model}"
     if (
         base_url
         and model
@@ -1047,7 +1047,7 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
                 "Set VERILOG_CODEGEN_ENABLED=1 in your environment."
             )
         cfg = VERILOG_CODEGEN_CONFIG
-        model = cfg.get("model", "").strip() or "gpt-4o"
+        model = cfg.get("model", "").strip() or "infinity"
         api_key = cfg.get("api_key", "").strip()
         base_url = cfg.get("base_url", "").strip()
         model = _normalize_model_name(model, base_url)
@@ -1061,8 +1061,8 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
             )
             if base_url:
                 llm_kwargs["base_url"] = base_url
-            if "azure/" in model.lower():
-                api_version = os.getenv("AZURE_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
+            if "infinity/" in model.lower():
+                api_version = os.getenv("INFINITY_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
                 if api_version:
                     llm_kwargs["api_version"] = api_version
             llm = LLM(**llm_kwargs)
@@ -1095,7 +1095,7 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
             "No valid BYOK API key found. Please configure your API keys in Workspace Settings."
         )
 
-    model = byok_model or "gpt-4o"
+    model = byok_model or "infinity"
     base_url = byok_base_url.strip()
     model = _normalize_model_name(model, base_url)
 
@@ -1105,8 +1105,8 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
         )
         if base_url:
             llm_kwargs["base_url"] = base_url
-        if "azure/" in model.lower():
-            api_version = os.getenv("AZURE_API_VERSION")
+        if "infinity/" in model.lower():
+            api_version = os.getenv("INFINITY_API_VERSION")
             if api_version:
                 llm_kwargs["api_version"] = api_version
         if "deepseek" in model.lower():
@@ -1127,7 +1127,7 @@ def _get_role_llm_map(
         from agentic.config import VERILOG_CODEGEN_CONFIG
 
         cfg = VERILOG_CODEGEN_CONFIG
-        model = cfg.get("model", "").strip() or "gpt-4o"
+        model = cfg.get("model", "").strip() or "infinity"
         api_key = cfg.get("api_key", "").strip()
         base_url = cfg.get("base_url", "").strip()
         model = _normalize_model_name(model, base_url)
@@ -1136,8 +1136,8 @@ def _get_role_llm_map(
         )
         if base_url:
             llm_kwargs["base_url"] = base_url
-        if "azure/" in model.lower():
-            api_version = os.getenv("AZURE_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
+        if "infinity/" in model.lower():
+            api_version = os.getenv("INFINITY_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
             if api_version:
                 llm_kwargs["api_version"] = api_version
         shared_llm = LLM(**llm_kwargs)
@@ -1182,8 +1182,8 @@ def _get_role_llm_map(
         )
         if resolved.get("base_url"):
             llm_kwargs["base_url"] = resolved["base_url"]
-        if "azure/" in resolved["model"].lower():
-            api_version = os.getenv("AZURE_API_VERSION")
+        if "infinity/" in resolved["model"].lower():
+            api_version = os.getenv("INFINITY_API_VERSION")
             if api_version:
                 llm_kwargs["api_version"] = api_version
         if "extra_body" in resolved:
@@ -2778,7 +2778,7 @@ async def chat_converse(
         messages_payload.append({"role": msg.role, "content": msg.content})
 
     # Direct extraction of LLM properties to prevent attribute errors on wrapper objects
-    model_name = "gpt-4o"
+    model_name = "infinity"
     api_key = None
     base_url = None
     api_version = None
@@ -2786,11 +2786,11 @@ async def chat_converse(
     if is_agentic_paid:
         from agentic.config import VERILOG_CODEGEN_CONFIG
         cfg = VERILOG_CODEGEN_CONFIG
-        model_name = cfg.get("model", "").strip() or "gpt-4o"
+        model_name = cfg.get("model", "").strip() or "infinity"
         api_key = cfg.get("api_key", "").strip()
         base_url = cfg.get("base_url", "").strip()
-        if "azure/" in model_name.lower():
-            api_version = os.getenv("AZURE_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
+        if "infinity/" in model_name.lower():
+            api_version = os.getenv("INFINITY_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
     elif byok_key:
         for group_name in ("group1", "group2", "group3"):
             group = byok_key.get(group_name, {})
@@ -2799,8 +2799,8 @@ async def chat_converse(
                 api_key = key
                 model_name = group.get("model", "").strip() or model_name
                 base_url = group.get("base_url", "").strip() or base_url
-                if "azure/" in model_name.lower():
-                    api_version = os.getenv("AZURE_API_VERSION")
+                if "infinity/" in model_name.lower():
+                    api_version = os.getenv("INFINITY_API_VERSION")
                 break
 
     # Normalize model name for litellm

@@ -363,7 +363,7 @@ The interactive setup wizard will ask for:
 Any OpenAI-compatible provider works:
 | Provider | Base URL | Example Model |
 |----------|----------|---------------|
-| OpenAI | (default) | gpt-4o |
+| OpenAI | (default) | infinity |
 | Anthropic | (none needed) | claude-3-5-sonnet |
 | Groq | api.groq.com/openai/v1 | llama-3.3-70b |
 | Ollama | localhost:11434 | qwen2.5-coder:7b |
@@ -544,15 +544,15 @@ agentic usage --build my_design --days 30
 
 | Provider | Model | Cost/1K Tokens |
 |----------|-------|-----------------|
-| OpenAI | gpt-4o | $0.005 |
-| OpenAI | gpt-4o-mini | $0.00015 |
+| OpenAI | infinity | $0.005 |
+| OpenAI | infinity-mini | $0.00015 |
 | Anthropic | claude-3-5-sonnet | $0.003 |
 | Groq | llama-3.3-70b | $0.00059 |
 
 ### Reducing API Costs
 
 1. **Use cache**: Identical prompts are free after first call
-2. **Use smaller models**: gpt-4o-mini is 30x cheaper than gpt-4o
+2. **Use smaller models**: infinity-mini is 30x cheaper than infinity
 3. **Use Groq**: Free tier available, fast inference
 4. **Batch builds**: Cache hits increase with repeated similar designs
 

@@ -133,7 +133,7 @@ def _default_group_credentials() -> Dict[str, str]:
 # =============================================================================
 # Any OpenAI-compatible endpoint works. Set via environment variables:
 #
-#   OpenAI:      LLM_BASE_URL=https://api.openai.com/v1       LLM_MODEL=gpt-4o
+#   OpenAI:      LLM_BASE_URL=https://api.openai.com/v1       LLM_MODEL=infinity
 #   Anthropic:   LLM_MODEL=anthropic/claude-3-5-sonnet        (no base_url needed)
 #   Generic:        LLM_BASE_URL=https://api.generic.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
 #   Generic NIM:  LLM_BASE_URL=https://integrate.api.generic.com/v1
@@ -142,30 +142,30 @@ def _default_group_credentials() -> Dict[str, str]:
 #   OpenRouter:  LLM_BASE_URL=https://openrouter.ai/api/v1
 #
 # Per-role overrides: set ROLE_{ROLE}_MODEL / ROLE_{ROLE}_BASE_URL / ROLE_{ROLE}_API_KEY
-# e.g. ROLE_DESIGNER_MODEL=gpt-4o  ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
+# e.g. ROLE_DESIGNER_MODEL=infinity  ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
 
 _DEFAULT_GROUP = _default_group_credentials()
 
 _DEFAULT_LLM_CONFIG = {
     "model": (
         os.environ.get("LLM_MODEL", "").strip()
-        or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
-        or os.environ.get("AZURE_DEPLOYMENT_NAME", "").strip()
+        or os.environ.get("INFINITY_OPENAI_DEPLOYMENT", "").strip()
+        or os.environ.get("INFINITY_DEPLOYMENT_NAME", "").strip()
         or _DEFAULT_GROUP.get("model", "")
-        or "openai/gpt-4o"
+        or "openai/infinity"
     ),
     "base_url": _normalize_base_url(
         os.environ.get("LLM_BASE_URL", "").strip()
-        or os.environ.get("AZURE_API_BASE", "").strip()
-        or os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+        or os.environ.get("INFINITY_API_BASE", "").strip()
+        or os.environ.get("INFINITY_OPENAI_ENDPOINT", "").strip()
         or _DEFAULT_GROUP.get("base_url", "")
         or "https://api.openai.com/v1"
     ),
     "api_key": (
         os.environ.get("OPENAI_API_KEY", "").strip() or 
         os.environ.get("LLM_API_KEY", "").strip() or 
-        os.environ.get("AZURE_API_KEY", "").strip() or
-        os.environ.get("AZURE_OPENAI_API_KEY", "").strip() or
+        os.environ.get("INFINITY_API_KEY", "").strip() or
+        os.environ.get("INFINITY_OPENAI_API_KEY", "").strip() or
         _DEFAULT_GROUP.get("api_key", "")
     ),
 }
@@ -188,20 +188,20 @@ AGENTIC_MODEL_ENABLED = os.environ.get("AGENTIC_MODEL_ENABLED", "0").strip().low
 AGENTIC_MODEL_CONFIG = {
     "model": (
         os.environ.get("AGENTIC_MODEL_MODEL", "").strip()
-        or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
-        or os.environ.get("AZURE_DEPLOYMENT_NAME", "").strip()
+        or os.environ.get("INFINITY_OPENAI_DEPLOYMENT", "").strip()
+        or os.environ.get("INFINITY_DEPLOYMENT_NAME", "").strip()
         or DEFAULT_LLM_CONFIG["model"]
     ),
     "base_url": _normalize_base_url(
         os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip()
-        or os.environ.get("AZURE_API_BASE", "").strip()
-        or os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+        or os.environ.get("INFINITY_API_BASE", "").strip()
+        or os.environ.get("INFINITY_OPENAI_ENDPOINT", "").strip()
         or DEFAULT_LLM_CONFIG["base_url"]
     ),
     "api_key": (
         os.environ.get("AGENTIC_MODEL_API_KEY", "").strip()
-        or os.environ.get("AZURE_API_KEY", "").strip()
-        or os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+        or os.environ.get("INFINITY_API_KEY", "").strip()
+        or os.environ.get("INFINITY_OPENAI_API_KEY", "").strip()
         or DEFAULT_LLM_CONFIG["api_key"]
     ),
 }
@@ -212,22 +212,22 @@ VERILOG_CODEGEN_CONFIG = {
     "model": (
         os.environ.get("VERILOG_CODEGEN_MODEL", "").strip()
         or os.environ.get("AGENTIC_MODEL_MODEL", "").strip()
-        or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
-        or os.environ.get("AZURE_DEPLOYMENT_NAME", "").strip()
+        or os.environ.get("INFINITY_OPENAI_DEPLOYMENT", "").strip()
+        or os.environ.get("INFINITY_DEPLOYMENT_NAME", "").strip()
         or AGENTIC_MODEL_CONFIG["model"]
     ),
     "base_url": _normalize_base_url(
         os.environ.get("VERILOG_CODEGEN_BASE_URL", "").strip()
         or os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip()
-        or os.environ.get("AZURE_API_BASE", "").strip()
-        or os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+        or os.environ.get("INFINITY_API_BASE", "").strip()
+        or os.environ.get("INFINITY_OPENAI_ENDPOINT", "").strip()
         or AGENTIC_MODEL_CONFIG["base_url"]
     ),
     "api_key": (
         os.environ.get("VERILOG_CODEGEN_API_KEY", "").strip()
         or os.environ.get("AGENTIC_MODEL_API_KEY", "").strip()
-        or os.environ.get("AZURE_API_KEY", "").strip()
-        or os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+        or os.environ.get("INFINITY_API_KEY", "").strip()
+        or os.environ.get("INFINITY_OPENAI_API_KEY", "").strip()
         or AGENTIC_MODEL_CONFIG["api_key"]
     ),
 }
@@ -255,7 +255,7 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
     Works transparently with any OpenAI-compatible provider via LiteLLM.
 
     Override examples:
-        ROLE_DESIGNER_MODEL=gpt-4o
+        ROLE_DESIGNER_MODEL=infinity
         ROLE_FIXER_MODEL=anthropic/claude-3-5-sonnet
         ROLE_DOCUMENTER_MODEL=llama-3.3-70b-versatile
         ROLE_DOCUMENTER_BASE_URL=https://api.generic.com/openai/v1
@@ -287,7 +287,7 @@ def get_role_llm_config(role: str) -> Dict[str, str]:
 def resolve_llm_config(
     env_var_prefix: str = "LLM",
     credential_group: str = "default",
-    fallback_model: str = "openai/gpt-4o",
+    fallback_model: str = "openai/infinity",
     fallback_base_url: str = "https://api.openai.com/v1",
 ) -> Dict[str, Any]:
     """Resolve LLM config with priority: explicit > env > credentials > defaults.
@@ -342,7 +342,7 @@ def detect_llm_from_env() -> list[dict]:
 
     Providers detected (priority order):
         Anthropic  â€” ANTHROPIC_API_KEY  â†’ claude-3-5-sonnet
-        OpenAI     â€” OPENAI_API_KEY     â†’ gpt-4o
+        OpenAI     â€” OPENAI_API_KEY     â†’ infinity
         Generic       â€” GENERIC_API_KEY       â†’ llama-3.3-70b
         DeepSeek   â€” DEEPSEEK_API_KEY   â†’ deepseek-chat
         ZhipuAI    â€” ZHIPUAI_API_KEY    â†’ ZHIPUAI_MODEL or LLM_MODEL
@@ -352,7 +352,7 @@ def detect_llm_from_env() -> list[dict]:
     detected = []
 
     PROVIDER_MAP = [
-        ("openai", "gpt-4o", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+        ("openai", "infinity", "https://api.openai.com/v1", "OPENAI_API_KEY"),
         ("anthropic", "claude-3-5-sonnet", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
         ("generic", "llama-3.3-70b", "https://api.generic.com/openai/v1", "GENERIC_API_KEY"),
         ("deepseek", "deepseek-chat", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
@@ -404,7 +404,7 @@ def detect_llm_from_env() -> list[dict]:
     if generic and not any(d["api_key"] == generic for d in detected):
         detected.append({
             "provider": "generic",
-            "model": os.environ.get("LLM_MODEL", "gpt-4o"),
+            "model": os.environ.get("LLM_MODEL", "infinity"),
             "base_url": os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
             "api_key": generic,
             "key_env_var": "LLM_API_KEY",

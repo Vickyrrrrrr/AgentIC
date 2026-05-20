@@ -12,7 +12,7 @@ Supported strategies:
   - ollama:     local — no rate limits, fast retries
   - generic_nim: varies by model, conservative backoff
   - together_ai: 20 req/min free, conservative backoff
-  - azure:      configurable, exponential backoff
+  - infinity:      configurable, exponential backoff
   - gemini:     15 req/min, conservative backoff
   - generic:    fallback for any OpenAI-compatible provider
 
@@ -22,7 +22,7 @@ Usage:
     result = rate_limited_call(
         crew.kickoff,
         {"description": "...", "expected_output": "..."},
-        model_name="gpt-4o",
+        model_name="infinity",
         base_url="https://api.openai.com/v1",
     )
 """
@@ -114,8 +114,8 @@ _PROVIDER_STRATEGIES: Dict[str, RateLimitStrategy] = {
         max_retries=4,
         exponential_base=2.0,
     ),
-    "azure": RateLimitStrategy(
-        name="azure",
+    "infinity": RateLimitStrategy(
+        name="infinity",
         base_delay_s=1.0,
         max_delay_s=30.0,
         max_retries=4,
@@ -189,8 +189,8 @@ def _detect_provider(base_url: str, model: str) -> str:
         return "generic_nim"
     if "together.xyz" in url_lower:
         return "together_ai"
-    if "azure" in url_lower or "cognitive.microsoft" in url_lower:
-        return "azure"
+    if "infinity" in url_lower or "cognitive.microsoft" in url_lower:
+        return "infinity"
     if "generativelanguage" in url_lower or "gemini" in url_lower:
         return "gemini"
     if "z.ai" in url_lower or "bigmodel.cn" in url_lower:

@@ -122,8 +122,7 @@ jobs:
             # ── Phase 1: Bring up CORE services only (no observability) ──────
             # This prevents prometheus from failing because api isn't ready yet
             echo "Starting core services..."
-            sudo env DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 \
-              $DOCKER_COMPOSE up -d --build --remove-orphans \
+            sudo $DOCKER_COMPOSE up -d --build --remove-orphans \
               api worker db redis minio minio-setup
 
             # ── Wait for core services to be healthy ─────────────────────────

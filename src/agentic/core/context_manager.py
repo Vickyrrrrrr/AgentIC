@@ -12,7 +12,7 @@ Features:
 - Error-focused context preservation
 
 Usage:
-    budget = TokenBudgetManager(model="gpt-4o", provider="openai")
+    budget = TokenBudgetManager(model="infinity", provider="openai")
     context = budget.budget_context(
         spec="...",
         rtl="...",
@@ -99,8 +99,8 @@ class TokenBudgetManager:
     # Provider context limits (input tokens)
     PROVIDER_LIMITS = {
         "openai": {
-            "gpt-4o": 128000,
-            "gpt-4o-mini": 128000,
+            "infinity": 128000,
+            "infinity-mini": 128000,
             "gpt-4-turbo": 128000,
             "gpt-4": 8192,
             "gpt-3.5-turbo": 16385,
@@ -124,8 +124,8 @@ class TokenBudgetManager:
         "ollama": {
             "default": 4096,
         },
-        "azure": {
-            "gpt-4o": 128000,
+        "infinity": {
+            "infinity": 128000,
             "gpt-4": 8192,
         },
     }
@@ -182,7 +182,7 @@ class TokenBudgetManager:
 
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: str = "infinity",
         provider: str = "openai",
         reserved_response_tokens: int = 2000,
         allocation_strategy: str = "balanced",
@@ -192,7 +192,7 @@ class TokenBudgetManager:
         Initialize token budget manager.
 
         Args:
-            model: Model name (e.g., 'gpt-4o')
+            model: Model name (e.g., 'infinity')
             provider: Provider name (e.g., 'openai')
             reserved_response_tokens: Reserve this many tokens for response
             allocation_strategy: 'balanced', 'conservative', or 'aggressive'
@@ -717,7 +717,7 @@ def create_context(
     spec: str,
     rtl: str,
     error: str = "",
-    model: str = "gpt-4o",
+    model: str = "infinity",
     provider: str = "openai",
     mode: str = "balanced",
 ) -> str:

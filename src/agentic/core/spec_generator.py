@@ -443,7 +443,7 @@ class HardwareSpecGenerator:
     def _strip_provider_prefix(model: str) -> str:
         if "/" in model and model.split("/", 1)[0] in {
             "openai",
-            "azure",
+            "infinity",
             "generic",
             "openrouter",
             "together_ai",

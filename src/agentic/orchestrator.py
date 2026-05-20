@@ -566,8 +566,8 @@ class BuildOrchestrator:
                 provider = "generic"
             elif "anthropic" in base_url:
                 provider = "anthropic"
-            elif "azure" in base_url:
-                provider = "azure"
+            elif "infinity" in base_url:
+                provider = "infinity"
         self.token_budget = DynamicTokenBudget(model=model, provider=provider)
 
     def get_llm_for_role(self, role: str) -> "LLM":
@@ -599,8 +599,8 @@ class BuildOrchestrator:
                     provider = "generic"
                 elif "anthropic" in base_url:
                     provider = "anthropic"
-                elif "azure" in base_url:
-                    provider = "azure"
+                elif "infinity" in base_url:
+                    provider = "infinity"
 
         def _execute_crew():
             res = rate_limited_crew_kickoff(
