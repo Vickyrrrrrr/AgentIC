@@ -317,7 +317,7 @@ export const BillingModal = ({
                   <span className="byok-onboarding-icon"><Sparkles size={16} /></span>
                   <div>
                     <strong>Available now</strong>
-                    <p>Uses your server-side Azure/AgentIC model configuration. Billing can be added later.</p>
+                    <p>Uses your server-side Infinity/AgentIC model configuration. Billing can be added later.</p>
                   </div>
                 </div>
               </div>
@@ -327,7 +327,7 @@ export const BillingModal = ({
                   <Check size={16} />
                   <div>
                     <strong>Infinite Ready</strong>
-                    <span>AgentIC will use the hosted Azure-backed model configured on this server.</span>
+                    <span>AgentIC will use the hosted Infinity model configured on this server.</span>
                   </div>
                 </div>
                 <button className="byok-agentic-btn" onClick={onClose}>

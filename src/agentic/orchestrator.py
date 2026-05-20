@@ -1106,7 +1106,19 @@ class BuildOrchestrator:
             issues.append("RTL candidate is not valid Verilog/SystemVerilog code output.")
             return issues
         modules = self._extract_module_names(candidate_code)
+        # Hierarchy-aware: if fix only contains sub-modules, that's valid
         if self.name not in modules:
+            # Check if ALL modules in candidate exist as known sub-modules
+            known_subs = set(self.artifacts.get("sub_module_rtl", {}).keys())
+            src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+            if src_dir and os.path.isdir(src_dir):
+                for f in os.listdir(src_dir):
+                    if f.endswith(".v") and f != f"{self.name}.v":
+                        known_subs.add(os.path.splitext(f)[0])
+            if modules and all(m in known_subs for m in modules):
+                # Valid sub-module fix — store which modules were fixed
+                self.artifacts["_sub_module_fix_targets"] = modules
+                return issues  # No issues — it's a valid sub-module patch
             issues.append(f"RTL candidate is missing top module '{self.name}'.")
         prev_modules = self._extract_module_names(previous_code)
         if prev_modules and len(prev_modules) > 1:
@@ -1523,6 +1535,29 @@ class BuildOrchestrator:
             return ""
         return "\n".join(lines)
 
+    def _dump_combined_verilog(self):
+        """Dump all .v files to a combined output file, even on failure."""
+        src_dir = os.path.join(OPENLANE_ROOT, "designs", self.name, "src")
+        if not os.path.isdir(src_dir):
+            return
+        combined = []
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            if v_file.endswith("_tb.v"):
+                continue
+            try:
+                with open(v_file, "r") as f:
+                    combined.append(f"// ===== {os.path.basename(v_file)} =====\n{f.read()}")
+            except OSError:
+                pass
+        if combined:
+            combined_path = os.path.join(
+                OPENLANE_ROOT, "designs", self.name, f"{self.name}_combined.v"
+            )
+            with open(combined_path, "w") as f:
+                f.write("\n\n".join(combined) + "\n")
+            self.artifacts["combined_rtl_path"] = combined_path
+            self.log(f"Combined RTL dumped to: {combined_path}", refined=True)
+
     def run(self):
         """Main execution loop."""
         import io
@@ -1649,6 +1684,7 @@ class BuildOrchestrator:
                 f"  [dim]Output: {self.artifacts.get('root', 'N/A')}/runs/*/final/gdsii/[/dim]"
             )
         else:
+            self._dump_combined_verilog()
             console.print(f"\n[red]✗[/red] BUILD FAILED")
             console.print(f"  [dim]Log: {self.artifacts.get('root', 'N/A')}/{self.name}.log[/dim]")
 
@@ -2132,16 +2168,29 @@ SPECIFICATION SECTIONS (Markdown):
             if result.feasibility_status == "REJECT":
                 for r in result.feasibility_rejections:
                     self.log(f"  ❌ {r}", refined=True)
-                self.log(
-                    "❌ FEASIBILITY REJECTED — pipeline halted before RTL generation.",
-                    refined=True,
-                )
-                self.errors.append(
-                    f"Feasibility rejected: {'; '.join(result.feasibility_rejections[:3])}"
-                )
-                self.artifacts["feasibility_rejection_reasons"] = result.feasibility_rejections
-                self.state = BuildState.FAIL
-                return
+                has_macro_manifest = bool(self.artifacts.get("macro_manifest_path"))
+                if has_macro_manifest:
+                    self.log(
+                        "⚠ FEASIBILITY REJECTED but macro manifest provided — "
+                        "downgrading to WARN and continuing pipeline.",
+                        refined=True,
+                    )
+                    self.logger.warning(
+                        f"Feasibility rejected but macro manifest present: "
+                        f"{'; '.join(result.feasibility_rejections[:3])}"
+                    )
+                    result.feasibility_status = "WARN"
+                else:
+                    self.log(
+                        "❌ FEASIBILITY REJECTED — pipeline halted before RTL generation.",
+                        refined=True,
+                    )
+                    self.errors.append(
+                        f"Feasibility rejected: {'; '.join(result.feasibility_rejections[:3])}"
+                    )
+                    self.artifacts["feasibility_rejection_reasons"] = result.feasibility_rejections
+                    self.state = BuildState.FAIL
+                    return
 
             if result.memory_macros_required:
                 for macro in result.memory_macros_required:
@@ -3523,6 +3572,7 @@ Specification:
 Requirements:
 - Module name MUST be exactly: {design_name}
 - Include clk and rst_n ports
+- NEVER use Verilog reserved words as port or signal names: config, supply0, supply1, table, library, design, instance, cell, use
 - Output ONLY raw Verilog in a ```verilog fence. No explanation text.
 """,
             expected_output=f"Valid Verilog RTL for {design_name} in a ```verilog fence",
@@ -3657,7 +3707,10 @@ endmodule
 
                 # ── Parallel sub-module generation (same-depth nodes fire simultaneously) ──
                 if len(ordered_nodes) > 1:
-                    self._generate_sub_modules_parallel(ordered_nodes, graph)
+                    # Don't generate the top module in parallel — CrewAI handles it separately
+                    sub_nodes = [n for n in ordered_nodes if n.name != self.name]
+                    if sub_nodes:
+                        self._generate_sub_modules_parallel(sub_nodes, graph)
 
             except Exception as e:
                 self.log(f"Graph Builder parsing warning: {e}", refined=True)
@@ -3780,6 +3833,7 @@ CRITICAL RULES:
 2. Async active-low reset `rst_n`
 3. Flatten ports on the TOP module (no multi-dim arrays on top-level ports). Internal modules can use them.
 4. **IMPLEMENT EVERYTHING**: Do not leave any logic as "to be implemented" or "simplified".
+4b. **NEVER** use Verilog reserved words as port or signal names. Banned names include: config, supply0, supply1, table, library, design, instance, cell, use, endconfig, liblist
 {hierarchy_rule}
 6. Return code in ```verilog fence.
 """,
@@ -3875,6 +3929,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                             refined=True,
                         )
                         self.strategy = BuildStrategy.VERILOG_CLASSIC
+                        self._validate_and_fix_macro_files()
                         self.transition(BuildState.RTL_GEN)
                     else:
                         self.log(
@@ -3924,7 +3979,68 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         self._emit_hierarchical_block_artifacts()
         self.transition(BuildState.RTL_FIX)
 
+    def _validate_and_fix_macro_files(self) -> bool:
+        """Pre-flight check: validate ALL .v files in src/, auto-fix reserved words.
+        Returns True if any file was fixed (caller should re-run syntax check)."""
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+        
+        # Verilog reserved words that LLMs commonly misuse as identifiers
+        VERILOG_RESERVED_WORDS = {
+            'config', 'library', 'design', 'instance', 'cell', 'use',
+            'liblist', 'endconfig', 'supply0', 'supply1', 'table',
+            'endtable', 'scalared', 'vectored', 'trireg', 'tri0', 'tri1',
+        }
+        
+        any_fixed = False
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                content = f.read()
+            
+            # Check for reserved words used as identifiers in port declarations
+            fixed_content = content
+            for reserved in VERILOG_RESERVED_WORDS:
+                # Match: input/output/inout ... <reserved_word>,
+                pattern = re.compile(
+                    r'(\b(?:input|output|inout)\s+(?:wire|reg|logic)?\s*'
+                    r'(?:signed\s*)?(?:\[[^\]]+\]\s*)?)'
+                    + r'\b' + re.escape(reserved) + r'\b',
+                    re.MULTILINE
+                )
+                if pattern.search(fixed_content):
+                    replacement_name = f"{reserved}_reg"
+                    # Replace all occurrences as identifier (not in strings/comments)
+                    fixed_content = re.sub(
+                        r'\b' + re.escape(reserved) + r'\b',
+                        replacement_name,
+                        fixed_content
+                    )
+                    self.log(
+                        f"Auto-fixed reserved word '{reserved}' → '{replacement_name}' "
+                        f"in {os.path.basename(v_file)}",
+                        refined=True,
+                    )
+            
+            if fixed_content != content:
+                with open(v_file, "w") as f:
+                    f.write(fixed_content)
+                any_fixed = True
+        
+        return any_fixed
+
+    def _parse_error_files(self, error_text: str) -> List[str]:
+        """Extract unique file basenames from Verilator error messages."""
+        files = set()
+        for match in re.finditer(r'%Error[^:]*:\s*([^:]+\.(?:v|sv)):', error_text):
+            files.add(os.path.basename(match.group(1).strip()))
+        return sorted(files)
+
     def do_rtl_fix(self):
+        # Pre-flight: auto-fix reserved words in ALL files (including macros)
+        if self._validate_and_fix_macro_files():
+            self.log("Reserved word auto-fix applied to source files. Re-checking syntax.", refined=True)
+
         # Check syntax
         path = self.artifacts["rtl_path"]
         success, errors = run_syntax_check(path)
@@ -4077,6 +4193,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                     refined=True,
                 )
                 self.strategy = BuildStrategy.VERILOG_CLASSIC
+                self._validate_and_fix_macro_files()
                 self.transition(
                     BuildState.RTL_GEN, preserve_retries=True
                 )  # Restart RTL Gen with new strategy
@@ -4130,6 +4247,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
 
             _react_context = (
                 f"RTL directory: {src_dir}\n\n"
+                f"Files with errors: {', '.join(self._parse_error_files(errors_for_llm))}\n\n"
                 f"Errors:\n{errors_for_llm}\n\n"
                 f"Current RTL (All Modules):\n```verilog\n{all_rtl_code}\n```"
             )
@@ -4191,7 +4309,9 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
 
 CRITICAL: Do not rename the module. Do not add, modify, or remove any input/output ports. The top-module interface MUST remain exactly the same.
 
-Fix Syntax/Lint Errors in "{self.name}".
+Fix Syntax/Lint Errors in the following files: {', '.join(self._parse_error_files(errors_for_llm)) or self.name}.
+IMPORTANT: If the error is in a sub-module (not {self.name}), output ONLY the fixed sub-module(s).
+Do NOT output the top-level module unless it also has errors.
 
 ## ERROR ANALYSIS (from IncrementalFixer)
 Error Type: {analysis.error_type.value if hasattr(analysis.error_type, "value") else analysis.error_type}
@@ -4277,6 +4397,7 @@ You explain what you changed and why.""",
                             refined=True,
                         )
                         self.strategy = BuildStrategy.VERILOG_CLASSIC
+                        self._validate_and_fix_macro_files()
                         self.transition(BuildState.RTL_GEN, preserve_retries=True)
                     else:
                         self.log(
@@ -4307,6 +4428,22 @@ You explain what you changed and why.""",
             # This ensures the next loop iteration doesn't see the SAME error log (on the same disk code)
             # and incorrectly assume we are in an infinite loop.
             self._clear_last_fingerprint(str(errors))
+            return
+
+        sub_fix_targets = self.artifacts.pop("_sub_module_fix_targets", None)
+        if sub_fix_targets:
+            # Write each fixed sub-module to its own file
+            src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+            modules_in_code = re.findall(
+                r'(\bmodule\s+([a-zA-Z_]\w*)\s*(?:#|\(|;)[\s\S]*?\bendmodule\b)',
+                new_code
+            )
+            for mod_code, mod_name in modules_in_code:
+                mod_path = os.path.join(src_dir, f"{mod_name}.v")
+                with open(mod_path, "w") as f:
+                    f.write(mod_code + "\n")
+                self.log(f"Sub-module fix written: {mod_name}.v", refined=True)
+            # Stay in RTL_FIX to re-check syntax
             return
 
         # --- Inner retry loop for LLM parse errors ---

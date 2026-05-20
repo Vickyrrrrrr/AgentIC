@@ -2728,7 +2728,7 @@ async def chat_converse(
     req: ChatRequest, request: Request, profile: dict = Depends(get_current_user)
 ):
     """Stateless chat conversation with the VLSI Expert Copilot.
-    Uses the model configured under your plan (Azure serverless credits or BYOK).
+    Uses the model configured under your plan (Infinity serverless credits or BYOK).
     """
     header_key = request.headers.get("X-LLM-API-Key")
     if header_key:

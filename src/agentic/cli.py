@@ -3179,7 +3179,7 @@ def _format_model_for_provider(model: str, base_url: str) -> str:
     model = (model or "").strip()
 
     # Already has a provider prefix (check if first part is a known provider)
-    known_providers = ["openai", "anthropic", "generic", "together", "infinity", "ollama", "huggingface", "vertex_ai", "bedrock", "groq"]
+    known_providers = ["openai", "anthropic", "generic", "together", "infinity", "ollama", "huggingface", "vertex_ai", "bedrock", "groq", "azure"]
     if "/" in model and any(model.startswith(p + "/") for p in known_providers):
         return model
 
