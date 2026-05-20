@@ -1,5 +1,7 @@
 # AgentIC: Autonomous AI Chip Design CLI
 
+👉 **[View the detailed RTL-to-GDSII Pipeline Architecture Flow Diagram](pipeline.md)**
+
 **AgentIC** is a CLI-first AI hardware design system that turns a natural-language chip request into RTL, verification artifacts, timing constraints, and, when Docker/OpenLane plus an open PDK are installed, a hardening run that can produce GDSII.
 
 The current package is strongest for digital RTL blocks, peripherals, accelerators, small SoCs, and open-PDK experiments. It is not a magic guarantee that any arbitrary chip on any arbitrary node will close timing, DRC, LVS, power, and manufacturability without engineering review. The design goal is autonomous iteration with fail-closed gates and correction loops that follow a real VLSI flow: spec, RTL, lint/syntax, testbench, simulation, formal/coverage/regression, SDC, synthesis, DFT/power/STA, floorplan, hardening, DRC/LVS, post-layout checks, and signoff reporting.
