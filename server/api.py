@@ -868,8 +868,10 @@ BYOK_DEFAULT_MODEL = (
     or "gpt-4o"
 )
 BYOK_DEFAULT_BASE_URL = (
-    os.getenv("BYOK_DEFAULT_BASE_URL", "").strip()
-    or os.getenv("LLM_BASE_URL", "").strip()
+    os.path.expandvars(
+        os.getenv("BYOK_DEFAULT_BASE_URL", "").strip()
+        or os.getenv("LLM_BASE_URL", "").strip()
+    )
     or "https://api.openai.com/v1"
 )
 
@@ -913,6 +915,13 @@ PRIMARY_GROUP_FALLBACK_ROLE: Dict[str, str] = {
 def _normalize_model_name(model: str, base_url: str) -> str:
     model = (model or "").strip()
     base_url = (base_url or "").strip()
+    if (
+        base_url
+        and ".openai.azure.com" in base_url.lower()
+        and model
+        and not model.startswith("azure/")
+    ):
+        return f"azure/{model}"
     if (
         base_url
         and model
@@ -1041,6 +1050,7 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
         model = cfg.get("model", "").strip() or "gpt-4o"
         api_key = cfg.get("api_key", "").strip()
         base_url = cfg.get("base_url", "").strip()
+        model = _normalize_model_name(model, base_url)
         if not api_key:
             raise RuntimeError(
                 "AgentIC-paid mode requires VERILOG_CODEGEN_API_KEY to be set on the server."
@@ -1120,6 +1130,7 @@ def _get_role_llm_map(
         model = cfg.get("model", "").strip() or "gpt-4o"
         api_key = cfg.get("api_key", "").strip()
         base_url = cfg.get("base_url", "").strip()
+        model = _normalize_model_name(model, base_url)
         llm_kwargs = dict(
             model=model, api_key=api_key, temperature=0.6, max_tokens=16384
         )
@@ -2724,6 +2735,7 @@ async def chat_converse(
         req.api_key = header_key
 
     is_agentic_paid = req.plan_type == "agentic_paid"
+
     byok_key = None
     if req.api_key:
         try:
@@ -2833,15 +2845,6 @@ async def trigger_build(
 
     # ── Auth guard: check plan + build count ──
     check_build_allowed(profile)
-
-    # ── Strict Backend Model Gating ──
-    if req.plan_type == "agentic_paid":
-        actual_plan = profile.get("plan_type", "") if profile else ""
-        if actual_plan != "agentic_paid":
-            raise HTTPException(
-                status_code=403,
-                detail="AgentIC Orchestration mode is locked. Please upgrade to a paid plan."
-            )
 
     if not req.skip_openlane:
         from agentic.config import validate_pdk_installation
@@ -3560,10 +3563,6 @@ async def set_byok_key(
     """Store an encrypted LLM API key for BYOK plan users."""
     if profile is None:
         raise HTTPException(status_code=403, detail="Auth not enabled")
-    if profile.get("plan") != "byok":
-        raise HTTPException(
-            status_code=400, detail="Only BYOK plan users can set an API key"
-        )
 
     from server.auth import _supabase_update
 

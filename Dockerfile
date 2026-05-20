@@ -40,18 +40,26 @@ FROM python:3.11-slim
 #   libgcc-s1    — shared lib required by iverilog / vvp ELF binaries
 #   libstdc++6   — C++ stdlib required by yosys and other OSS CAD tools
 #   curl         — health checks + runtime downloads
-#   docker.io    — OpenLane container execution
+#   docker CLI   — OpenLane container execution through the mounted host Docker socket
 RUN apt-get update && apt-get install -y --no-install-recommends \
     perl \
     libgcc-s1 \
     libstdc++6 \
     curl \
-    docker.io \
     ngspice \
     ca-certificates \
     fontconfig \
     fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
+
+ARG DOCKER_CLI_VERSION=29.1.3
+RUN ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "aarch64" || echo "x86_64") && \
+    curl -fsSL \
+    "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+    -o /tmp/docker.tgz && \
+    tar -xzf /tmp/docker.tgz -C /tmp && \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker && \
+    rm -rf /tmp/docker /tmp/docker.tgz
 
 # Copy the full OSS CAD Suite from the downloader stage.
 # Binaries are root-owned with 755 permissions from the tarball — no chown needed.

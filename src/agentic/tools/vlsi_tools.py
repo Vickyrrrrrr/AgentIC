@@ -3139,6 +3139,9 @@ def run_openlane(
     # When running inside a container, `docker run -v /app:...` interprets /app
     # as a HOST path. We need the actual host paths for volume mounts.
     host_openlane_root = os.environ.get("HOST_OPENLANE_ROOT", OPENLANE_ROOT)
+    host_designs_dir = os.environ.get(
+        "HOST_DESIGNS_DIR", os.path.join(host_openlane_root, "designs")
+    )
     host_pdk_root = os.environ.get("HOST_PDK_ROOT", effective_pdk_root)
 
     # Direct Docker command (non-interactive)
@@ -3147,8 +3150,10 @@ def run_openlane(
         "docker",
         "run",
         "--rm",
+        "-w",
+        "/openlane",
         "-v",
-        f"{host_openlane_root}:/openlane",
+        f"{host_designs_dir}:/openlane/designs",
         "-v",
         f"{host_pdk_root}:{effective_pdk_root}",
         "-e",

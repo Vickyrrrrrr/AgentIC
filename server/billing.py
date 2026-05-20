@@ -503,9 +503,11 @@ async def get_billing_status(profile: dict = Depends(get_current_user)):
 
     plan = profile.get("plan", "free")
     return {
-        "plan_type": "byok" if plan == "byok" else "agentic_paid",
+        "plan_type": "agentic_paid",
         "plan": plan,
-        "build_limit": PLAN_LIMITS.get(plan),
+        "build_limit": None,
         "successful_builds": profile.get("successful_builds", 0),
+        "paid_infra": True,
+        "billing_disabled": True,
         "test_mode": IS_TEST_MODE,
     }

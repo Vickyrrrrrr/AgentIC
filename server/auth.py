@@ -30,17 +30,34 @@ ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 
 AUTH_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY and SUPABASE_JWT_SECRET)
 
-# Plan limits: max successful builds allowed (None = unlimited)
+# Plan limits: max successful builds allowed (None = unlimited).
+# Billing is currently disabled for launch/dev: authenticated users can use the
+# hosted AgentIC model or BYOK without an active payment plan.
 PLAN_LIMITS = {
-    "free": 2,
-    "starter": 10,
+    "free": None,
+    "starter": None,
     "unlimited": None,
     "pro": None,
-    "byok": None,  # unlimited, uses own key
+    "byok": None,
 }
 
 _bearer = HTTPBearer(auto_error=False)
 logger = logging.getLogger("agentic.auth")
+
+
+def _is_production_env() -> bool:
+    app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).strip().lower()
+    return app_env in {"prod", "production"}
+
+
+def allow_anonymous_infra_for_local_dev() -> bool:
+    """Local/dev convenience only; production must have auth and billing enabled."""
+    return not AUTH_ENABLED and not _is_production_env()
+
+
+def has_paid_infra_plan(profile: Optional[dict]) -> bool:
+    """Compatibility shim while payment enforcement is disabled."""
+    return True
 
 
 # ─── JWT Decode (no pyjwt dependency — use Supabase /auth/v1/user) ──
@@ -271,36 +288,7 @@ def check_build_allowed(profile: Optional[dict]) -> None:
     Uses build_limit from profile (set by billing flow).
     Falls back to PLAN_LIMITS lookup for legacy profiles.
     """
-    if profile is None:
-        return  # Auth disabled — no restrictions
-
-    plan_type = profile.get("plan_type", "byok")
-
-    # BYOK users have unlimited builds
-    if plan_type == "byok":
-        return
-
-    # AgentIC-paid users: check build_limit (set by billing)
-    # Falling back to PLAN_LIMITS for legacy users without build_limit set
-    build_limit = profile.get("build_limit")
-    if build_limit is None:
-        build_limit = PLAN_LIMITS.get(plan_type)
-
-    if build_limit is not None:
-        builds = profile.get("successful_builds", 0)
-        if builds >= build_limit:
-            plan_name = profile.get("plan", plan_type)
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "error": "build_limit_reached",
-                    "plan": plan_name,
-                    "used": builds,
-                    "limit": build_limit,
-                    "message": f"You've used all {build_limit} builds on your {plan_name} plan. Upgrade to continue building chips.",
-                    "upgrade_url": "/pricing",
-                },
-            )
+    return
 
 
 def get_llm_key_for_user(profile: Optional[dict]) -> Optional[str]:

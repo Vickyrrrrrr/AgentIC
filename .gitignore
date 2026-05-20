@@ -167,3 +167,4 @@ NUL
 tests
 agentic_jobs.db-shm
 agentic_jobs.db-wal
+.env.example

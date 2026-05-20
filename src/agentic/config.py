@@ -61,7 +61,7 @@ def save_user_credentials(credentials: Dict[str, Any]) -> None:
 
 def _normalize_base_url(raw_url: str) -> str:
     """Ensure provider base URLs include a protocol."""
-    url = (raw_url or "").strip().strip('"').strip("'")
+    url = os.path.expandvars((raw_url or "").strip().strip('"').strip("'"))
     if not url:
         return ""
     if "://" in url:
@@ -149,17 +149,23 @@ _DEFAULT_GROUP = _default_group_credentials()
 _DEFAULT_LLM_CONFIG = {
     "model": (
         os.environ.get("LLM_MODEL", "").strip()
+        or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
+        or os.environ.get("AZURE_DEPLOYMENT_NAME", "").strip()
         or _DEFAULT_GROUP.get("model", "")
         or "openai/gpt-4o"
     ),
     "base_url": _normalize_base_url(
         os.environ.get("LLM_BASE_URL", "").strip()
+        or os.environ.get("AZURE_API_BASE", "").strip()
+        or os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
         or _DEFAULT_GROUP.get("base_url", "")
         or "https://api.openai.com/v1"
     ),
     "api_key": (
         os.environ.get("OPENAI_API_KEY", "").strip() or 
         os.environ.get("LLM_API_KEY", "").strip() or 
+        os.environ.get("AZURE_API_KEY", "").strip() or
+        os.environ.get("AZURE_OPENAI_API_KEY", "").strip() or
         _DEFAULT_GROUP.get("api_key", "")
     ),
 }
@@ -178,22 +184,52 @@ LLM_API_KEY = DEFAULT_LLM_CONFIG["api_key"]
 AGENTIC_MODEL_ENABLED = os.environ.get("AGENTIC_MODEL_ENABLED", "0").strip().lower() in (
     "1", "true", "yes", "on"
 )
+
+AGENTIC_MODEL_CONFIG = {
+    "model": (
+        os.environ.get("AGENTIC_MODEL_MODEL", "").strip()
+        or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
+        or os.environ.get("AZURE_DEPLOYMENT_NAME", "").strip()
+        or DEFAULT_LLM_CONFIG["model"]
+    ),
+    "base_url": _normalize_base_url(
+        os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip()
+        or os.environ.get("AZURE_API_BASE", "").strip()
+        or os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+        or DEFAULT_LLM_CONFIG["base_url"]
+    ),
+    "api_key": (
+        os.environ.get("AGENTIC_MODEL_API_KEY", "").strip()
+        or os.environ.get("AZURE_API_KEY", "").strip()
+        or os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+        or DEFAULT_LLM_CONFIG["api_key"]
+    ),
+}
+
 # Robust aliases for VERILOG_CODEGEN across branches
 VERILOG_CODEGEN_ENABLED = os.environ.get("VERILOG_CODEGEN_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on") or AGENTIC_MODEL_ENABLED
 VERILOG_CODEGEN_CONFIG = {
-    "model": os.environ.get("VERILOG_CODEGEN_MODEL", "").strip() or os.environ.get("AGENTIC_MODEL_MODEL", "").strip() or AGENTIC_MODEL_CONFIG["model"],
-    "base_url": _normalize_base_url(
-        os.environ.get("VERILOG_CODEGEN_BASE_URL", "").strip() or os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip() or AGENTIC_MODEL_CONFIG["base_url"]
+    "model": (
+        os.environ.get("VERILOG_CODEGEN_MODEL", "").strip()
+        or os.environ.get("AGENTIC_MODEL_MODEL", "").strip()
+        or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
+        or os.environ.get("AZURE_DEPLOYMENT_NAME", "").strip()
+        or AGENTIC_MODEL_CONFIG["model"]
     ),
-    "api_key": os.environ.get("VERILOG_CODEGEN_API_KEY", "").strip() or os.environ.get("AGENTIC_MODEL_API_KEY", "").strip() or AGENTIC_MODEL_CONFIG["api_key"],
-}
-
-AGENTIC_MODEL_CONFIG = {
-    "model": os.environ.get("AGENTIC_MODEL_MODEL", "").strip() or DEFAULT_LLM_CONFIG["model"],
     "base_url": _normalize_base_url(
-        os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip() or DEFAULT_LLM_CONFIG["base_url"]
+        os.environ.get("VERILOG_CODEGEN_BASE_URL", "").strip()
+        or os.environ.get("AGENTIC_MODEL_BASE_URL", "").strip()
+        or os.environ.get("AZURE_API_BASE", "").strip()
+        or os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+        or AGENTIC_MODEL_CONFIG["base_url"]
     ),
-    "api_key": os.environ.get("AGENTIC_MODEL_API_KEY", "").strip() or DEFAULT_LLM_CONFIG["api_key"],
+    "api_key": (
+        os.environ.get("VERILOG_CODEGEN_API_KEY", "").strip()
+        or os.environ.get("AGENTIC_MODEL_API_KEY", "").strip()
+        or os.environ.get("AZURE_API_KEY", "").strip()
+        or os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+        or AGENTIC_MODEL_CONFIG["api_key"]
+    ),
 }
 
 _ROLE_TO_GROUP = {

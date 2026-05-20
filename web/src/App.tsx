@@ -3,7 +3,6 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import { LandingPage } from './pages/LandingPage';
-import { WaitlistDashboard } from './pages/WaitlistDashboard';
 import { api } from './api';
 import { BillingModal } from './components/BillingModal';
 import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary';
@@ -11,13 +10,8 @@ import { queryClient } from './lib/query-client';
 import './index.css';
 import type { LucideIcon } from 'lucide-react';
 import {
-  Home,
   Zap,
-  // Users,
-  BarChart2,
   BookOpen,
-  Scaling,
-  Factory,
   TerminalSquare,
   ClipboardList,
   Settings2,
@@ -28,26 +22,11 @@ import {
 
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
 
-const HomeComponent = lazy(() =>
-  import('./components/HomeComponent').then((m) => ({ default: m.HomeComponent }))
-);
-const Dashboard = lazy(() =>
-  import('./pages/Dashboard').then((m) => ({ default: m.Dashboard }))
-);
 const DesignStudio = lazy(() =>
   import('./pages/DesignStudio').then((m) => ({ default: m.DesignStudio }))
 );
-const HumanInLoopBuild = lazy(() =>
-  import('./pages/HumanInLoopBuild').then((m) => ({ default: m.HumanInLoopBuild }))
-);
 const Pricing = lazy(() =>
   import('./pages/Pricing').then((m) => ({ default: m.Pricing }))
-);
-const Benchmarking = lazy(() =>
-  import('./pages/Benchmarking').then((m) => ({ default: m.Benchmarking }))
-);
-const Fabrication = lazy(() =>
-  import('./pages/Fabrication').then((m) => ({ default: m.Fabrication }))
 );
 const Documentation = lazy(() =>
   import('./pages/Documentation').then((m) => ({ default: m.Documentation }))
@@ -357,32 +336,7 @@ const App = () => {
     );
   }
 
-  if (AUTH_ENABLED && session) {
-    const userEmail = session.user.email?.toLowerCase() || '';
-    const isApproved = userEmail === 'vickynishad110@gmail.com';
-    if (!isApproved) {
-      return <WaitlistDashboard email={session.user.email || ''} />;
-    }
-  }
-
-  const handleHomeNavigation = (page: string) => {
-    const exists = NAV_GROUPS.some((group) => group.items.some((item) => item.page === page));
-    if (exists) {
-      setSelectedPage(page as PageKey);
-    }
-  };
-
-  const selectedDesignHasGds = designs.find((d) => d.name === selectedDesign)?.has_gds;
   const currentPageMeta = PAGE_META[selectedPage];
-  const derivedRunningBuilds = jobs.filter((job) =>
-    job.status === 'queued' || job.status === 'running' || job.status === 'cancelling'
-  ).length;
-  const derivedSuccessfulBuilds = jobs.filter((job) => job.status === 'done').length;
-  const homeTotalBuilds = profile?.total_builds ?? jobs.length;
-  const homeRunningBuilds = profile?.running_builds ?? derivedRunningBuilds;
-  const homeSuccessfulBuilds =
-    profile?.workspace_successful_builds ?? profile?.successful_builds ?? derivedSuccessfulBuilds;
-  const homeDesignCount = profile?.active_designs ?? designs.length;
 
   const renderPage = () => {
     switch (selectedPage) {

@@ -8,18 +8,14 @@ import {
     ArrowUp,
     Check,
     ChevronDown,
-    ChevronLeft,
     ChevronRight,
     CircleStop,
     Cpu,
     FileText,
     Folder,
-    History,
     KeyRound,
-    PanelLeft,
     Plus,
     RotateCcw,
-    Settings,
     Sparkles,
 } from 'lucide-react';
 import { BillingModal } from '../components/BillingModal';
@@ -60,15 +56,6 @@ interface Artifact {
     name: string;
     size?: number;
     type?: string;
-}
-
-interface JobSummary {
-    job_id: string;
-    design_name: string;
-    status: string;
-    current_state: string;
-    created_at: number;
-    event_count: number;
 }
 
 interface PdkOption {
@@ -184,14 +171,12 @@ export const DesignStudio = () => {
     const [artifactPreview, setArtifactPreview] = useState('');
     const [error, setError] = useState('');
     const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
-    const [jobs, setJobs] = useState<JobSummary[]>([]);
     const [pdkProfile, setPdkProfile] = useState('sky130');
     const [skipOpenlane, setSkipOpenlane] = useState(false);
     const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
     const [showBillingModal, setShowBillingModal] = useState(false);
     const [billingMode, setBillingMode] = useState<BillingMode>('byok');
     const [profile, setProfile] = useState<{ plan_type?: string; has_byok_key?: boolean } | null>(null);
-    const [studioSidebarCollapsed, setStudioSidebarCollapsed] = useState(false);
     const [inspectorTab, setInspectorTab] = useState<InspectorTab>('overview');
     const [inspectorCollapsed, setInspectorCollapsed] = useState(true);
     const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
@@ -201,7 +186,6 @@ export const DesignStudio = () => {
     const announcedStages = useRef<Set<string>>(new Set());
     const artifactFetchAt = useRef(0);
 
-    const isInfiniteAvailable = profile?.plan_type === 'agentic_paid';
     const byokLabel = getByokModelLabel();
     const hasByok = Boolean(profile?.has_byok_key) || Boolean(readByokConfig());
     const activeStages = stageSchema.length ? stageSchema : FALLBACK_STAGES;
@@ -272,14 +256,12 @@ export const DesignStudio = () => {
             api.get('/billing/status'),
             api.get('/pipeline/schema'),
             api.get('/pdks'),
-            api.get('/jobs'),
-        ]).then(([profileRes, billingRes, schemaRes, pdksRes, jobsRes]) => {
+        ]).then(([profileRes, billingRes, schemaRes, pdksRes]) => {
             const prof = profileRes.status === 'fulfilled' ? profileRes.value.data : null;
             const billing = billingRes.status === 'fulfilled' ? billingRes.value.data : null;
             if (prof && billing) setProfile({ ...prof, plan_type: billing.plan_type });
             else if (prof) setProfile(prof);
             if (schemaRes.status === 'fulfilled') setStageSchema(schemaRes.value.data?.stages || []);
-            if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value.data?.jobs || []);
             if (pdksRes.status === 'fulfilled') {
                 const pdks: PdkOption[] = pdksRes.value.data?.pdks || [];
                 const defaultPdk = pdksRes.value.data?.default || 'sky130';
@@ -327,15 +309,6 @@ export const DesignStudio = () => {
         setMessages((previous) => [...previous, { role: 'assistant', content, tone }]);
     };
 
-    const requestAgenticSubscription = () => {
-        setBillingMode('agentic');
-        setShowBillingModal(true);
-        addAssistant(
-            '**Infinite requires AgentIC paid.** Subscribe to AgentIC paid to use the hosted Infinite model, or switch to BYOK to run with your own model key.',
-            'normal'
-        );
-    };
-
     const requestByokSetup = () => {
         setBillingMode('byok');
         setShowBillingModal(true);
@@ -358,10 +331,6 @@ export const DesignStudio = () => {
         const text = prompt.trim();
         if (!text || phase === 'building' || isChatting) return;
 
-        if (modelChoice === 'infinite' && !isInfiniteAvailable) {
-            requestAgenticSubscription();
-            return;
-        }
         if (modelChoice === 'byok' && !hasByok) {
             requestByokSetup();
             return;
@@ -405,10 +374,6 @@ export const DesignStudio = () => {
         const description = prompt.trim() || lastBuildPrompt.trim();
         if (!description || phase === 'building') return;
 
-        if (modelChoice === 'infinite' && !isInfiniteAvailable) {
-            requestAgenticSubscription();
-            return;
-        }
         if (modelChoice === 'byok' && !hasByok) {
             requestByokSetup();
             return;
@@ -714,10 +679,6 @@ export const DesignStudio = () => {
                                                 className={modelChoice === 'infinite' ? 'active' : ''}
                                                 onClick={() => {
                                                     setModelMenuOpen(false);
-                                                    if (!isInfiniteAvailable) {
-                                                        requestAgenticSubscription();
-                                                        return;
-                                                    }
                                                     setModelChoice('infinite');
                                                 }}
                                             >

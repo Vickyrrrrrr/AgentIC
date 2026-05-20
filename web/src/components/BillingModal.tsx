@@ -127,7 +127,6 @@ export const BillingModal = ({
   const [quickModel, setQuickModel] = useState(DEFAULT_BYOK_MODEL);
   const [quickBaseUrl, setQuickBaseUrl] = useState(DEFAULT_BYOK_BASE_URL);
   const [saved, setSaved] = useState(false);
-  const [agenticPlan, setAgenticPlan] = useState<{ plan_type: string; plan: string; build_limit: number | null } | null>(null);
 
   const applyParsed = (parsed: Partial<Record<GroupKey, ByokServerGroup>>) => {
     const nextGroups: GroupState = {
@@ -151,23 +150,6 @@ export const BillingModal = ({
     if (!isOpen) { setSaved(false); return; }
     setError('');
     setMode(initialMode);
-
-    // Load current plan/billing status
-    const loadBillingStatus = async () => {
-      try {
-        const resp = await fetch(`${API_BASE}/billing/status`);
-        if (resp.ok) {
-          const data = await resp.json();
-          setAgenticPlan({
-            plan_type: data.plan_type,
-            plan: data.plan,
-            build_limit: data.build_limit,
-          });
-        }
-      } catch {
-        // ignore
-      }
-    };
 
     const loadKeys = async () => {
       // Try server-side first
@@ -212,7 +194,6 @@ export const BillingModal = ({
       }
     };
 
-    loadBillingStatus();
     loadKeys();
   }, [isOpen, initialMode]);
 
@@ -335,43 +316,25 @@ export const BillingModal = ({
                 <div className="byok-onboarding-card">
                   <span className="byok-onboarding-icon"><Sparkles size={16} /></span>
                   <div>
-                    <strong>Requires AgentIC paid</strong>
-                    <p>Subscribe once, then launch autonomous builds with the hosted model.</p>
+                    <strong>Available now</strong>
+                    <p>Uses your server-side Azure/AgentIC model configuration. Billing can be added later.</p>
                   </div>
                 </div>
               </div>
 
-              {agenticPlan && agenticPlan.plan_type === 'agentic_paid' ? (
-                <div className="byok-agentic-active">
-                  <div className="byok-agentic-badge">
-                    <Check size={16} />
-                    <div>
-                      <strong>{agenticPlan.plan === 'unlimited' ? 'Unlimited' : 'Starter'} Plan Active</strong>
-                      <span>
-                        {agenticPlan.build_limit !== null
-                          ? `${agenticPlan.build_limit} successful builds included`
-                          : 'Unlimited successful builds'}
-                      </span>
-                    </div>
+              <div className="byok-agentic-active">
+                <div className="byok-agentic-badge">
+                  <Check size={16} />
+                  <div>
+                    <strong>Infinite Ready</strong>
+                    <span>AgentIC will use the hosted Azure-backed model configured on this server.</span>
                   </div>
-                  <button className="byok-upgrade-btn" onClick={() => window.location.href = '/pricing'}>
-                    Change Plan
-                  </button>
                 </div>
-              ) : (
-                <div className="byok-agentic-cta">
-                  <p className="byok-agentic-hint">
-                    Subscribe to AgentIC paid to use Infinite for autonomous chip builds. BYOK remains available with your own provider key.
-                  </p>
-                  <button
-                    className="byok-agentic-btn"
-                    onClick={() => window.location.href = '/pricing'}
-                  >
-                    View Plans & Pricing
-                    <Sparkles size={15} />
-                  </button>
-                </div>
-              )}
+                <button className="byok-agentic-btn" onClick={onClose}>
+                  Use Infinite
+                  <Sparkles size={15} />
+                </button>
+              </div>
             </div>
           )}
 
@@ -383,14 +346,14 @@ export const BillingModal = ({
                   <span className="byok-onboarding-icon"><LockKeyhole size={16} /></span>
                   <div>
                     <strong>Encrypted &amp; synced to your account</strong>
-                    <p>Keys are encrypted server-side and synced to your profile so they work on any device.</p>
+                    <p>Keys are encrypted server-side and synced to your profile when auth is available.</p>
                   </div>
                 </div>
                 <div className="byok-onboarding-card">
                   <span className="byok-onboarding-icon"><KeyRound size={16} /></span>
                   <div>
                     <strong>Bring your own LLM provider</strong>
-                    <p>Use any OpenAI-compatible API — OpenAI, Anthropic, Groq, DeepSeek, Together, Ollama, etc.</p>
+                    <p>Use any OpenAI-compatible API for model calls, or switch back to Infinite for the hosted model.</p>
                   </div>
                 </div>
               </div>
@@ -451,7 +414,7 @@ export const BillingModal = ({
                   </div>
                   <div className="byok-guidance-callout">
                     <strong>Quick Setup</strong>
-                    <p>Paste one API key, save it, and the chip pipeline can start immediately.</p>
+                    <p>Paste one API key and save it. Builds can run with BYOK immediately.</p>
                   </div>
                 </div>
               )}
@@ -479,7 +442,7 @@ export const BillingModal = ({
               {/* Actions */}
               <div className="byok-footer">
                 <span className="byok-footer-note">
-                  Keys are encrypted and synced to your account.
+                  BYOK saves model credentials for your workspace.
                 </span>
                 <button className="byok-cancel-btn" onClick={onClose} disabled={saving}>
                   Cancel

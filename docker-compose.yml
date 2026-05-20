@@ -27,9 +27,9 @@ services:
       - PDK_ROOT=/home/appuser/.ciel
       - PDK=${PDK:-sky130A}
       # Host paths for Docker-in-Docker (OpenLane needs real host paths for volume mounts)
-      - HOST_DESIGNS_DIR=${PWD:-.}/designs
+      - HOST_DESIGNS_DIR=${AGENTIC_HOST_ROOT:-.}/designs
       - HOST_PDK_ROOT=${HOME}/.ciel
-      - HOST_OPENLANE_ROOT=${PWD:-.}
+      - HOST_OPENLANE_ROOT=${AGENTIC_HOST_ROOT:-.}
     depends_on:
       redis:
         condition: service_healthy
@@ -50,7 +50,7 @@ services:
       - ${HOME}/.ciel:/home/appuser/.ciel
       - ${HOME}/.volare:/home/appuser/.volare
     group_add:
-      - "${DOCKER_GID:-1001}"
+      - "${DOCKER_GID:-121}"
     entrypoint: [ "/bin/sh", "/app/scripts/init-dirs.sh" ]
     command: gunicorn server.api:app -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:7860
     healthcheck:
@@ -90,9 +90,9 @@ services:
       - PDK_ROOT=/home/appuser/.ciel
       - PDK=${PDK:-sky130A}
       # Host paths for Docker-in-Docker (OpenLane needs real host paths for volume mounts)
-      - HOST_DESIGNS_DIR=${PWD:-.}/designs
+      - HOST_DESIGNS_DIR=${AGENTIC_HOST_ROOT:-.}/designs
       - HOST_PDK_ROOT=${HOME}/.ciel
-      - HOST_OPENLANE_ROOT=${PWD:-.}
+      - HOST_OPENLANE_ROOT=${AGENTIC_HOST_ROOT:-.}
     depends_on:
       redis:
         condition: service_healthy
@@ -113,7 +113,7 @@ services:
       - ${HOME}/.ciel:/home/appuser/.ciel
       - ${HOME}/.volare:/home/appuser/.volare
     group_add:
-      - "${DOCKER_GID:-1001}"
+      - "${DOCKER_GID:-121}"
     entrypoint: [ "/bin/sh", "/app/scripts/init-dirs.sh" ]
     command: celery -A server.tasks worker --loglevel=info
     healthcheck:
