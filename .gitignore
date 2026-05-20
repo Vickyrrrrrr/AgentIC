@@ -165,3 +165,5 @@ AGENTIC_ARCHITECTURE.md
 
 NUL
 tests
+agentic_jobs.db-shm
+agentic_jobs.db-wal

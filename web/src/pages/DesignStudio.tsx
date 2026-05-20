@@ -193,6 +193,8 @@ export const DesignStudio = () => {
     const [profile, setProfile] = useState<{ plan_type?: string; has_byok_key?: boolean } | null>(null);
     const [studioSidebarCollapsed, setStudioSidebarCollapsed] = useState(false);
     const [inspectorTab, setInspectorTab] = useState<InspectorTab>('overview');
+    const [inspectorCollapsed, setInspectorCollapsed] = useState(true);
+    const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
 
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const abortRef = useRef<AbortController | null>(null);
@@ -213,6 +215,20 @@ export const DesignStudio = () => {
         : phase === 'building'
             ? Math.min(98, Math.round(((currentStageIndex + 1) / Math.max(activeStages.length, 1)) * 100))
             : 0;
+            
+    const completedStages = useMemo(() => {
+        const done = new Set<string>();
+        events.forEach(e => {
+            if (e.status === 'done' && e.state && e.state !== 'UNKNOWN') done.add(e.state);
+        });
+        // Also add all stages prior to current stage if we are advancing
+        if (currentStageIndex > 0) {
+            for (let i = 0; i < currentStageIndex; i++) {
+                done.add(activeStages[i].state);
+            }
+        }
+        return done;
+    }, [events, currentStageIndex, activeStages]);
 
     const visibleArtifacts = useMemo(() => {
         const priority = ['.v', '.sv', '.sby', '.sdc', '.gds', '.def', '.lef', '.rpt', '.pdf', '.docx', '.json', '.log'];
@@ -274,6 +290,20 @@ export const DesignStudio = () => {
                 setSkipOpenlane(!readyDefault && !firstReady);
             }
         });
+
+        // Resolve landing page carried prompts
+        const initialPrompt = localStorage.getItem('agentic_studio_initial_prompt');
+        const initialPdk = localStorage.getItem('agentic_studio_initial_pdk');
+        if (initialPrompt) {
+            setPrompt(initialPrompt);
+            setDesignName(slugify(initialPrompt));
+            localStorage.removeItem('agentic_studio_initial_prompt');
+        }
+        if (initialPdk) {
+            setPdkProfile(initialPdk);
+            localStorage.removeItem('agentic_studio_initial_pdk');
+        }
+
         return () => abortRef.current?.abort();
     }, []);
 
@@ -394,6 +424,7 @@ export const DesignStudio = () => {
         abortRef.current?.abort();
         announcedStages.current = new Set();
         setPhase('building');
+        setInspectorCollapsed(false);
         setError('');
         setEvents([]);
         setArtifacts([]);
@@ -552,6 +583,7 @@ export const DesignStudio = () => {
         setJobId('');
         setJobStatus('queued');
         setError('');
+        setInspectorCollapsed(true);
     };
 
     const downloadArtifact = async (artifact: Artifact) => {
@@ -569,53 +601,33 @@ export const DesignStudio = () => {
             setError(`Unable to download ${artifact.name}.`);
         }
     };
-
     return (
-        <div className={`studio-min-root${studioSidebarCollapsed ? ' studio-sidebar-collapsed' : ''}`}>
-            <aside className="studio-min-sidebar">
-                <div className="studio-min-window">
-                    <PanelLeft size={16} />
-                    <span />
-                    <span />
-                    <button
-                        className="studio-min-collapse"
-                        onClick={() => setStudioSidebarCollapsed((value) => !value)}
-                        title={studioSidebarCollapsed ? 'Expand build panel' : 'Collapse build panel'}
-                        aria-label={studioSidebarCollapsed ? 'Expand build panel' : 'Collapse build panel'}
-                    >
-                        {studioSidebarCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
-                    </button>
-                </div>
-                <button className="studio-min-new" onClick={reset}>
-                    <Plus size={16} />
-                    New Conversation
-                </button>
-                <button className="studio-min-nav">
-                    <History size={16} />
-                    Conversation History
-                </button>
-                <div className="studio-min-projects">
-                    <div className="studio-min-section-title">Projects</div>
-                    <div className="studio-min-project-title"><Folder size={16} /> AgentIC</div>
-                    {!Array.isArray(jobs) || jobs.length === 0 ? (
-                        <span className="studio-min-muted">No conversations yet</span>
-                    ) : (
-                        jobs.slice(0, 6).map((job) => (
-                            <button key={job.job_id} className="studio-min-history" onClick={() => setDesignName(job.design_name)}>
-                                <span>{job.design_name || 'unnamed_design'}</span>
-                                <em>{job.status}</em>
-                            </button>
-                        ))
-                    )}
-                </div>
-                <button className="studio-min-settings" onClick={() => setShowBillingModal(true)}>
-                    <Settings size={16} />
-                    Model Settings
-                </button>
-            </aside>
+        <div className="studio-min-root">
+            {/* Drawer Backdrop */}
+            <div 
+                className={`studio-drawer-backdrop${!inspectorCollapsed ? ' active' : ''}`} 
+                onClick={() => setInspectorCollapsed(true)} 
+            />
+
+            {/* Lab Drawer Toggle (Floating) */}
+            <button 
+                className="studio-drawer-toggle" 
+                onClick={() => setInspectorCollapsed(false)}
+            >
+                <Folder size={14} />
+                Code & Lab
+                <em>{artifacts.length}</em>
+            </button>
 
             <main className="studio-min-canvas">
                 <div className="studio-min-thread">
+                    {phase === 'idle' && (
+                        <div className="studio-greeting">
+                            <h1>Good to see you 👋</h1>
+                            <p>Describe your custom silicon. AgentIC handles RTL generation, formal verification, and layout.</p>
+                        </div>
+                    )}
+
                     {messages.map((message, index) => (
                         <motion.article
                             key={`${message.role}-${index}`}
@@ -637,19 +649,35 @@ export const DesignStudio = () => {
                 </div>
 
                 <section className={`studio-min-launch ${phase !== 'idle' ? 'is-running' : ''}`}>
-                    <div className="studio-min-project-label">
-                        <Folder size={16} />
-                        AgentIC
-                        {phase === 'building' && (
-                            <motion.span
-                                key={currentStage}
-                                className="studio-min-inline-status"
-                                initial={{ opacity: 0, y: 4 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                transition={{ duration: 0.28 }}
+                    <div className="studio-min-project-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Folder size={16} />
+                            AgentIC
+                            {phase === 'building' && (
+                                <motion.span
+                                    key={currentStage}
+                                    className="studio-min-inline-status"
+                                    initial={{ opacity: 0, y: 4 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ duration: 0.28 }}
+                                >
+                                    {currentStageLabel}: {liveStatusText}
+                                </motion.span>
+                            )}
+                        </div>
+                        {(phase !== 'idle' || artifacts.length > 0 || error) && (
+                            <button 
+                                className="studio-inspector-toggle-btn"
+                                onClick={() => setInspectorCollapsed(!inspectorCollapsed)}
+                                style={{ 
+                                    background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', 
+                                    color: 'var(--text-mid)', fontSize: '0.75rem', cursor: 'pointer', display: 'flex', 
+                                    alignItems: 'center', gap: '0.35rem', padding: '3px 8px',
+                                    borderRadius: '6px', fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease'
+                                }}
                             >
-                                {currentStageLabel}: {liveStatusText}
-                            </motion.span>
+                                <span>{inspectorCollapsed ? 'Show Lab Drawer' : 'Hide Lab Drawer'}</span>
+                            </button>
                         )}
                     </div>
                     <div className="studio-min-composer">
@@ -755,56 +783,70 @@ export const DesignStudio = () => {
 
                 <AnimatePresence>
                     {(phase !== 'idle' || artifacts.length > 0 || error) && (
-                        <motion.section
-                            className="studio-min-run"
-                            initial={{ opacity: 0, y: 14 }}
+                        <motion.div
+                            className={`studio-status-pill ${statusDropdownOpen ? 'expanded' : ''}`}
+                            initial={{ opacity: 0, y: -20 }}
                             animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: 14 }}
+                            exit={{ opacity: 0, y: -20 }}
+                            onClick={() => setStatusDropdownOpen(!statusDropdownOpen)}
                         >
-                            <div className="studio-min-run-head">
-                                <div>
-                                    <span>{designName || 'agentic_chip'}</span>
-                                    <strong>{jobStatus}</strong>
-                                </div>
-                                <div className="studio-min-run-actions">
-                                    {phase === 'building' ? (
-                                        <button onClick={cancel}><CircleStop size={15} /> Stop</button>
-                                    ) : (
-                                        <button onClick={reset}><RotateCcw size={15} /> New run</button>
-                                    )}
-                                </div>
-                            </div>
-                            <div className="studio-min-progress is-quiet">
-                                <span style={{ width: `${progress}%` }} />
-                            </div>
-                            {phase === 'building' && (
-                                <motion.div
-                                    key={`${currentStage}-${liveStatusText}`}
-                                    className="studio-min-live-status"
-                                    initial={{ opacity: 0, y: 8 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0, y: -4 }}
-                                    transition={{ duration: 0.32 }}
-                                >
-                                    <span><i /><i /><i /></span>
-                                    <div>
-                                        <strong>{currentStageLabel}</strong>
-                                        <p>{liveStatusText}</p>
-                                    </div>
-                                </motion.div>
-                            )}
-                            {error && (
-                                <div className="studio-min-error">
-                                    <AlertCircle size={16} />
-                                    {error}
-                                </div>
-                            )}
-                        </motion.section>
+                            <div className={`studio-status-dot ${error ? 'failed' : jobStatus === 'done' ? 'done' : ''}`} />
+                            <span className="studio-status-label">Building ·</span>
+                            <span className="studio-status-stage">{currentStageLabel}</span>
+                            <span className="studio-status-pct">({progress}%)</span>
+                            <ChevronDown size={14} className="studio-status-chevron" />
+                            
+                            <AnimatePresence>
+                                {statusDropdownOpen && (
+                                    <motion.div 
+                                        className="studio-status-dropdown"
+                                        initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                                        exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                                        transition={{ duration: 0.15 }}
+                                        onClick={(e) => e.stopPropagation()}
+                                    >
+                                        <div className="studio-pipeline-grid">
+                                            {FALLBACK_STAGES.map((s) => {
+                                                const isActive = currentStage === s.state;
+                                                const isDone = completedStages.has(s.state);
+                                                return (
+                                                    <div key={s.state} className={`studio-pipeline-stage ${isActive ? 'active' : ''} ${isDone ? 'done' : ''}`}>
+                                                        <div className="stage-icon">{s.icon}</div>
+                                                        <span className="stage-label">{s.label}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                        
+                                        {error && (
+                                            <div className="studio-min-error" style={{ marginBottom: '1rem' }}>
+                                                <AlertCircle size={16} />
+                                                {error}
+                                            </div>
+                                        )}
+                                        
+                                        <div className="studio-status-actions">
+                                            <span className="studio-status-note">{liveStatusText}</span>
+                                            {phase === 'building' ? (
+                                                <button onClick={cancel}><CircleStop size={14} /> Stop Build</button>
+                                            ) : (
+                                                <button onClick={reset}><RotateCcw size={14} /> New Run</button>
+                                            )}
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </motion.div>
                     )}
                 </AnimatePresence>
             </main>
 
-            <aside className="studio-min-inspector">
+            <aside className={`studio-min-inspector${!inspectorCollapsed ? ' drawer-open' : ''}`}>
+                <button className="studio-drawer-close" onClick={() => setInspectorCollapsed(true)}>
+                    <ChevronRight size={16} />
+                </button>
+
                 <div className="studio-min-inspector-tabs">
                     <button
                         className={inspectorTab === 'overview' ? 'active' : ''}

@@ -243,12 +243,6 @@ export const HumanInLoopBuild = () => {
     const selectedPdk = pdkOptions.find((pdk) => pdk.key === pdkProfile);
 
     useEffect(() => {
-        if (prompt.length > 8) {
-            setDesignName(slugify(prompt));
-        }
-    }, [prompt]);
-
-    useEffect(() => {
         api.get('/profile')
             .then((res) => setProfile(res.data || null))
             .catch(() => setProfile(null));
@@ -706,7 +700,10 @@ export const HumanInLoopBuild = () => {
 
                                 <div className="hitl-examples hitl-examples--cards">
                                     {HITL_EXAMPLES.map(example => (
-                                        <button key={example.prompt} className="hitl-example-card" onClick={() => setPrompt(example.prompt)}>
+                                        <button key={example.prompt} className="hitl-example-card" onClick={() => {
+                                            setPrompt(example.prompt);
+                                            setDesignName(slugify(example.prompt));
+                                        }}>
                                             <strong>{example.title}</strong>
                                             <span>{example.note}</span>
                                             <p>{example.prompt}</p>
@@ -720,7 +717,13 @@ export const HumanInLoopBuild = () => {
                                         className="hitl-prompt-textarea hitl-prompt-textarea--premium"
                                         placeholder="Describe the chip you want to build in plain English…"
                                         value={prompt}
-                                        onChange={e => setPrompt(e.target.value)}
+                                        onChange={e => {
+                                            const val = e.target.value;
+                                            setPrompt(val);
+                                            if (val.length > 8) {
+                                                setDesignName(slugify(val));
+                                            }
+                                        }}
                                         rows={5}
                                         autoFocus
                                     />

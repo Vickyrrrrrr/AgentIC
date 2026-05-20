@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline' https://checkout.razorpay.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://agentic.buildstack.live https://*.supabase.co wss://*.supabase.co; img-src 'self' data: https:; media-src 'self';" />
+  <title>AgentIC</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: #000000;
+      overflow: hidden;
+    }
+    /* Draggable region for frameless window */
+    .electron-drag-region {
+      -webkit-app-region: drag;
+    }
+    .electron-no-drag {
+      -webkit-app-region: no-drag;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="../../web/src/main.tsx"></script>
+</body>
+
+</html>

@@ -2,7 +2,8 @@ import axios, { AxiosError } from 'axios';
 import { supabase } from './supabaseClient';
 import type { ApiError } from './lib/types';
 
-const base = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? '/api' : '');
+const isDesktopApp = typeof window !== 'undefined' && ('electronAPI' in window || window.location.protocol === 'file:' || window.location.protocol.startsWith('agentic'));
+const base = isDesktopApp ? 'https://api.buildstack.live' : (import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? '/api' : ''));
 
 const cleanBase = base.replace(/\/$/, '');
 export const API_BASE = cleanBase || '';

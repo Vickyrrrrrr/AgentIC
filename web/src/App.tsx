@@ -63,13 +63,8 @@ const WorkspaceSettings = lazy(() =>
 );
 
 type PageKey =
-  | 'Home'
   | 'Design Studio'
-  | 'HITL Build'
   | 'Build History'
-  | 'Dashboard'
-  | 'Fabrication'
-  | 'Benchmarking'
   | 'Manual EDA Lab'
   | 'Documentation'
   | 'Workspace Settings';
@@ -105,60 +100,25 @@ type NavGroup = {
 
 const NAV_GROUPS: NavGroup[] = [
   {
-    label: 'Build',
+    label: 'Workspace',
     items: [
-      { page: 'Home', label: 'Overview', icon: Home },
-      { page: 'Design Studio', label: 'Quick Build', icon: Zap },
-      // { page: 'HITL Build', label: 'HITL Pipeline', icon: Users },
-      { page: 'Build History', label: 'Jobs & History', icon: ClipboardList },
-    ],
-  },
-  {
-    label: 'Designs',
-    items: [
-      { page: 'Dashboard', label: 'Design Insights', icon: BarChart2 },
-      { page: 'Fabrication', label: 'Fabrication', icon: Factory },
-      { page: 'Benchmarking', label: 'Benchmarking', icon: Scaling },
-    ],
-  },
-  {
-    label: 'System',
-    items: [
+      { page: 'Design Studio', label: 'New Conversation', icon: Zap },
+      { page: 'Build History', label: 'Conversation History', icon: ClipboardList },
       { page: 'Manual EDA Lab', label: 'Manual EDA Lab', icon: TerminalSquare },
       { page: 'Documentation', label: 'Documentation', icon: BookOpen },
-      { page: 'Workspace Settings', label: 'Workspace Settings', icon: Settings2 },
+      { page: 'Workspace Settings', label: 'Settings', icon: Settings2 },
     ],
-  },
+  }
 ];
 
 const PAGE_META: Record<PageKey, { title: string; subtitle: string }> = {
-  Home: {
-    title: 'AgentIC Workspace',
-    subtitle: 'Autonomous silicon operations center',
-  },
   'Design Studio': {
-    title: 'Quick Build Studio',
-    subtitle: 'Launch fully autonomous chip builds from natural language',
-  },
-  'HITL Build': {
-    title: 'Human-in-the-Loop Pipeline',
-    subtitle: 'Review and approve each stage with full operator control',
+    title: 'AgentIC Studio',
+    subtitle: 'Synthesize synthesizable silicon through natural language',
   },
   'Build History': {
-    title: 'Jobs & Build History',
-    subtitle: 'Track build outcomes, states, and recent execution history',
-  },
-  Dashboard: {
-    title: 'Design Insights',
-    subtitle: 'Metrics, signoff intelligence, and recent activity',
-  },
-  Fabrication: {
-    title: 'Fabrication Workspace',
-    subtitle: 'Inspect and prepare final manufacturing artifacts',
-  },
-  Benchmarking: {
-    title: 'Benchmarking',
-    subtitle: 'Compare AgentIC flow performance against traditional workflows',
+    title: 'Conversation History',
+    subtitle: 'Track past builds, states, and execution history',
   },
   'Manual EDA Lab': {
     title: 'Manual EDA Lab',
@@ -177,7 +137,7 @@ const PAGE_META: Record<PageKey, { title: string; subtitle: string }> = {
 const App = () => {
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(AUTH_ENABLED);
-  const [selectedPage, setSelectedPage] = useState<PageKey>('Home');
+  const [selectedPage, setSelectedPage] = useState<PageKey>('Design Studio');
   const [showPricing, setShowPricing] = useState(() =>
     typeof window !== 'undefined' && window.location.pathname === '/pricing'
   );
@@ -211,6 +171,23 @@ const App = () => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('agentic-theme', theme);
   }, [theme]);
+
+  // Capture prompt from landing page on successful session
+  useEffect(() => {
+    if (session) {
+      const landingPrompt = localStorage.getItem('agentic_landing_prompt');
+      if (landingPrompt) {
+        localStorage.removeItem('agentic_landing_prompt');
+        localStorage.setItem('agentic_studio_initial_prompt', landingPrompt);
+        const landingPdk = localStorage.getItem('agentic_landing_pdk');
+        if (landingPdk) {
+          localStorage.setItem('agentic_studio_initial_pdk', landingPdk);
+          localStorage.removeItem('agentic_landing_pdk');
+        }
+        setSelectedPage('Design Studio');
+      }
+    }
+  }, [session]);
 
   // Handle browser back/forward navigation for pricing page
   useEffect(() => {
@@ -331,7 +308,7 @@ const App = () => {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setSession(null);
-    setSelectedPage('Home');
+    setSelectedPage('Design Studio');
   };
 
   if (authLoading) {
@@ -409,30 +386,12 @@ const App = () => {
 
   const renderPage = () => {
     switch (selectedPage) {
-      case 'Home':
-        return (
-          <HomeComponent
-            designsLength={homeDesignCount}
-            totalBuilds={homeTotalBuilds}
-            runningBuilds={homeRunningBuilds}
-            successfulBuilds={homeSuccessfulBuilds}
-            setSelectedPage={handleHomeNavigation}
-          />
-        );
-      case 'Dashboard':
-        return <Dashboard selectedDesign={selectedDesign} />;
       case 'Design Studio':
         return <DesignStudio />;
       case 'Manual EDA Lab':
         return <EDALab />;
-      case 'HITL Build':
-        return <HumanInLoopBuild />;
       case 'Documentation':
         return <Documentation />;
-      case 'Benchmarking':
-        return <Benchmarking selectedDesign={selectedDesign} />;
-      case 'Fabrication':
-        return <Fabrication selectedDesign={selectedDesign} hasGds={selectedDesignHasGds} />;
       case 'Build History':
         return (
           <BuildHistory
@@ -440,7 +399,7 @@ const App = () => {
             selectedDesign={selectedDesign}
             onSelectDesign={setSelectedDesign}
             onOpenPage={(page) => {
-              if (page === 'Dashboard' || page === 'Design Studio') {
+              if (page === 'Design Studio') {
                 setSelectedPage(page);
               }
             }}
@@ -455,15 +414,7 @@ const App = () => {
           />
         );
       default:
-        return (
-          <HomeComponent
-            designsLength={homeDesignCount}
-            totalBuilds={homeTotalBuilds}
-            runningBuilds={homeRunningBuilds}
-            successfulBuilds={homeSuccessfulBuilds}
-            setSelectedPage={handleHomeNavigation}
-          />
-        );
+        return <DesignStudio />;
     }
   };
 

@@ -83,3 +83,22 @@ exclude = [
     "tests/",
     "test/",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    "knowledge",
+    ".agentic_cache",
+    ".agents",
+    "build",
+    "dist",
+    "qdrant_storage",
+    "sandbox",
+    "scripts",
+    "web",
+    "node_modules",
+]
+python_files = ["test_*.py"]
+addopts = "--ignore=knowledge"
+
