@@ -80,9 +80,13 @@ ENV PDK_ROOT=/app/pdk
 # Install Python dependencies using system Python.
 # DO NOT use /opt/oss-cad-suite/bin/python3 — it has a broken OpenSSL library.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir 'apscheduler>=3.10.0'
+
+# Pre-install CPU-only PyTorch so pip doesn't fetch massive multi-GB NVIDIA CUDA drivers
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install -r requirements.txt && \
+    pip install 'apscheduler>=3.10.0'
 
 # Copy application source
 COPY . .

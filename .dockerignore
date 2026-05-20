@@ -80,3 +80,9 @@ agentic_jobs.db
 fix_*.py
 *.tmp
 
+
+# Desktop app
+desktop/
+desktop/node_modules/
+desktop/dist/
+node_modules/
