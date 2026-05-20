@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # Stage 1: Download OSS CAD Suite (separate cached layer)
 # Update OSS_CAD_VERSION to upgrade ALL EDA tools in one place:
