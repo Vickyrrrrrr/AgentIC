@@ -557,7 +557,8 @@ mandatory_fields_status, ports, submodules, behavioral_contract, warnings.
 ports items: name,direction,data_type,description. Always include clk and rst_n.
 submodules items: name,description,ports.
 behavioral_contract items: given,when,then,within.
-If ADC/DAC/PLL/analog is requested, specify digital control/status or macro-facing interface only.
+If ADC/DAC/PLL/TRNG/analog/custom-layout behavior is requested, preserve the user-visible intent but specify a digital control/status or macro-facing interface only.
+If PDK/tool constraints make the literal request infeasible, choose the closest feasible VLSI implementation and add a warning explaining the substitution.
 Preserve requested widths, reset style, timers, watchdogs, buses, muxing, and standard ASIC naming.
 """
 

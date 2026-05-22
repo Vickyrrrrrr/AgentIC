@@ -103,7 +103,7 @@ export const HomeComponent = ({
 
           <h1 className="home-hero-title">
             Natural language in.
-            <span className="home-title-accent"> fabrication-ready silicon out.</span>
+            <span className="home-title-accent"> OSS layout evidence out.</span>
           </h1>
 
           <p className="home-hero-desc">

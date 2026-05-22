@@ -10805,6 +10805,65 @@ select option:disabled {
   background: #20201d;
 }
 
+.studio-min-reasoning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.studio-min-reasoning-row {
+  border-left: 2px solid #d97040;
+  border-radius: 8px;
+  background: #10100f;
+  padding: 0.48rem 0.58rem;
+}
+
+.studio-min-reasoning-row strong {
+  display: block;
+  color: #f0e7dc;
+  font-size: 0.72rem;
+  font-weight: 650;
+  margin-bottom: 0.24rem;
+}
+
+.studio-min-reasoning-row span {
+  display: block;
+  color: #918a80;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  max-height: 5rem;
+  overflow: auto;
+}
+
+.studio-min-extension-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.studio-min-extension-row {
+  border: 1px solid #2b2723;
+  border-radius: 8px;
+  background: #10100f;
+  padding: 0.5rem 0.58rem;
+}
+
+.studio-min-extension-row strong {
+  display: block;
+  color: #d8b59e;
+  font-size: 0.72rem;
+  font-weight: 700;
+  margin-bottom: 0.22rem;
+}
+
+.studio-min-extension-row span {
+  display: block;
+  color: #8f887f;
+  font-size: 0.72rem;
+  line-height: 1.42;
+}
+
 .studio-min-preview-head {
   display: flex;
   align-items: center;
@@ -10922,6 +10981,65 @@ select option:disabled {
 
 .studio-min-thinking i:nth-child(3) {
   animation-delay: 0.32s;
+}
+
+.studio-vlsi-review-card {
+  width: min(800px, 100%);
+  border: 1px solid #2d2925;
+  border-radius: 10px;
+  background: #121211;
+  padding: 0.9rem 1rem;
+  color: #ded9d0;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.24);
+}
+
+.studio-vlsi-review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+}
+
+.studio-vlsi-review-head span {
+  color: #f0e7dc;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.studio-vlsi-review-head em {
+  border: 1px solid #3b332c;
+  border-radius: 999px;
+  color: #d8b59e;
+  background: rgba(217, 112, 64, 0.08);
+  padding: 0.18rem 0.52rem;
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.studio-vlsi-review-card p {
+  margin: 0 0 0.55rem;
+  color: #aaa399;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.studio-vlsi-review-card strong {
+  display: block;
+  color: #e9dfd3;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin-bottom: 0.55rem;
+}
+
+.studio-vlsi-review-card ul {
+  margin: 0;
+  padding-left: 1.05rem;
+  color: #8fba9a;
+  font-size: 0.78rem;
+  line-height: 1.55;
 }
 
 @keyframes studio-min-dot {
@@ -11415,6 +11533,21 @@ select option:disabled {
   white-space: pre-wrap;
 }
 
+.studio-min-monaco-shell {
+  height: min(520px, 54vh);
+  min-height: 260px;
+  overflow: hidden;
+  border: 1px solid #2b2b28;
+  border-radius: 10px;
+  background: #111110;
+}
+
+.studio-min-monaco-shell .monaco-editor,
+.studio-min-monaco-shell .monaco-editor-background,
+.studio-min-monaco-shell .monaco-editor .margin {
+  background-color: #111110;
+}
+
 @media (max-width: 980px) {
   .studio-min-root,
   .studio-min-root.studio-sidebar-collapsed {
@@ -11750,7 +11883,7 @@ select option:disabled {
   font-size: clamp(0.98rem, 0.35vw + 0.88rem, 1.08rem);
   line-height: 1.55;
   font-weight: 430;
-  letter-spacing: -0.018em;
+  letter-spacing: 0;
 }
 
 .studio-min-message.assistant:first-child {
@@ -11759,7 +11892,7 @@ select option:disabled {
   font-size: clamp(2rem, 3.2vw, 3.65rem);
   line-height: 0.98;
   font-weight: 590;
-  letter-spacing: -0.055em;
+  letter-spacing: 0;
 }
 
 .studio-min-message.assistant:first-child p {
@@ -11800,7 +11933,7 @@ select option:disabled {
   font-size: 1rem;
   line-height: 1.45;
   font-weight: 430;
-  letter-spacing: -0.018em;
+  letter-spacing: 0;
 }
 
 .studio-min-composer textarea::placeholder {
@@ -13327,6 +13460,17 @@ footer.landing-premium-footer p {
   border-color: #333333;
 }
 
+.studio-drawer-toggle:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.studio-drawer-toggle:disabled:hover {
+  background: #0A0A0A;
+  color: #888888;
+  border-color: #1F1F1F;
+}
+
 .studio-drawer-toggle em {
   font-style: normal;
   background: #1F1F1F;
@@ -13343,15 +13487,15 @@ footer.landing-premium-footer p {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 6vh 2rem 2rem;
+  padding: 4vh 2rem 1.4rem;
   text-align: center;
   flex-shrink: 0;
 }
 
 .studio-greeting h1 {
-  font-size: 1.75rem;
+  font-size: clamp(1.45rem, 2vw, 2rem);
   font-weight: 600;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   color: #E8E8E8;
   margin-bottom: 0.3rem;
 }
@@ -13360,6 +13504,81 @@ footer.landing-premium-footer p {
   color: #555555;
   font-size: 0.92rem;
   max-width: 480px;
+}
+
+.studio-min-draft {
+  width: 100%;
+  margin-bottom: 0.75rem;
+  border: 1px solid #232323;
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(217, 112, 64, 0.07), rgba(217, 112, 64, 0.02)),
+    #090909;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  padding: 0.9rem;
+}
+
+.studio-min-draft-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: center;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid #1d1d1d;
+}
+
+.studio-min-draft-head span {
+  color: #f2eee8;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.studio-min-draft-head em {
+  color: #a9775f;
+  font-size: 0.76rem;
+  font-style: normal;
+  text-align: right;
+}
+
+.studio-min-draft p {
+  margin: 0.75rem 0 0;
+  max-height: 8.5rem;
+  overflow: auto;
+  color: #bdb7ae;
+  font-family: 'Geist Mono', 'Fira Code', monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.studio-min-draft-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+.studio-min-draft-actions button {
+  min-height: 32px;
+  border: 1px solid #2b2b2b;
+  border-radius: 8px;
+  background: #111111;
+  color: #d8d3ca;
+  padding: 0 0.78rem;
+  font-family: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.studio-min-draft-actions button:first-child {
+  border-color: rgba(217, 112, 64, 0.55);
+  background: #d97040;
+  color: #1c120d;
+  font-weight: 700;
+}
+
+.studio-min-draft-actions button:hover {
+  transform: translateY(-1px);
+  border-color: #d97040;
 }
 
 /* Floating status pill */

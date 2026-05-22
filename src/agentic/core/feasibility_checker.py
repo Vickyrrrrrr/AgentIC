@@ -18,11 +18,13 @@ Pipeline Steps:
 import json
 import logging
 import math
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..config import get_pdk_tool_config
+from ..config import get_pdk_flow_capabilities, get_pdk_tool_config
+from .flow_capabilities import resolve_flow_profile
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,66 @@ class MacroRequirement:
 
 
 @dataclass
+class FeasibilityIssue:
+    """Structured issue emitted by the feasibility checker."""
+
+    category: str  # AUTO_REPAIRABLE | REQUIRES_MACRO | REQUIRES_USER_ASSET | UNSUPPORTED
+    code: str
+    message: str
+    target: str = ""
+    suggested_action: str = ""
+    severity: str = "warning"  # info | warning | error
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SignoffRequirement:
+    """One node-specific requirement that must have evidence before tapeout."""
+
+    key: str
+    description: str
+    required: bool = True
+    evidence_type: str = "report"
+    tool_family: str = ""
+    blocking: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class NodeContract:
+    """PDK/node contract used to keep autonomous loops signoff-governed."""
+
+    node: str
+    pdk: str
+    std_cell_library: str = ""
+    node_class: str = "generic"
+    flow_status: str = "requires_pdk_collateral"
+    fabrication_ready: bool = False
+    collateral_ready: bool = False
+    proprietary: bool = False
+    custom: bool = False
+    max_reliable_mhz: int = 150
+    upper_limit_mhz: int = 200
+    voltage_vdd: str = "1.8"
+    memory_macro_threshold_bytes: int = 1024
+    flow_profile: str = "sky130_oss_executable"
+    readiness_ceiling: str = "OSS_LAYOUT_CANDIDATE"
+    blocked_extensions: List[str] = field(default_factory=list)
+    required_signoff: List[SignoffRequirement] = field(default_factory=list)
+    missing_capabilities: List[str] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["required_signoff"] = [r.to_dict() for r in self.required_signoff]
+        return data
+
+
+@dataclass
 class FeasibilityResult:
     """Output of the FeasibilityChecker."""
 
@@ -142,6 +204,10 @@ class FeasibilityResult:
     memory_macros_required: List[MacroRequirement] = field(default_factory=list)
     feasibility_warnings: List[str] = field(default_factory=list)
     feasibility_rejections: List[str] = field(default_factory=list)
+    feasibility_issues: List[FeasibilityIssue] = field(default_factory=list)
+    node_contract: Optional[NodeContract] = None
+    readiness_level: str = "RTL_CANDIDATE"
+    signoff_blockers: List[str] = field(default_factory=list)
     # Detailed breakdown
     area_breakdown: Dict[str, int] = field(default_factory=dict)
 
@@ -156,6 +222,10 @@ class FeasibilityResult:
             "memory_macros_required": [m.to_dict() for m in self.memory_macros_required],
             "feasibility_warnings": list(self.feasibility_warnings),
             "feasibility_rejections": list(self.feasibility_rejections),
+            "feasibility_issues": [i.to_dict() for i in self.feasibility_issues],
+            "node_contract": self.node_contract.to_dict() if self.node_contract else {},
+            "readiness_level": self.readiness_level,
+            "signoff_blockers": list(self.signoff_blockers),
             "area_breakdown": dict(self.area_breakdown),
         }
 
@@ -181,6 +251,7 @@ class FeasibilityChecker:
     def __init__(self, pdk: str = "sky130", auto_adjust: bool = True):
         self.pdk = pdk
         self.auto_adjust = auto_adjust
+        self.node_contract = self._build_node_contract()
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -202,9 +273,19 @@ class FeasibilityChecker:
         """
         warnings: List[str] = []
         rejections: List[str] = []
+        issues: List[FeasibilityIssue] = []
         area_breakdown: Dict[str, int] = {}
         frequency_was_adjusted = False
-        recommended_freq = 0
+        node_contract = self.node_contract
+        signoff_blockers = list(node_contract.missing_capabilities)
+        if not node_contract.collateral_ready:
+            signoff_blockers.append(
+                f"PDK collateral for {node_contract.node} is not fully validated."
+            )
+        if node_contract.proprietary:
+            signoff_blockers.append(
+                "Authorized foundry/commercial signoff collateral must be confirmed."
+            )
 
         # Resolve target frequency
         target_freq = hw_spec_dict.get("target_frequency_mhz", 0)
@@ -229,10 +310,33 @@ class FeasibilityChecker:
                     f"AUTO_ADJUSTED: Target frequency {original_freq} MHz exceeds {self.pdk} limit "
                     f"of {upper_limit_mhz} MHz. Adjusted to {target_freq} MHz (max reliable)."
                 )
+                issues.append(
+                    FeasibilityIssue(
+                        category="AUTO_REPAIRABLE",
+                        code="FREQUENCY_ADJUSTED",
+                        target="target_frequency_mhz",
+                        message=(
+                            f"Target frequency {original_freq} MHz exceeds the configured "
+                            f"{self.pdk} upper limit of {upper_limit_mhz} MHz."
+                        ),
+                        suggested_action=f"Use {target_freq} MHz for this PDK profile.",
+                    )
+                )
             else:
-                rejections.append(
+                msg = (
                     f"FEASIBILITY_REJECTED: {self.pdk} cannot reliably achieve "
                     f"{target_freq} MHz. Maximum reliable: {max_reliable_mhz} MHz."
+                )
+                rejections.append(msg)
+                issues.append(
+                    FeasibilityIssue(
+                        category="AUTO_REPAIRABLE",
+                        code="FREQUENCY_TOO_HIGH",
+                        target="target_frequency_mhz",
+                        message=msg,
+                        suggested_action=f"Lower target_frequency_mhz to {max_reliable_mhz}.",
+                        severity="error",
+                    )
                 )
 
         # Collect all submodule specs (top-level + nested from hierarchy)
@@ -250,9 +354,10 @@ class FeasibilityChecker:
         rejections.extend(freq_rejections)
 
         # Step 2: Memory feasibility
-        mem_warnings, mem_rejections, macros = self._check_memory(all_submodules)
+        mem_warnings, mem_rejections, macros, mem_issues = self._check_memory(all_submodules)
         warnings.extend(mem_warnings)
         rejections.extend(mem_rejections)
+        issues.extend(mem_issues)
 
         # Step 3: Arithmetic feasibility
         arith_warnings = self._check_arithmetic(all_submodules, all_contracts, design_desc)
@@ -263,12 +368,13 @@ class FeasibilityChecker:
         area_warnings = self._check_area_budget(total_ge)
         warnings.extend(area_warnings)
 
-        # Step 5: Sky130-specific rules
-        sky_warnings, sky_rejections = self._check_sky130_rules(
+        # Step 5: PDK-specific / ASIC-flow rules
+        pdk_warnings, pdk_rejections, pdk_issues = self._check_pdk_rules(
             all_ports, all_submodules, all_contracts, design_desc, hw_spec_dict
         )
-        warnings.extend(sky_warnings)
-        rejections.extend(sky_rejections)
+        warnings.extend(pdk_warnings)
+        rejections.extend(pdk_rejections)
+        issues.extend(pdk_issues)
 
         # Determine floorplan recommendation
         floorplan = self._recommend_floorplan(total_ge)
@@ -281,6 +387,8 @@ class FeasibilityChecker:
         else:
             status = "PASS"
 
+        readiness_level = self._infer_readiness_level(status, node_contract, signoff_blockers)
+
         return FeasibilityResult(
             feasibility_status=status,
             estimated_gate_equivalents=total_ge,
@@ -291,8 +399,203 @@ class FeasibilityChecker:
             memory_macros_required=macros,
             feasibility_warnings=warnings,
             feasibility_rejections=rejections,
+            feasibility_issues=issues,
+            node_contract=node_contract,
+            readiness_level=readiness_level,
+            signoff_blockers=signoff_blockers,
             area_breakdown=area_breakdown,
         )
+
+    # ── Node Contract / Signoff Governance ───────────────────────────
+
+    def _build_node_contract(self) -> NodeContract:
+        """Build a conservative signoff contract from PDK/tool capabilities.
+
+        A real foundry node should provide this explicitly. If no manifest is
+        available, AgentIC derives a minimum digital-signoff contract and marks
+        the collateral state honestly.
+        """
+        caps = get_pdk_flow_capabilities(self.pdk)
+        tool = get_pdk_tool_config(self.pdk)
+        manifest = self._load_node_contract_manifest(caps)
+
+        requirements = self._default_signoff_requirements(caps)
+        notes: List[str] = []
+        missing: List[str] = []
+
+        if manifest:
+            notes.append("Loaded external node contract manifest.")
+            requirements = self._requirements_from_manifest(manifest, requirements)
+            missing.extend(str(x) for x in manifest.get("missing_capabilities", []) if x)
+
+        if not caps.get("collateral_ready"):
+            missing.append("pdk_collateral_ready")
+        if not caps.get("fabrication_ready"):
+            notes.append(
+                "PDK is not marked fabrication-ready; treat output as a tapeout candidate only."
+            )
+        if caps.get("flow_status") in {
+            "requires_authorized_foundry_collateral",
+            "requires_custom_pdk_validation",
+            "requires_pdk_collateral",
+        }:
+            notes.append(f"Flow status: {caps.get('flow_status')}")
+
+        if caps.get("advanced_node"):
+            notes.append(
+                "Advanced node: require tighter MMMC, EM/IR, DFM, reliability, and power-intent evidence."
+            )
+
+        node = str(manifest.get("node") if manifest else caps.get("profile") or self.pdk)
+        pdk = str(manifest.get("pdk") if manifest else caps.get("pdk") or self.pdk)
+        flow = resolve_flow_profile(pdk=self.pdk, tool_config=tool)
+        if flow.blocked_extensions:
+            notes.append(
+                "Capability-gated extensions are not part of the default executable flow: "
+                + ", ".join(flow.blocked_extensions)
+            )
+
+        return NodeContract(
+            node=node,
+            pdk=pdk,
+            std_cell_library=str(
+                manifest.get("std_cell_library")
+                if manifest
+                else caps.get("std_cell_library") or tool.get("std_cell_library", "")
+            ),
+            node_class=str(caps.get("node_class", "generic")),
+            flow_status=str(manifest.get("flow_status") if manifest else caps.get("flow_status")),
+            fabrication_ready=bool(
+                manifest.get("fabrication_ready")
+                if manifest
+                else caps.get("fabrication_ready", False)
+            ),
+            collateral_ready=bool(
+                manifest.get("collateral_ready")
+                if manifest
+                else caps.get("collateral_ready", False)
+            ),
+            proprietary=bool(caps.get("proprietary", False)),
+            custom=bool(caps.get("custom", False)),
+            max_reliable_mhz=int(tool.get("max_reliable_mhz", 150) or 150),
+            upper_limit_mhz=int(tool.get("upper_limit_mhz", 200) or 200),
+            voltage_vdd=str(tool.get("voltage_vdd", "1.8")),
+            memory_macro_threshold_bytes=int(
+                caps.get("memory_macro_threshold_bytes", 1024) or 1024
+            ),
+            flow_profile=flow.name,
+            readiness_ceiling=flow.readiness_ceiling,
+            blocked_extensions=list(flow.blocked_extensions),
+            required_signoff=requirements,
+            missing_capabilities=sorted(set(missing)),
+            notes=notes,
+        )
+
+    def _load_node_contract_manifest(self, caps: Dict[str, Any]) -> Dict[str, Any]:
+        """Load optional JSON node contract from env or PDK directory."""
+        candidates: List[str] = []
+        explicit = os.getenv("AGENTIC_NODE_CONTRACT", "").strip()
+        if explicit:
+            candidates.append(os.path.expanduser(explicit))
+
+        tool = caps.get("tool_config", {}) if isinstance(caps, dict) else {}
+        pdk_dir = str(tool.get("pdk_dir", "") or caps.get("pdk", "") or "")
+        pdk_root = os.getenv("PDK_ROOT", "").strip()
+        if pdk_root and pdk_dir:
+            base = os.path.join(pdk_root, pdk_dir)
+            candidates.extend(
+                [
+                    os.path.join(base, "agentic_node_contract.json"),
+                    os.path.join(base, "node_contract.json"),
+                ]
+            )
+
+        for path in candidates:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    data["_source_path"] = path
+                    return data
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Failed to read node contract %s: %s", path, exc)
+        return {}
+
+    def _default_signoff_requirements(
+        self, caps: Dict[str, Any]
+    ) -> List[SignoffRequirement]:
+        req = [
+            SignoffRequirement("rtl_lint_clean", "RTL syntax/lint clean", tool_family="verilator"),
+            SignoffRequirement("simulation_pass", "Self-checking simulation passed", tool_family="verilator/iverilog"),
+            SignoffRequirement("formal_reviewed", "Formal/SVA pass or explicit waiver", tool_family="sby"),
+            SignoffRequirement("coverage_met", "Coverage thresholds met or waived", tool_family="verilator/iverilog"),
+            SignoffRequirement("sdc_valid", "Timing constraints reviewed and consumed", tool_family="sdc"),
+            SignoffRequirement("synthesis_clean", "Synthesis completed with no unmapped logic", tool_family="yosys"),
+            SignoffRequirement("lec_pass", "RTL-to-gate logic equivalence passed or waived with OSS limitation noted", tool_family="eqy", required=False, blocking=False),
+            SignoffRequirement("dft_complete", "Scan/ATPG/MBIST complete only when a commercial DFT flow is configured", required=False, tool_family="commercial_dft", blocking=False),
+            SignoffRequirement("gds_generated", "GDS/OASIS generated by physical flow", tool_family="openlane/openroad"),
+            SignoffRequirement("sta_all_corners_pass", "All required setup/hold corners pass", tool_family="opensta"),
+            SignoffRequirement("drc_clean", "DRC clean with required deck", tool_family="magic/calibre/pegasus"),
+            SignoffRequirement("lvs_clean", "LVS clean with required deck", tool_family="netgen/calibre/pegasus"),
+            SignoffRequirement("antenna_clean", "Antenna checks clean or repaired", tool_family="openroad/magic"),
+            SignoffRequirement("power_reviewed", "Power report reviewed against target", tool_family="opensta/openroad"),
+            SignoffRequirement("package_complete", "Tapeout/IP package contains required collateral", tool_family="agentic"),
+        ]
+        if caps.get("advanced_node"):
+            req.extend(
+                [
+                    SignoffRequirement("mmmc_defined", "MMMC views/modes/corners explicitly defined", tool_family="sta"),
+                    SignoffRequirement("emir_pass", "EM/IR signoff passed", tool_family="redhawk/voltus"),
+                    SignoffRequirement("dfm_density_pass", "DFM, density, and fill checks passed", tool_family="foundry"),
+                    SignoffRequirement("reliability_pass", "Reliability/aging checks passed where required", tool_family="foundry"),
+                    SignoffRequirement("power_intent_verified", "UPF/CPF power intent verified if multi-domain", tool_family="cpf/upf"),
+                ]
+            )
+        return req
+
+    def _requirements_from_manifest(
+        self,
+        manifest: Dict[str, Any],
+        fallback: List[SignoffRequirement],
+    ) -> List[SignoffRequirement]:
+        raw = manifest.get("required_signoff")
+        if not isinstance(raw, list) or not raw:
+            return fallback
+        parsed: List[SignoffRequirement] = []
+        for item in raw:
+            if isinstance(item, str):
+                parsed.append(SignoffRequirement(key=item, description=item.replace("_", " ")))
+            elif isinstance(item, dict):
+                key = str(item.get("key") or item.get("name") or "").strip()
+                if not key:
+                    continue
+                parsed.append(
+                    SignoffRequirement(
+                        key=key,
+                        description=str(item.get("description") or key.replace("_", " ")),
+                        required=bool(item.get("required", True)),
+                        evidence_type=str(item.get("evidence_type", "report")),
+                        tool_family=str(item.get("tool_family", "")),
+                        blocking=bool(item.get("blocking", True)),
+                    )
+                )
+        return parsed or fallback
+
+    def _infer_readiness_level(
+        self,
+        status: str,
+        contract: NodeContract,
+        signoff_blockers: List[str],
+    ) -> str:
+        if status == "REJECT":
+            return "NOT_FEASIBLE"
+        if not contract.collateral_ready:
+            return "RTL_CANDIDATE"
+        if contract.fabrication_ready:
+            return "FAB_READY" if not signoff_blockers else "COMMERCIAL_SIGNOFF_REQUIRED"
+        return contract.readiness_ceiling or "OSS_LAYOUT_CANDIDATE"
 
     # ── Step 1: Frequency Feasibility ────────────────────────────────
 
@@ -402,9 +705,10 @@ class FeasibilityChecker:
 
     def _check_memory(
         self, submodules: List[Dict[str, Any]]
-    ) -> Tuple[List[str], List[str], List[MacroRequirement]]:
+    ) -> Tuple[List[str], List[str], List[MacroRequirement], List[FeasibilityIssue]]:
         warnings: List[str] = []
         rejections: List[str] = []
+        issues: List[FeasibilityIssue] = []
         macros: List[MacroRequirement] = []
 
         for sm in submodules:
@@ -442,12 +746,13 @@ class FeasibilityChecker:
             size_bits = width * depth
 
             if size_bits > 16384:  # > 2KB
-                rejections.append(
+                msg = (
                     f"MEMORY_WARNING: '{name}' requires {size_bits} bits "
                     f"({size_bits // 8} bytes) of storage. This must be "
                     f"implemented as an OpenRAM macro, not synthesized registers. "
                     f"(width={width}, depth={depth})"
                 )
+                warnings.append(msg)
                 # Infer port counts from description
                 rports = 1
                 wports = 1
@@ -465,6 +770,18 @@ class FeasibilityChecker:
                         size_bits=size_bits,
                     )
                 )
+                issues.append(
+                    FeasibilityIssue(
+                        category="REQUIRES_MACRO",
+                        code="MEMORY_MACRO_REQUIRED",
+                        target=name,
+                        message=msg,
+                        suggested_action=(
+                            "Use a memory macro wrapper/black box and keep only the "
+                            "digital control/interface logic in synthesized RTL."
+                        ),
+                    )
+                )
 
             elif size_bits > 2048:  # 256B–2KB
                 ge_estimate = width * depth * 6  # rough: each bit ≈ 6 GE
@@ -476,7 +793,7 @@ class FeasibilityChecker:
                 )
             # Below 2048 bits: FEASIBLE, no action
 
-        return warnings, rejections, macros
+        return warnings, rejections, macros, issues
 
     # ── Step 3: Arithmetic Feasibility ───────────────────────────────
 
@@ -520,13 +837,13 @@ class FeasibilityChecker:
                 if w1 > 16 or w2 > 16:
                     warnings.append(
                         f"ARITHMETIC_WARN: {w1}×{w2}-bit multiplier is expensive on "
-                        f"Sky130 (~{w1 * w2 * 4} GE, no DSP blocks). Consider "
+                        f"{self.pdk} (~{w1 * w2 * 4} GE, no DSP blocks). Consider "
                         f"pipelining or shift-and-add over multiple cycles."
                     )
                 elif w1 > 8 or w2 > 8:
                     warnings.append(
                         f"ARITHMETIC_WARN: {w1}×{w2}-bit multiplier will consume "
-                        f"~1000 GE on Sky130 and may impact timing."
+                        f"~1000 GE on {self.pdk} and may impact timing."
                     )
                 # ≤ 8×8: feasible (~200 GE)
 
@@ -539,7 +856,7 @@ class FeasibilityChecker:
                     if width > 16:
                         warnings.append(
                             f"ARITHMETIC_WARN: Submodule '{sm.get('name')}' contains "
-                            f"multiplication ({width}-bit). Very expensive on Sky130. "
+                            f"multiplication ({width}-bit). Very expensive on {self.pdk}. "
                             f"Consider pipelining."
                         )
                     elif width > 8:
@@ -551,7 +868,7 @@ class FeasibilityChecker:
         # Check for division
         if "divider" in combined_text or "divide" in combined_text or "division" in combined_text:
             warnings.append(
-                "ARITHMETIC_WARN: Division is extremely expensive on Sky130 "
+                f"ARITHMETIC_WARN: Division is extremely expensive on {self.pdk} "
                 "(no hardware divider). Flag for manual review. Consider "
                 "iterative shift-subtract implementation."
             )
@@ -560,7 +877,7 @@ class FeasibilityChecker:
         if "float" in combined_text or "fpu" in combined_text or "ieee 754" in combined_text:
             warnings.append(
                 "ARITHMETIC_WARN: Floating-point operations are extremely expensive "
-                "on Sky130. A minimal FPU can consume >5000 GE. Flag for manual review."
+                f"on {self.pdk}. A minimal FPU can consume >5000 GE. Flag for manual review."
             )
 
         return warnings
@@ -641,18 +958,21 @@ class FeasibilityChecker:
                 return description
         return f"Very large design ({total_ge} GE) — manual floorplan required"
 
-    # ── Step 5: Sky130-Specific Rules ────────────────────────────────
+    # ── Step 5: PDK / ASIC Flow Rules ────────────────────────────────
 
-    def _check_sky130_rules(
+    def _check_pdk_rules(
         self,
         top_ports: List[Dict[str, Any]],
         submodules: List[Dict[str, Any]],
         contracts: List[Dict[str, Any]],
         design_desc: str,
         spec: Dict[str, Any],
-    ) -> Tuple[List[str], List[str]]:
+    ) -> Tuple[List[str], List[str], List[FeasibilityIssue]]:
         warnings: List[str] = []
         rejections: List[str] = []
+        issues: List[FeasibilityIssue] = []
+        caps = get_pdk_flow_capabilities(self.pdk)
+        pdk_label = caps.get("profile") or self.pdk
 
         combined_text = design_desc.lower()
         for sm in submodules:
@@ -669,11 +989,22 @@ class FeasibilityChecker:
                 if p.get("direction", "") == "inout":
                     pname = p.get("name", "")
                     if pname not in top_level_port_names:
-                        rejections.append(
-                            f"FEASIBILITY_REJECTED: Internal tri-state port "
-                            f"'{pname}' in submodule '{sm.get('name')}'. Sky130 "
-                            f"synthesized logic cannot use internal tri-states. "
-                            f"Replace with mux/demux logic."
+                        msg = (
+                            f"FEASIBILITY_REJECTED: Internal tri-state/inout port "
+                            f"'{pname}' in submodule '{sm.get('name')}'. Standard-cell "
+                            f"ASIC flows for {pdk_label} cannot use internal tri-states. "
+                            f"Replace with explicit input/output/output-enable signals."
+                        )
+                        rejections.append(msg)
+                        issues.append(
+                            FeasibilityIssue(
+                                category="AUTO_REPAIRABLE",
+                                code="INTERNAL_TRISTATE",
+                                target=f"{sm.get('name')}.{pname}",
+                                message=msg,
+                                suggested_action="Split internal inout into *_i, *_o, and *_oe signals.",
+                                severity="error",
+                            )
                         )
 
         # Rule 2: Async reset with > 2 clock domains
@@ -704,7 +1035,7 @@ class FeasibilityChecker:
 
         if has_async_reset and (has_multi_clock or len(clock_ports) > 2):
             warnings.append(
-                "SKY130_WARN: Asynchronous reset with more than 2 clock domains "
+                f"PDK_WARN: Asynchronous reset with more than 2 clock domains on {pdk_label} "
                 "detected. Cross-domain async reset de-assertion needs "
                 "synchronizers. Add reset synchronizer module per domain."
             )
@@ -720,12 +1051,28 @@ class FeasibilityChecker:
             "bandgap",
             "ldo",
             "oscillator",
+            "trng",
         ]
         for kw in analog_keywords:
             if kw in combined_text:
-                rejections.append(
-                    f"FEASIBILITY_REJECTED: '{kw.upper()}' is analog and cannot "
-                    f"be automated through OpenLane. Requires manual custom layout."
+                msg = (
+                    f"FEASIBILITY_REJECTED: '{kw.upper()}' requires analog/custom or "
+                    f"macro collateral and cannot be synthesized directly in the "
+                    f"{pdk_label} RTL-to-GDS flow."
+                )
+                rejections.append(msg)
+                issues.append(
+                    FeasibilityIssue(
+                        category="AUTO_REPAIRABLE",
+                        code="ANALOG_OR_CUSTOM_BLOCK",
+                        target=kw,
+                        message=msg,
+                        suggested_action=(
+                            "Replace with a digital control/status wrapper or a hard-macro "
+                            "black-box interface."
+                        ),
+                        severity="error",
+                    )
                 )
 
         # Rule 4: Negative-edge triggered flip-flops
@@ -739,8 +1086,8 @@ class FeasibilityChecker:
         for kw in negedge_keywords:
             if kw in combined_text:
                 warnings.append(
-                    "SKY130_WARN: Negative-edge triggered flip-flops detected. "
-                    "Sky130 standard cell library has limited negedge cells. "
+                    f"PDK_WARN: Negative-edge triggered flip-flops detected for {pdk_label}. "
+                    "The selected standard-cell library may have limited negedge cells. "
                     "Prefer posedge-triggered always_ff."
                 )
                 break
@@ -750,13 +1097,13 @@ class FeasibilityChecker:
         for kw in latch_keywords:
             if kw in combined_text:
                 warnings.append(
-                    "SKY130_WARN: Latch-based storage detected. OpenLane synthesis "
+                    f"PDK_WARN: Latch-based storage detected for {pdk_label}. OpenLane synthesis "
                     "may not handle latch inference correctly. Prefer always_ff "
                     "with flip-flops."
                 )
                 break
 
-        return warnings, rejections
+        return warnings, rejections, issues
 
     # ── Utility: Collect All Submodules ──────────────────────────────
 
@@ -885,8 +1232,12 @@ class FeasibilityChecker:
             "estimated_gate_equivalents": result.estimated_gate_equivalents,
             "recommended_floorplan": result.recommended_floorplan_size_um,
             "target_frequency_mhz": result.target_frequency_mhz,
+            "readiness_level": result.readiness_level,
+            "signoff_blockers": list(result.signoff_blockers),
+            "node_contract": result.node_contract.to_dict() if result.node_contract else {},
             "memory_macros": [m.to_dict() for m in result.memory_macros_required],
             "warnings_count": len(result.feasibility_warnings),
             "rejections_count": len(result.feasibility_rejections),
+            "issues": [i.to_dict() for i in result.feasibility_issues],
             "area_breakdown": result.area_breakdown,
         }

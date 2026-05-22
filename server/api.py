@@ -68,6 +68,7 @@ from server.stage_summary import (
     generate_failure_explanation,
     get_stage_log_summary,
 )
+from agentic.core.flow_capabilities import get_stage_meta, resolve_flow_profile
 
 # ─── Python path ────────────────────────────────────────────────────
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -666,7 +667,7 @@ def _collect_platform_status(include_llm: bool = False) -> Dict[str, Any]:
     llm_error = None
     if include_llm:
         try:
-            _, llm_name = _get_llm()
+            _, llm_name = _get_llm(is_agentic_paid=True)
             llm_ok = True
         except Exception as exc:
             llm_ok = False
@@ -780,75 +781,11 @@ TRAINING_JSONL = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "training", "agentic_sft_data.jsonl")
 )
 
-BUILD_STATES_ORDER = [
-    "INIT",
-    "SPEC",
-    "SPEC_VALIDATE",
-    "HIERARCHY_EXPAND",
-    "VERIFICATION_PLAN",
-    "RTL_GEN",
-    "RTL_FIX",
-    "LINT_CHECK",
-    "CDC_ANALYZE",
-    "VERIFICATION",
-    "FORMAL_VERIFY",
-    "COVERAGE_CHECK",
-    "REGRESSION",
-    "SDC_GEN",
-    "SYNTHESIS",
-    "FEASIBILITY_CHECK",
-    "DFT_SCAN",
-    "DFT_ATPG",
-    "MBIST",
-    "GLS_SIM",
-    "FLOORPLAN",
-    "HARDENING",
-    "TIMING_ANALYSIS",
-    "CONVERGENCE_REVIEW",
-    "ECO_PATCH",
-    "POWER_ANALYSIS",
-    "PHYSICAL_VERIFY",
-    "POST_LAYOUT_SPICE",
-    "SIGNOFF",
-    "IP_PACKAGE",
-    "SUCCESS",
-]
+DEFAULT_FLOW_PROFILE = resolve_flow_profile()
+BUILD_STATES_ORDER = list(DEFAULT_FLOW_PROFILE.stages)
 TOTAL_STEPS = len(BUILD_STATES_ORDER)
 
-STAGE_META: Dict[str, Dict[str, str]] = {
-    "INIT": {"label": "Initializing Workspace", "icon": "🔧"},
-    "SPEC": {"label": "Architectural Planning", "icon": "📐"},
-    "SPEC_VALIDATE": {"label": "Specification Validation", "icon": "🔍"},
-    "HIERARCHY_EXPAND": {"label": "Hierarchy Expansion", "icon": "🌲"},
-    "VERIFICATION_PLAN": {"label": "Verification Planning", "icon": "📋"},
-    "RTL_GEN": {"label": "RTL Generation", "icon": "💻"},
-    "RTL_FIX": {"label": "RTL Syntax Fixing", "icon": "🔨"},
-    "LINT_CHECK": {"label": "RTL Lint Check", "icon": "✅"},
-    "CDC_ANALYZE": {"label": "CDC Analysis", "icon": "🔀"},
-    "VERIFICATION": {"label": "Verification & Testbench", "icon": "🧪"},
-    "FORMAL_VERIFY": {"label": "Formal Verification", "icon": "📊"},
-    "COVERAGE_CHECK": {"label": "Coverage Analysis", "icon": "📈"},
-    "REGRESSION": {"label": "Regression Testing", "icon": "🔁"},
-    "SDC_GEN": {"label": "SDC Generation", "icon": "🕒"},
-    "SYNTHESIS": {"label": "RTL Synthesis", "icon": "⚡"},
-    "FEASIBILITY_CHECK": {"label": "Feasibility Check", "icon": "⚖️"},
-    "DFT_SCAN": {"label": "DFT Scan Insertion", "icon": "🔬"},
-    "DFT_ATPG": {"label": "DFT ATPG Patterns", "icon": "📝"},
-    "MBIST": {"label": "Memory BIST", "icon": "💾"},
-    "GLS_SIM": {"label": "Gate-Level Simulation", "icon": "🔬"},
-    "FLOORPLAN": {"label": "Floorplanning", "icon": "🗺️"},
-    "HARDENING": {"label": "GDSII Hardening", "icon": "🏗️"},
-    "TIMING_ANALYSIS": {"label": "Static Timing Analysis", "icon": "⏱️"},
-    "CONVERGENCE_REVIEW": {"label": "Convergence Review", "icon": "🎯"},
-    "ECO_PATCH": {"label": "ECO Patch", "icon": "🩹"},
-    "POWER_ANALYSIS": {"label": "Power Analysis", "icon": "⚡"},
-    "PHYSICAL_VERIFY": {"label": "Physical Verification", "icon": "🔍"},
-    "POST_LAYOUT_SPICE": {"label": "Spice Sim", "icon": "⚡"},
-    "SIGNOFF": {"label": "DRC/LVS Signoff", "icon": "✅"},
-    "IP_PACKAGE": {"label": "IP Packaging", "icon": "📦"},
-    "SUCCESS": {"label": "Build Complete", "icon": "🎉"},
-    "FAIL": {"label": "Build Failed", "icon": "❌"},
-}
+STAGE_META: Dict[str, Dict[str, str]] = get_stage_meta()
 
 _KNOWN_MODEL_PREFIXES = (
     "openai/",
@@ -1352,7 +1289,7 @@ class BuildRequest(BaseModel):
     design_name: str
     description: str
     skip_openlane: bool = False
-    skip_spice: bool = False
+    skip_spice: bool = True
     skip_coverage: bool = False
     full_signoff: bool = False
     max_retries: int = 5
@@ -1371,6 +1308,7 @@ class BuildRequest(BaseModel):
     coverage_profile: str = "balanced"
     human_in_loop: bool = False
     skip_stages: List[str] = []
+    flow_profile: str = ""
     plan_type: str = "byok"
 
 
@@ -1382,6 +1320,30 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     plan_type: str = "byok"
     api_key: Optional[str] = None
+
+def _looks_like_chip_build_request(description: str) -> bool:
+    text = re.sub(r"\s+", " ", (description or "").strip().lower())
+    if not text:
+        return False
+    if re.fullmatch(r"(hi+|hello+|hey+|yo+|sup|thanks|thank you|ok|okay|test)", text):
+        return False
+    hardware = re.search(
+        r"\b(chip|rtl|verilog|systemverilog|vlsi|asic|fpga|pdk|sky130|gf180|gds|layout|"
+        r"synthesis|synthesize|timer|uart|spi|i2c|axi|apb|wishbone|fifo|ram|rom|sram|"
+        r"cpu|risc|risc-v|mcu|microcontroller|alu|dma|pwm|watchdog|aes|sha|trng|gpio|"
+        r"counter|fsm|pll|adc|dac|register|bus|peripheral|accelerator|core)\b",
+        text,
+    )
+    if not hardware:
+        return False
+    words = [w for w in text.split(" ") if w]
+    action = re.search(r"\b(build|create|design|generate|make|implement|synthesize|harden|layout|verify)\b", text)
+    detail = re.search(
+        r"\b(with|using|include|support|clock|reset|register|interrupt|memory[- ]mapped|"
+        r"bit|width|mhz|khz|formal|testbench|coverage|gdsii|openlane|fifo|divider|interface)\b",
+        text,
+    )
+    return bool((detail and len(words) >= 4) or (action and len(words) >= 6) or len(words) >= 10)
 
 class RagQueryRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=4000)
@@ -1598,6 +1560,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
 
         JOB_STORE[job_id]["status"] = "running"
         JOB_STORE[job_id]["human_in_loop"] = req.human_in_loop
+        JOB_STORE[job_id]["flow_profile"] = req.flow_profile or DEFAULT_FLOW_PROFILE.name
         JOB_STORE[job_id]["waiting_approval"] = False
         JOB_STORE[job_id]["waiting_stage"] = ""
         JOB_STORE[job_id]["skip_stages"] = req.skip_stages or []
@@ -1617,18 +1580,25 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             state = event.get("state", "UNKNOWN")
             message = event.get("message", "")
             event_type = event.get("type", "log")
+            extra = {
+                k: v
+                for k, v in event.items()
+                if k not in {"type", "state", "message"}
+            }
             step = (
                 BUILD_STATES_ORDER.index(state) + 1
                 if state in BUILD_STATES_ORDER
                 else 0
             )
-            _emit_event(job_id, event_type, state, message, step=step)
+            _emit_event(job_id, event_type, state, message, step=step, extra=extra)
 
             # Also emit as agent_thought for the live activity feed
-            if message and event_type in ("log", "checkpoint"):
+            if message and event_type in ("log", "checkpoint", "design_decision"):
                 # Infer agent name from state
                 agent_name = _infer_agent_name(state, message)
                 thought_type = _infer_thought_type(message)
+                if event_type == "design_decision":
+                    thought_type = "decision"
                 _emit_agent_thought(job_id, agent_name, thought_type, message, state)
 
         # Resolve LLM: AgentIC-paid uses server VERILOG_CODEGEN, BYOK uses user's keys
@@ -1665,6 +1635,7 @@ def _run_agentic_build(job_id: str, req: BuildRequest):
             coverage_backend=req.coverage_backend,
             coverage_fallback_policy=req.coverage_fallback_policy,
             coverage_profile=req.coverage_profile,
+            flow_profile=req.flow_profile,
             event_sink=event_sink,
             role_llms=_get_role_llm_map(byok_config=byok_key),
             human_in_loop=req.human_in_loop,
@@ -1835,7 +1806,7 @@ def _infer_agent_name(state: str, message: str) -> str:
         "HARDENING": "Physical Design",
         "CONVERGENCE_REVIEW": "Convergence Reviewer",
         "ECO_PATCH": "Convergence Reviewer",
-        "POST_LAYOUT_SPICE": "SPICE Simulation",
+        "POST_LAYOUT_SPICE": "Scoped SPICE Extension",
         "SIGNOFF": "Signoff Engineer",
     }
     return state_agents.get(state, "Orchestrator")
@@ -1873,7 +1844,7 @@ def _get_thinking_message(state_name: str, design_name: str) -> str:
         "SPEC": f"Decomposing architecture for {design_name}...",
         "SPEC_VALIDATE": f"Validating hardware spec for {design_name}...",
         "HIERARCHY_EXPAND": f"Expanding submodule hierarchy for {design_name}...",
-        "FEASIBILITY_CHECK": f"Checking Sky130 feasibility for {design_name}...",
+        "FEASIBILITY_CHECK": f"Checking PDK feasibility for {design_name}...",
         "CDC_ANALYZE": f"Analyzing clock domain crossings for {design_name}...",
         "VERIFICATION_PLAN": f"Generating verification plan for {design_name}...",
         "RTL_GEN": f"Generating Verilog RTL for {design_name}...",
@@ -1887,8 +1858,8 @@ def _get_thinking_message(state_name: str, design_name: str) -> str:
         "HARDENING": f"Running GDSII hardening flow...",
         "CONVERGENCE_REVIEW": f"Analyzing timing and area convergence...",
         "ECO_PATCH": f"Applying engineering change orders...",
-        "POST_LAYOUT_SPICE": f"Running post-layout transistor-level SPICE simulation...",
-        "SIGNOFF": f"Running DRC, LVS, and STA checks...",
+        "POST_LAYOUT_SPICE": f"Running scoped post-layout SPICE extension...",
+        "SIGNOFF": f"Reviewing OSS DRC, LVS, STA, power, and commercial blockers...",
     }
     return messages.get(state_name, f"Processing {state_name}...")
 
@@ -2084,6 +2055,7 @@ def _execute_stage(orchestrator, state_name: str):
         "SPEC": orchestrator.do_spec,
         "SPEC_VALIDATE": orchestrator.do_spec_validate,
         "HIERARCHY_EXPAND": orchestrator.do_hierarchy_expand,
+        "FEASIBILITY_CHECK": orchestrator.do_feasibility_check,
         "VERIFICATION_PLAN": orchestrator.do_verification_plan,
         "RTL_GEN": orchestrator.do_rtl_gen,
         "RTL_FIX": orchestrator.do_rtl_fix,
@@ -2095,10 +2067,10 @@ def _execute_stage(orchestrator, state_name: str):
         "REGRESSION": orchestrator.do_regression,
         "SDC_GEN": orchestrator.do_sdc_gen,
         "SYNTHESIS": orchestrator.do_synthesis,
-        "FEASIBILITY_CHECK": orchestrator.do_feasibility_check,
         "DFT_SCAN": orchestrator.do_dft_scan,
         "DFT_ATPG": orchestrator.do_dft_atpg,
         "MBIST": orchestrator.do_mbist,
+        "GLS_SIMULATION": orchestrator.do_gls_simulation,
         "GLS_SIM": orchestrator.do_gls_simulation,
         "FLOORPLAN": orchestrator.do_floorplan,
         "HARDENING": orchestrator.do_hardening,
@@ -2413,17 +2385,23 @@ def export_jobs_backup(profile: dict = Depends(get_current_user)):
 
 
 @app.get("/pipeline/schema")
-def get_pipeline_schema():
+def get_pipeline_schema(flow_profile: str = "", pdk_profile: str = ""):
     """Canonical pipeline schema for frontend timeline rendering."""
+    profile = resolve_flow_profile(flow_profile, pdk=pdk_profile)
     stages = [
         {"state": s, **STAGE_META.get(s, {"label": s, "icon": "•"})}
-        for s in BUILD_STATES_ORDER
+        for s in profile.stages
     ]
     return {
         "stages": stages,
+        "flow_profile": profile.to_schema(),
         "terminal_states": ["SUCCESS", "FAIL"],
-        "optional_stages": ["REGRESSION", "ECO_PATCH"],
-        "total_steps": TOTAL_STEPS,
+        "optional_stages": profile.optional_stages,
+        "blocked_extensions": [
+            {"state": s, **STAGE_META.get(s, {"label": s, "icon": "•"})}
+            for s in profile.blocked_extensions
+        ],
+        "total_steps": len(profile.stages),
     }
 
 
@@ -2763,6 +2741,10 @@ async def chat_converse(
         "- Sound like a premium coding assistant: concise, direct, warm, technically sharp.\n"
         "- Prefer structured Markdown with short sections only when structure helps.\n"
         "- Ask for missing high-impact chip details only when needed: interface, clock/reset, registers, bit widths, timing target, verification expectations, and whether GDSII is required.\n"
+        "- If the user sends a greeting, vague idea, or non-chip question, answer conversationally and help them shape a better chip prompt instead of implying a build should start.\n"
+        "- Be VLSI-aware and PDK-aware. Explain what is feasible as synthesizable digital RTL and what needs a hard macro, wrapper, or user-supplied asset.\n"
+        "- You may propose safe spec substitutions for PDK/tool limits: analog/ADC/DAC/PLL/TRNG become digital wrappers or macro-facing interfaces, large memories use macro wrappers, internal tri-states become input/output/output-enable signals, and unrealistic frequencies should be lowered with an explanation.\n"
+        "- For each proposed substitution, state the original request, the constraint, the chosen substitute, and why it is the closest feasible implementation.\n"
         "- Do not over-explain basic concepts unless the user asks.\n"
         "- Never pretend a build has run from chat alone. Chat refines the spec; the Run pipeline action executes AgentIC.\n"
         "- When the spec is good enough, say it is ready to run and summarize what AgentIC will generate.\n\n"
@@ -2843,6 +2825,22 @@ async def trigger_build(
     if header_key:
         req.api_key = header_key
 
+    if not _looks_like_chip_build_request(req.description):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "not_chip_build_request",
+                "message": (
+                    "This looks like chat or an underspecified chip idea, not a runnable silicon build. "
+                    "Ask AgentIC to refine it into a VLSI-aware prompt first, then approve the build."
+                ),
+                "hint": (
+                    "Include the block type, interface, clock/reset, registers or data widths, "
+                    "verification expectations, target PDK, and whether GDSII is required."
+                ),
+            },
+        )
+
     # ── Auth guard: check plan + build count ──
     check_build_allowed(profile)
 
@@ -2916,7 +2914,8 @@ async def trigger_build(
         "user_profile": profile,
         "byok_key": byok_key,
         "plan_type": req.plan_type,
-        "human_in_loop": False,
+        "human_in_loop": req.human_in_loop,
+        "flow_profile": req.flow_profile or DEFAULT_FLOW_PROFILE.name,
         "stages": {},  # stage_name -> stage_complete payload
         "build_status": "running",
     }

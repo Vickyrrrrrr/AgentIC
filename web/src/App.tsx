@@ -21,6 +21,8 @@ import {
 } from 'lucide-react';
 
 const AUTH_ENABLED = Boolean(import.meta.env.VITE_SUPABASE_URL);
+const IS_DESKTOP_APP = typeof window !== 'undefined' && 'electronAPI' in window;
+const BUILD_FLAVOR = import.meta.env.DEV ? 'dev' : 'built';
 
 const DesignStudio = lazy(() =>
   import('./pages/DesignStudio').then((m) => ({ default: m.DesignStudio }))
@@ -429,6 +431,7 @@ const App = () => {
               </button>
               <div className="app-version">
                 {profile?.plan ? `Plan: ${profile.plan}` : 'Local Workspace'} · v3.0
+                {IS_DESKTOP_APP ? ` · Desktop ${BUILD_FLAVOR}` : ''}
               </div>
             </div>
           </aside>

@@ -61,7 +61,8 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   ───────────────────────────────────────────────────
   • Clock Domain Crossing (CDC): Always use multi-stage synchronizers (e.g., 2-flop or 3-flop) when moving signals between asynchronous clock domains.
   • High Fanout Nets: For nets driving many sinks (e.g., global resets or enables), avoid single-driver bottlenecks. Assume OpenLane/CTS will handle buffers, but duplicate registers at RTL if fanout > 1000.
-  • Macros & Memory: NEVER synthesize large memory arrays (RAMs/ROMs) > 1KB into flip-flops. Always use parameterized block RAM instantiations or standard foundry SRAM macro wrappers (e.g., OpenRAM).
+  • Macros & Memory: NEVER synthesize large memory arrays (RAMs/ROMs) > 1KB into flip-flops. Always use parameterized memory macro wrappers, OpenRAM-style wrappers, or foundry SRAM black boxes.
+  • Feasible Substitution: If a requested block needs custom analog/layout/IP collateral, implement the closest digital control/status or hard-macro wrapper and clearly preserve the user-visible intent in comments and interfaces.
   • Reset Trees: Be mindful of reset fanout and recovery times. Use active-low asynchronous resets but synchronize de-assertion to the clock domain (async assert, sync deassert).
   • Power & Tie-Cells: Do not hardcode 1'b1 or 1'b0 heavily in critical datapaths if it causes routing congestion; let synthesis infer tie-high/tie-low standard cells.
 
@@ -95,7 +96,7 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         """
     else:
         role = "SystemVerilog Architect"
-        backstory = f"""You are a Principal ASIC Architect at a top-tier semiconductor company (Generic/Intel).
+        backstory = f"""You are a Principal ASIC Architect at a top-tier semiconductor company.
         You write PRODUCTION-READY RTL — never toy code or placeholders.
 
         Your Principles:
@@ -105,6 +106,7 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         4. **Modern SystemVerilog**: Use 'logic', 'always_ff', 'always_comb', 'enum', 'struct'.
         5. **Universal Chip Coverage**: You can implement ANY chip family listed below.
         6. **Width Correctness**: Before returning any Verilog, mentally simulate Verilator strict width checking on every signal assignment, port connection, arithmetic operation, and parameter comparison. Resolve all width mismatches proactively. Every signal must be explicitly sized.
+        7. **VLSI/PDK Awareness**: When direct implementation is infeasible for the selected PDK or tool flow, choose the closest synthesizable digital/macro-facing implementation rather than refusing.
 
 {CHIP_FAMILIES}
 

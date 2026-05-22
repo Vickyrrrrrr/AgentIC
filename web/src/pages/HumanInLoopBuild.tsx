@@ -19,9 +19,9 @@ import { toUserError, isNetworkError } from '../utils/errorFormatter';
 import '../hitl.css';
 
 const PIPELINE_STAGES = [
-    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'LINT_CHECK', 'CDC_ANALYZE', 'VERIFICATION', 'FORMAL_VERIFY',
-    'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS', 'FEASIBILITY_CHECK', 'DFT_SCAN', 'DFT_ATPG', 'MBIST', 'GLS_SIM',
-    'FLOORPLAN', 'HARDENING', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'PHYSICAL_VERIFY', 'POST_LAYOUT_SPICE', 'SIGNOFF', 'IP_PACKAGE',
+    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'FEASIBILITY_CHECK', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'CDC_ANALYZE', 'VERIFICATION', 'FORMAL_VERIFY',
+    'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS',
+    'FLOORPLAN', 'HARDENING', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'TIMING_ANALYSIS', 'PHYSICAL_VERIFY', 'SIGNOFF', 'IP_PACKAGE',
 ];
 const TOTAL = PIPELINE_STAGES.length;
 
@@ -30,10 +30,10 @@ const STAGE_ENCOURAGEMENTS: Record<string, string> = {
     SPEC:              'Translating your description into a chip specification…',
     SPEC_VALIDATE:     'Validating spec — classifying design, checking completeness, generating assertions…',
     HIERARCHY_EXPAND:   'Expanding complex submodules into nested specifications…',
+    FEASIBILITY_CHECK: 'Checking node contract, memory macros, area, and PDK feasibility…',
     VERIFICATION_PLAN: 'Building verification plan & SVA properties…',
     RTL_GEN:           'Writing Verilog — your chip is taking shape…',
     RTL_FIX:           'Fixing any RTL issues automatically…',
-    LINT_CHECK:       'Running RTL lint check for code quality…',
     CDC_ANALYZE:      'Analyzing clock domain crossings…',
     VERIFICATION:     'Running simulation — making sure your logic is correct…',
     FORMAL_VERIFY:    'Proving your chip is correct with formal methods…',
@@ -41,11 +41,6 @@ const STAGE_ENCOURAGEMENTS: Record<string, string> = {
     REGRESSION:       'Running the full regression suite…',
     SDC_GEN:          'Generating timing constraints for synthesis…',
     SYNTHESIS:        'Synthesizing RTL to gate-level netlist…',
-    FEASIBILITY_CHECK: 'Verifying physical design feasibility after synthesis…',
-    DFT_SCAN:         'Inserting scan chains for testability…',
-    DFT_ATPG:        'Generating test patterns…',
-    MBIST:            'Inserting memory BIST circuits…',
-    GLS_SIM:         'Running gate-level simulation…',
     FLOORPLAN:        'Planning the physical layout of your chip…',
     HARDENING:        'Running place-and-route — turning RTL into real silicon…',
     TIMING_ANALYSIS:   'Running static timing analysis…',
@@ -53,8 +48,7 @@ const STAGE_ENCOURAGEMENTS: Record<string, string> = {
     ECO_PATCH:        'Applying final tweaks for clean sign-off…',
     POWER_ANALYSIS:    'Analyzing power consumption…',
     PHYSICAL_VERIFY:   'Running physical verification checks…',
-    POST_LAYOUT_SPICE: 'Running transistor-level SPICE checks…',
-    SIGNOFF:         'Almost there — running final LVS/DRC checks…',
+    SIGNOFF:         'Reviewing OSS signoff evidence and commercial blockers…',
     IP_PACKAGE:      'Packaging IP for reuse…',
 };
 
@@ -63,31 +57,30 @@ const MILESTONE_TOASTS: Record<string, { title: string; msg: string }> = {
     VERIFICATION: { title: 'Verification Passed', msg: 'All simulation tests passed. Design is logically correct.' },
     SYNTHESIS: { title: 'Synthesis Complete', msg: 'RTL converted to gate-level netlist.' },
     HARDENING: { title: 'Silicon Layout Done', msg: 'Place-and-route complete. Your chip has a physical form.' },
-    SIGNOFF:   { title: 'Chip Signed Off', msg: 'All checks passed. Ready for tape-out.' },
+    SIGNOFF:   { title: 'OSS Signoff Reviewed', msg: 'Evidence is collected; commercial blockers remain explicit.' },
 };
 
 const STAGE_LABELS: Record<string, string> = {
     INIT: 'Initialization', SPEC: 'Specification', SPEC_VALIDATE: 'Spec Validation', HIERARCHY_EXPAND: 'Hierarchy Expansion',
-    VERIFICATION_PLAN: 'Verification Plan', RTL_GEN: 'RTL Generation', RTL_FIX: 'RTL Fix', LINT_CHECK: 'Lint Check',
+    FEASIBILITY_CHECK: 'Feasibility Check', VERIFICATION_PLAN: 'Verification Plan', RTL_GEN: 'RTL Generation', RTL_FIX: 'RTL Fix',
     CDC_ANALYZE: 'CDC Analysis', VERIFICATION: 'Verification', FORMAL_VERIFY: 'Formal Verification',
     COVERAGE_CHECK: 'Coverage Check', REGRESSION: 'Regression', SDC_GEN: 'SDC Generation', SYNTHESIS: 'Synthesis',
-    FEASIBILITY_CHECK: 'Feasibility Check', DFT_SCAN: 'DFT Scan', DFT_ATPG: 'DFT ATPG', MBIST: 'MBIST',
-    GLS_SIM: 'GLS Simulation', FLOORPLAN: 'Floorplan', HARDENING: 'Hardening', TIMING_ANALYSIS: 'Timing Analysis',
+    FLOORPLAN: 'Floorplan', HARDENING: 'Hardening', TIMING_ANALYSIS: 'Timing Analysis',
     CONVERGENCE_REVIEW: 'Convergence Review', ECO_PATCH: 'ECO Patch', POWER_ANALYSIS: 'Power Analysis',
-    PHYSICAL_VERIFY: 'Physical Verification', POST_LAYOUT_SPICE: 'SPICE Sim', SIGNOFF: 'Signoff', IP_PACKAGE: 'IP Package', FAIL: 'Failed',
+    PHYSICAL_VERIFY: 'Physical Verification', SIGNOFF: 'Signoff', IP_PACKAGE: 'IP Package', FAIL: 'Failed',
 };
 
 const MANDATORY_STAGES = new Set([
-    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'LINT_CHECK', 'CDC_ANALYZE',
-    'VERIFICATION', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS', 'FEASIBILITY_CHECK',
-    'FLOORPLAN', 'HARDENING', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS',
-    'PHYSICAL_VERIFY', 'POST_LAYOUT_SPICE', 'SIGNOFF', 'IP_PACKAGE',
+    'INIT', 'SPEC', 'SPEC_VALIDATE', 'HIERARCHY_EXPAND', 'FEASIBILITY_CHECK', 'VERIFICATION_PLAN', 'RTL_GEN', 'RTL_FIX', 'CDC_ANALYZE',
+    'VERIFICATION', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS',
+    'FLOORPLAN', 'HARDENING', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'POWER_ANALYSIS',
+    'PHYSICAL_VERIFY', 'SIGNOFF', 'IP_PACKAGE',
 ]);
 
 type BuildMode = 'quick' | 'verified' | 'full';
 const BUILD_MODE_SKIPS: Record<BuildMode, string[]> = {
-    quick: ['LINT_CHECK', 'CDC_ANALYZE', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS', 'FEASIBILITY_CHECK', 'DFT_SCAN', 'DFT_ATPG', 'MBIST', 'GLS_SIM', 'FLOORPLAN', 'HARDENING', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'PHYSICAL_VERIFY', 'POST_LAYOUT_SPICE', 'SIGNOFF', 'IP_PACKAGE'],
-    verified: ['LINT_CHECK', 'CDC_ANALYZE', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'DFT_SCAN', 'DFT_ATPG', 'MBIST', 'GLS_SIM', 'TIMING_ANALYSIS', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'PHYSICAL_VERIFY', 'POST_LAYOUT_SPICE', 'IP_PACKAGE'],
+    quick: ['CDC_ANALYZE', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'SDC_GEN', 'SYNTHESIS', 'FLOORPLAN', 'HARDENING', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'TIMING_ANALYSIS', 'PHYSICAL_VERIFY', 'SIGNOFF', 'IP_PACKAGE'],
+    verified: ['CDC_ANALYZE', 'FORMAL_VERIFY', 'COVERAGE_CHECK', 'REGRESSION', 'CONVERGENCE_REVIEW', 'ECO_PATCH', 'POWER_ANALYSIS', 'TIMING_ANALYSIS', 'PHYSICAL_VERIFY', 'IP_PACKAGE'],
     full: [],
 };
 
@@ -129,6 +122,12 @@ interface BuildEvent {
     next_stage_name?: string;
     next_stage_preview?: string;
     options?: Array<Record<string, string>>;
+    changes?: Array<Record<string, string>>;
+    target?: string;
+    category?: string;
+    original_request?: string;
+    constraint?: string;
+    chosen_substitute?: string;
 }
 
 interface StageCompleteData {
@@ -178,6 +177,15 @@ function slugify(text: string): string {
         .slice(0, 4)
         .join('_')
         .substring(0, 48);
+}
+
+function notifyBuild(title: string, body: string) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    try {
+        new Notification(title, { body });
+    } catch {
+        // Browser/desktop notification support varies by shell.
+    }
 }
 
 type Phase = 'prompt' | 'building' | 'done';
@@ -412,6 +420,7 @@ export const HumanInLoopBuild = () => {
                             setCompletedStages(prev => new Set(prev).add(data.stage_name || data.state || ''));
                         }
                         setCurrentStage(data.stage_name || data.state || '');
+                        notifyBuild('AgentIC stage complete', `${data.stage_name || data.state || 'Stage'} is ready for review.`);
                     }
 
                     if (data.type === 'elaboration_waiting') {
@@ -420,6 +429,15 @@ export const HumanInLoopBuild = () => {
                             message: data.message || 'Waiting for architectural elaboration...',
                         });
                         setWaitingForApproval(true);
+                    }
+
+                    if (data.type === 'spec_reconciled') {
+                        const count = data.changes?.length || 0;
+                        notifyBuild('AgentIC adjusted the spec', `${count} PDK feasibility change${count === 1 ? '' : 's'} applied.`);
+                    }
+
+                    if (data.type === 'design_decision') {
+                        notifyBuild('AgentIC design decision', data.message || 'A feasibility-driven design change was applied.');
                     }
 
                     if (data.type === 'transition' || data.state) {
@@ -853,7 +871,7 @@ export const HumanInLoopBuild = () => {
                                                         color: '#d97706',
                                                     }}>
                                                         <strong>{PDK_MATURITY[selectedPdk.maturity]?.label || selectedPdk.maturity}:</strong>{' '}
-                                                        {PDK_MATURITY[selectedPdk.maturity]?.warning || 'Use sky130 for fabrication-ready results.'}
+                                                        {PDK_MATURITY[selectedPdk.maturity]?.warning || 'Use sky130 for the most mature OSS layout candidate flow.'}
                                                     </div>
                                                 )}
                                             </label>

@@ -1,20 +1,17 @@
 """
-DFT Tools - Design for Test Insertion and ATPG
-================================================
-Production VLSI chips CANNOT be shipped without DFT (Design for Test).
-After fabrication, every chip must be tested. Without scan chains and ATPG,
-defective chips pass as good — yield drops to near zero.
+DFT Tools - experimental/advisory helpers
+=========================================
+Production scan insertion, ATPG, and MBIST are commercial/toolchain-specific
+flows. The default AgentIC Sky130/OpenLane path does NOT claim to perform
+production DFT. These helpers are disabled unless AGENTIC_EXPERIMENTAL_DFT=1
+because open-source Yosys/OpenLane do not provide a real manufacturing
+scan/ATPG/MBIST flow.
 
-This module provides:
-1. Scan chain insertion (STIL/EDIF based)
-2. ATPG pattern generation (using Tetramax-style flow via Yosys)
-3. MBIST (Memory BIST) wrapper generation
-4. BIST/LBIST controller insertion
-5. Boundary scan (JTAG) infrastructure
-6. DFT verification (testability metrics)
+Industry DFT flow shape:
+  RTL -> Synthesis -> Scan Insertion -> ATPG -> ATE patterns
 
-Industry standard DFT flow:
-  RTL → Synthesis → Scan Insertion → ATPG → Test patterns → Ship
+Real execution requires adapters for tools such as Tessent, Modus, TetraMAX,
+DFT Compiler, or a technology-specific MBIST compiler.
 
 Usage:
     from agentic.tools.dft_tools import (
@@ -30,6 +27,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import YOSYS_BIN, WORKSPACE_ROOT
+
+
+def _experimental_dft_enabled() -> bool:
+    return os.getenv("AGENTIC_EXPERIMENTAL_DFT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 @dataclass
@@ -104,7 +110,7 @@ def run_scan_insertion(
     timeout: int = 600,
     design_name: Optional[str] = None,
 ) -> DFTResult:
-    """Insert scan chains into synthesized netlist for production testability.
+    """Experimental scan placeholder; not a production OSS DFT implementation.
 
     Args:
         rtl_files: List of Verilog source files
@@ -134,6 +140,16 @@ def run_scan_insertion(
 
     warnings: List[str] = []
     errors: List[str] = []
+
+    if not _experimental_dft_enabled():
+        return _error_dft_result(
+            [
+                "Production scan insertion is not available in the default OSS flow. "
+                "Configure a commercial DFT adapter, or set AGENTIC_EXPERIMENTAL_DFT=1 "
+                "only for non-signoff experiments."
+            ],
+            scan_netlist,
+        )
 
     for f in rtl_files:
         if not os.path.exists(f):
@@ -302,7 +318,7 @@ def run_atpg(
     timeout: int = 600,
     design_name: Optional[str] = None,
 ) -> ATPGResult:
-    """Generate ATPG test patterns for a scan-inserted netlist.
+    """Experimental ATPG placeholder; not a production OSS ATPG implementation.
 
     Args:
         scan_netlist: Path to scan-inserted Verilog netlist
@@ -329,6 +345,13 @@ def run_atpg(
     script_path = os.path.join(output_dir, f"{design_name}_atpg.ys")
 
     errors: List[str] = []
+    if not _experimental_dft_enabled():
+        errors.append(
+            "Production ATPG is not available in the default OSS flow. "
+            "Configure a commercial ATPG adapter, or set AGENTIC_EXPERIMENTAL_DFT=1 "
+            "only for non-signoff experiments."
+        )
+        return _error_atpg_result(errors, pattern_file, fault_file)
     if not os.path.exists(scan_netlist):
         errors.append(f"Scan netlist not found: {scan_netlist}")
         return _error_atpg_result(errors, pattern_file, fault_file)
@@ -414,10 +437,9 @@ def generate_mbist_wrapper(
     test_algorithm: str = "march",
     include_ecc: bool = False,
 ) -> Tuple[bool, str]:
-    """Generate a Memory BIST (MBIST) wrapper for a given memory.
+    """Generate an experimental MBIST wrapper skeleton for a given memory.
 
-    Memory BIST is required for any on-chip SRAM/DRAM in production chips.
-    Embedded memories are particularly vulnerable to manufacturing defects.
+    This is not a replacement for a technology-qualified MBIST compiler.
 
     Args:
         mem_instance: Full hierarchical instance name of the memory
@@ -430,6 +452,13 @@ def generate_mbist_wrapper(
 
     Returns: (ok, message)
     """
+    if not _experimental_dft_enabled():
+        return (
+            False,
+            "Production MBIST is not available in the default OSS flow. "
+            "Use a technology-specific MBIST compiler or enable "
+            "AGENTIC_EXPERIMENTAL_DFT=1 only for wrapper experiments.",
+        )
     depth_bits = (mem_depth - 1).bit_length()
     addr_bits = max(1, depth_bits)
 

@@ -26,6 +26,12 @@ interface ActivityEvent {
     warnings?: string[];
     next_stage_name?: string;
     next_stage_preview?: string;
+    changes?: Array<{
+        original_request?: string;
+        constraint?: string;
+        chosen_substitute?: string;
+        user_explanation?: string;
+    }>;
 }
 
 interface Props {
@@ -156,6 +162,7 @@ export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
                                       hour12: false,
                                   });
                         const stage = evt.state?.replace(/_/g, ' ') || '';
+                        const changes = evt.type === 'spec_reconciled' ? (evt.changes || []) : [];
 
                         return (
                             <div
@@ -169,6 +176,15 @@ export const ActivityFeed: React.FC<Props> = ({ events, thinkingData }) => {
                                 <span className="hitl-log-msg">
                                     {display}
                                     {isTruncated && <span className="hitl-log-expand"> more</span>}
+                                    {changes.length > 0 && (
+                                        <span style={{ display: 'block', marginTop: 6 }}>
+                                            {changes.slice(0, 3).map((change, idx) => (
+                                                <span key={idx} style={{ display: 'block' }}>
+                                                    {change.original_request || 'requested behavior'} → {change.chosen_substitute || 'feasible substitute'}
+                                                </span>
+                                            ))}
+                                        </span>
+                                    )}
                                 </span>
                             </div>
                         );

@@ -1,11 +1,15 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
-import { join } from 'path'
+import { app, shell, BrowserWindow, ipcMain, dialog, protocol, session } from 'electron'
+import { join, resolve as nodeResolve } from 'path'
 import { writeFile } from 'fs/promises'
-import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
 let mainWindow: BrowserWindow | null = null
+const isDev = !app.isPackaged
 
-function createWindow(): void {
+async function createWindow(): Promise<void> {
+  if (isDev) {
+    await session.defaultSession.clearCache()
+  }
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -41,8 +45,10 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  if (isDev && process.env['ELECTRON_RENDERER_URL']) {
+    const url = new URL(process.env['ELECTRON_RENDERER_URL'])
+    url.searchParams.set('desktop_build', String(Date.now()))
+    mainWindow.loadURL(url.toString())
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
@@ -62,18 +68,20 @@ if (!gotTheLock) {
   })
 
   app.whenReady().then(() => {
-    electronApp.setAppUserModelId('live.buildstack.agentic')
+    if (process.platform === 'win32') {
+      app.setAppUserModelId(isDev ? process.execPath : 'live.buildstack.agentic')
+    }
 
     app.on('browser-window-created', (_, window) => {
-      optimizer.watchWindowShortcuts(window)
+      watchWindowShortcuts(window)
     })
 
     registerIpcHandlers()
     registerProtocol()
-    createWindow()
+    void createWindow()
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+      if (BrowserWindow.getAllWindows().length === 0) void createWindow()
     })
   })
 
@@ -85,6 +93,27 @@ if (!gotTheLock) {
 
   app.on('open-url', (_event, url) => {
     handleDeepLink([url])
+  })
+}
+
+function watchWindowShortcuts(window: BrowserWindow): void {
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    if (!isDev && input.code === 'KeyR' && (input.control || input.meta)) {
+      event.preventDefault()
+      return
+    }
+    if (isDev && input.code === 'F12') {
+      if (window.webContents.isDevToolsOpened()) {
+        window.webContents.closeDevTools()
+      } else {
+        window.webContents.openDevTools({ mode: 'undocked' })
+      }
+      return
+    }
+    if ((input.code === 'Minus' || (input.code === 'Equal' && input.shift)) && (input.control || input.meta)) {
+      event.preventDefault()
+    }
   })
 }
 
@@ -143,6 +172,5 @@ function handleDeepLink(args: string[]): void {
 }
 
 function resolve(path: string): string {
-  const { resolve: nodeResolve } = require('path')
   return nodeResolve(path)
 }

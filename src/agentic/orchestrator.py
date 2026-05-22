@@ -71,14 +71,17 @@ from .core.macro_registry import (
 from .tools.retrieval_tool import vlsi_search, vlsi_ask, pdk_rule_lookup, expand_abbr
 from .core.context_evolution import MultiAgentContextEvolver
 from .core.eda_capabilities import detect_eda_capabilities
+from .core.flow_capabilities import resolve_flow_profile
 from .core import (
     HardwareSpecGenerator,
     HardwareSpec,
     HierarchyExpander,
     FeasibilityChecker,
+    DesignIntentReconciler,
     CDCAnalyzer,
     VerificationPlanner,
 )
+from .core.design_intent_reconciler import write_reconciliation_artifacts
 from .contracts import (
     AgentResult,
     ArtifactRef,
@@ -448,6 +451,7 @@ class BuildOrchestrator:
         role_llms: Optional[Dict[str, Any]] = None,  # role -> LLM mapping
         human_in_loop: bool = False,  # For web API HITL
         thinking_level: str = "minimal",  # Display: minimal, normal, verbose
+        flow_profile: str = "",  # Capability-gated executable flow profile
     ):
         self._suppress_external_logging()
 
@@ -475,6 +479,11 @@ class BuildOrchestrator:
         )
         self.pdk_flow_capabilities = get_pdk_flow_capabilities(
             self.pdk_profile.get("profile", pdk_profile)
+        )
+        self.flow_profile = resolve_flow_profile(
+            flow_profile,
+            pdk=self.pdk_profile.get("profile", pdk_profile),
+            tool_config=self.pdk_tool_config,
         )
         self.max_pivots = max_pivots
         self.congestion_threshold = congestion_threshold
@@ -528,6 +537,7 @@ class BuildOrchestrator:
         self.artifacts: Dict[str, Any] = {}  # Store paths to gathered files
         self.artifacts["pdk_tool_config"] = dict(self.pdk_tool_config)
         self.artifacts["pdk_flow_capabilities"] = dict(self.pdk_flow_capabilities)
+        self.artifacts["flow_profile"] = self.flow_profile.to_schema()
         self.macro_manifest_path = ""
         self._macro_manifest: Optional[MacroManifest] = None
         self.artifact_bus: Dict[str, ArtifactRef] = {}
@@ -715,6 +725,21 @@ class BuildOrchestrator:
         if hasattr(self, "_thinking"):
             self._thinking.show_activity(message, refined=refined)
 
+    def emit_user_event(self, event_type: str, state: str, message: str, **extra: Any) -> None:
+        """Emit a structured user-visible event without changing stage history."""
+        if self.event_sink is None:
+            return
+        try:
+            payload = {
+                "type": event_type,
+                "state": state,
+                "message": message,
+            }
+            payload.update(extra)
+            self.event_sink(payload)
+        except Exception:
+            pass
+
     def transition(self, new_state: BuildState, preserve_retries: bool = False):
         if hasattr(self, "_thinking"):
             self._thinking.show_state(new_state.name, subtitle=new_state.value)
@@ -748,6 +773,25 @@ class BuildOrchestrator:
             cp_path = self.checkpoint_manager.save(self, reason=f"after_{new_state.name.lower()}")
             if cp_path and self.verbose:
                 self.log(f"Checkpoint saved: {cp_path}", refined=True)
+
+    def _flow_has_stage(self, state: BuildState | str) -> bool:
+        state_name = state.name if isinstance(state, BuildState) else str(state)
+        return self.flow_profile.has_stage(state_name)
+
+    def _next_flow_state(self, current: BuildState | str) -> BuildState:
+        state_name = current.name if isinstance(current, BuildState) else str(current)
+        next_name = self.flow_profile.next_stage(state_name)
+        if next_name and hasattr(BuildState, next_name):
+            return getattr(BuildState, next_name)
+        return BuildState.SIGNOFF
+
+    def _transition_next(self, current: BuildState | str, preserve_retries: bool = False):
+        self.transition(self._next_flow_state(current), preserve_retries=preserve_retries)
+
+    def _after_physical_verify_state(self) -> BuildState:
+        if self._flow_has_stage(BuildState.POST_LAYOUT_SPICE) and not self.skip_spice:
+            return BuildState.POST_LAYOUT_SPICE
+        return self._next_flow_state(BuildState.PHYSICAL_VERIFY)
 
     def _bump_state_retry(self) -> int:
         count = self.state_retry_counts.get(self.state.name, 0) + 1
@@ -2138,7 +2182,7 @@ SPECIFICATION SECTIONS (Markdown):
             self.transition(BuildState.FEASIBILITY_CHECK)
 
     def do_feasibility_check(self):
-        """Stage: Check physical realizability on Sky130 before RTL generation."""
+        """Stage: Check physical realizability and reconcile infeasible intent."""
         self.log(
             f"Running FeasibilityChecker (frequency → memory → arithmetic → area → {self.pdk_profile.get('profile', 'sky130').upper()} rules)...",
             refined=True,
@@ -2160,10 +2204,104 @@ SPECIFICATION SECTIONS (Markdown):
                 f"Floorplan: {result.recommended_floorplan_size_um}",
                 refined=True,
             )
+            node_contract = getattr(result, "node_contract", None)
+            if node_contract:
+                self.log(
+                    f"Node contract: {node_contract.node} / {node_contract.node_class} | "
+                    f"readiness={result.readiness_level} | "
+                    f"required gates={len(node_contract.required_signoff)}",
+                    refined=True,
+                )
+            if getattr(result, "signoff_blockers", None):
+                for blocker in result.signoff_blockers[:5]:
+                    self.log(f"  Signoff blocker: {blocker}", refined=True)
 
             if result.feasibility_warnings:
                 for w in result.feasibility_warnings[:5]:
                     self.log(f"  ⚠ {w[:120]}", refined=True)
+
+            should_reconcile = bool(
+                result.feasibility_rejections
+                or result.memory_macros_required
+                or result.frequency_was_adjusted
+                or any(
+                    getattr(issue, "category", "") in {"AUTO_REPAIRABLE", "REQUIRES_MACRO"}
+                    for issue in getattr(result, "feasibility_issues", [])
+                )
+            )
+            if should_reconcile:
+                reconciler = DesignIntentReconciler(self.pdk_profile)
+                reconciliation = reconciler.reconcile(
+                    original_prompt=self.desc,
+                    sid=self.artifacts.get("sid", ""),
+                    hw_spec_dict=hw_spec_dict,
+                    hierarchy_result_dict=hierarchy_result_dict,
+                    feasibility_result=result,
+                    macro_manifest_path=self.artifacts.get("macro_manifest_path", ""),
+                )
+                if reconciliation.changed:
+                    paths = write_reconciliation_artifacts(
+                        self.artifacts.get("root", os.path.join(OPENLANE_ROOT, "designs", self.name)),
+                        reconciliation,
+                    )
+                    self.artifacts.update(paths)
+                    self.artifacts["reconciled_spec"] = reconciliation.spec
+                    self.artifacts["spec_change_log"] = [c.to_dict() for c in reconciliation.changes]
+                    self.artifacts["spec_reconciliation"] = reconciliation.to_dict()
+                    self.artifacts["hw_spec"] = reconciliation.spec
+                    hw_spec_dict = reconciliation.spec
+                    if reconciliation.hierarchy is not None:
+                        self.artifacts["hierarchy_result"] = reconciliation.hierarchy
+                        hierarchy_result_dict = reconciliation.hierarchy
+
+                    change_lines = []
+                    for change in reconciliation.changes:
+                        msg = (
+                            f"Spec change: {change.original_request} -> "
+                            f"{change.chosen_substitute} ({change.constraint})"
+                        )
+                        change_lines.append(msg)
+                        self.log(msg, refined=True)
+                        self.emit_user_event(
+                            "design_decision",
+                            self.state.name,
+                            change.user_explanation,
+                            target=change.target,
+                            category=change.category,
+                            original_request=change.original_request,
+                            constraint=change.constraint,
+                            chosen_substitute=change.chosen_substitute,
+                        )
+
+                    self.emit_user_event(
+                        "spec_reconciled",
+                        self.state.name,
+                        f"AgentIC reconciled {len(reconciliation.changes)} spec change(s) for {self.pdk_profile.get('profile', 'selected PDK')}.",
+                        changes=[c.to_dict() for c in reconciliation.changes],
+                        unresolved_blockers=reconciliation.unresolved_blockers,
+                    )
+
+                    existing_spec = self.artifacts.get("spec", "")
+                    self.artifacts["spec"] = (
+                        existing_spec
+                        + "\n\n## PDK Feasibility Reconciliation\n"
+                        + "\n".join(f"- {line}" for line in change_lines)
+                        + "\n"
+                    )
+
+                    result = checker.check(hw_spec_dict, hierarchy_result_dict)
+                    self.artifacts["feasibility_result"] = result.to_dict()
+                    self.artifacts["feasibility_result_json"] = result.to_json()
+                    self.log(
+                        f"Post-reconciliation feasibility: {result.feasibility_status} | "
+                        f"~{result.estimated_gate_equivalents} GE",
+                        refined=True,
+                    )
+
+                if reconciliation.unresolved_blockers:
+                    self.artifacts["feasibility_unresolved_blockers"] = (
+                        reconciliation.unresolved_blockers
+                    )
 
             if result.feasibility_status == "REJECT":
                 for r in result.feasibility_rejections:
@@ -2292,7 +2430,7 @@ SPECIFICATION SECTIONS (Markdown):
         self.log("Running RTL Lint Check...", refined=True)
         path = self.artifacts.get("rtl_path")
         if not path or not os.path.exists(path):
-            self.log("No RTL path found, skipping LINT_CHECK.", refined=True)
+            self.log("No RTL path found, skipping standalone lint check.", refined=True)
             self.transition(BuildState.VERIFICATION)
             return
         success, report = run_lint_check(path)
@@ -3514,21 +3652,44 @@ endclass
                     node = futures[future]
                     try:
                         result = future.result()
-                        if result:
-                            with self._artifact_lock:
-                                if "sub_module_rtl" not in self.artifacts:
-                                    self.artifacts["sub_module_rtl"] = {}
-                                self.artifacts["sub_module_rtl"][node.name] = result
+                        ok, clean = extract_and_validate_llm_code(result or "")
+                        if not ok and not clean:
+                            raise ValueError("empty or non-Verilog sub-module output")
+                        with self._artifact_lock:
+                            if "sub_module_rtl" not in self.artifacts:
+                                self.artifacts["sub_module_rtl"] = {}
+                            self.artifacts["sub_module_rtl"][node.name] = clean or result
                         self.log(
                             f"Sub-module {node.name} generated successfully.",
                             refined=True,
                         )
                     except Exception as e:
                         self.log(
-                            f"Sub-module {node.name} generation failed: {e}",
+                            f"Sub-module {node.name} generation failed: {e}. Retrying sequentially.",
                             refined=True,
                         )
                         self.logger.error(f"Parallel sub-module error ({node.name}): {e}")
+                        retry = self._generate_single_sub_module(node, graph, depth)
+                        ok, clean = extract_and_validate_llm_code(retry or "")
+                        if ok or clean:
+                            with self._artifact_lock:
+                                if "sub_module_rtl" not in self.artifacts:
+                                    self.artifacts["sub_module_rtl"] = {}
+                                self.artifacts["sub_module_rtl"][node.name] = clean or retry
+                            self.log(
+                                f"Sub-module {node.name} recovered via sequential retry.",
+                                refined=True,
+                            )
+                        else:
+                            stub = self._generate_stub_module(node.name)
+                            with self._artifact_lock:
+                                if "sub_module_rtl" not in self.artifacts:
+                                    self.artifacts["sub_module_rtl"] = {}
+                                self.artifacts["sub_module_rtl"][node.name] = stub
+                            self.log(
+                                f"Sub-module {node.name} fell back to deterministic interface stub.",
+                                refined=True,
+                            )
 
     def _generate_single_sub_module(self, node, graph, depth: int) -> str:
         """Generate RTL for a single sub-module. Called from parallel executor."""
@@ -3582,6 +3743,56 @@ Requirements:
         crew = Crew(verbose=False, agents=[agent], tasks=[task])
         result = self._crew_kickoff(crew, role_hint=f"sub_module_{design_name}")
         return str(result) if result else ""
+
+    def _generate_stub_module(self, module_name: str) -> str:
+        safe_name = re.sub(r"\W+", "_", module_name).strip("_") or "stub_module"
+        return (
+            f"module {safe_name}(\n"
+            f"    input wire clk,\n"
+            f"    input wire rst_n\n"
+            f");\n"
+            f"endmodule\n"
+        )
+
+    def _generate_top_stub_from_spec(self) -> str:
+        spec = self.artifacts.get("hw_spec", {}) or {}
+        ports = spec.get("ports", []) or []
+        if not ports:
+            return self._generate_stub_module(self.name)
+
+        lines = [f"module {self.name}("]
+        decls = []
+        output_assigns = []
+        for idx, port in enumerate(ports):
+            raw_name = str(port.get("name", f"port_{idx}"))
+            name = re.sub(r"\W+", "_", raw_name).strip("_") or f"port_{idx}"
+            direction = str(port.get("direction", "input")).lower()
+            if direction not in {"input", "output", "inout"}:
+                direction = "input"
+            dtype = str(port.get("data_type") or "").strip()
+            width = str(port.get("width") or "").strip()
+            packed = ""
+            m = re.search(r"\[(\d+)\s*:\s*0\]", dtype)
+            if m:
+                packed = f" [{m.group(1)}:0]"
+            elif width and width not in {"1", "logic", "wire"}:
+                try:
+                    packed = f" [{int(width) - 1}:0]"
+                except ValueError:
+                    packed = ""
+            comma = "," if idx < len(ports) - 1 else ""
+            decls.append(f"    {direction} wire{packed} {name}{comma}")
+            if direction == "output":
+                output_assigns.append(f"assign {name} = 1'b0;")
+
+        lines.extend(decls)
+        lines.append(");")
+        lines.append("")
+        lines.append("// Deterministic fallback RTL generated after LLM output was unavailable.")
+        for assign in output_assigns:
+            lines.append(assign)
+        lines.append("endmodule")
+        return "\n".join(lines) + "\n"
 
     def _generate_functional_coverage_model(self) -> str:
         """Generate SystemVerilog covergroups based on design spec.
@@ -3940,9 +4151,31 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                     return
 
             if rtl_code is None or rtl_code == "None" or not rtl_code.strip():
-                self.log("RTL generation produced no output. Build Failed.", refined=True)
-                self.state = BuildState.FAIL
-                return
+                if self.artifacts.get("spec_reconciliation"):
+                    self.log(
+                        "RTL generation produced no output; using deterministic reconciled-spec stub.",
+                        refined=True,
+                    )
+                    rtl_code = self._generate_top_stub_from_spec()
+                else:
+                    self.log("RTL generation produced no output. Build Failed.", refined=True)
+                    self.state = BuildState.FAIL
+                    return
+
+            is_valid_final, extracted_final = extract_and_validate_llm_code(rtl_code)
+            if extracted_final:
+                rtl_code = extracted_final
+            elif not is_valid_final:
+                if self.artifacts.get("spec_reconciliation"):
+                    self.log(
+                        "RTL generation output was not Verilog; using deterministic reconciled-spec stub.",
+                        refined=True,
+                    )
+                    rtl_code = self._generate_top_stub_from_spec()
+                else:
+                    self.log("RTL generation produced non-Verilog output. Build Failed.", refined=True)
+                    self.state = BuildState.FAIL
+                    return
 
             self.logger.info(f"GENERATED RTL ({self.strategy.name}):\n{rtl_code[:500]}...")
 
@@ -6420,7 +6653,7 @@ REQUIREMENTS:
             if result.warnings:
                 for w in result.warnings[:3]:
                     self.log(f"  WARN: {w}", refined=True)
-            self.transition(BuildState.DFT_SCAN)
+            self._transition_next(BuildState.SYNTHESIS)
         else:
             structured_errors = parse_yosys_errors(
                 "\n".join([result.stdout, result.stderr, *result.errors])
@@ -6448,7 +6681,7 @@ REQUIREMENTS:
                 "SYNTHESIS",
                 result.errors,
                 retry_state=BuildState.RTL_GEN,
-                fallback_state=BuildState.DFT_SCAN,
+                fallback_state=self._next_flow_state(BuildState.SYNTHESIS),
                 structured_errors=structured_errors,
                 confidence_threshold=0.5,
             ):
@@ -6459,17 +6692,24 @@ REQUIREMENTS:
             if self.strict_gates:
                 self.transition(BuildState.FAIL)
                 return
-            self.transition(BuildState.DFT_SCAN)
+            self._transition_next(BuildState.SYNTHESIS)
 
     def do_dft_scan(self):
         """Insert scan chains into synthesized netlist for testability."""
+        if not self._flow_has_stage(BuildState.DFT_SCAN):
+            self.log(
+                "DFT scan is not executable in the selected OSS flow; commercial DFT adapter required.",
+                refined=True,
+            )
+            self._transition_next(BuildState.SYNTHESIS)
+            return
         self.log("Running DFT Scan Chain Insertion...", refined=True)
         synth_netlist = self.artifacts.get("synth_netlist", "")
         dft_dir = f"{OPENLANE_ROOT}/designs/{self.name}/dft"
 
         if not synth_netlist or not os.path.exists(synth_netlist):
             self.log("No synth netlist for DFT scan; skipping.", refined=True)
-            self.transition(BuildState.DFT_ATPG)
+            self._transition_next(BuildState.DFT_SCAN)
             return
 
         os.makedirs(dft_dir, exist_ok=True)
@@ -6505,7 +6745,7 @@ REQUIREMENTS:
                 f"compression={result.compression_ratio:.1f}x",
                 refined=True,
             )
-            self.transition(BuildState.DFT_ATPG)
+            self._transition_next(BuildState.DFT_SCAN)
         else:
             structured_errors = (
                 result.metrics.get("structured_errors", [])
@@ -6524,10 +6764,17 @@ REQUIREMENTS:
 
             self.log(f"DFT scan FAILED: {'; '.join(result.errors[:2])}", refined=True)
             self.artifacts["dft_error"] = result.errors
-            self.transition(BuildState.DFT_ATPG)
+            self._transition_next(BuildState.DFT_SCAN)
 
     def do_dft_atpg(self):
         """Generate ATPG test patterns for scan-inserted netlist."""
+        if not self._flow_has_stage(BuildState.DFT_ATPG):
+            self.log(
+                "ATPG is not executable in the selected OSS flow; commercial ATPG adapter required.",
+                refined=True,
+            )
+            self._transition_next(BuildState.DFT_SCAN)
+            return
         self.log("Running ATPG Pattern Generation...", refined=True)
         scan_netlist = self.artifacts.get("scan_netlist", "")
         dft_dir = f"{OPENLANE_ROOT}/designs/{self.name}/dft"
@@ -6539,19 +6786,18 @@ REQUIREMENTS:
                 self.log("Using synth netlist for ATPG (no scan netlist).", refined=True)
             else:
                 self.log("No netlist for ATPG; skipping to MBIST.", refined=True)
-                self.transition(BuildState.MBIST)
+                self._transition_next(BuildState.DFT_ATPG)
                 return
 
         with console.status("[accent]Generating ATPG Patterns...[/accent]"):
             from .tools.dft_tools import run_atpg, ATPGResult
 
             result = run_atpg(
-                netlist_files=[scan_netlist],
+                scan_netlist=scan_netlist,
                 top_module=self.name,
                 output_dir=dft_dir,
                 target_coverage=95.0,
                 max_patterns=5000,
-                pdk=self.pdk_profile.get("pdk", PDK),
                 timeout=600,
             )
 
@@ -6571,14 +6817,21 @@ REQUIREMENTS:
                 f"{result.undetected} undetected faults",
                 refined=True,
             )
-            self.transition(BuildState.MBIST)
+            self._transition_next(BuildState.DFT_ATPG)
         else:
             self.log(f"ATPG FAILED: {'; '.join(result.errors[:2])}", refined=True)
             self.artifacts["atpg_error"] = result.errors
-            self.transition(BuildState.MBIST)
+            self._transition_next(BuildState.DFT_ATPG)
 
     def do_mbist(self):
         """Generate Memory BIST wrappers for embedded memories."""
+        if not self._flow_has_stage(BuildState.MBIST):
+            self.log(
+                "MBIST is not executable in the selected OSS flow; memory-test compiler required.",
+                refined=True,
+            )
+            self._transition_next(BuildState.DFT_ATPG)
+            return
         self.log("Running Memory BIST Insertion...", refined=True)
         synth_netlist = self.artifacts.get("synth_netlist", "")
         mbist_dir = f"{OPENLANE_ROOT}/designs/{self.name}/mbist"
@@ -6602,7 +6855,7 @@ REQUIREMENTS:
 
         if not memories_found:
             self.log("No embedded memories detected; skipping MBIST.", refined=True)
-            self.transition(BuildState.GLS_SIMULATION)
+            self._transition_next(BuildState.MBIST)
             return
 
         with console.status("[accent]Generating MBIST Wrappers...[/accent]"):
@@ -6610,8 +6863,7 @@ REQUIREMENTS:
             from .tools.dft_tools import run_testability_analysis
 
             test_result = run_testability_analysis(
-                netlist_files=[synth_netlist] if synth_netlist else [],
-                top_module=self.name,
+                rtl_file=synth_netlist,
                 output_dir=mbist_dir,
             )
             self.artifacts["testability_metrics"] = test_result
@@ -6643,24 +6895,35 @@ REQUIREMENTS:
                 mem_configs.append(cfg)
 
             for cfg in mem_configs:
-                mbist_result = generate_mbist_wrapper(
-                    mbist_config=cfg,
-                    output_dir=mbist_dir,
-                    top_module=self.name,
+                wrapper_path = os.path.join(mbist_dir, f"{cfg.memory_instance}_mbist.v")
+                ok, message = generate_mbist_wrapper(
+                    mem_instance=cfg.memory_instance,
+                    mem_depth=cfg.memory_depth,
+                    mem_width=cfg.memory_width,
+                    output_path=wrapper_path,
+                    bist_clock_mhz=cfg.bist_clock_mhz,
+                    test_algorithm=cfg.test_algorithm,
                 )
                 self.log(
                     f"MBIST: {cfg.memory_instance} -> "
-                    f"{mbist_result.get('wrapper_path', 'generated')}",
+                    f"{wrapper_path if ok else message}",
                     refined=True,
                 )
 
         self.artifacts["mbist_dir"] = mbist_dir
         self.artifacts["mbist_configs"] = [cfg.memory_instance for cfg in mem_configs]
         self.log(f"MBIST: {len(mem_configs)} memory BIST wrappers generated.", refined=True)
-        self.transition(BuildState.GLS_SIMULATION)
+        self._transition_next(BuildState.MBIST)
 
     def do_gls_simulation(self):
         """Gate-level simulation with SDF timing annotation."""
+        if not self._flow_has_stage(BuildState.GLS_SIMULATION):
+            self.log(
+                "SDF gate-level simulation is not enabled for this flow; continuing to physical implementation.",
+                refined=True,
+            )
+            self._transition_next(BuildState.SYNTHESIS)
+            return
         self.log("Running Gate-Level Simulation (GLS)...", refined=True)
         scan_netlist = self.artifacts.get("scan_netlist", "")
         synth_netlist = self.artifacts.get("synth_netlist", "")
@@ -6673,7 +6936,7 @@ REQUIREMENTS:
                 self.artifacts["gls_error"] = "No gate netlist available for GLS"
                 self.transition(BuildState.FAIL)
                 return
-            self.transition(BuildState.FLOORPLAN)
+            self._transition_next(BuildState.GLS_SIMULATION)
             return
 
         gls_dir = f"{OPENLANE_ROOT}/designs/{self.name}/gls"
@@ -6749,7 +7012,7 @@ REQUIREMENTS:
                     self.transition(BuildState.FAIL)
                     return
 
-        self.transition(BuildState.FLOORPLAN)
+        self._transition_next(BuildState.GLS_SIMULATION)
 
     def do_power_analysis(self):
         """Post-PnR power analysis with SPEF extraction."""
@@ -7050,7 +7313,7 @@ REQUIREMENTS:
                 self.artifacts["physical_verify_error"] = "No GDS/LEF found for physical verification"
                 self.transition(BuildState.FAIL)
                 return
-            self.transition(BuildState.POST_LAYOUT_SPICE if not self.skip_spice else BuildState.SIGNOFF)
+            self.transition(self._after_physical_verify_state())
             return
 
         gate_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
@@ -7182,10 +7445,17 @@ REQUIREMENTS:
             "lvs_equivalent": lvs_result.equivalent,
         }
 
-        self.transition(BuildState.POST_LAYOUT_SPICE if not self.skip_spice else BuildState.SIGNOFF)
+        self.transition(self._after_physical_verify_state())
 
     def do_post_layout_spice(self):
         """Extract parasitic SPICE from GDS and run ngspice post-layout checks."""
+        if not self._flow_has_stage(BuildState.POST_LAYOUT_SPICE):
+            self.log(
+                "Post-layout SPICE is not part of the selected executable flow; treating it as an optional scoped extension.",
+                refined=True,
+            )
+            self.transition(BuildState.SIGNOFF)
+            return
         if self.skip_spice:
             self.log("Skipping Post-Layout SPICE (--skip-spice).", refined=True)
             self.transition(BuildState.SIGNOFF)

@@ -6,64 +6,32 @@ import json
 import time
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Next stage mapping - CORRECTED ORDER (matches orchestator.py)
-STAGE_FLOW = [
-    "INIT", "SPEC", "SPEC_VALIDATE", "HIERARCHY_EXPAND", "VERIFICATION_PLAN", "RTL_GEN", "RTL_FIX", "LINT_CHECK", "CDC_ANALYZE",
-    "VERIFICATION", "FORMAL_VERIFY", "COVERAGE_CHECK", "REGRESSION", "SDC_GEN", "SYNTHESIS", "FEASIBILITY_CHECK",
-    "DFT_SCAN", "DFT_ATPG", "MBIST", "GLS_SIM", "FLOORPLAN", "HARDENING", "TIMING_ANALYSIS", "CONVERGENCE_REVIEW",
-    "ECO_PATCH", "POWER_ANALYSIS", "PHYSICAL_VERIFY", "POST_LAYOUT_SPICE", "SIGNOFF", "IP_PACKAGE", "SUCCESS",
-]
+_SRC_PATH = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(_SRC_PATH))
 
-STAGE_DESCRIPTIONS = {
-    "INIT": "Initialize workspace, check tool availability, and prepare build directories",
-    "SPEC": "Decompose natural language description into a structured architecture specification (SID JSON)",
-    "SPEC_VALIDATE": "Run 6-stage hardware spec validation: classify design, check completeness, decompose modules, define interfaces, generate behavioral contract",
-    "HIERARCHY_EXPAND": "Evaluate submodule complexity, recursively expand complex submodules into nested specs, and verify interface consistency across the full hierarchy",
-    "VERIFICATION_PLAN": "Generate structured verification plan: test cases, SVA assertions, and coverage metrics",
-    "RTL_GEN": "Generate Verilog/SystemVerilog RTL code from the architecture specification",
-    "RTL_FIX": "Run syntax checks and fix any Verilog syntax errors in the generated RTL",
-    "LINT_CHECK": "Run RTL lint check using Verilator for code quality and style violations",
-    "CDC_ANALYZE": "Identify clock domain crossings and assign synchronization strategies after RTL exists",
-    "VERIFICATION": "Generate a testbench and run functional simulation to verify RTL correctness",
-    "FORMAL_VERIFY": "Write SystemVerilog Assertions and run formal property verification",
-    "COVERAGE_CHECK": "Run simulation with coverage instrumentation and analyze line/branch/toggle coverage",
-    "REGRESSION": "Run regression tests across multiple scenarios and corner cases",
-    "SDC_GEN": "Generate Synopsys Design Constraints (SDC) for timing/clock definitions - INPUT to synthesis",
-    "SYNTHESIS": "Convert RTL to gate-level netlist using Yosys, optimize for timing/area/power",
-    "FEASIBILITY_CHECK": "Verify physical design feasibility AFTER synthesis: actual gate count, timing, PDK constraints",
-    "DFT_SCAN": "Insert scan chains into synthesized netlist for manufacturing testability",
-    "DFT_ATPG": "Generate Automatic Test Pattern Generation (ATPG) patterns for scan testing",
-    "MBIST": "Insert Memory Built-In Self-Test (MBIST) circuits for on-chip memory testing",
-    "GLS_SIM": "Run gate-level simulation to verify netlist matches RTL behavior",
-    "FLOORPLAN": "Generate floorplan configuration and run physical placement",
-    "HARDENING": "Run OpenLane GDSII hardening flow (synthesis → PnR → signoff)",
-    "TIMING_ANALYSIS": "Run static timing analysis at pre-layout, post-place, and post-route",
-    "CONVERGENCE_REVIEW": "Analyze timing/congestion/area convergence and decide on strategy pivots",
-    "ECO_PATCH": "Apply Engineering Change Orders to fix post-layout violations",
-    "POWER_ANALYSIS": "Analyze dynamic and static power consumption across operating modes",
-    "PHYSICAL_VERIFY": "Run DRC (Design Rule Check) and LVS (Layout vs Schematic)",
-    "POST_LAYOUT_SPICE": "Extract parasitic SPICE from GDS and run ngspice post-layout simulation",
-    "SIGNOFF": "Run DRC, LVS, STA, and power signoff checks",
-    "IP_PACKAGE": "Package design as reusable IP with docs, timing models, and test fixtures",
-    "SUCCESS": "Build completed successfully — all quality gates passed",
-    "FAIL": "Build failed — see error log for details",
-}
+from agentic.core.flow_capabilities import (
+    get_stage_descriptions,
+    get_stage_human_names,
+    resolve_flow_profile,
+)
+
+# Next stage mapping - capability-gated by the selected flow profile.
+DEFAULT_FLOW_PROFILE = resolve_flow_profile()
+STAGE_FLOW = list(DEFAULT_FLOW_PROFILE.stages)
+
+STAGE_DESCRIPTIONS = get_stage_descriptions()
 
 
 def get_next_stage(current_stage: str) -> Optional[str]:
     """Get the next stage in the pipeline."""
-    try:
-        idx = STAGE_FLOW.index(current_stage)
-        if idx + 1 < len(STAGE_FLOW):
-            return STAGE_FLOW[idx + 1]
-    except ValueError:
-        pass
-    return None
+    return DEFAULT_FLOW_PROFILE.next_stage(current_stage)
 
 
 ARTIFACT_DESCRIPTIONS = {
@@ -89,10 +57,10 @@ STAGE_ARTIFACT_SUFFIXES = {
     "SPEC": {".json", ".md", ".txt"},
     "SPEC_VALIDATE": {".json", ".md", ".txt"},
     "HIERARCHY_EXPAND": {".json", ".md", ".txt"},
+    "FEASIBILITY_CHECK": {".json", ".rpt", ".log"},
     "VERIFICATION_PLAN": {".json", ".sv", ".sva", ".md", ".txt"},
     "RTL_GEN": {".v", ".sv"},
     "RTL_FIX": {".v", ".sv", ".log"},
-    "LINT_CHECK": {".log", ".rpt", ".txt"},
     "CDC_ANALYZE": {".json", ".rpt", ".log"},
     "VERIFICATION": {".v", ".sv", ".vcd", ".log", ".txt"},
     "FORMAL_VERIFY": {".sby", ".sv", ".v", ".log", ".txt"},
@@ -100,7 +68,7 @@ STAGE_ARTIFACT_SUFFIXES = {
     "REGRESSION": {".json", ".log", ".rpt", ".txt"},
     "SDC_GEN": {".sdc", ".tcl", ".log"},
     "SYNTHESIS": {".v", ".json", ".blif", ".rpt", ".log"},
-    "FEASIBILITY_CHECK": {".json", ".rpt", ".log"},
+    "GLS_SIMULATION": {".v", ".sv", ".vcd", ".log", ".sdf", ".rpt", ".txt"},
     "FLOORPLAN": {".tcl", ".json", ".def", ".odb", ".log"},
     "HARDENING": {".gds", ".def", ".lef", ".odb", ".spef", ".sdf", ".rpt", ".log"},
     "TIMING_ANALYSIS": {".rpt", ".spef", ".sdf", ".log"},
@@ -224,7 +192,9 @@ def collect_stage_artifacts(orchestrator, stage_name: str, design_name: str = ""
         ],
         "FEASIBILITY_CHECK": [
             ("feasibility_result", "Physical design feasibility analysis (JSON)"),
-            ("feasibility_enrichment", "Feasibility verdict, GE estimate, floorplan recommendation, warnings"),
+            ("feasibility_enrichment", "Feasibility verdict, node contract, readiness level, GE estimate, floorplan recommendation, warnings"),
+            ("reconciled_spec", "PDK-feasible reconciled hardware specification (JSON)"),
+            ("spec_change_log", "Automatic spec changes made to satisfy PDK/tool constraints"),
         ],
         "CDC_ANALYZE": [
             ("cdc_result", "Clock domain crossing analysis (JSON)"),
@@ -318,7 +288,7 @@ def collect_stage_decisions(orchestrator, stage_name: str) -> List[str]:
     for entry in orchestrator.build_history:
         if entry.state == stage_name:
             msg = entry.message.lower()
-            if "fallback" in msg or "pivot" in msg or "strategy" in msg:
+            if "fallback" in msg or "pivot" in msg or "strategy" in msg or "spec change" in msg:
                 decisions.append(entry.message[:200])
             elif "gate" in msg and ("pass" in msg or "fail" in msg):
                 decisions.append(entry.message[:200])
@@ -333,7 +303,7 @@ def collect_stage_warnings(orchestrator, stage_name: str) -> List[str]:
     for entry in orchestrator.build_history:
         if entry.state == stage_name:
             msg = entry.message.lower()
-            if any(w in msg for w in ["warn", "near-fail", "degraded", "threshold", "exceeded", "timeout"]):
+            if any(w in msg for w in ["warn", "near-fail", "degraded", "threshold", "exceeded", "timeout", "reconciled"]):
                 warnings.append(entry.message[:200])
     
     return warnings[:10]
@@ -453,40 +423,7 @@ def build_stage_complete_payload(orchestrator, stage_name: str, design_name: str
 
 
 # ─── Human-readable stage name mapping ───────────────────────────────
-STAGE_HUMAN_NAMES = {
-    "INIT": "Initialization",
-    "SPEC": "Architecture Specification",
-    "SPEC_VALIDATE": "Specification Validation",
-    "HIERARCHY_EXPAND": "Hierarchy Expansion",
-    "VERIFICATION_PLAN": "Verification Planning",
-    "RTL_GEN": "RTL Generation",
-    "RTL_FIX": "RTL Syntax Fixing",
-    "LINT_CHECK": "RTL Lint Check",
-    "CDC_ANALYZE": "CDC Analysis",
-    "VERIFICATION": "Verification",
-    "FORMAL_VERIFY": "Formal Verification",
-    "COVERAGE_CHECK": "Coverage Analysis",
-    "REGRESSION": "Regression Testing",
-    "SDC_GEN": "SDC Generation",
-    "SYNTHESIS": "RTL Synthesis",
-    "FEASIBILITY_CHECK": "Feasibility Check",
-    "DFT_SCAN": "DFT Scan Insertion",
-    "DFT_ATPG": "DFT ATPG Patterns",
-    "MBIST": "Memory BIST",
-    "GLS_SIM": "Gate-Level Simulation",
-    "FLOORPLAN": "Floorplanning",
-    "HARDENING": "GDSII Hardening",
-    "TIMING_ANALYSIS": "Static Timing Analysis",
-    "CONVERGENCE_REVIEW": "Convergence Review",
-    "ECO_PATCH": "ECO Patch",
-    "POWER_ANALYSIS": "Power Analysis",
-    "PHYSICAL_VERIFY": "Physical Verification",
-    "POST_LAYOUT_SPICE": "Post-Layout SPICE",
-    "SIGNOFF": "DRC/LVS Signoff",
-    "IP_PACKAGE": "IP Packaging",
-    "SUCCESS": "Build Complete",
-    "FAIL": "Build Failed",
-}
+STAGE_HUMAN_NAMES = get_stage_human_names()
 
 
 def generate_failure_explanation(llm, stage_name: str, design_name: str,

@@ -27,6 +27,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
+from rich.table import Table
 from crewai import Agent, Task, Crew, LLM
 
 
@@ -75,6 +76,8 @@ from .config import (
     get_pdk_profile,
     list_pdk_profiles,
 )
+from .core.feasibility_checker import FeasibilityChecker
+from .core.flow_capabilities import FLOW_PROFILES, resolve_flow_profile
 from .agents.designer import get_designer_agent
 from .agents.testbench_designer import get_testbench_agent
 from .agents.verifier import get_verification_agent, get_error_analyst_agent
@@ -1361,6 +1364,42 @@ def doctor():
     console.print(f"  Recovery actions: RELAX_CLOCK → REDUCE_UTIL → EXPAND_AREA → PIPELINE → FIX_RTL")
     console.print(f"  Default recovery budget: 5 attempts (configurable via --recovery-attempts)")
 
+    # Node contract status
+    try:
+        contract = FeasibilityChecker(PDK).node_contract
+        flow = resolve_flow_profile(pdk=PDK)
+        console.print(f"\n[heading]📜 Node Contract[/heading]")
+        console.print(
+            f"  PDK: [info]{contract.pdk}[/info] | Node: [info]{contract.node}[/info] | "
+            f"Class: [info]{contract.node_class}[/info]"
+        )
+        console.print(
+            f"  Flow status: [info]{contract.flow_status}[/info] | "
+            f"Collateral ready: [{'success' if contract.collateral_ready else 'warning'}]{contract.collateral_ready}[/]"
+        )
+        if contract.missing_capabilities:
+            console.print(
+                "  [warning]Missing signoff capabilities:[/warning] "
+                + ", ".join(contract.missing_capabilities[:6])
+            )
+        console.print(
+            f"  Required signoff evidence gates: [info]{len(contract.required_signoff)}[/info]"
+        )
+        console.print(f"\n[heading]🧭 Executable Flow Profile[/heading]")
+        console.print(
+            f"  Profile: [info]{flow.name}[/info] | Readiness ceiling: [warning]{flow.readiness_ceiling}[/warning]"
+        )
+        console.print(f"  Executable stages: [info]{len(flow.stages)}[/info]")
+        if flow.blocked_extensions:
+            console.print(
+                "  [warning]Capability-gated extensions:[/warning] "
+                + ", ".join(flow.blocked_extensions)
+            )
+        for note in flow.notes[:3]:
+            console.print(f"  - {note}")
+    except Exception as exc:
+        console.print(f"\n[warning]Node contract check skipped:[/warning] {exc}")
+
     if required_failed:
         raise typer.Exit(1)
 
@@ -1375,6 +1414,89 @@ def doctor():
     else:
         console.print("\n[success]Environment checks passed.[/success]")
     console.print("\n[info]To install a PDK:[/info] [accent]agentic install-pdk list[/accent]")
+
+
+@app.command("node-contract")
+def node_contract(
+    pdk: str = typer.Option("", "--pdk", help="PDK profile/name to inspect; defaults to active PDK"),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
+):
+    """Inspect the PDK/node signoff contract AgentIC will enforce before tapeout claims."""
+    checker = FeasibilityChecker(pdk or PDK)
+    contract = checker.node_contract
+    payload = contract.to_dict()
+
+    if json_output:
+        print(json.dumps(payload, indent=2))
+        return
+
+    status_style = "success" if contract.collateral_ready else "warning"
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"Node: [accent]{contract.node}[/accent]",
+                    f"PDK: [info]{contract.pdk}[/info]",
+                    f"Stdcell: [info]{contract.std_cell_library or 'unknown'}[/info]",
+                    f"Class: [info]{contract.node_class}[/info]",
+                    f"Flow status: [info]{contract.flow_status}[/info]",
+                    f"Collateral ready: [{status_style}]{contract.collateral_ready}[/]",
+                    f"Fabrication-ready profile: [{status_style}]{contract.fabrication_ready}[/]",
+                    f"Frequency envelope: {contract.max_reliable_mhz} MHz reliable / {contract.upper_limit_mhz} MHz upper",
+                ]
+            ),
+            title="Node Signoff Contract",
+            border_style=status_style,
+        )
+    )
+
+    table = Table(title="Required Evidence Gates")
+    table.add_column("Gate", style="accent")
+    table.add_column("Required")
+    table.add_column("Tool family")
+    table.add_column("Description")
+    for req in contract.required_signoff:
+        table.add_row(
+            req.key,
+            "yes" if req.required else "no",
+            req.tool_family or "-",
+            req.description,
+        )
+    console.print(table)
+
+    if contract.missing_capabilities:
+        console.print("\n[warning]Blockers before fabrication-ready claims:[/warning]")
+        for blocker in contract.missing_capabilities:
+            console.print(f"  - {blocker}")
+    if contract.notes:
+        console.print("\n[info]Notes:[/info]")
+        for note in contract.notes:
+            console.print(f"  - {note}")
+
+
+@app.command("flow-profiles")
+def flow_profiles(
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
+):
+    """List capability-gated VLSI flow profiles."""
+    payload = {name: profile.to_schema() for name, profile in FLOW_PROFILES.items()}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    table = Table(title="AgentIC Flow Profiles", show_lines=True)
+    table.add_column("Profile", style="accent")
+    table.add_column("Readiness Ceiling", style="warning")
+    table.add_column("Executable Stages", justify="right")
+    table.add_column("Capability-Gated Extensions", style="dim")
+    for name, profile in FLOW_PROFILES.items():
+        table.add_row(
+            name,
+            profile.readiness_ceiling,
+            str(len(profile.stages)),
+            ", ".join(profile.blocked_extensions) or "-",
+        )
+    console.print(table)
 
 
 PDK_INSTALL_CONFIGS = {
@@ -3830,9 +3952,9 @@ def build(
         False, "--skip-openlane", help="Stop after simulation (no RTL→GDSII hardening)"
     ),
     skip_spice: bool = typer.Option(
-        False,
-        "--skip-spice",
-        help="Bypass post-layout ngspice extraction/simulation during physical signoff",
+        True,
+        "--skip-spice/--run-spice",
+        help="Bypass optional scoped post-layout ngspice checks (default; full-chip SPICE is not in the OSS flow)",
     ),
     skip_coverage: bool = typer.Option(
         False,
@@ -3852,7 +3974,7 @@ def build(
     full_signoff: bool = typer.Option(
         False,
         "--full-signoff",
-        help="Run full industry signoff (formal + coverage + regression + DRC/LVS)",
+        help="Run the strongest available OSS evidence gates; commercial signoff still requires external tools",
     ),
     min_coverage: float = typer.Option(
         80.0,
@@ -3865,6 +3987,11 @@ def build(
         help="Enable strict fail-closed gating",
     ),
     pdk: str = typer.Option("", "--pdk", help="Target PDK (auto-detected if omitted)"),
+    flow_profile: str = typer.Option(
+        "",
+        "--flow-profile",
+        help="Executable flow profile: sky130_oss_executable, oss_with_optional_gls, or commercial_signoff",
+    ),
     pdk_path: str = typer.Option(
         "", "--pdk-path", help="Path to a custom PDK directory to use for this build"
     ),
@@ -4145,6 +4272,24 @@ def build(
     if thinking_level not in {"minimal", "normal", "verbose"}:
         raise typer.BadParameter("--thinking-level must be one of: minimal, normal, verbose")
     run_startup_diagnostics(strict=strict_gates)
+    resolved_flow = resolve_flow_profile(flow_profile, pdk=pdk_profile)
+    if flow_profile and flow_profile not in FLOW_PROFILES and resolved_flow.name == "sky130_oss_executable":
+        console.print(
+            f"[warning]Unknown or unavailable flow profile '{flow_profile}'. Using {resolved_flow.name}.[/warning]"
+        )
+    elif flow_profile and flow_profile != resolved_flow.name:
+        console.print(
+            f"[warning]Flow profile '{flow_profile}' is not available with current tool capabilities. Using {resolved_flow.name}.[/warning]"
+        )
+    console.print(
+        f"[dim]  Flow: {resolved_flow.label} | readiness ceiling: {resolved_flow.readiness_ceiling}[/dim]"
+    )
+    if resolved_flow.blocked_extensions:
+        console.print(
+            "[dim]  Capability-gated: "
+            + ", ".join(resolved_flow.blocked_extensions)
+            + "[/dim]"
+        )
     llm = get_llm(show_verbose=show_thinking)
 
     # Build Multi-LLM Role Map for the CLI
@@ -4224,6 +4369,7 @@ def build(
         coverage_profile=coverage_profile,
         no_golden_templates=no_golden_templates,
         thinking_level=thinking_level,
+        flow_profile=resolved_flow.name,
     )
     orchestrator.hardening_recovery_attempts_max = recovery_attempts
     if macro_manifest_path:
@@ -4564,17 +4710,18 @@ def dft(
     testability: bool = typer.Option(
         False, "--testability", help="Run RTL testability analysis only"
     ),
+    experimental: bool = typer.Option(
+        False,
+        "--experimental",
+        help="Allow non-signoff experimental OSS DFT helper execution",
+    ),
     pdk: str = typer.Option("", "--pdk", help="PDK name (auto-detected if omitted)"),
 ):
-    """Run DFT scan insertion and ATPG pattern generation.
+    """Run advisory DFT checks or experimental DFT helpers.
 
-    PRODUCTION REQUIRED: No chip ships without DFT.
-    - Scan chain insertion
-    - ATPG pattern generation
-    - MBIST wrapper generation
-    - JTAG infrastructure
-
-    Note: --pdk is optional. If not provided, AgentIC will auto-detect.
+    Production scan insertion, ATPG, and MBIST require commercial or
+    technology-specific tools. The default OSS flow does not claim these
+    commands are fabrication signoff.
     """
     verify_license()
 
@@ -4593,7 +4740,7 @@ def dft(
         Panel(
             f"[accent]DFT Scan Insertion[/accent]\n"
             f"RTL: {rtl_file}\nTop: {top}\nChains: {scan_chains}\nPDK: {effective_pdk}",
-            title="🔬 Design for Test",
+            title="Design for Test (Capability-Gated)",
         )
     )
 
@@ -4606,6 +4753,16 @@ def dft(
             for issue in analysis["dft_issues"]:
                 console.print(f"    - {issue}")
         return
+
+    if not experimental:
+        console.print(
+            "[warning]Production DFT/ATPG is not available in the default OSS flow.[/warning]\n"
+            "Use --testability for advisory analysis, configure a commercial DFT adapter, "
+            "or pass --experimental for non-signoff helper experiments."
+        )
+        raise typer.Exit(1)
+
+    os.environ["AGENTIC_EXPERIMENTAL_DFT"] = "1"
 
     result = run_scan_insertion(
         rtl_files=[rtl_file],

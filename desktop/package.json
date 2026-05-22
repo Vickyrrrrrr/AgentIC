@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "description": "AgentIC — Autonomous AI-Powered Silicon Design Studio (Desktop)",
   "private": true,
-  "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "dev:fresh": "bash scripts/dev-fresh.sh",
     "build": "electron-vite build",
+    "run:built": "bash scripts/run-built.sh",
     "preview": "electron-vite preview",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",

@@ -7,7 +7,7 @@ Modules:
     vlsi_tools.py         - Core simulation, synthesis validation, OpenLane
     synth_tools.py        - Direct Yosys synthesis (RTL → gate-level netlist)
     sta_tools.py          - OpenSTA static timing analysis + multi-corner STA
-    dft_tools.py          - DFT scan insertion, ATPG, MBIST, JTAG
+    dft_tools.py          - Experimental/advisory DFT helpers; production DFT needs commercial adapters
     power_tools.py         - SPEF parsing, power analysis, IR-drop
     physical_tools.py      - Magic DRC, Netgen LVS, antenna checking
     signoff_reporter.py    - Structured QOR/DFM report generation

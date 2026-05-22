@@ -73,8 +73,8 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
 
           <p className="auth-value-prop">
             Describe any digital chip in plain English. Our multi-agent AI system writes RTL, 
-            verifies logic, runs formal proofs, and generates fabrication-ready GDSII — 
-            all without human intervention.
+            verifies logic, runs formal proofs, and prepares honest OSS layout evidence with
+            commercial signoff blockers called out.
           </p>
 
           <div className="auth-features">
@@ -96,7 +96,7 @@ export const AuthPage = ({ onAuth }: { onAuth: () => void }) => {
               <div className="auth-feature-icon">🔬</div>
               <div>
                 <div className="auth-feature-title">Sky130 PDK</div>
-                <div className="auth-feature-desc">Open-source fabrication-ready output</div>
+                <div className="auth-feature-desc">Open-source layout candidate output</div>
               </div>
             </div>
           </div>

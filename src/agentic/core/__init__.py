@@ -14,7 +14,14 @@ Modules:
 from .architect import ArchitectModule, StructuredSpecDict
 from .spec_generator import HardwareSpecGenerator, HardwareSpec
 from .hierarchy_expander import HierarchyExpander, HierarchyResult
-from .feasibility_checker import FeasibilityChecker, FeasibilityResult
+from .feasibility_checker import (
+    FeasibilityChecker,
+    FeasibilityIssue,
+    FeasibilityResult,
+    NodeContract,
+    SignoffRequirement,
+)
+from .design_intent_reconciler import DesignIntentReconciler, ReconciliationResult
 from .cdc_analyzer import CDCAnalyzer, CDCResult
 from .verification_planner import VerificationPlanner, VerificationPlan
 from .waveform_expert import WaveformExpertModule
@@ -26,6 +33,14 @@ from .vlsi_rag import VLSIKnowledgeBase, build_vlsi_context, smart_chunk, classi
 from .context_evolution import MultiAgentContextEvolver, ContextEvolution
 from .rtl_corpus import RTLCorpusBuilder
 from .eda_capabilities import EDACapabilities, detect_eda_capabilities
+from .flow_capabilities import (
+    FlowProfile,
+    StageInfo,
+    FLOW_PROFILES,
+    STAGE_REGISTRY,
+    resolve_flow_profile,
+    get_stage_info,
+)
 
 __all__ = [
     "ArchitectModule",
@@ -35,7 +50,12 @@ __all__ = [
     "HierarchyExpander",
     "HierarchyResult",
     "FeasibilityChecker",
+    "FeasibilityIssue",
     "FeasibilityResult",
+    "NodeContract",
+    "SignoffRequirement",
+    "DesignIntentReconciler",
+    "ReconciliationResult",
     "CDCAnalyzer",
     "CDCResult",
     "VerificationPlanner",
@@ -57,4 +77,10 @@ __all__ = [
     "RTLCorpusBuilder",
     "EDACapabilities",
     "detect_eda_capabilities",
+    "FlowProfile",
+    "StageInfo",
+    "FLOW_PROFILES",
+    "STAGE_REGISTRY",
+    "resolve_flow_profile",
+    "get_stage_info",
 ]
