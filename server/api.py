@@ -789,6 +789,8 @@ STAGE_META: Dict[str, Dict[str, str]] = get_stage_meta()
 
 _KNOWN_MODEL_PREFIXES = (
     "openai/",
+    "azure/",
+    "azure_ai/",
     "groq/",
     "ollama/",
     "anthropic/",
@@ -797,6 +799,7 @@ _KNOWN_MODEL_PREFIXES = (
     "huggingface/",
     "together_ai/",
     "mistral/",
+    "deepseek/",
 )
 
 BYOK_DEFAULT_MODEL = (
@@ -2783,6 +2786,8 @@ async def chat_converse(
                 base_url = group.get("base_url", "").strip() or base_url
                 if "infinity/" in model_name.lower():
                     api_version = os.getenv("INFINITY_API_VERSION")
+                elif model_name.lower().startswith("azure/"):
+                    api_version = os.getenv("AZURE_API_VERSION") or os.getenv("VERILOG_CODEGEN_API_VERSION")
                 break
 
     # Normalize model name for litellm

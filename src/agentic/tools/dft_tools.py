@@ -22,6 +22,7 @@ Usage:
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,7 +36,154 @@ def _experimental_dft_enabled() -> bool:
         "true",
         "yes",
         "on",
+    } or os.getenv("AGENTIC_FLOW_PROFILE", "").strip().lower() in {
+        "sky130_oss_experimental_complete",
+        "experimental_complete",
     }
+
+
+def _infer_clock_reset(netlist_path: str) -> Tuple[str, str, bool]:
+    clock = os.getenv("AGENTIC_DFT_CLOCK", "").strip()
+    reset = os.getenv("AGENTIC_DFT_RESET", "").strip()
+    active_low = os.getenv("AGENTIC_DFT_RESET_ACTIVE_LOW", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        with open(netlist_path, "r", encoding="utf-8", errors="ignore") as f:
+            src = f.read(20000)
+    except OSError:
+        return clock or "clk", reset or "rst_n", active_low or True
+
+    ports = re.findall(r"\b(?:input|inout)\s+(?:wire|reg|logic)?\s*(?:\[[^\]]+\]\s*)?([A-Za-z_][A-Za-z0-9_$]*)", src)
+    lowered = {p.lower(): p for p in ports}
+    if not clock:
+        for key in ("clk", "clock", "wb_clk_i", "core_clk"):
+            if key in lowered:
+                clock = lowered[key]
+                break
+    if not reset:
+        for key in ("rst_n", "reset_n", "resetb", "reset_b", "rst", "reset", "wb_rst_i"):
+            if key in lowered:
+                reset = lowered[key]
+                break
+    if reset and (reset.endswith("_n") or reset.lower().endswith("n")):
+        active_low = True
+    return clock or "clk", reset or "rst_n", active_low
+
+
+def _find_liberty_and_cell_models(pdk: str = "sky130", pdk_root: Optional[str] = None) -> Tuple[str, str]:
+    root = pdk_root or os.getenv("PDK_ROOT", "")
+    candidates = []
+    if root:
+        pdk_dirs = [pdk, "sky130A" if pdk.startswith("sky130") else pdk]
+        libs = ["sky130_fd_sc_hd", "sky130_fd_sc_hdll", "gf180mcu_fd_sc_mcu7t5v0"]
+        for pdk_dir in pdk_dirs:
+            for lib in libs:
+                base = os.path.join(root, pdk_dir, "libs.ref", lib)
+                candidates.append(base)
+    liberty = os.getenv("AGENTIC_DFT_LIBERTY", "").strip()
+    cell_model = os.getenv("AGENTIC_DFT_CELL_MODELS", "").strip()
+    for base in candidates:
+        if not liberty and os.path.isdir(os.path.join(base, "lib")):
+            for name in sorted(os.listdir(os.path.join(base, "lib"))):
+                if name.endswith(".lib") and ("tt" in name or not liberty):
+                    liberty = os.path.join(base, "lib", name)
+                    if "tt" in name:
+                        break
+        if not cell_model:
+            verilog_dir = os.path.join(base, "verilog")
+            if os.path.isdir(verilog_dir):
+                for name in sorted(os.listdir(verilog_dir)):
+                    if name.endswith((".v", ".sv")) and ("blackbox" not in name.lower()):
+                        cell_model = os.path.join(verilog_dir, name)
+                        break
+    return liberty, cell_model
+
+
+def _run_fault_chain(
+    netlist: str,
+    output_netlist: str,
+    pdk: str,
+    pdk_root: Optional[str],
+    timeout: int,
+) -> Optional[Tuple[bool, str, str, str]]:
+    fault_bin = shutil.which("fault")
+    if not fault_bin:
+        return None
+    liberty, cell_model = _find_liberty_and_cell_models(pdk, pdk_root)
+    if not liberty or not cell_model:
+        return False, "", "", "Fault found, but Liberty/cell-model Verilog could not be resolved."
+    clock, reset, active_low = _infer_clock_reset(netlist)
+    cmd = [
+        fault_bin,
+        "chain",
+        "--clock",
+        clock,
+        "--reset",
+        reset,
+        "-l",
+        liberty,
+        "-c",
+        cell_model,
+        "-o",
+        output_netlist,
+        netlist,
+    ]
+    if active_low:
+        cmd.insert(cmd.index("-l"), "--activeLow")
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return proc.returncode == 0 and os.path.exists(output_netlist), proc.stdout, proc.stderr, " ".join(cmd)
+
+
+def _run_fault_atpg(
+    netlist: str,
+    output_dir: str,
+    pdk: str,
+    pdk_root: Optional[str],
+    target_coverage: float,
+    max_patterns: int,
+    timeout: int,
+) -> Optional[Tuple[bool, str, str, str, str]]:
+    fault_bin = shutil.which("fault")
+    if not fault_bin:
+        return None
+    _liberty, cell_model = _find_liberty_and_cell_models(pdk, pdk_root)
+    if not cell_model:
+        return False, "", "", "", "Fault found, but cell-model Verilog could not be resolved."
+    clock, reset, active_low = _infer_clock_reset(netlist)
+    cut_netlist = os.path.join(output_dir, os.path.basename(netlist).replace(".v", ".cut.v"))
+    cut_cmd = [fault_bin, "cut", "-o", cut_netlist, netlist, "--clock", clock, "--reset", reset]
+    if active_low:
+        cut_cmd.append("--activeLow")
+    cut_proc = subprocess.run(cut_cmd, capture_output=True, text=True, timeout=timeout)
+    if cut_proc.returncode != 0 or not os.path.exists(cut_netlist):
+        return False, cut_proc.stdout, cut_proc.stderr, "", " ".join(cut_cmd)
+
+    atpg_cmd = [
+        fault_bin,
+        "-c",
+        cell_model,
+        "-v",
+        "100",
+        "-r",
+        "50",
+        "-m",
+        str(target_coverage),
+        "--ceiling",
+        str(max_patterns),
+        cut_netlist,
+        "--clock",
+        clock,
+        "--reset",
+        reset,
+    ]
+    if active_low:
+        atpg_cmd.append("--activeLow")
+    proc = subprocess.run(atpg_cmd, capture_output=True, text=True, timeout=timeout)
+    return proc.returncode == 0, proc.stdout, proc.stderr, cut_netlist, " ".join(atpg_cmd)
 
 
 @dataclass
@@ -157,6 +305,48 @@ def run_scan_insertion(
 
     if errors:
         return _error_dft_result(errors, scan_netlist)
+
+    fault_result = _run_fault_chain(
+        netlist=rtl_files[0],
+        output_netlist=scan_netlist,
+        pdk=pdk,
+        pdk_root=pdk_root,
+        timeout=timeout,
+    )
+    if fault_result is not None:
+        ok, stdout, stderr, command = fault_result
+        if ok:
+            faults = _parse_fault_count(stdout + "\n" + stderr)
+            coverage = _parse_test_coverage(stdout + "\n" + stderr)
+            return DFTResult(
+                ok=True,
+                scan_netlist_path=scan_netlist,
+                scan_chain_count=scan_chain_count,
+                total_faults=faults.get("total", 0),
+                detected_faults=faults.get("detected", 0),
+                undetected_faults=faults.get("undetected", 0),
+                atpg_coverage_percent=coverage,
+                test_pattern_count=faults.get("patterns", 0),
+                compression_ratio=1.0,
+                scan_enable_signal=scan_enable_signal,
+                warnings=[],
+                errors=[],
+                diagnostics=[f"Fault command: {command}", stdout[-2000:]],
+                metrics={"dft_method": "fault_chain", "scan_chains": scan_chain_count},
+            )
+        errors.append(
+            "Fault scan chain insertion failed. "
+            + (command if command else "")
+            + "\n"
+            + "\n".join(x for x in [stdout[-2000:], stderr[-2000:]] if x)
+        )
+        return _error_dft_result(errors, scan_netlist)
+
+    errors.append(
+        "Fault CLI not found on PATH. Install AUCOHL/Fault or use nix run .#fault; "
+        "AgentIC will not run fake Yosys scan insertion."
+    )
+    return _error_dft_result(errors, scan_netlist)
 
     commands = _build_dft_script(
         rtl_files=rtl_files,
@@ -315,6 +505,8 @@ def run_atpg(
     target_coverage: float = 99.0,
     clock_cycles: int = 2,
     include_transparent: bool = True,
+    pdk: str = "sky130",
+    pdk_root: Optional[str] = None,
     timeout: int = 600,
     design_name: Optional[str] = None,
 ) -> ATPGResult:
@@ -355,6 +547,58 @@ def run_atpg(
     if not os.path.exists(scan_netlist):
         errors.append(f"Scan netlist not found: {scan_netlist}")
         return _error_atpg_result(errors, pattern_file, fault_file)
+
+    fault_result = _run_fault_atpg(
+        netlist=scan_netlist,
+        output_dir=output_dir,
+        pdk=pdk,
+        pdk_root=pdk_root,
+        target_coverage=target_coverage,
+        max_patterns=max_patterns,
+        timeout=timeout,
+    )
+    if fault_result is not None:
+        ok, stdout, stderr, cut_netlist, command = fault_result
+        faults = _parse_fault_count(stdout + "\n" + stderr)
+        coverage = _parse_test_coverage(stdout + "\n" + stderr)
+        pattern_count = faults.get("patterns", 0)
+        with open(fault_file, "w") as f:
+            json.dump(
+                {
+                    "design": design_name,
+                    "method": "fault",
+                    "command": command,
+                    "cut_netlist": cut_netlist,
+                    "coverage_percent": coverage,
+                    "total_faults": faults.get("total", 0),
+                    "detected": faults.get("detected", 0),
+                    "undetected": faults.get("undetected", 0),
+                    "stdout_excerpt": stdout[-5000:],
+                    "stderr_excerpt": stderr[-5000:],
+                },
+                f,
+                indent=2,
+            )
+        with open(pattern_file, "w") as f:
+            f.write("// Fault ATPG pattern export placeholder\n")
+            f.write(f"// See {fault_file} for coverage and generated Fault artifacts.\n")
+        return ATPGResult(
+            ok=ok and coverage >= target_coverage,
+            pattern_file=pattern_file,
+            fault_file=fault_file,
+            total_faults=faults.get("total", 0),
+            detected=faults.get("detected", 0),
+            undetected=faults.get("undetected", 0),
+            untestable=faults.get("untestable", 0),
+            coverage_percent=coverage,
+            pattern_count=pattern_count,
+            compression_ratio=1.0,
+            scan_chain_info={"method": "fault", "cut_netlist": cut_netlist},
+            errors=[] if ok else [stderr[-2000:] or stdout[-2000:] or "Fault ATPG failed"],
+        )
+
+    errors.append("Fault CLI not found on PATH. Install AUCOHL/Fault for experimental OSS ATPG.")
+    return _error_atpg_result(errors, pattern_file, fault_file)
 
     commands = [
         f"# ATPG for {design_name}",

@@ -1,137 +1,239 @@
-# Industry-Standard VLSI Pipeline Architecture
+# AgentIC VLSI Pipeline
 
-This document maps the AgentIC orchestrator flow to an industry-standard ASIC/VLSI pipeline. It details the exact sequence of stages from initial architecture to final tape-out, highlighting the specific EDA tools and physical signoff mechanisms invoked at each step.
+This document describes the current AgentIC chip-build flow and its limits.
 
-## RTL-to-GDSII Pipeline Flow
+## Readiness Levels
 
-The execution loop operates as an automated RTL-to-GDSII pipeline, heavily utilizing the OSS-CAD-Suite and OpenLane/OpenROAD toolchains.
+AgentIC's default open-source flow produces an **OSS layout candidate**, not a
+commercial fabrication-ready signoff package.
 
-```mermaid
-flowchart TD
-    %% 1. Specification
-    subgraph Spec ["1. Architecture & Spec"]
-        direction TB
-        INIT["PDK Setup"]
-        SPEC["Spec Generation"]
-        SPEC_VAL["Spec Validation"]
-        HIER_EXP["Hierarchy Expansion"]
-        FEAS_CHK["Feasibility Check"]
-        CDC["CDC Analysis"]
-        
-        INIT --> SPEC --> SPEC_VAL --> HIER_EXP --> FEAS_CHK --> CDC
-    end
+```text
+Default OSS flow:
+  OSS_LAYOUT_CANDIDATE
 
-    %% 2. RTL
-    subgraph RTL ["2. RTL Implementation"]
-        direction TB
-        VERIF_PLAN["Verification Plan"]
-        RTL_GEN["RTL Generation"]
-        RTL_FIX["Lint & Syntax Fix"]
-        
-        VERIF_PLAN --> RTL_GEN --> RTL_FIX
-        RTL_FIX -. "Lint Errors" .-> RTL_GEN
-    end
+Experimental complete OSS flow:
+  OSS_TEST_ENHANCED_LAYOUT_CANDIDATE
 
-    %% 3. Verification
-    subgraph Verif ["3. Verification"]
-        direction TB
-        SIM["Functional Sim"]
-        FORMAL["Formal Verif"]
-        COV["Coverage Check"]
-        REGRESS["Regression"]
-        
-        SIM --> FORMAL --> COV
-        COV -. "Low Coverage" .-> SIM
-        COV --> REGRESS
-    end
-
-    %% 4. Synthesis
-    subgraph Logic ["4. Synthesis & DFT"]
-        direction TB
-        SDC["SDC Constraints"]
-        SYNTH["Logic Synthesis"]
-        SCAN["Scan Insertion"]
-        ATPG["ATPG Pattern Gen"]
-        MBIST["Memory BIST"]
-        GLS["Gate-Level Sim"]
-        
-        SDC --> SYNTH --> SCAN --> ATPG --> MBIST --> GLS
-    end
-
-    %% 5. Physical
-    subgraph PD ["5. Physical Design"]
-        direction TB
-        FP["Floorplan & Macro"]
-        PLACE["Place & Route"]
-        STA["Static Timing (STA)"]
-        CONV["Convergence"]
-        ECO["ECO Patch"]
-        
-        FP --> PLACE --> STA --> CONV
-        CONV -. "Setup/Hold Violation" .-> ECO
-        CONV -. "Congestion" .-> FP
-    end
-
-    %% 6. Signoff
-    subgraph SignoffPhase ["6. Signoff"]
-        direction TB
-        PWR["Power Analysis"]
-        PHYS["DRC / LVS Signoff"]
-        POST_SIM["Post-Layout SPICE"]
-        GDS["GDSII Export"]
-        IP["IP Package"]
-        
-        PWR --> PHYS --> POST_SIM --> GDS --> IP
-    end
-
-    %% Connect the major phases linearly
-    CDC --> VERIF_PLAN
-    RTL_FIX --> SIM
-    SIM -. "Logic Bugs" .-> RTL_GEN
-    REGRESS --> SDC
-    GLS --> FP
-    ECO --> PWR
-    CONV --> PWR
+Commercial/foundry signoff flow:
+  FAB_READY only after proprietary/foundry signoff passes
 ```
 
-## Toolchain & Pipeline Mapping
+Why this matters:
 
-An industry-standard ASIC flow integrates multiple specialized tools. Below is exactly what happens under the hood during the pipeline stages:
+- Open-source tools can generate useful RTL, verification, synthesis, layout,
+  timing, DRC/LVS-style evidence, and reports.
+- True fabrication readiness still needs foundry-qualified signoff decks,
+  production DFT/ATPG/MBIST, signoff STA, extraction, IR/EM, reliability checks,
+  and final foundry-accepted GDS/OASIS checks.
+- DFT scan, ATPG, MBIST, GLS, and post-layout SPICE are therefore marked
+  **experimental** unless commercial/foundry tools are configured.
 
-### 1. Specification & Planning (`SPEC` ➔ `CDC_ANALYZE`)
-- **Action:** Decomposes the design into sub-modules, assigns clock domains, and establishes microarchitectural contracts.
-- **Feasibility:** Checks required Gate Equivalents (GE), assesses OpenRAM macro requirements, and flags multi-clock asynchronous resets.
+## Flow Profiles
 
-### 2. RTL Design & Linting (`RTL_GEN` ➔ `RTL_FIX`)
-- **Tools:** `Verilator` (linting), `Slang` (SystemVerilog validation).
-- **Action:** SystemVerilog modules are generated and immediately compiled. The `IncrementalFixEngine` surgically resolves lint errors (e.g., width mismatches, undeclared nets) based strictly on Verilator outputs before the design is allowed to proceed to verification.
+### `sky130_oss_executable`
 
-### 3. Verification & Formal (`VERIFICATION` ➔ `REGRESSION`)
-- **Simulation:** `Icarus Verilog (iverilog/vvp)` or `Verilator` is used to compile testbenches against the RTL.
-- **Formal:** `SymbiYosys (sby)` evaluates SystemVerilog Assertions (SVA) for property checking, boundedness, and liveness.
-- **Coverage:** Line, toggle, and branch coverage is collected. If coverage dips below the `min_coverage` threshold (e.g., 80%), the pipeline loops back to augment the testbench.
+Default executable open-source flow:
 
-### 4. Synthesis & DFT (`SYNTHESIS` ➔ `GLS_SIMULATION`)
-- **Constraints:** `OpenROAD` constraint generation (SDC files).
-- **Synthesis:** `Yosys` maps RTL to standard cells (e.g., Sky130).
-- **DFT & Equivalence:** `Eqy` is used for Logic Equivalence Checking (LEC) to ensure the synthesized netlist perfectly matches the RTL logic. Scan insertion and ATPG are handled in the backend flow.
-- **GLS:** Gate-Level Simulation confirms the netlist still satisfies the testbench post-synthesis.
+```text
+spec
+-> feasibility and PDK reconciliation
+-> RTL generation
+-> RTL contract gate
+-> lint/syntax/width repair
+-> testbench generation
+-> simulation/formal/coverage
+-> SDC generation
+-> Yosys synthesis
+-> OpenLane/OpenROAD physical design
+-> OpenSTA timing
+-> Magic/Netgen physical checks
+-> report/package
+```
 
-### 5. Physical Design (`FLOORPLAN` ➔ `ECO_PATCH`)
-- **Tools:** `OpenLane` and `OpenROAD` environment.
-- **Action:** Core utilization, die area, macro placement, pin configuration, Clock Tree Synthesis (CTS), and global/detailed routing.
-- **Automated Convergence:** The orchestrator extracts Worst Negative Slack (WNS), Total Negative Slack (TNS), and routing congestion from OpenROAD logs. If setup/hold violations or heavy routing congestion occurs, the pipeline dynamically reverts to `FLOORPLAN` (to adjust density) or applies an `ECO_PATCH`.
+Excluded by default:
 
-### 6. Signoff (`POWER_ANALYSIS` ➔ `IP_PACKAGE`)
-- **Timing:** `OpenSTA` validates final post-route setup, hold, and slew metrics.
-- **Physical Verification:** `Magic` handles Design Rule Checks (DRC) and antenna checks, while `Netgen` performs Layout vs Schematic (LVS) matching.
-- **Output:** The orchestrator generates a clean GDSII layout, LEF macros, and SPEF parasitics, officially completing the pipeline (`SUCCESS`).
+```text
+DFT_SCAN
+DFT_ATPG
+MBIST
+GLS_SIMULATION
+POST_LAYOUT_SPICE
+```
 
-## Error Parsing and Convergence Mitigation
-In a real VLSI flow, tools frequently encounter physical limits. The orchestrator handles EDA crashes proactively:
+### `sky130_oss_experimental_complete`
 
-1. **Fingerprinting & State Tracking:** If an exact failure loops (e.g., a specific CDC violation or DRC spacing error), the state machine prevents infinite iterations by applying surgical logic fixes or relaxing constraints.
-2. **Back-end Pipeline Recovery (`PipelineErrorRecovery`):** 
-   - **Timing Failures:** Adjusts `SYNTH_STRATEGY` or target frequency in `config.tcl`.
-   - **Congestion:** If global routing fails, the core utilization (`FP_CORE_UTIL`) is lowered dynamically, and macro placements are spaced further apart before restarting OpenLane.
-   - **Equivalence Failures:** Triggers a halt and re-evaluates the Yosys synthesis mapping directives.
+Adds experimental extensions:
+
+```text
+DFT_SCAN
+DFT_ATPG
+MBIST
+GLS_SIMULATION
+POST_LAYOUT_SPICE
+```
+
+These stages can provide research evidence, but they are not production signoff.
+
+## Pipeline Diagram
+
+```text
+1. Spec / PDK / Feasibility
+   PDK setup
+   -> spec generation
+   -> spec validation
+   -> hierarchy expansion
+   -> feasibility check
+   -> PDK-aware reconciliation
+   -> CDC analysis
+
+2. RTL Generation
+   verification plan
+   -> RTL generation
+   -> universal RTL contract gate
+   -> RTL syntax/lint/width repair
+
+3. Verification
+   testbench from actual RTL ports
+   -> static TB gate
+   -> Verilator compile gate
+   -> simulation
+   -> formal checks
+   -> coverage/regression
+
+   If simulation fails:
+   logs/waveforms
+   -> classify RTL bug or TB bug
+   -> repair RTL or regenerate/fix TB
+   -> rerun gates and simulation
+
+4. Synthesis
+   SDC generation
+   -> Yosys synthesis
+   -> optional LEC/EQY evidence
+
+5. Optional Experimental Extensions
+   scan
+   -> ATPG
+   -> MBIST wrapper
+   -> GLS
+   -> scoped post-layout SPICE
+
+6. Physical Design
+   floorplan/macro planning
+   -> placement
+   -> CTS
+   -> routing
+   -> OpenSTA timing
+   -> ECO/floorplan recovery if needed
+
+7. OSS Checks and Packaging
+   power estimate
+   -> Magic DRC / antenna evidence
+   -> Netgen LVS evidence
+   -> GDS/LEF/reports
+   -> IP package
+```
+
+```mermaid
+flowchart LR
+    A["Spec + Feasibility"] --> B["RTL + Contract Gate"]
+    B --> C["TB + Verification"]
+    C --> D["Synthesis"]
+    D --> E["Physical Design"]
+    E --> F["OSS Checks + Package"]
+    D -. experimental .-> X["DFT / ATPG / MBIST / GLS / SPICE"]
+    C -. fail .-> R["Log/Waveform Diagnosis"]
+    R -. RTL bug .-> B
+    R -. TB bug .-> C
+```
+
+## Universal RTL Contract Gate
+
+Before synthesis, AgentIC enforces PDK-aware RTL rules:
+
+- Large SRAM/RAM/ROM/register-file storage becomes a memory macro wrapper.
+- ADC, DAC, PLL, TRNG, bandgap, LDO, and other analog/custom blocks become
+  hard-macro interfaces unless real macro collateral is supplied.
+- Internal `inout` and internal tri-state buses are rejected.
+- Internal bidirectional intent is rewritten as `*_i`, `*_o`, and `*_oe`.
+- Only top-level pad boundaries may use `inout`.
+- Required macro modules must be black-box wrappers and must not contain
+  synthesizable `reg mem[...]` arrays.
+
+Source of truth:
+
+```text
+designs/<name>/src/*.v
+reconciled_spec.json
+spec_change_log.json
+```
+
+Derived artifacts such as `*_combined.v`, `synth_out/*`, SPICE files, and gate
+JSON reports are evidence from a specific run. They must be regenerated or
+treated as stale when RTL changes.
+
+## Testbench Verification Flow
+
+AgentIC does not blindly trust an LLM-generated testbench.
+
+```text
+RTL generated
+-> testbench generated from actual ports
+-> static TB gate
+-> Verilator compile gate
+-> simulation
+-> waveform/log analysis if failed
+-> RTL or TB repair loop
+```
+
+Checks:
+
+- Static gate: DUT instance, stimulus, checking logic, and `TEST PASSED` /
+  `TEST FAILED` markers.
+- Compile gate: RTL and testbench compile together with Verilator.
+- Simulation: behavior is checked by the self-checking testbench.
+- Failure diagnosis: logs/waveforms decide whether to repair RTL or TB.
+
+## Experimental Stages
+
+### DFT Scan and ATPG
+
+Open/free tools may provide partial scan/ATPG evidence. Production DFT still
+requires commercial-grade scan insertion, ATPG coverage closure, test-mode
+constraints, physical awareness, and ATE-ready pattern export.
+
+### MBIST
+
+Generated MBIST wrappers are not a replacement for a real MBIST compiler or
+memory-vendor BIST/BISR collateral.
+
+### GLS
+
+GLS is meaningful only with a mapped gate netlist, cell simulation models, SDF,
+SDF back-annotation, and a compatible simulator. Without SDF, it is a gate-level
+sanity check, not timing signoff.
+
+### Post-Layout SPICE
+
+SPICE is useful for analog blocks, SRAM/custom cells, IO/pads, tiny extracted
+blocks, or selected critical paths. Full-chip SPICE for a digital SoC is usually
+not practical.
+
+## Why Proprietary Tools Are Still Needed
+
+To call a chip fabrication-ready, the final handoff normally needs:
+
+- foundry-qualified DRC/LVS/antenna/DFM decks,
+- multi-corner multi-mode signoff STA,
+- signoff extraction,
+- IR drop and electromigration analysis,
+- reliability checks,
+- production DFT scan insertion,
+- ATPG fault coverage and ATE patterns,
+- MBIST/BISR for memories,
+- final GDS/OASIS checks accepted by the foundry.
+
+AgentIC can prepare the design and gather open-source evidence. Final
+fabrication readiness still depends on the selected node's foundry/commercial
+signoff flow.
+

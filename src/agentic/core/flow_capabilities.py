@@ -140,7 +140,7 @@ OPTIONAL_GLS_STAGES = [
     *SKY130_OSS_STAGES[SKY130_OSS_STAGES.index("FLOORPLAN") :],
 ]
 
-COMMERCIAL_SIGNOFF_STAGES = [
+EXPERIMENTAL_COMPLETE_STAGES = [
     *SKY130_OSS_STAGES[: SKY130_OSS_STAGES.index("FLOORPLAN")],
     "DFT_SCAN",
     "DFT_ATPG",
@@ -152,6 +152,8 @@ COMMERCIAL_SIGNOFF_STAGES = [
     "IP_PACKAGE",
     "SUCCESS",
 ]
+
+COMMERCIAL_SIGNOFF_STAGES = list(EXPERIMENTAL_COMPLETE_STAGES)
 
 FLOW_PROFILES: Dict[str, FlowProfile] = {
     "sky130_oss_executable": FlowProfile(
@@ -177,6 +179,28 @@ FLOW_PROFILES: Dict[str, FlowProfile] = {
         optional_stages=["REGRESSION", "ECO_PATCH", "GLS_SIMULATION"],
         blocked_extensions=["DFT_SCAN", "DFT_ATPG", "MBIST", "POST_LAYOUT_SPICE"],
     ),
+    "sky130_oss_experimental_complete": FlowProfile(
+        name="sky130_oss_experimental_complete",
+        label="Sky130 OSS Experimental Complete",
+        description="Experimental open-tool extension using Fault-style DFT/ATPG, experimental MBIST helpers, optional SDF GLS, and scoped post-layout SPICE.",
+        stages=EXPERIMENTAL_COMPLETE_STAGES,
+        readiness_ceiling="OSS_TEST_ENHANCED_LAYOUT_CANDIDATE",
+        optional_stages=[
+            "REGRESSION",
+            "ECO_PATCH",
+            "DFT_SCAN",
+            "DFT_ATPG",
+            "MBIST",
+            "GLS_SIMULATION",
+            "POST_LAYOUT_SPICE",
+        ],
+        blocked_extensions=[],
+        notes=[
+            "Uses free/open tools where installed: Fault for scan/ATPG, experimental MBIST wrappers/autombist-style collateral, Icarus/Verilator GLS, Magic/ngspice SPICE.",
+            "This is not equivalent to commercial DFT/ATPG/MBIST or foundry signoff.",
+            "Successful completion should be labeled test-enhanced OSS candidate, not FAB_READY.",
+        ],
+    ),
     "commercial_signoff": FlowProfile(
         name="commercial_signoff",
         label="Commercial Signoff Extension",
@@ -198,6 +222,8 @@ def resolve_flow_profile(profile: str = "", pdk: str = "", tool_config: Optional
         requested = "sky130_oss_executable"
     if requested in {"gls", "oss_gls", "optional_gls"}:
         requested = "oss_with_optional_gls"
+    if requested in {"experimental", "experimental_complete", "oss_experimental_complete", "sky130_experimental_complete"}:
+        requested = "sky130_oss_experimental_complete"
     if requested in {"commercial", "commercial_dft", "advanced_node_commercial"}:
         requested = "commercial_signoff"
 

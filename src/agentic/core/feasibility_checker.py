@@ -1056,11 +1056,11 @@ class FeasibilityChecker:
         for kw in analog_keywords:
             if kw in combined_text:
                 msg = (
-                    f"FEASIBILITY_REJECTED: '{kw.upper()}' requires analog/custom or "
-                    f"macro collateral and cannot be synthesized directly in the "
-                    f"{pdk_label} RTL-to-GDS flow."
+                    f"ANALOG_BLOCK_DETECTED: '{kw.upper()}' requires analog collateral "
+                    f"and cannot be synthesized directly in the {pdk_label} RTL-to-GDS flow. "
+                    f"Auto-reconcile by implementing it as a digital wrapper/interface."
                 )
-                rejections.append(msg)
+                warnings.append(msg)
                 issues.append(
                     FeasibilityIssue(
                         category="AUTO_REPAIRABLE",
@@ -1071,7 +1071,7 @@ class FeasibilityChecker:
                             "Replace with a digital control/status wrapper or a hard-macro "
                             "black-box interface."
                         ),
-                        severity="error",
+                        severity="warning",
                     )
                 )
 

@@ -28,6 +28,7 @@ type ModelChoice = 'infinite' | 'byok';
 type BillingMode = 'agentic' | 'byok';
 type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'cancelling';
 type InspectorTab = 'overview' | 'files';
+type FlowChoice = 'sky130_oss_executable' | 'sky130_oss_experimental_complete';
 
 interface ChatMessage {
     role: 'user' | 'assistant';
@@ -499,6 +500,7 @@ export const DesignStudio = () => {
     const [stageSchema, setStageSchema] = useState<StageSchemaItem[]>([]);
     const [blockedExtensions, setBlockedExtensions] = useState<StageSchemaItem[]>(FALLBACK_BLOCKED_EXTENSIONS);
     const [pdkProfile, setPdkProfile] = useState('sky130');
+    const [flowProfile, setFlowProfile] = useState<FlowChoice>('sky130_oss_executable');
     const [skipOpenlane, setSkipOpenlane] = useState(false);
     const [pdkOptions, setPdkOptions] = useState<PdkOption[]>([]);
     const [showBillingModal, setShowBillingModal] = useState(false);
@@ -682,6 +684,18 @@ export const DesignStudio = () => {
             .catch(() => setArtifactPreview('Preview unavailable.'));
     }, [selectedArtifact, designName]);
 
+    useEffect(() => {
+        api.get('/pipeline/schema', { params: { flow_profile: flowProfile, pdk_profile: pdkProfile } })
+            .then((res) => {
+                setStageSchema(res.data?.stages || []);
+                setBlockedExtensions(res.data?.blocked_extensions || FALLBACK_BLOCKED_EXTENSIONS);
+            })
+            .catch(() => {
+                setStageSchema([]);
+                setBlockedExtensions(FALLBACK_BLOCKED_EXTENSIONS);
+            });
+    }, [flowProfile, pdkProfile]);
+
     const addAssistant = (content: string, tone: ChatMessage['tone'] = 'normal') => {
         setMessages((previous) => [...previous, { role: 'assistant', content, tone }]);
     };
@@ -831,7 +845,7 @@ export const DesignStudio = () => {
                 description,
                 skip_openlane: skipOpenlane,
                 show_thinking: true,
-                flow_profile: 'sky130_oss_executable',
+                flow_profile: flowProfile,
                 max_retries: 5,
                 min_coverage: 80.0,
                 pdk_profile: pdkProfile,
@@ -1227,6 +1241,19 @@ export const DesignStudio = () => {
                                 <button className="studio-min-local" type="button" onClick={() => setSkipOpenlane((value) => !value)}>
                                     <Cpu size={15} />
                                     {skipOpenlane ? 'RTL only' : pdkProfile}
+                                </button>
+                                <button
+                                    className="studio-min-local"
+                                    type="button"
+                                    onClick={() => setFlowProfile((value) => (
+                                        value === 'sky130_oss_experimental_complete'
+                                            ? 'sky130_oss_executable'
+                                            : 'sky130_oss_experimental_complete'
+                                    ))}
+                                    title="Toggle default OSS flow vs experimental complete OSS flow"
+                                >
+                                    <Cpu size={15} />
+                                    {flowProfile === 'sky130_oss_experimental_complete' ? 'Experimental complete' : 'OSS flow'}
                                 </button>
                             </div>
                             <div className="studio-min-actions">

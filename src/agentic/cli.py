@@ -2460,6 +2460,7 @@ def install_signoff_tools(
                 "build-essential",
                 "autoconf",
                 "automake",
+                "libtool",
                 "m4",
                 "csh",
                 "tcsh",
@@ -2470,8 +2471,15 @@ def install_signoff_tools(
                 "libxrender-dev",
                 "libxpm-dev",
                 "libreadline-dev",
-                "netgen",
-                "opensta",
+                "netgen-lvs",
+                "cmake",
+                "clang",
+                "swig",
+                "bison",
+                "flex",
+                "zlib1g-dev",
+                "libeigen3-dev",
+                "libgtest-dev",
             ]
             console.print("[accent]Installing apt dependencies, Netgen, and OpenSTA...[/accent]")
             update = subprocess.run(["sudo", "apt-get", "update"])
@@ -2482,6 +2490,9 @@ def install_signoff_tools(
             if install.returncode != 0:
                 console.print("[error]apt-get install failed.[/error]")
                 raise typer.Exit(install.returncode)
+            
+            # Symlink netgen to a standard PATH location so doctor finds it
+            subprocess.run(["sudo", "ln", "-sf", "/usr/lib/netgen/bin/netgen", "/usr/local/bin/netgen"])
     else:
         console.print("[dim]Skipped apt packages (--skip-apt).[/dim]")
 
@@ -2517,6 +2528,65 @@ def install_signoff_tools(
             if install.returncode != 0:
                 console.print("[error]Magic install failed.[/error]")
                 raise typer.Exit(install.returncode)
+                
+        # ── OpenSTA Source Build ──
+        sta_bin = shutil.which("sta")
+        if sta_bin and not force_magic:
+            console.print(f"[success]OpenSTA is already installed:[/success] {sta_bin}")
+        else:
+            # First compile CUDD
+            cudd_source = os.path.abspath(os.path.expanduser("~/eda-src/cudd"))
+            os.makedirs(os.path.dirname(cudd_source), exist_ok=True)
+            if os.path.exists(cudd_source):
+                console.print(f"[accent]Using existing CUDD source checkout:[/accent] {cudd_source}")
+            else:
+                console.print("[accent]Cloning CUDD source...[/accent]")
+                subprocess.run(["git", "clone", "https://github.com/ivmai/cudd.git", cudd_source], check=True)
+                
+            console.print("[accent]Running autoreconf for CUDD...[/accent]")
+            subprocess.run(["autoreconf", "-fi"], cwd=cudd_source, check=True)
+            
+            console.print("[accent]Configuring CUDD...[/accent]")
+            subprocess.run(["./configure", "--enable-shared", "--enable-obj"], cwd=cudd_source, check=True)
+            
+            console.print("[accent]Building CUDD...[/accent]")
+            subprocess.run(["make", "-j" + str(os.cpu_count() or 1)], cwd=cudd_source, check=True)
+            
+            console.print("[accent]Installing CUDD...[/accent]")
+            subprocess.run(["sudo", "make", "install"], cwd=cudd_source, check=True)
+            
+            sta_source = os.path.abspath(os.path.expanduser("~/eda-src/OpenSTA"))
+            if os.path.exists(sta_source):
+                console.print(f"[accent]Using existing OpenSTA source checkout:[/accent] {sta_source}")
+            else:
+                console.print("[accent]Cloning OpenSTA source...[/accent]")
+                clone = subprocess.run(
+                    ["git", "clone", "--recursive", "--depth", "1", "https://github.com/The-OpenROAD-Project/OpenSTA.git", sta_source]
+                )
+                if clone.returncode != 0:
+                    console.print("[error]OpenSTA clone failed.[/error]")
+                    raise typer.Exit(clone.returncode)
+
+            console.print("[accent]Building OpenSTA...[/accent]")
+            build_dir = os.path.join(sta_source, "build")
+            os.makedirs(build_dir, exist_ok=True)
+            configure = subprocess.run(["cmake", "..", "-DCMAKE_BUILD_TYPE=Release", "-DCUDD_DIR=/usr/local"], cwd=build_dir)
+            if configure.returncode != 0:
+                console.print("[error]OpenSTA configure failed.[/error]")
+                raise typer.Exit(configure.returncode)
+            
+            make = subprocess.run(["make", "-j" + str(os.cpu_count() or 1)], cwd=build_dir)
+            if make.returncode != 0:
+                console.print("[error]OpenSTA build failed.[/error]")
+                raise typer.Exit(make.returncode)
+                
+            console.print("[accent]Installing OpenSTA...[/accent]")
+            install = subprocess.run(["sudo", "make", "install"], cwd=build_dir)
+            if install.returncode != 0:
+                console.print("[error]OpenSTA install failed.[/error]")
+                raise typer.Exit(install.returncode)
+                
+            subprocess.run(["sudo", "ldconfig"], check=True)
     else:
         console.print("[dim]Skipped Magic source build (--skip-magic-build).[/dim]")
 
@@ -5035,6 +5105,7 @@ def report(
     design: str = typer.Option(..., "--design", "-d", help="Design name"),
     output_dir: str = typer.Option("./reports", "--out", "-o", help="Output directory"),
     pdk: str = typer.Option("sky130", "--pdk", help="PDK name"),
+    run_dir: str = typer.Option("", "--run-dir", help="Path to OpenLane run directory"),
     format: str = typer.Option("all", "--format", "-f", help="Format: json, csv, md, all"),
 ):
     """Generate structured QOR signoff report from build data.
@@ -5046,12 +5117,104 @@ def report(
     """
     verify_license()
     os.makedirs(output_dir, exist_ok=True)
+    import csv
+    
+    # Locate metrics.csv
+    metrics_path = ""
+    if run_dir and os.path.exists(os.path.join(run_dir, "reports", "metrics.csv")):
+        metrics_path = os.path.join(run_dir, "reports", "metrics.csv")
+    elif run_dir and os.path.exists(os.path.join(run_dir, "metrics.csv")):
+        metrics_path = os.path.join(run_dir, "metrics.csv")
+    elif os.path.exists(f"./runs/agentrun/reports/metrics.csv"):
+        metrics_path = f"./runs/agentrun/reports/metrics.csv"
+    else:
+        # Fallback to OPENLANE_ROOT
+        from .tools.vlsi_tools import OPENLANE_ROOT
+        default_path = f"{OPENLANE_ROOT}/designs/{design}/runs/agentrun/reports/metrics.csv"
+        if os.path.exists(default_path):
+            metrics_path = default_path
+            
+    if not metrics_path or not os.path.exists(metrics_path):
+        console.print(f"[error]Error: metrics.csv not found for design {design}. Specify --run-dir.[/error]")
+        raise typer.Exit(1)
+        
+    synthesis_data = {}
+    sta_data = {}
+    power_data = {}
+    physical_data = {}
 
-    reporter = SignoffReporter(design, pdk)
+    try:
+        with open(metrics_path, "r") as f:
+            reader = csv.DictReader(f)
+            data = next(reader)
+            
+            synthesis_data = {
+                "cell_count": int(float(data.get("TotalCells", data.get("synth_cell_count", 0)))),
+                "dff_count": int(float(data.get("DFF", 0))),
+                "area_um2": float(data.get("DIEAREA_mm^2", data.get("DieArea_mm^2", 0))) * 1e6,
+            }
+            
+            crit_path = float(data.get("critical_path_ns", 10.0))
+            max_freq = 1000.0 / crit_path if crit_path > 0 else 0.0
+            sta_data = {
+                "nom": {
+                    "wns_setup_ns": float(data.get("wns", data.get("timing__wns", 0.0))),
+                    "tns_setup_ns": float(data.get("tns", data.get("timing__tns", 0.0))),
+                    "wns_hold_ns": 0.0,
+                    "max_freq_mhz": max_freq,
+                }
+            }
+            
+            p_int = float(data.get("power_typical_internal_uW", 0.0))
+            p_sw = float(data.get("power_typical_switching_uW", 0.0))
+            p_leak = float(data.get("power_typical_leakage_uW", 0.0))
+            total_uw = p_int + p_sw + p_leak
+            if "power__total" in data:
+                total_uw = float(data["power__total"]) * 1e6 # assuming W in newer OL
+                
+            chip_area_mm2 = synthesis_data["area_um2"] / 1e6
+            power_density = (total_uw / 1000.0) / chip_area_mm2 if chip_area_mm2 > 0 else 0.0
+            
+            power_data = {
+                "total_uW": total_uw,
+                "dynamic_uW": p_int + p_sw,
+                "leakage_uW": p_leak,
+                "power_density_mW_per_mm2": power_density,
+            }
+            
+            # Resolve actual GDS path
+            actual_gds_path = ""
+            if run_dir:
+                actual_gds_path = os.path.join(run_dir, "results", "signoff", f"{design}.gds")
+            else:
+                from .tools.vlsi_tools import OPENLANE_ROOT
+                actual_gds_path = os.path.join(OPENLANE_ROOT, "designs", design, "runs", "agentrun", "results", "signoff", f"{design}.gds")
+                
+            physical_data = {
+                "drc_violations": int(float(data.get("Magic_violations", 0))),
+                "lvs_errors": int(float(data.get("lvs_total_errors", 0))) if data.get("lvs_total_errors") != "-1" else 0,
+                "antenna_violations": int(float(data.get("net_antenna_violations", 0))),
+                "gds_path": actual_gds_path,
+            }
+            
+    except Exception as e:
+        console.print(f"[warning]Warning: Error parsing metrics.csv: {e}[/warning]")
 
-    json_path = reporter.generate_json_report(os.path.join(output_dir, f"{design}_qor.json"))
-    csv_path = reporter.generate_csv_report(os.path.join(output_dir, f"{design}_checklist.csv"))
-    md_path = reporter.generate_markdown_report(os.path.join(output_dir, f"{design}_signoff.md"))
+    from .tools.signoff_reporter import generate_qor_report
+    
+    generate_qor_report(
+        design_name=design,
+        pdk=pdk,
+        output_dir=output_dir,
+        synthesis_data=synthesis_data,
+        sta_data=sta_data,
+        power_data=power_data,
+        physical_data=physical_data,
+    )
+
+    json_path = os.path.join(output_dir, f"{design}_qor.json")
+    csv_path = os.path.join(output_dir, f"{design}_checklist.csv")
+    md_path = os.path.join(output_dir, f"{design}_signoff.md")
 
     console.print(
         Panel(

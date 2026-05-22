@@ -459,9 +459,9 @@ def _build_magic_drc_tcl(
     pdk_dir = tool_config.get("pdk_dir", pdk)
     tcl: List[str] = [
         f"# Magic DRC script for {design_name} (PDK: {pdk_dir})",
-        f"tech load {tech_file}",
-        f"gds read {gds_path}",
-        f"load {design_name}",
+        f"tech load [list {tech_file}]",
+        f"gds read [list {gds_path}]",
+        f"load [list {design_name}]",
         "",
         "# Enable DRC",
         "drc on",
@@ -470,7 +470,7 @@ def _build_magic_drc_tcl(
         f"# Report DRC violations to {drc_report}",
         "drc style " + pdk_dir,
         "drc exist",
-        "puts [open [list {drc_report}] w] [drc listall]",
+        f"puts [open [list {drc_report}] w] [drc listall]",
         "",
         "# Count violations",
         "set viols [drc list count]",
@@ -552,10 +552,10 @@ def run_netgen_lvs(
     lvs_script = [
         f"# Netgen LVS script for {design_name} (PDK: {pdk_dir})",
         f"set spicedevs " + pdk_dir,
-        f'lvs "read_netlist {schematic_verilog} {design_name}" \\',
-        f'     "gds read {layout_gds} {design_name}" \\',
-        f"     {tech_setup} \\",
-        f"     {design_name}",
+        f'lvs "{{{schematic_verilog}}} {design_name}" \\',
+        f'     "{{{layout_gds}}} {design_name}" \\',
+        f'     "{{{tech_setup}}}" \\',
+        f'     "{{{design_name}}}"',
         f"puts [open [list {lvs_report}] w] [lvs summary]",
         "quit",
     ]
@@ -662,8 +662,8 @@ def run_antenna_check(
 
     tcl = [
         f"# Antenna check for {design_name}",
-        f"tech load {tech_file}",
-        f"gds read {gds_path}",
+        f"tech load [list {tech_file}]",
+        f"gds read [list {gds_path}]",
         f"antenna check {antenna_ratio}",
         f"antenna report > {report_path}",
         "quit",

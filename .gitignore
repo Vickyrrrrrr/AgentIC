@@ -162,9 +162,12 @@ AGENTIC_ARCHITECTURE.md
 .env.example
 .env.example
 .env.example
-
+reports/
 NUL
 tests
 agentic_jobs.db-shm
 agentic_jobs.db-wal
 .env.example
+synth_out/
+lvs_out/
+drc_out/

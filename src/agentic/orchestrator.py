@@ -2,6 +2,7 @@ import enum
 import time
 import logging
 import os
+import glob
 
 logger = logging.getLogger("agentic.orchestrator")
 import re
@@ -107,6 +108,7 @@ from .tools.vlsi_tools import (
     run_formal_verification,
     check_physical_metrics,
     run_lint_check,
+    convert_sva_to_yosys,
     run_simulation_with_coverage,
     parse_coverage_report,
     parse_drc_lvs_reports,
@@ -485,6 +487,9 @@ class BuildOrchestrator:
             pdk=self.pdk_profile.get("profile", pdk_profile),
             tool_config=self.pdk_tool_config,
         )
+        if self.flow_profile.name == "sky130_oss_experimental_complete":
+            os.environ["AGENTIC_FLOW_PROFILE"] = self.flow_profile.name
+            os.environ["AGENTIC_EXPERIMENTAL_DFT"] = "1"
         self.max_pivots = max_pivots
         self.congestion_threshold = congestion_threshold
         self.hierarchical_mode = hierarchical_mode
@@ -1738,6 +1743,17 @@ class BuildOrchestrator:
         # Setup directories, check tools
         self.artifacts["root"] = f"{OPENLANE_ROOT}/designs/{self.name}"
         self.setup_logger()  # Setup logging to file
+        
+        # Auto-resume from latest checkpoint if available
+        latest = self.checkpoint_manager.load_latest()
+        if latest:
+            self.log(f"Auto-resuming from checkpoint: {latest.timestamp} | Stage: {latest.state_name}", refined=True)
+            self.state = latest.state
+            self.global_step_count = latest.global_step_count
+            self.artifacts = latest.artifacts
+            self.artifacts["root"] = f"{OPENLANE_ROOT}/designs/{self.name}"
+            return
+
         self.artifacts["pdk_profile"] = self.pdk_profile
         diag = startup_self_check()
         self.artifacts["startup_check"] = diag
@@ -3794,6 +3810,220 @@ Requirements:
         lines.append("endmodule")
         return "\n".join(lines) + "\n"
 
+    def _iter_hw_spec_submodules(self, spec: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Return all submodules from the reconciled hardware spec, including nested specs."""
+        spec = spec or self.artifacts.get("hw_spec", {}) or {}
+        found: List[Dict[str, Any]] = []
+
+        def visit(item: Dict[str, Any]) -> None:
+            found.append(item)
+            nested = item.get("nested_spec")
+            if isinstance(nested, dict):
+                for child in nested.get("submodules", []) or []:
+                    if isinstance(child, dict):
+                        visit(child)
+
+        for sm in spec.get("submodules", []) or []:
+            if isinstance(sm, dict):
+                visit(sm)
+        return found
+
+    @staticmethod
+    def _clean_verilog_identifier(name: str, fallback: str = "sig") -> str:
+        cleaned = re.sub(r"\W+", "_", str(name or "")).strip("_")
+        if not cleaned or not re.match(r"^[A-Za-z_]", cleaned):
+            cleaned = f"{fallback}_{cleaned}" if cleaned else fallback
+        return cleaned
+
+    @staticmethod
+    def _packed_range_from_port(port: Dict[str, Any]) -> str:
+        dtype = str(port.get("data_type") or "").strip()
+        width = str(port.get("width") or "").strip()
+        match = re.search(r"\[[^\]]+\]", dtype)
+        if match:
+            return f" {match.group(0)}"
+        if width and width not in {"1", "logic", "wire"}:
+            try:
+                width_i = int(width)
+                if width_i > 1:
+                    return f" [{width_i - 1}:0]"
+            except ValueError:
+                return ""
+        return ""
+
+    def _macro_submodules_from_spec(self) -> List[Dict[str, Any]]:
+        macros = []
+        for sm in self._iter_hw_spec_submodules():
+            if sm.get("requires_macro") or sm.get("macro_kind"):
+                macros.append(sm)
+        return macros
+
+    def _render_blackbox_module(self, sm: Dict[str, Any]) -> str:
+        name = self._clean_verilog_identifier(str(sm.get("name", "hard_macro")), "hard_macro")
+        macro_kind = str(sm.get("macro_kind", "")).lower()
+        width = int(sm.get("macro_width_bits") or 0)
+        depth = int(sm.get("macro_depth_words") or 0)
+        addr_width = max(1, (depth - 1).bit_length()) if depth > 0 else 1
+
+        params: List[str] = []
+        if macro_kind == "memory" or width or depth:
+            params = [
+                f"    parameter DATA_WIDTH = {width or 32}",
+                f"    parameter ADDR_WIDTH = {addr_width}",
+                f"    parameter DEPTH = {depth or 1}",
+            ]
+
+        ports = list(sm.get("ports") or [])
+        if macro_kind == "memory":
+            common_memory_ports = [
+                {"name": "clk", "direction": "input", "data_type": "logic"},
+                {"name": "rst_n", "direction": "input", "data_type": "logic"},
+                {"name": "wr_en", "direction": "input", "data_type": "logic"},
+                {"name": "rd_en", "direction": "input", "data_type": "logic"},
+                {"name": "addr", "direction": "input", "data_type": "logic [ADDR_WIDTH-1:0]"},
+                {"name": "wr_data", "direction": "input", "data_type": "logic [DATA_WIDTH-1:0]"},
+                {"name": "rd_data", "direction": "output", "data_type": "logic [DATA_WIDTH-1:0]"},
+                {"name": "ce", "direction": "input", "data_type": "logic"},
+                {"name": "we", "direction": "input", "data_type": "logic"},
+                {"name": "addr", "direction": "input", "data_type": f"logic [{addr_width - 1}:0]"},
+                {"name": "wdata", "direction": "input", "data_type": f"logic [{(width or 32) - 1}:0]"},
+                {"name": "rdata", "direction": "output", "data_type": f"logic [{(width or 32) - 1}:0]"},
+                {"name": "mem_addr", "direction": "input", "data_type": f"logic [{addr_width - 1}:0]"},
+                {"name": "mem_en", "direction": "input", "data_type": "logic"},
+                {"name": "mem_rdata", "direction": "output", "data_type": f"logic [{(width or 32) - 1}:0]"},
+                {"name": "mem_wdata", "direction": "input", "data_type": f"logic [{(width or 32) - 1}:0]"},
+                {"name": "mem_we", "direction": "input", "data_type": "logic"},
+            ]
+            seen_ports = {str(p.get("name", "")) for p in ports}
+            for port in common_memory_ports:
+                if str(port.get("name", "")) not in seen_ports:
+                    ports.append(port)
+                    seen_ports.add(str(port.get("name", "")))
+
+        lines: List[str] = [
+            "// Auto-generated hard-macro wrapper from reconciled_spec.json.",
+            "// This module is intentionally a black box; supply LEF/GDS/SPICE views in the physical flow.",
+            "(* blackbox *)",
+        ]
+        if params:
+            lines.append(f"module {name} #(")
+            lines.append(",\n".join(params))
+            lines.append(") (")
+        else:
+            lines.append(f"module {name} (")
+
+        decls = []
+        for idx, port in enumerate(ports):
+            pname = self._clean_verilog_identifier(str(port.get("name", f"port_{idx}")), f"port_{idx}")
+            direction = str(port.get("direction", "input")).lower()
+            if direction not in {"input", "output", "inout"}:
+                direction = "input"
+            packed = self._packed_range_from_port(port)
+            comma = "," if idx < len(ports) - 1 else ""
+            decls.append(f"    {direction} wire{packed} {pname}{comma}")
+        lines.extend(decls)
+        lines.append(");")
+        lines.append("endmodule")
+        return "\n".join(lines) + "\n"
+
+    def _write_macro_blackboxes_from_spec(self) -> Tuple[bool, List[str]]:
+        """Overwrite required hard-macro modules with deterministic black-box wrappers."""
+        macros = self._macro_submodules_from_spec()
+        if not macros:
+            return False, []
+        src_dir = os.path.join(OPENLANE_ROOT, "designs", self.name, "src")
+        os.makedirs(src_dir, exist_ok=True)
+        written: List[str] = []
+        changed = False
+        for sm in macros:
+            module_name = self._clean_verilog_identifier(str(sm.get("name", "")), "hard_macro")
+            if not module_name or module_name == self.name:
+                continue
+            path = os.path.join(src_dir, f"{module_name}.v")
+            new_code = self._render_blackbox_module(sm)
+            old_code = ""
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    old_code = f.read()
+            if old_code != new_code:
+                with open(path, "w") as f:
+                    f.write(new_code)
+                changed = True
+            written.append(path)
+        if written:
+            self.artifacts["macro_blackbox_rtl"] = written
+        return changed, written
+
+    def _scan_rtl_contract_violations(self) -> List[str]:
+        """Find RTL constructs that violate reconciled ASIC-flow constraints."""
+        src_dir = os.path.join(OPENLANE_ROOT, "designs", self.name, "src")
+        if not os.path.isdir(src_dir):
+            return []
+
+        macro_names = {
+            self._clean_verilog_identifier(str(sm.get("name", "")), "hard_macro")
+            for sm in self._macro_submodules_from_spec()
+        }
+        violations: List[str] = []
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))):
+            try:
+                with open(v_file, "r") as f:
+                    code = f.read()
+            except OSError:
+                continue
+
+            for match in re.finditer(
+                r"\bmodule\s+([A-Za-z_]\w*)\s*(?:#\s*\([\s\S]*?\)\s*)?\(([\s\S]*?)\)\s*;",
+                code,
+                re.MULTILINE,
+            ):
+                module_name = match.group(1)
+                header = match.group(2)
+                body_start = match.end()
+                end_match = re.search(r"\bendmodule\b", code[body_start:], re.MULTILINE)
+                body = code[body_start : body_start + end_match.start()] if end_match else code[body_start:]
+                module_text = header + "\n" + body
+
+                if module_name != self.name and module_name not in macro_names:
+                    if re.search(r"\binout\b", header):
+                        violations.append(
+                            f"{os.path.basename(v_file)}:{module_name}: internal inout/tri-state port detected; split into *_i/*_o/*_oe."
+                        )
+
+                if module_name in macro_names:
+                    if re.search(r"\breg\s+(?:signed\s+)?(?:\[[^\]]+\]\s+)?[A-Za-z_]\w*\s*\[[^\]]+\]", body):
+                        violations.append(
+                            f"{os.path.basename(v_file)}:{module_name}: required hard macro contains synthesizable reg-array storage."
+                        )
+                    continue
+
+                for mem in re.finditer(
+                    r"\breg\s+(?:signed\s+)?(?:\[(\d+)\s*:\s*(\d+)\]\s+)?([A-Za-z_]\w*)\s*\[\s*(\d+)\s*:\s*(\d+)\s*\]",
+                    module_text,
+                ):
+                    msb = int(mem.group(1) or "0")
+                    lsb = int(mem.group(2) or "0")
+                    depth_hi = int(mem.group(4))
+                    depth_lo = int(mem.group(5))
+                    width = abs(msb - lsb) + 1 if mem.group(1) else 1
+                    depth = abs(depth_hi - depth_lo) + 1
+                    bits = width * depth
+                    if bits > 16384:
+                        violations.append(
+                            f"{os.path.basename(v_file)}:{module_name}.{mem.group(3)}: {width}x{depth} inferred memory ({bits} bits); use SRAM macro wrapper."
+                        )
+
+        return sorted(set(violations))
+
+    def _enforce_reconciled_rtl_contract(self) -> Tuple[bool, List[str]]:
+        """Apply deterministic macro wrappers and report remaining RTL contract violations."""
+        fixed, written = self._write_macro_blackboxes_from_spec()
+        if fixed:
+            self.log(f"Reconciled macro contract enforced: wrote {len(written)} black-box wrapper(s).", refined=True)
+        violations = self._scan_rtl_contract_violations()
+        self.artifacts["rtl_contract_violations"] = violations
+        return fixed, violations
+
     def _generate_functional_coverage_model(self) -> str:
         """Generate SystemVerilog covergroups based on design spec.
 
@@ -4014,7 +4244,17 @@ You return the FINAL corrected code in ```verilog``` fences.""",
             sub_rtls = self.artifacts.get("sub_module_rtl", {})
             if sub_rtls:
                 sub_names = ", ".join(sub_rtls.keys())
-                hierarchy_rule = f"5. **HIERARCHICAL WRAPPER**: The following sub-modules already exist: {sub_names}. YOU MUST ONLY WRITE THE TOP-LEVEL MODULE '{self.name}' THAT INSTANTIATES THEM. DO NOT redefine these sub-modules in your code."
+                signatures = ""
+                for name, code in sub_rtls.items():
+                    match = re.search(r"module\s+" + re.escape(name) + r"\s*(?:#\s*\([\s\S]*?\))?\s*\([\s\S]*?\);", code)
+                    if match:
+                        signatures += f"\n{match.group(0)}\n"
+                        
+                hierarchy_rule = (
+                    f"5. **HIERARCHICAL WRAPPER**: The following sub-modules already exist: {sub_names}. "
+                    f"YOU MUST ONLY WRITE THE TOP-LEVEL MODULE '{self.name}' THAT INSTANTIATES THEM. "
+                    f"DO NOT redefine these sub-modules in your code. Here are their exact port definitions:\n{signatures}"
+                )
             else:
                 hierarchy_rule = "5. **MODULAR HIERARCHY**: For complex designs, break them into smaller sub-modules. Output ALL modules in your response."
 
@@ -4023,6 +4263,9 @@ You return the FINAL corrected code in ```verilog``` fences.""",
             
 SPECIFICATION:
 {self.artifacts.get("spec", "")}
+
+RECONCILED HARDWARE SPEC JSON (authoritative for macro/interface constraints):
+{json.dumps(self.artifacts.get("hw_spec", {}) or {}, indent=2)[:9000]}
 
 STRATEGY GUIDELINES:
 {strategy_prompt}
@@ -4044,6 +4287,7 @@ CRITICAL RULES:
 2. Async active-low reset `rst_n`
 3. Flatten ports on the TOP module (no multi-dim arrays on top-level ports). Internal modules can use them.
 4. **IMPLEMENT EVERYTHING**: Do not leave any logic as "to be implemented" or "simplified".
+4a. **HARD MACRO CONTRACT**: Any submodule with `requires_macro=true` or `macro_kind` in the reconciled spec MUST be instantiated as a wrapper/black box only. Do not implement SRAM/ROM/register-array storage, ADC/DAC/PLL/TRNG internals, or custom-layout internals in synthesizable RTL.
 4b. **NEVER** use Verilog reserved words as port or signal names. Banned names include: config, supply0, supply1, table, library, design, instance, cell, use, endconfig, liblist
 {hierarchy_rule}
 6. Return code in ```verilog fence.
@@ -4205,6 +4449,13 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 with open(mod_path, "w") as f:
                     f.write(clean_mod_code + "\n")
             self.log(f"Wrote {len(sub_rtls)} parallel-generated sub-modules to disk (overwriting any hallucinations).", refined=True)
+
+        contract_fixed, contract_violations = self._enforce_reconciled_rtl_contract()
+        if contract_violations:
+            self.log(
+                f"RTL contract gate found {len(contract_violations)} issue(s); RTL_FIX will repair before synthesis.",
+                refined=True,
+            )
         # Store the CLEANED code (read back from file), not raw LLM output
         with open(path, "r") as f:
             self.artifacts["rtl_code"] = f.read()
@@ -4294,24 +4545,41 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             if lint_success:
                 self.log("Lint Check Passed (Verilator)", refined=True)
 
+                contract_fixed, contract_violations = self._enforce_reconciled_rtl_contract()
+                if contract_fixed:
+                    with open(path, "r") as f:
+                        self.artifacts["rtl_code"] = f.read()
+                    return
+                if contract_violations:
+                    self.log("RTL contract gate failed; routing to fixer.", refined=True)
+                    errors = "RTL CONTRACT VIOLATIONS:\n" + "\n".join(
+                        f"- {v}" for v in contract_violations
+                    )
+                    self.logger.info(errors)
+                else:
+                    errors = ""
+
                 # --- PRE-SYNTHESIS VALIDATION ---
                 # Catch undriven signals that would fail Yosys synthesis
                 from .tools.vlsi_tools import validate_rtl_for_synthesis
 
-                was_fixed, synth_report = validate_rtl_for_synthesis(path)
-                self.logger.info(f"PRE-SYNTH VALIDATION: {synth_report}")
-                if was_fixed:
-                    self.log(f"Pre-synthesis auto-fix applied.", refined=True)
-                    # Re-read fixed code into artifacts
-                    with open(path, "r") as f:
-                        self.artifacts["rtl_code"] = f.read()
-                    # Re-check syntax after fix (stay in RTL_FIX)
-                    return
+                if not errors:
+                    was_fixed, synth_report = validate_rtl_for_synthesis(path)
+                    self.logger.info(f"PRE-SYNTH VALIDATION: {synth_report}")
+                    if was_fixed:
+                        self.log(f"Pre-synthesis auto-fix applied.", refined=True)
+                        # Re-read fixed code into artifacts
+                        with open(path, "r") as f:
+                            self.artifacts["rtl_code"] = f.read()
+                        # Re-check syntax after fix (stay in RTL_FIX)
+                        return
 
-                sem_ok, sem_report = run_semantic_rigor_check(path)
+                sem_ok, sem_report = (False, {}) if errors else run_semantic_rigor_check(path)
                 self.logger.info(f"SEMANTIC RIGOR: {sem_report}")
                 if not sem_ok:
-                    if self.strict_gates:
+                    if errors:
+                        pass
+                    elif self.strict_gates:
                         width_issues = (
                             sem_report.get("width_issues", [])
                             if isinstance(sem_report, dict)
@@ -4482,14 +4750,19 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 f"RTL directory: {src_dir}\n\n"
                 f"Files with errors: {', '.join(self._parse_error_files(errors_for_llm))}\n\n"
                 f"Errors:\n{errors_for_llm}\n\n"
+                f"Reconciled hardware spec JSON:\n{json.dumps(self.artifacts.get('hw_spec', {}) or {}, indent=2)[:9000]}\n\n"
                 f"Current RTL (All Modules):\n```verilog\n{all_rtl_code}\n```"
             )
             _react_trace = _react_agent.run(
                 task=(
                     f"Fix all syntax and lint errors in the Verilog code for design '{self.name}'. "
                     f"The errors may be in the top module or in any of the sub-modules provided in the context. "
-                    f"CRITICAL: Do not rename the module. Do not add, modify, or remove any input/output ports. "
-                    f"The top-module interface MUST remain exactly the same. "
+                    f"CRITICAL: Do not rename the top module. The top-module interface MUST remain exactly the same. "
+                    f"Internal sub-module ports may be changed only when required by the RTL contract. "
+                    f"Universal ASIC contract repairs: required macro modules must be black boxes with no reg-array storage; "
+                    f"large SRAM/RAM/ROM/register-file storage must become a macro wrapper; "
+                    f"internal inout/tri-state ports must be split into input/output/output-enable signals, "
+                    f"with tri-state kept only at the top-level pad boundary. "
                     f"Use syntax_check tool to verify your fix compiles clean. "
                     f"Final Answer must be ONLY corrected Verilog inside ```verilog fences. "
                     f"YOU MUST OUTPUT THE FULL CODE FOR ALL MODULES THAT YOU MODIFY so they can be saved to disk."
@@ -4540,11 +4813,21 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             # Build surgical fix prompt with error analysis
             fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
 
-CRITICAL: Do not rename the module. Do not add, modify, or remove any input/output ports. The top-module interface MUST remain exactly the same.
+CRITICAL: Do not rename the top module. The top-module interface MUST remain exactly the same.
+Internal sub-module ports may be changed only when required by the universal ASIC RTL contract.
 
 Fix Syntax/Lint Errors in the following files: {', '.join(self._parse_error_files(errors_for_llm)) or self.name}.
 IMPORTANT: If the error is in a sub-module (not {self.name}), output ONLY the fixed sub-module(s).
 Do NOT output the top-level module unless it also has errors.
+
+## UNIVERSAL ASIC RTL CONTRACT
+- Treat `reconciled_spec` as authoritative for hard macros and physical feasibility.
+- Any module with `requires_macro=true` or `macro_kind` must be a wrapper/black box only.
+- Do not implement SRAM/RAM/ROM/register-file storage for required macro modules using `reg mem[...]`.
+- Large inferred memories must become SRAM/OpenRAM/foundry macro wrappers with address/control/data ports.
+- Internal `inout` and internal tri-state `1'bz` are forbidden. Split them into `*_i`, `*_o`, and `*_oe`.
+- Top-level pad ports may remain `inout`; the top module may contain the only tri-state assignment to the external pad.
+- Preserve the user-visible top interface while repairing internal implementation contracts.
 
 ## ERROR ANALYSIS (from IncrementalFixer)
 Error Type: {analysis.error_type.value if hasattr(analysis.error_type, "value") else analysis.error_type}
@@ -4554,6 +4837,9 @@ Side Effect Risks: {"; ".join(analysis.side_effect_risks[:3]) if analysis.side_e
 
 ## BUILD CONTEXT:
 {self._build_llm_context(mode="error_mode")}
+
+## RECONCILED HARDWARE SPEC JSON:
+{json.dumps(self.artifacts.get("hw_spec", {}) or {}, indent=2)[:9000]}
 
 ## ERROR LOG:
 {errors_for_llm}
@@ -6726,6 +7012,7 @@ REQUIREMENTS:
                 scan_enable_signal="scan_en",
                 scan_mode_signal="scan_mode",
                 pdk=self.pdk_profile.get("pdk", PDK),
+                pdk_root=PDK_ROOT,
                 timeout=600,
             )
 
@@ -6798,6 +7085,8 @@ REQUIREMENTS:
                 output_dir=dft_dir,
                 target_coverage=95.0,
                 max_patterns=5000,
+                pdk=self.pdk_profile.get("pdk", PDK),
+                pdk_root=PDK_ROOT,
                 timeout=600,
             )
 
