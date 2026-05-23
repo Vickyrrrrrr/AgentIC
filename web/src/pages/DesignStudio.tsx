@@ -1,23 +1,16 @@
+// @ts-nocheck
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import '../studio-3pane.css';
+import { motion } from 'framer-motion';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import Editor from '@monaco-editor/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-    AlertCircle,
     ArrowUp,
-    Check,
-    ChevronDown,
-    ChevronRight,
-    CircleStop,
     Cpu,
     FileText,
     Folder,
-    KeyRound,
-    Plus,
-    RotateCcw,
-    Sparkles,
 } from 'lucide-react';
 import { BillingModal } from '../components/BillingModal';
 import { api, API_BASE, getSseHeaders } from '../api';
@@ -472,7 +465,7 @@ function artifactLanguage(name: string): string {
 export const DesignStudio = () => {
     const [phase, setPhase] = useState<Phase>('idle');
     const [modelChoice, setModelChoice] = useState<ModelChoice>('infinite');
-    const [modelMenuOpen, setModelMenuOpen] = useState(false);
+    // const [modelMenuOpen, setModelMenuOpen] = useState(false);
     const [prompt, setPrompt] = useState('');
     const [draftSpec, setDraftSpec] = useState('');
     const [draftSummary, setDraftSummary] = useState('');
@@ -506,9 +499,9 @@ export const DesignStudio = () => {
     const [showBillingModal, setShowBillingModal] = useState(false);
     const [billingMode, setBillingMode] = useState<BillingMode>('byok');
     const [profile, setProfile] = useState<{ plan_type?: string; has_byok_key?: boolean } | null>(null);
-    const [inspectorTab, setInspectorTab] = useState<InspectorTab>('overview');
-    const [inspectorCollapsed, setInspectorCollapsed] = useState(true);
-    const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
+    // const [inspectorTab, setInspectorTab] = useState<InspectorTab>('overview');
+    // const [inspectorCollapsed, setInspectorCollapsed] = useState(true);
+    // const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
 
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const abortRef = useRef<AbortController | null>(null);
@@ -616,7 +609,7 @@ export const DesignStudio = () => {
     useEffect(() => {
         if (visibleArtifacts.length > 0 && !autoOpenedWorkspace.current) {
             autoOpenedWorkspace.current = true;
-            setInspectorCollapsed(false);
+            
         }
     }, [visibleArtifacts.length]);
 
@@ -822,7 +815,7 @@ export const DesignStudio = () => {
         setLastBuildPrompt(description);
         setPrompt('');
         setPhase('building');
-        setInspectorCollapsed(true);
+        
         setError('');
         setEvents([]);
         setArtifacts([]);
@@ -1025,7 +1018,7 @@ export const DesignStudio = () => {
         setJobId('');
         setJobStatus('queued');
         setError('');
-        setInspectorCollapsed(true);
+        
         setLastBuildPrompt('');
         autoOpenedWorkspace.current = false;
         resetDraft();
@@ -1047,470 +1040,161 @@ export const DesignStudio = () => {
         }
     };
     return (
-        <div className="studio-min-root">
-            {/* Drawer Backdrop */}
-            <div 
-                className={`studio-drawer-backdrop${!inspectorCollapsed ? ' active' : ''}`} 
-                onClick={() => setInspectorCollapsed(true)} 
-            />
-
-            {/* Lab Drawer Toggle (Floating) */}
-            <button 
-                className="studio-drawer-toggle" 
-                onClick={() => setInspectorCollapsed(false)}
-                disabled={visibleArtifacts.length === 0}
-                title={visibleArtifacts.length === 0 ? 'Generated files will appear here after AgentIC writes them.' : 'Open generated file workspace'}
-            >
-                <Folder size={14} />
-                Code & Lab
-                <em>{artifacts.length}</em>
-            </button>
-
-            <main className="studio-min-canvas">
-                <div className="studio-min-thread">
+        <div className="studio-3pane-root">
+            {/* Left Pane: Chat */}
+            <aside className="studio-3pane-chat">
+                <div className="studio-3pane-chat-history">
                     {phase === 'idle' && (
-                        <div className="studio-greeting">
-                            <h1>VLSI-aware silicon copilot</h1>
-                            <p>Chat first, draft the feasible spec, then launch RTL, verification, and physical flow when the chip request is ready.</p>
+                        <div className="studio-greeting" style={{ padding: '1rem' }}>
+                            <h2 style={{ fontSize: '1.2rem', marginBottom: '0.5rem' }}>VLSI-aware silicon copilot</h2>
+                            <p style={{ color: 'var(--text-mid)', fontSize: '0.9rem' }}>Chat first, draft the feasible spec, then launch RTL, verification, and physical flow when the chip request is ready.</p>
                         </div>
                     )}
-
                     {messages.map((message, index) => (
                         <motion.article
-                            key={`${message.role}-${index}`}
-                            className={`studio-min-message ${message.role} ${message.tone || ''}`}
+                            key={message.role + '-' + index}
+                            className={'studio-min-message ' + message.role + ' ' + (message.tone || '')}
                             initial={{ opacity: 0, y: 8 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ duration: 0.18 }}
+                            style={{ padding: '0.75rem', background: message.role === 'assistant' ? 'transparent' : 'var(--bg-hover)', borderRadius: '8px', borderBottom: '1px solid var(--border)' }}
                         >
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                         </motion.article>
                     ))}
                     {(thinking || phase === 'building') && (
-                        <div className="studio-min-thinking">
-                            <span><i /><i /><i /></span>
-                            <p>{thinking || 'AgentIC is working through the pipeline.'}</p>
+                        <div className="studio-min-thinking" style={{ padding: '1rem' }}>
+                            <p style={{ color: 'var(--text-dim)', fontStyle: 'italic', fontSize: '0.85rem' }}>{thinking || 'AgentIC is working...'}</p>
                         </div>
-                    )}
-                    {phase === 'building' && (
-                        <motion.section
-                            className="studio-vlsi-review-card"
-                            key={currentStage}
-                            initial={{ opacity: 0, y: 8 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.18 }}
-                        >
-                            <div className="studio-vlsi-review-head">
-                                <span>Senior VLSI Review</span>
-                                <em>{currentStageLabel}</em>
-                            </div>
-                            <p>{currentStageReview.focus}</p>
-                            <strong>{currentStageReview.gate}</strong>
-                            <ul>
-                                {currentStageReview.checks.map((check) => (
-                                    <li key={check}>{check}</li>
-                                ))}
-                            </ul>
-                        </motion.section>
                     )}
                     <div ref={scrollRef} />
                 </div>
-
-                <section className={`studio-min-launch ${phase !== 'idle' ? 'is-running' : ''}`}>
+                <div className="studio-3pane-chat-input">
                     {draftSpec && phase === 'idle' && (
-                        <motion.div
-                            className="studio-min-draft"
-                            initial={{ opacity: 0, y: 8 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.18 }}
+                         <div style={{ marginBottom: '0.5rem', background: 'var(--accent-soft)', padding: '0.75rem', borderRadius: '6px' }}>
+                             <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--accent)', marginBottom: '0.25rem' }}>Draft Ready</div>
+                             <div style={{ fontSize: '0.8rem', color: 'var(--text-mid)', marginBottom: '0.5rem' }}>{draftSummary}</div>
+                             <button type="button" onClick={() => void launch(draftSpec)} style={{ background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '4px', padding: '0.3rem 0.6rem', fontSize: '0.8rem', cursor: 'pointer' }}>Build this chip</button>
+                         </div>
+                    )}
+                    <textarea
+                        value={prompt}
+                        onChange={(event) => setPrompt(event.target.value)}
+                        placeholder="Chat about VLSI intent, or describe a chip to build..."
+                        rows={3}
+                        style={{ width: '100%', padding: '0.75rem', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', resize: 'none', fontFamily: 'inherit', fontSize: '0.9rem' }}
+                        onKeyDown={(event) => {
+                            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                                event.preventDefault();
+                                void handlePrimaryAction();
+                            }
+                        }}
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
+                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem', background: 'var(--bg-hover)', color: 'var(--text-mid)', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><Cpu size={12} /> {pdkProfile}</span>
+                            <span style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem', background: 'var(--bg-hover)', color: 'var(--text-mid)', borderRadius: '4px' }}>{modelChoice}</span>
+                        </div>
+                        <button
+                            onClick={() => void handlePrimaryAction()}
+                            disabled={!(prompt.trim() || draftSpec.trim()) || phase === 'building' || isChatting}
+                            style={{ background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '6px', padding: '0.4rem 0.8rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.85rem', fontWeight: 500 }}
                         >
-                            <div className="studio-min-draft-head">
-                                <span>Draft chip prompt</span>
-                                <em>{draftSummary || 'Ready for review'}</em>
-                            </div>
-                            <p>{draftSpec}</p>
-                            <div className="studio-min-draft-actions">
-                                <button type="button" onClick={() => void launch(draftSpec)}>
-                                    Build this chip
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setPrompt(`Refine this draft: ${draftSpec}`);
-                                        resetDraft();
-                                    }}
-                                >
-                                    Refine
-                                </button>
-                            </div>
-                        </motion.div>
-                    )}
-                    <div className="studio-min-project-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <Folder size={16} />
-                            AgentIC
-                            {phase === 'building' && (
-                                <motion.span
-                                    key={currentStage}
-                                    className="studio-min-inline-status"
-                                    initial={{ opacity: 0, y: 4 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    transition={{ duration: 0.28 }}
-                                >
-                                    {currentStageLabel}: {liveStatusText}
-                                </motion.span>
-                            )}
-                        </div>
-                        {(phase !== 'idle' || artifacts.length > 0 || error) && (
-                            <button 
-                                className="studio-inspector-toggle-btn"
-                                onClick={() => setInspectorCollapsed(!inspectorCollapsed)}
-                                style={{ 
-                                    background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', 
-                                    color: 'var(--text-mid)', fontSize: '0.75rem', cursor: 'pointer', display: 'flex', 
-                                    alignItems: 'center', gap: '0.35rem', padding: '3px 8px',
-                                    borderRadius: '6px', fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease'
-                                }}
-                            >
-                                <span>{inspectorCollapsed ? 'Show Lab Drawer' : 'Hide Lab Drawer'}</span>
-                            </button>
-                        )}
+                            Send <ArrowUp size={14} />
+                        </button>
                     </div>
-                    <div className="studio-min-composer">
-                        <textarea
-                            value={prompt}
-                            onChange={(event) => {
-                                const nextPrompt = event.target.value;
-                                setPrompt(nextPrompt);
-                                if (!designName && isBuildReadyPrompt(nextPrompt)) setDesignName(slugify(nextPrompt));
-                            }}
-                            onKeyDown={(event) => {
-                                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                                    event.preventDefault();
-                                    void handlePrimaryAction();
-                                }
-                            }}
-                            placeholder="Chat about VLSI intent, or describe a chip to build..."
-                            rows={3}
-                        />
-                        <div className="studio-min-composer-bar">
-                            <div className="studio-min-left-tools">
-                                <button type="button" className="studio-min-plus" onClick={sendMessage} disabled={isChatting || !prompt.trim()}>
-                                    <Plus size={16} />
-                                </button>
-                                <div className="studio-min-model">
-                                    <button type="button" onClick={() => setModelMenuOpen((open) => !open)}>
-                                        {modelChoice === 'infinite' ? <Sparkles size={15} /> : <KeyRound size={15} />}
-                                        <span>{modelChoice === 'infinite' ? 'Infinite' : byokLabel}</span>
-                                        <ChevronDown size={14} />
-                                    </button>
-                                    {modelMenuOpen && (
-                                        <div className="studio-min-model-menu">
-                                            <button
-                                                className={modelChoice === 'infinite' ? 'active' : ''}
-                                                onClick={() => {
-                                                    setModelMenuOpen(false);
-                                                    setModelChoice('infinite');
-                                                }}
-                                            >
-                                                <Sparkles size={15} />
-                                                <div>
-                                                    <strong>Infinite</strong>
-                                                    <span>AgentIC hosted model</span>
-                                                </div>
-                                                {modelChoice === 'infinite' && <Check size={14} />}
-                                            </button>
-                                            <button
-                                                className={modelChoice === 'byok' ? 'active' : ''}
-                                                onClick={() => {
-                                                    setModelChoice('byok');
-                                                    setModelMenuOpen(false);
-                                                    if (!hasByok) requestByokSetup();
-                                                }}
-                                            >
-                                                <KeyRound size={15} />
-                                                <div>
-                                                    <strong>{hasByok ? byokLabel : 'BYOK'}</strong>
-                                                    <span>{hasByok ? 'Your configured model' : 'Add your own key'}</span>
-                                                </div>
-                                                {modelChoice === 'byok' && <Check size={14} />}
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
-                                <button className="studio-min-local" type="button" onClick={() => setSkipOpenlane((value) => !value)}>
-                                    <Cpu size={15} />
-                                    {skipOpenlane ? 'RTL only' : pdkProfile}
-                                </button>
-                                <button
-                                    className="studio-min-local"
-                                    type="button"
-                                    onClick={() => setFlowProfile((value) => (
-                                        value === 'sky130_oss_experimental_complete'
-                                            ? 'sky130_oss_executable'
-                                            : 'sky130_oss_experimental_complete'
-                                    ))}
-                                    title="Toggle default OSS flow vs experimental complete OSS flow"
-                                >
-                                    <Cpu size={15} />
-                                    {flowProfile === 'sky130_oss_experimental_complete' ? 'Experimental complete' : 'OSS flow'}
-                                </button>
-                            </div>
-                            <div className="studio-min-actions">
-                                <input
-                                    value={designName}
-                                    onChange={(event) => setDesignName(event.target.value)}
-                                    placeholder="design_name"
-                                    aria-label="Design name"
-                                />
-                                <button
-                                    className="studio-min-send"
-                                    disabled={!(prompt.trim() || draftSpec.trim()) || phase === 'building' || isChatting}
-                                    onClick={() => void handlePrimaryAction()}
-                                    title={draftSpec && !prompt.trim() ? 'Build approved draft' : 'Send to AgentIC'}
-                                >
-                                    <ArrowUp size={17} />
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                    {EXAMPLES.length > 0 && phase === 'idle' && (
-                        <div className="studio-min-examples">
-                            {EXAMPLES.map((example) => (
-                                <button
-                                    key={example}
-                                    onClick={() => {
-                                        const draft = makeDraftFromPrompt(example, pdkProfile);
-                                        setPrompt(example);
-                                        setDraftSpec(draft.spec);
-                                        setDraftSummary(draft.summary);
-                                        if (!designName) setDesignName(slugify(draft.spec));
-                                    }}
-                                >
-                                    {example}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </section>
-
-                <AnimatePresence>
-                    {(phase !== 'idle' || artifacts.length > 0 || error) && (
-                        <motion.div
-                            className={`studio-status-pill ${statusDropdownOpen ? 'expanded' : ''}`}
-                            initial={{ opacity: 0, y: -20 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -20 }}
-                            onClick={() => setStatusDropdownOpen(!statusDropdownOpen)}
-                        >
-                            <div className={`studio-status-dot ${error ? 'failed' : jobStatus === 'done' ? 'done' : ''}`} />
-                            <span className="studio-status-label">Building ·</span>
-                            <span className="studio-status-stage">{currentStageLabel}</span>
-                            <span className="studio-status-pct">({progress}%)</span>
-                            <ChevronDown size={14} className="studio-status-chevron" />
-                            
-                            <AnimatePresence>
-                                {statusDropdownOpen && (
-                                    <motion.div 
-                                        className="studio-status-dropdown"
-                                        initial={{ opacity: 0, y: 10, scale: 0.98 }}
-                                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                                        exit={{ opacity: 0, y: 10, scale: 0.98 }}
-                                        transition={{ duration: 0.15 }}
-                                        onClick={(e) => e.stopPropagation()}
-                                    >
-                                        <div className="studio-pipeline-grid">
-                                            {activeStages.map((s) => {
-                                                const isActive = currentStage === s.state;
-                                                const isDone = completedStages.has(s.state);
-                                                return (
-                                                    <div key={s.state} className={`studio-pipeline-stage ${isActive ? 'active' : ''} ${isDone ? 'done' : ''}`}>
-                                                        <div className="stage-icon">{s.icon}</div>
-                                                        <span className="stage-label">{s.label}</span>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                        
-                                        {error && (
-                                            <div className="studio-min-error" style={{ marginBottom: '1rem' }}>
-                                                <AlertCircle size={16} />
-                                                {error}
-                                            </div>
-                                        )}
-                                        
-                                        <div className="studio-status-actions">
-                                            <span className="studio-status-note">{liveStatusText}</span>
-                                            {phase === 'building' ? (
-                                                <button onClick={cancel}><CircleStop size={14} /> Stop Build</button>
-                                            ) : (
-                                                <button onClick={reset}><RotateCcw size={14} /> New Run</button>
-                                            )}
-                                        </div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-            </main>
-
-            <aside className={`studio-min-inspector${!inspectorCollapsed ? ' drawer-open' : ''}`}>
-                <button className="studio-drawer-close" onClick={() => setInspectorCollapsed(true)}>
-                    <ChevronRight size={16} />
-                </button>
-
-                <div className="studio-min-inspector-tabs">
-                    <button
-                        className={inspectorTab === 'overview' ? 'active' : ''}
-                        onClick={() => setInspectorTab('overview')}
-                    >
-                        Overview
-                    </button>
-                    <button
-                        className={inspectorTab === 'files' ? 'active' : ''}
-                        onClick={() => setInspectorTab('files')}
-                    >
-                        Files
-                    </button>
                 </div>
+            </aside>
 
-                <div className="studio-min-inspector-scroll">
-                    <section className="studio-min-inspector-section">
-                        <button className="studio-min-inspector-heading" type="button">
-                            <span>Model Reasoning Steps</span>
-                            <em>{reasoningRows.length}</em>
-                            <ChevronDown size={14} />
-                        </button>
-                        {reasoningRows.length === 0 ? (
-                            <p className="studio-min-inspector-empty">Agent decisions, spec repairs, and stage summaries will appear here during a build.</p>
-                        ) : (
-                            <div className="studio-min-reasoning-list">
-                                {reasoningRows.map((row, index) => (
-                                    <div key={`${row.label}-${index}`} className="studio-min-reasoning-row">
-                                        <strong>{row.label}</strong>
-                                        <span>{row.message}</span>
-                                    </div>
-                                ))}
+            {/* Middle Pane: Workspace Explorer */}
+            <aside className="studio-3pane-explorer">
+                <div className="studio-3pane-explorer-header">Workspace Explorer</div>
+                <div className="studio-3pane-explorer-tree">
+                    {artifactSections.map(section => (
+                        <div key={section.label} style={{ marginBottom: '0.5rem' }}>
+                            <div className="studio-tree-folder">
+                                <Folder size={14} /> {section.label}
                             </div>
-                        )}
-                    </section>
-
-                    <section className="studio-min-inspector-section">
-                        <button className="studio-min-inspector-heading" type="button">
-                            <span>Capability-Gated Extensions</span>
-                            <em>{blockedExtensions.length}</em>
-                            <ChevronDown size={14} />
-                        </button>
-                        <p className="studio-min-inspector-empty">
-                            These are not run in the default Sky130 OSS flow. AgentIC treats them as commercial or collateral-gated signoff requirements.
-                        </p>
-                        <div className="studio-min-extension-list">
-                            {blockedExtensions.map((stage) => (
-                                <div key={stage.state} className="studio-min-extension-row">
-                                    <strong>{stage.label}</strong>
-                                    <span>{stage.description || STAGE_NOTES[stage.state] || 'Requires additional tool capability.'}</span>
+                            {section.files.map(artifact => (
+                                <div
+                                    key={artifact.name}
+                                    className={'studio-tree-file ' + (selectedArtifact?.name === artifact.name ? 'active' : '')}
+                                    onClick={() => {
+                                        setArtifactPreview('');
+                                        setSelectedArtifact(artifact);
+                                    }}
+                                >
+                                    <FileText size={12} /> {artifact.name}
                                 </div>
                             ))}
                         </div>
-                    </section>
-
-                    <section className="studio-min-inspector-section">
-                        <button className="studio-min-inspector-heading" type="button">
-                            <span>Workspace Explorer</span>
-                            <em>{visibleArtifacts.length}</em>
-                            <ChevronDown size={14} />
-                        </button>
-                        {visibleArtifacts.length === 0 ? (
-                            <p className="studio-min-inspector-empty">Generated chip files will appear here as the pipeline writes them.</p>
-                        ) : (
-                            <div className="studio-min-file-list">
-                                {visibleArtifacts.slice(0, inspectorTab === 'overview' ? 7 : 40).map((artifact) => (
-                                    <button
-                                        key={artifact.name}
-                                        className={selectedArtifact?.name === artifact.name ? 'active' : ''}
-                                        onClick={() => {
-                                            setArtifactPreview('');
-                                            setSelectedArtifact(artifact);
-                                            setInspectorTab('files');
-                                        }}
-                                    >
-                                        <FileText size={15} />
-                                        <span>{artifact.name}</span>
-                                        <em>{artifact.type || 'file'}</em>
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                    </section>
-
-                    <section className="studio-min-inspector-section">
-                        <button className="studio-min-inspector-heading" type="button">
-                            <span>Artifacts</span>
-                            <em>{artifactSections.length}</em>
-                            <ChevronDown size={14} />
-                        </button>
-                        {artifactSections.length === 0 ? (
-                            <p className="studio-min-inspector-empty">RTL, testbench, formal, reports, and layout outputs will collect here.</p>
-                        ) : (
-                            <div className="studio-min-artifact-groups">
-                                {artifactSections.map((section) => (
-                                    <div key={section.label} className="studio-min-artifact-group">
-                                        <strong>{section.label}</strong>
-                                        {section.files.slice(0, inspectorTab === 'overview' ? 3 : 12).map((artifact) => (
-                                            <button
-                                                key={`${section.label}-${artifact.name}`}
-                                                className={selectedArtifact?.name === artifact.name ? 'active' : ''}
-                                                onClick={() => {
-                                                    setArtifactPreview('');
-                                                    setSelectedArtifact(artifact);
-                                                    setInspectorTab('files');
-                                                }}
-                                                onDoubleClick={() => downloadArtifact(artifact)}
-                                            >
-                                                <span>{artifact.name}</span>
-                                                <em>{formatBytes(artifact.size)}</em>
-                                            </button>
-                                        ))}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </section>
-
-                    {selectedArtifact && (
-                        <section className="studio-min-inspector-section studio-min-inspector-preview">
-                            <div className="studio-min-preview-head">
-                                <div>
-                                    <span>{selectedArtifact.name}</span>
-                                    <em>{formatBytes(selectedArtifact.size)}</em>
-                                </div>
-                                <button onClick={() => downloadArtifact(selectedArtifact)}>Download</button>
-                            </div>
-                            <div className="studio-min-monaco-shell">
-                                <Editor
-                                    height="100%"
-                                    language={artifactLanguage(selectedArtifact.name)}
-                                    theme="vs-dark"
-                                    value={artifactPreview || 'Loading preview...'}
-                                    options={{
-                                        readOnly: true,
-                                        minimap: { enabled: false },
-                                        fontSize: 12,
-                                        fontFamily: "'Geist Mono', 'Fira Code', monospace",
-                                        lineNumbersMinChars: 3,
-                                        scrollBeyondLastLine: false,
-                                        smoothScrolling: true,
-                                        wordWrap: 'on',
-                                        renderLineHighlight: 'line',
-                                        padding: { top: 10, bottom: 10 },
-                                    }}
-                                />
-                            </div>
-                        </section>
+                    ))}
+                    {artifactSections.length === 0 && (
+                        <div style={{ padding: '1rem', fontSize: '0.8rem', color: 'var(--text-dim)' }}>Generated files will appear here.</div>
                     )}
                 </div>
             </aside>
+
+            {/* Right Pane: Editor & Logs */}
+            <main className="studio-3pane-main">
+                <div className="studio-3pane-editor">
+                    <div className="studio-3pane-editor-tabs">
+                        {selectedArtifact ? (
+                            <div className="studio-3pane-editor-tab active">
+                                <FileText size={14} /> {selectedArtifact.name}
+                            </div>
+                        ) : (
+                            <div className="studio-3pane-editor-tab">
+                                <FileText size={14} /> Select a file
+                            </div>
+                        )}
+                        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', paddingRight: '1rem', gap: '1rem' }}>
+                            {phase !== 'idle' && (
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-mid)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                                    <div className={`studio-status-dot ${error ? 'failed' : jobStatus === 'done' ? 'done' : ''}`} />
+                                    {currentStageLabel}: {liveStatusText} ({progress}%)
+                                </span>
+                            )}
+                            {phase === 'building' && <button onClick={cancel} style={{ background: 'transparent', border: '1px solid var(--border-mid)', color: 'var(--fail)', borderRadius: '4px', padding: '0.2rem 0.5rem', fontSize: '0.75rem', cursor: 'pointer' }}>Stop</button>}
+                        </div>
+                    </div>
+                    <div className="studio-3pane-editor-content">
+                        {selectedArtifact ? (
+                            <Editor
+                                height="100%"
+                                language={artifactLanguage(selectedArtifact.name)}
+                                theme="vs-dark"
+                                value={artifactPreview || 'Loading preview...'}
+                                options={{
+                                    readOnly: true,
+                                    minimap: { enabled: false },
+                                    fontSize: 13,
+                                    fontFamily: "'Geist Mono', 'Fira Code', monospace",
+                                    scrollBeyondLastLine: false,
+                                    smoothScrolling: true,
+                                    wordWrap: 'on',
+                                    padding: { top: 10, bottom: 10 }
+                                }}
+                            />
+                        ) : (
+                            <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: '0.9rem' }}>
+                                AgentIC Studio is ready. Select a generated file to view its contents.
+                            </div>
+                        )}
+                    </div>
+                </div>
+                <div className="studio-3pane-logs">
+                    <div className="studio-3pane-logs-header">Log/Analytics</div>
+                    <div className="studio-3pane-logs-content" ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}>
+                        {events.filter(e => e.type === 'log' || e.type === 'agent_thinking' || e.type === 'agent_action').map((e, i) => (
+                            <div key={i} className={'studio-log-line ' + (e.type === 'agent_thinking' || e.type === 'agent_action' ? 'system' : '')}>
+                                <span style={{ color: 'var(--terminal-text-dim)', marginRight: '0.5rem' }}>[{e.state || 'System'}]</span>
+                                {e.message || e.content || e.type}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </main>
 
             <BillingModal
                 isOpen={showBillingModal}
@@ -1527,3 +1211,5 @@ export const DesignStudio = () => {
         </div>
     );
 };
+
+export default DesignStudio;

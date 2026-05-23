@@ -11,8 +11,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 os.environ.setdefault("FORCE_COLOR", "1")
 
@@ -1310,6 +1311,9 @@ def configure():
 @app.command()
 def doctor():
     """Validate local runtime, toolchain, saved credentials, and pipeline recovery for CLI builds."""
+    import shutil
+    import subprocess
+
     from .config import CREDENTIALS_PATH, _load_user_credentials
     from .core.pipeline_recovery import OpenLaneErrorFixer
 
@@ -1399,6 +1403,65 @@ def doctor():
             console.print(f"  - {note}")
     except Exception as exc:
         console.print(f"\n[warning]Node contract check skipped:[/warning] {exc}")
+
+    console.print(f"\n[heading]🧪 Experimental Complete Flow Helpers[/heading]")
+    experimental_tools = {
+        "ngspice": shutil.which("ngspice"),
+        "gtkwave": shutil.which("gtkwave"),
+        "klayout": shutil.which("klayout"),
+        "xschem": shutil.which("xschem"),
+        "fault": shutil.which("fault"),
+    }
+    for tool, path in experimental_tools.items():
+        if path:
+            console.print(f"  [success]✓[/success] {tool}: [info]{path}[/info]")
+        else:
+            optional_note = "direct binary optional; Docker image is supported" if tool == "fault" else "optional"
+            console.print(f"  [warning]○[/warning] {tool}: {optional_note}")
+    fault_image = os.getenv("AGENTIC_FAULT_DOCKER_IMAGE", "ghcr.io/aucohl/fault:latest")
+    docker = shutil.which("docker")
+    if docker:
+        try:
+            inspect = subprocess.run(
+                [docker, "image", "inspect", fault_image],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if inspect.returncode == 0:
+                console.print(f"  [success]✓[/success] Fault Docker image: [info]{fault_image}[/info]")
+            else:
+                console.print(f"  [warning]○[/warning] Fault Docker image not pulled: [info]{fault_image}[/info]")
+        except Exception:
+            console.print("  [warning]○[/warning] Fault Docker image check skipped.")
+
+    console.print(f"\n[heading]🏭 Commercial/Foundry Tool Registration[/heading]")
+    commercial_bins = {
+        "Calibre": "CALIBRE_BIN",
+        "Pegasus": "PEGASUS_BIN",
+        "IC Validator": "ICVALIDATOR_BIN",
+        "PrimeTime": "PRIME_TIME_BIN",
+        "Tempus": "TEMPUS_BIN",
+        "Innovus": "INNOVUS_BIN",
+        "Fusion Compiler": "FUSION_COMPILER_BIN",
+        "Tessent": "TESSENT_BIN",
+        "Modus": "MODUS_BIN",
+        "TetraMAX": "TMAX_BIN",
+        "MBIST compiler": "MBIST_COMPILER_BIN",
+    }
+    registered = []
+    for label, env_name in commercial_bins.items():
+        value = os.getenv(env_name, "").strip()
+        if value:
+            exists = os.path.exists(value) if os.path.isabs(value) else bool(shutil.which(value))
+            style = "success" if exists else "warning"
+            console.print(f"  [{style}]{'✓' if exists else '○'}[/] {label}: [info]{value}[/info]")
+            registered.append(label)
+    if not registered:
+        console.print(
+            "  [dim]No commercial tools registered. Use ~/.agentic/commercial-tools.env "
+            "after installing licensed tools/PDKs.[/dim]"
+        )
 
     if required_failed:
         raise typer.Exit(1)
@@ -1542,7 +1605,8 @@ PDK_INSTALL_CONFIGS = {
         "install_method": "download",
         "volare_repo": "",
         "volare_target": "",
-        "download_url": "https://github.com/The-OpenROAD-Project/asap7/archive/main.tar.gz",
+        "git_url": "https://github.com/The-OpenROAD-Project/asap7.git",
+        "download_url": "",
         "requires_volare": False,
         "versions": ["main"],
         "default_version": "main",
@@ -2040,7 +2104,7 @@ def _auto_restructure_pdk(target_path: str, cfg: dict, pdk_key: str) -> None:
         if name.lower().startswith(std_cell_lib.lower()[:6]) or name.lower() in pdk_key.lower():
             for subdir in os.listdir(path):
                 src = os.path.join(path, subdir)
-                dst = os.path.join(cell_ref_dir, subdir)
+                dst = os.path.join(cell_ref_dir, subdir.lower())
                 if os.path.isdir(src) and not os.path.exists(dst):
                     try:
                         os.symlink(os.path.relpath(src, cell_ref_dir), dst)
@@ -2259,6 +2323,53 @@ def _refresh_runtime_tool_paths(target_dir: str, pdk_root: str) -> None:
     except Exception:
         pass
 
+    _refresh_runtime_external_tool_paths()
+
+
+def _refresh_runtime_external_tool_paths() -> None:
+    """Refresh modules that imported tool binary globals before setup changed env."""
+    try:
+        from . import config as _config
+
+        for attr, bin_name in {
+            "OPENSTA_BIN": "sta",
+            "MAGIC_BIN": "magic",
+            "NETGEN_BIN": "netgen",
+            "NGSPICE_BIN": "ngspice",
+        }.items():
+            setattr(_config, attr, _config._resolve_tool_binary(bin_name, env_var=attr))
+
+        try:
+            from .tools import physical_tools as _physical_tools
+
+            _physical_tools.MAGIC_BIN = _config.MAGIC_BIN
+            _physical_tools.NETGEN_BIN = _config.NETGEN_BIN
+        except Exception:
+            pass
+        try:
+            from .tools import spice_tools as _spice_tools
+
+            _spice_tools.NGSPICE_BIN = _config.NGSPICE_BIN
+        except Exception:
+            pass
+        try:
+            from .tools import sta_tools as _sta_tools
+
+            _sta_tools.OPENSTA_BIN = os.environ.get("OPENSTA_BIN", _config.OPENSTA_BIN)
+        except Exception:
+            pass
+        try:
+            from .tools import vlsi_tools as _vlsi_tools
+
+            _vlsi_tools.MAGIC_BIN = _config.MAGIC_BIN
+            _vlsi_tools.NETGEN_BIN = _config.NETGEN_BIN
+            _vlsi_tools.NGSPICE_BIN = _config.NGSPICE_BIN
+            _vlsi_tools.OPENSTA_BIN = _config.OPENSTA_BIN
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 
 def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = False) -> bool:
     """Ensure the Docker OpenLane image used for hardening is available."""
@@ -2310,21 +2421,248 @@ def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = Fa
     return True
 
 
+def _agentic_tools_bin() -> str:
+    path = os.path.abspath(os.path.expanduser("~/.agentic/tools/bin"))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _resolve_installed_tool(name: str, candidates: Optional[List[str]] = None) -> str:
+    for candidate in candidates or []:
+        expanded = os.path.abspath(os.path.expanduser(candidate))
+        if os.path.exists(expanded):
+            return expanded
+    found = shutil.which(name)
+    return os.path.abspath(found) if found else ""
+
+
+def _link_agentic_tool(name: str, source: str) -> str:
+    """Place a stable symlink where AgentIC setup exports expect it."""
+    if not source:
+        return ""
+    source = os.path.abspath(os.path.expanduser(source))
+    if not os.path.exists(source):
+        return ""
+    link_path = os.path.join(_agentic_tools_bin(), name)
+    if os.path.abspath(link_path) == source:
+        return link_path
+    if os.path.lexists(link_path):
+        try:
+            if os.path.realpath(link_path) == source:
+                return link_path
+            os.remove(link_path)
+        except OSError:
+            return source
+    try:
+        os.symlink(source, link_path)
+        return link_path
+    except OSError:
+        return source
+
+
+def _install_experimental_flow_tools(
+    fault_image: str = "ghcr.io/aucohl/fault:latest",
+    skip_apt: bool = False,
+    no_shell: bool = False,
+) -> None:
+    """Install/check open tools used by the experimental-complete flow.
+
+    These tools improve GLS, post-layout SPICE, layout inspection, and open DFT
+    experiments. They do not turn the OSS flow into foundry-qualified signoff.
+    """
+    import platform
+    import shutil
+    import subprocess
+
+    console.print(
+        Panel(
+            "ngspice, KLayout, GTKWave, Xschem, optional Python helpers, and Fault Docker image\n"
+            "Commercial tools still require licensed user-provided installs.",
+            title="Installing Experimental Complete Flow Tools",
+        )
+    )
+
+    if platform.system().lower() == "linux" and not skip_apt and shutil.which("apt-get"):
+        packages = [
+            "ngspice",
+            "gtkwave",
+            "klayout",
+            "xschem",
+            "python3-pip",
+            "python3-venv",
+        ]
+        console.print("[accent]Installing open experimental/signoff helper packages...[/accent]")
+        update = subprocess.run(["sudo", "apt-get", "update"])
+        if update.returncode != 0:
+            console.print("[error]apt-get update failed while installing experimental tools.[/error]")
+            raise typer.Exit(update.returncode)
+        install = subprocess.run(["sudo", "apt-get", "install", "-y", *packages])
+        if install.returncode != 0:
+            console.print("[error]apt-get install failed while installing experimental tools.[/error]")
+            raise typer.Exit(install.returncode)
+    elif skip_apt:
+        console.print("[dim]Skipped apt packages for experimental flow tools.[/dim]")
+    else:
+        console.print("[warning]apt-get not available; skipped OS package install.[/warning]")
+
+    py_packages = ["vcdvcd", "cocotb"]
+    console.print("[accent]Installing optional Python verification helpers...[/accent]")
+    pip = subprocess.run(
+        [sys.executable, "-m", "pip", "install", *py_packages],
+        capture_output=True,
+        text=True,
+    )
+    if pip.returncode != 0:
+        console.print(
+            "[warning]Python helper install failed; continuing because these are optional.[/warning]\n"
+            f"{(pip.stderr or pip.stdout)[-1000:]}"
+        )
+
+    docker = shutil.which("docker")
+    if docker:
+        info = subprocess.run([docker, "info"], capture_output=True, text=True, timeout=30)
+        if info.returncode == 0:
+            inspect = subprocess.run(
+                [docker, "image", "inspect", fault_image],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if inspect.returncode == 0:
+                console.print(f"[success]Fault Docker image already present:[/success] {fault_image}")
+            else:
+                console.print(f"[accent]Pulling Fault Docker image:[/accent] {fault_image}")
+                pull = subprocess.run([docker, "pull", fault_image], text=True)
+                if pull.returncode != 0:
+                    console.print("[warning]Could not pull Fault Docker image; open ATPG remains optional.[/warning]")
+        else:
+            console.print("[warning]Docker is installed but not running; skipped Fault image pull.[/warning]")
+    else:
+        console.print("[warning]Docker not found; skipped Fault image pull.[/warning]")
+
+    tools_bin = _agentic_tools_bin()
+    linked = {}
+    for tool in ("ngspice", "gtkwave", "klayout", "xschem"):
+        linked_path = _link_agentic_tool(tool, _resolve_installed_tool(tool))
+        if linked_path:
+            linked[tool] = linked_path
+
+    os.environ["PATH"] = f"{tools_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+    if linked.get("ngspice"):
+        os.environ["NGSPICE_BIN"] = linked["ngspice"]
+    os.environ["AGENTIC_FAULT_DOCKER_IMAGE"] = fault_image
+    _refresh_runtime_external_tool_paths()
+
+    if not no_shell:
+        _write_experimental_shell_exports(fault_image=fault_image, linked_tools=linked)
+
+
+def _write_experimental_shell_exports(fault_image: str, linked_tools: Optional[Dict[str, str]] = None) -> None:
+    rc_files = [os.path.expanduser("~/.bashrc")]
+    zshrc = os.path.expanduser("~/.zshrc")
+    if os.path.exists(zshrc):
+        rc_files.append(zshrc)
+
+    tools_bin = _agentic_tools_bin()
+    linked_tools = linked_tools or {}
+    ngspice_bin = linked_tools.get("ngspice") or _link_agentic_tool("ngspice", _resolve_installed_tool("ngspice"))
+    exports = [
+        (f"export PATH=\"{tools_bin}:$PATH\"", f"export PATH=\"{tools_bin}:$PATH\""),
+        (f"export AGENTIC_FAULT_DOCKER_IMAGE={fault_image}", f"export AGENTIC_FAULT_DOCKER_IMAGE={fault_image}"),
+        (f"export NGSPICE_BIN={ngspice_bin}", f"export NGSPICE_BIN={ngspice_bin}") if ngspice_bin else ("", ""),
+    ]
+
+    for rcfile in rc_files:
+        existing = ""
+        if os.path.exists(rcfile):
+            with open(rcfile, "r", encoding="utf-8") as f:
+                existing = f.read()
+        added = 0
+        for marker, line in exports:
+            if not marker:
+                continue
+            if marker not in existing:
+                with open(rcfile, "a", encoding="utf-8") as f:
+                    if existing and not existing.endswith("\n"):
+                        f.write("\n")
+                    f.write(f"# AgentIC experimental complete flow\n{line}\n")
+                existing += f"\n{line}\n"
+                added += 1
+        if added:
+            console.print(f"[success]Updated {rcfile} ({added} experimental-flow lines added).[/success]")
+
+
+def _write_commercial_tool_template(path: str) -> None:
+    """Write a non-secret template for user-provided commercial tool adapters."""
+    template = """# AgentIC commercial/foundry flow registration template.
+# Source this only after replacing placeholders with licensed tool paths.
+# AgentIC cannot install foundry PDKs or commercial EDA tools without your licenses.
+
+# export AGENTIC_COMMERCIAL_SIGNOFF=1
+# export AGENTIC_FLOW_PROFILE=commercial_signoff
+
+# PDK / node collateral
+# export PDK_ROOT=/path/to/licensed/pdks
+# export PDK=tsmc28
+# export AGENTIC_STDCELL_LIB=/path/to/stdcell.lib
+# export AGENTIC_TECH_LEF=/path/to/tech.lef
+# export AGENTIC_CELL_LEF=/path/to/cells.lef
+# export AGENTIC_QRC_TECH=/path/to/qrc/techfile
+
+# Commercial physical verification / signoff
+# export CALIBRE_BIN=/path/to/calibre
+# export PEGASUS_BIN=/path/to/pegasus
+# export ICVALIDATOR_BIN=/path/to/icv
+# export TEMPUS_BIN=/path/to/tempus
+# export PRIME_TIME_BIN=/path/to/pt_shell
+# export STAR_RC_BIN=/path/to/StarXtract
+# export QUANTUS_BIN=/path/to/quantus
+# export REDHAWK_BIN=/path/to/redhawk
+# export VOLTUS_BIN=/path/to/voltus
+
+# Commercial implementation
+# export INNOVUS_BIN=/path/to/innovus
+# export FUSION_COMPILER_BIN=/path/to/fc_shell
+
+# Commercial DFT / ATPG / MBIST
+# export TESSENT_BIN=/path/to/tessent
+# export MODUS_BIN=/path/to/modus
+# export TMAX_BIN=/path/to/tmax
+# export MBIST_COMPILER_BIN=/path/to/mbist/compiler
+"""
+    path = os.path.abspath(os.path.expanduser(path))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        console.print(f"[dim]Commercial tool template already exists:[/dim] {path}")
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(template)
+    console.print(f"[success]Wrote commercial tool registration template:[/success] {path}")
+
+
 def _write_signoff_shell_exports(prefix: str, pdk_root: str) -> None:
     """Persist physical signoff tool paths for direct DRC/LVS/STA commands."""
-    import shutil
-
     prefix = os.path.abspath(os.path.expanduser(prefix))
     pdk_root = os.path.abspath(os.path.expanduser(pdk_root))
-    magic_bin = os.path.join(prefix, "bin", "magic")
-    netgen_bin = shutil.which("netgen") or "/usr/bin/netgen"
-    sta_bin = shutil.which("sta") or "/usr/bin/sta"
+    tools_bin = _agentic_tools_bin()
+    magic_bin = _link_agentic_tool(
+        "magic",
+        _resolve_installed_tool("magic", [os.path.join(prefix, "bin", "magic")]),
+    )
+    netgen_bin = _link_agentic_tool(
+        "netgen",
+        _resolve_installed_tool("netgen", ["/usr/local/bin/netgen", "/usr/lib/netgen/bin/netgen", "/usr/bin/netgen"]),
+    )
+    sta_bin = _link_agentic_tool(
+        "sta",
+        _resolve_installed_tool("sta", ["/usr/local/bin/sta", os.path.join(prefix, "bin", "sta"), "/usr/bin/sta"]),
+    )
 
     exports = [
-        (f"export PATH=\"{prefix}/bin:$PATH\"", f"export PATH=\"{prefix}/bin:$PATH\""),
-        (f"export MAGIC_BIN={magic_bin}", f"export MAGIC_BIN={magic_bin}"),
-        (f"export NETGEN_BIN={netgen_bin}", f"export NETGEN_BIN={netgen_bin}"),
-        (f"export OPENSTA_BIN={sta_bin}", f"export OPENSTA_BIN={sta_bin}"),
+        (f"export PATH=\"{tools_bin}:{prefix}/bin:$PATH\"", f"export PATH=\"{tools_bin}:{prefix}/bin:$PATH\""),
+        (f"export MAGIC_BIN={magic_bin}", f"export MAGIC_BIN={magic_bin}") if magic_bin else ("", ""),
+        (f"export NETGEN_BIN={netgen_bin}", f"export NETGEN_BIN={netgen_bin}") if netgen_bin else ("", ""),
+        (f"export OPENSTA_BIN={sta_bin}", f"export OPENSTA_BIN={sta_bin}") if sta_bin else ("", ""),
         (f"export PDK_ROOT={pdk_root}", f"export PDK_ROOT={pdk_root}"),
     ]
 
@@ -2340,6 +2678,8 @@ def _write_signoff_shell_exports(prefix: str, pdk_root: str) -> None:
                 existing = f.read()
         added = 0
         for marker, line in exports:
+            if not marker:
+                continue
             if marker not in existing:
                 with open(rcfile, "a", encoding="utf-8") as f:
                     if existing and not existing.endswith("\n"):
@@ -2590,11 +2930,26 @@ def install_signoff_tools(
     else:
         console.print("[dim]Skipped Magic source build (--skip-magic-build).[/dim]")
 
-    os.environ["PATH"] = f"{prefix_abs}/bin{os.pathsep}{os.environ.get('PATH', '')}"
-    os.environ["MAGIC_BIN"] = magic_bin
-    os.environ["NETGEN_BIN"] = shutil.which("netgen") or "/usr/bin/netgen"
-    os.environ["OPENSTA_BIN"] = shutil.which("sta") or "/usr/bin/sta"
+    tools_bin = _agentic_tools_bin()
+    magic_link = _link_agentic_tool("magic", _resolve_installed_tool("magic", [magic_bin]))
+    netgen_link = _link_agentic_tool(
+        "netgen",
+        _resolve_installed_tool("netgen", ["/usr/local/bin/netgen", "/usr/lib/netgen/bin/netgen", "/usr/bin/netgen"]),
+    )
+    sta_link = _link_agentic_tool(
+        "sta",
+        _resolve_installed_tool("sta", ["/usr/local/bin/sta", os.path.join(prefix_abs, "bin", "sta"), "/usr/bin/sta"]),
+    )
+
+    os.environ["PATH"] = f"{tools_bin}{os.pathsep}{prefix_abs}/bin{os.pathsep}{os.environ.get('PATH', '')}"
+    if magic_link:
+        os.environ["MAGIC_BIN"] = magic_link
+    if netgen_link:
+        os.environ["NETGEN_BIN"] = netgen_link
+    if sta_link:
+        os.environ["OPENSTA_BIN"] = sta_link
     os.environ["PDK_ROOT"] = pdk_root_abs
+    _refresh_runtime_external_tool_paths()
 
     if not no_shell:
         _write_signoff_shell_exports(prefix_abs, pdk_root_abs)
@@ -2664,6 +3019,24 @@ def install_openlane(
     _install_openlane_docker_image(image=image, force=force)
 
 
+@app.command("install-experimental-tools")
+def install_experimental_tools(
+    fault_image: str = typer.Option(
+        "ghcr.io/aucohl/fault:latest",
+        "--fault-image",
+        help="Docker image used for experimental open DFT/ATPG helpers",
+    ),
+    skip_apt: bool = typer.Option(False, "--skip-apt", help="Skip apt package installation"),
+    no_shell: bool = typer.Option(False, "--no-shell", help="Do not update shell profile exports"),
+):
+    """Install open helpers for experimental DFT/ATPG, GLS, SPICE, and inspection."""
+    _install_experimental_flow_tools(
+        fault_image=fault_image,
+        skip_apt=skip_apt,
+        no_shell=no_shell,
+    )
+
+
 @app.command("setup-cli")
 def setup_cli(
     target_dir: str = typer.Option(
@@ -2689,11 +3062,21 @@ def setup_cli(
         "--skip-signoff-tools",
         help="Skip Magic/Netgen/OpenSTA physical signoff tool setup",
     ),
+    skip_experimental_tools: bool = typer.Option(
+        False,
+        "--skip-experimental-tools",
+        help="Skip open experimental helpers for DFT/ATPG, GLS, SPICE, waveform, and layout inspection",
+    ),
     skip_pdk: bool = typer.Option(False, "--skip-pdk", help="Skip PDK installation"),
     openlane_image: str = typer.Option(
         OPENLANE_IMAGE,
         "--openlane-image",
         help="Docker image used for OpenLane hardening",
+    ),
+    commercial_template: str = typer.Option(
+        os.path.expanduser("~/.agentic/commercial-tools.env"),
+        "--commercial-template",
+        help="Path for commercial/foundry tool registration template",
     ),
 ):
     """Install the complete AgentIC CLI stack in one command."""
@@ -2704,9 +3087,11 @@ def setup_cli(
         skip_oss=skip_oss,
         skip_hardening=skip_openlane,
         skip_signoff_tools=skip_signoff_tools,
+        skip_experimental_tools=skip_experimental_tools,
         pdks=pdks,
         env_file="",
         openlane_image=openlane_image,
+        commercial_template=commercial_template,
     )
 
 
@@ -2743,6 +3128,11 @@ def install_tools(
         "--skip-signoff-tools",
         help="Skip Magic/Netgen/OpenSTA install for direct drc/lvs/sta commands",
     ),
+    skip_experimental_tools: bool = typer.Option(
+        False,
+        "--skip-experimental-tools",
+        help="Skip open experimental helpers for DFT/ATPG, GLS, SPICE, waveform, and layout inspection",
+    ),
     pdks: str = typer.Option(
         "sky130",
         "--pdks",
@@ -2758,12 +3148,18 @@ def install_tools(
         "--env-file",
         help="Write local-LLM .env template to this path",
     ),
+    commercial_template: str = typer.Option(
+        os.path.expanduser("~/.agentic/commercial-tools.env"),
+        "--commercial-template",
+        help="Write commercial/foundry tool registration template to this path",
+    ),
 ):
-    """One-shot setup: install OSS CAD Suite, signoff tools, Docker/OpenLane, volare, PDKs, and shell env.
+    """One-shot setup: install OSS CAD Suite, signoff tools, experimental helpers, Docker/OpenLane, volare, PDKs, and shell env.
 
     Examples:
         agentic install-tools
         agentic setup-cli --pdks sky130,gf180mcu
+        agentic setup-cli --pdks all-open-auto
         agentic install-oss
         agentic install-openlane
         agentic install-tools --target /opt/oss-cad-suite --pdk-root /opt/pdks
@@ -2782,7 +3178,11 @@ def install_tools(
     target_dir = os.path.abspath(os.path.expanduser(target_dir))
     pdk_root = os.path.abspath(os.path.expanduser(pdk_root))
 
-    total_steps = 5 if not skip_signoff_tools else 4
+    total_steps = 6
+    if skip_signoff_tools:
+        total_steps -= 1
+    if skip_experimental_tools:
+        total_steps -= 1
 
     # ── 1. OSS CAD Suite ──────────────────────────────────────────────────
     if not skip_oss:
@@ -2827,10 +3227,27 @@ def install_tools(
     else:
         console.print("[dim]Skipped physical signoff tools (--skip-signoff-tools).[/dim]")
 
-    if not skip_hardening:
+    if not skip_experimental_tools:
         console.print(
             Panel(
-                f"[accent]Step {3 if not skip_signoff_tools else 2}/{total_steps}: Docker/OpenLane Hardening Backend[/accent]\n"
+                f"[accent]Step {3 if not skip_signoff_tools else 2}/{total_steps}: Experimental Complete Flow Helpers[/accent]\n"
+                "Fault Docker, ngspice, KLayout, GTKWave, Xschem, cocotb helpers",
+                title="Installing Experimental Flow",
+            )
+        )
+        _install_experimental_flow_tools(no_shell=False)
+    else:
+        console.print("[dim]Skipped experimental complete flow tools (--skip-experimental-tools).[/dim]")
+
+    if not skip_hardening:
+        hardening_step = 4
+        if skip_signoff_tools:
+            hardening_step -= 1
+        if skip_experimental_tools:
+            hardening_step -= 1
+        console.print(
+            Panel(
+                f"[accent]Step {hardening_step}/{total_steps}: Docker/OpenLane Hardening Backend[/accent]\n"
                 f"Image: {openlane_image}",
                 title="Installing OpenLane",
             )
@@ -2840,9 +3257,14 @@ def install_tools(
         console.print("[dim]Skipped Docker/OpenLane setup (--skip-hardening).[/dim]")
 
     # ── 2. Volare ─────────────────────────────────────────────────────────
+    volare_step = 5
+    if skip_signoff_tools:
+        volare_step -= 1
+    if skip_experimental_tools:
+        volare_step -= 1
     console.print(
         Panel(
-            f"[accent]Step {4 if not skip_signoff_tools else 3}/{total_steps}: Volare PDK Manager[/accent]",
+            f"[accent]Step {volare_step}/{total_steps}: Volare PDK Manager[/accent]",
             title="📦 Installing Volare",
         )
     )
@@ -2864,6 +3286,11 @@ def install_tools(
 
     # ── 3. PDK ────────────────────────────────────────────────────────────
     if not skip_pdk:
+        pdk_step = 6
+        if skip_signoff_tools:
+            pdk_step -= 1
+        if skip_experimental_tools:
+            pdk_step -= 1
         requested_pdks = [
             item.strip().lower()
             for item in pdks.split(",")
@@ -2876,7 +3303,7 @@ def install_tools(
 
         console.print(
             Panel(
-                f"[accent]Step {5 if not skip_signoff_tools else 4}/{total_steps}: PDK Installation[/accent]\n"
+                f"[accent]Step {pdk_step}/{total_steps}: PDK Installation[/accent]\n"
                 f"Target: {pdk_root}\n"
                 f"PDKs: {', '.join(requested_pdks)}",
                 title="🧱 Installing PDK",
@@ -2898,6 +3325,8 @@ def install_tools(
             changed = True
     else:
         console.print("[dim]Skipped PDK installation (--skip-pdk).[/dim]")
+
+    _write_commercial_tool_template(commercial_template)
 
     # ── 4. Shell environment ──────────────────────────────────────────────
     console.print(
@@ -3217,8 +3646,9 @@ def install_pdk(
             raise typer.Exit(1)
 
     else:
+        git_url = cfg.get("git_url", "")
         download_url = cfg.get("download_url", "")
-        if not download_url:
+        if not download_url and not git_url:
             _print_manual_pdk_steps(pdk_key, cfg)
             return
 
@@ -3226,100 +3656,120 @@ def install_pdk(
         import shutil
         import subprocess
 
-        # ── Probe URL and get file size ──
-        console.print("[accent]Checking PDK availability...[/accent]")
-        try:
-            import requests as _requests
-            head = _requests.head(download_url, allow_redirects=True, timeout=15)
-            if head.status_code == 404:
-                # Try fallback: swap tags/v1.0.0 → main
-                fallback_url = download_url.replace("/refs/tags/v1.0.0", "/main")
-                if fallback_url != download_url:
-                    head2 = _requests.head(fallback_url, allow_redirects=True, timeout=15)
-                    if head2.status_code == 200:
-                        download_url = fallback_url
-                        head = head2
+        if git_url:
+            console.print(f"[accent]Cloning PDK repository {git_url}...[/accent]")
+            extract_dir = os.path.join(tempfile.gettempdir(), f"agentic_{pdk_key}_clone")
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            try:
+                result = subprocess.run(
+                    ["git", "clone", "--recursive", "--depth=1", git_url, extract_dir],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    console.print(f"[error]Git clone failed:[/error]\n{result.stderr}")
+                    raise typer.Exit(1)
+            except Exception as e:
+                console.print(f"[error]Git clone failed: {e}[/error]")
+                raise typer.Exit(1)
+            extracted_path = extract_dir
+            archive_path = None
+        else:
+            # ── Probe URL and get file size ──
+            console.print("[accent]Checking PDK availability...[/accent]")
+            try:
+                import requests as _requests
+                head = _requests.head(download_url, allow_redirects=True, timeout=15)
+                if head.status_code == 404:
+                    # Try fallback: swap tags/v1.0.0 → main
+                    fallback_url = download_url.replace("/refs/tags/v1.0.0", "/main")
+                    if fallback_url != download_url:
+                        head2 = _requests.head(fallback_url, allow_redirects=True, timeout=15)
+                        if head2.status_code == 200:
+                            download_url = fallback_url
+                            head = head2
+                        else:
+                            console.print(f"[error]PDK archive not found at {download_url}[/error]")
+                            console.print(f"[dim]Try volare-based PDKs: agentic install-pdk sky130[/dim]")
+                            raise typer.Exit(1)
                     else:
                         console.print(f"[error]PDK archive not found at {download_url}[/error]")
                         console.print(f"[dim]Try volare-based PDKs: agentic install-pdk sky130[/dim]")
                         raise typer.Exit(1)
-                else:
-                    console.print(f"[error]PDK archive not found at {download_url}[/error]")
-                    console.print(f"[dim]Try volare-based PDKs: agentic install-pdk sky130[/dim]")
-                    raise typer.Exit(1)
-            head.raise_for_status()
-        except _requests.exceptions.RequestException as e:
-            console.print(f"[error]Cannot reach PDK server: {e}[/error]")
-            console.print("[dim]Check your internet connection.[/dim]")
-            raise typer.Exit(1)
-
-        total_size = int(head.headers.get("content-length", 0))
-        if total_size > 0:
-            size_mb = total_size / (1024 * 1024)
-            if size_mb >= 1:
-                console.print(f"[info]PDK size: {size_mb:.1f} MB[/info]")
-            else:
-                console.print(f"[info]PDK size: {total_size / 1024:.0f} KB[/info]")
-        else:
-            console.print("[dim]PDK size: unknown[/dim]")
-
-        console.print("[accent]Downloading PDK archive...[/accent]")
-        archive_path = os.path.join(tempfile.gettempdir(), f"agentic_{pdk_key}.tar.gz")
-
-        try:
-            with _requests.get(download_url, stream=True, timeout=300) as resp:
-                resp.raise_for_status()
-                downloaded = 0
-                with open(archive_path, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=65536):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            pct = min(100, downloaded * 100 // total_size)
-                            bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-                            console.print(f"\r  [{bar}] {pct}%", end="")
-                if total_size > 0:
-                    console.print()  # newline after progress bar
-            console.print(f"[success]Download complete ({downloaded / (1024*1024):.1f} MB)[/success]")
-        except Exception as e:
-            console.print(f"\n[error]Download failed: {e}[/error]")
-            raise typer.Exit(1)
-
-        console.print("[accent]Extracting archive...[/accent]")
-        extract_dir = os.path.join(tempfile.gettempdir(), f"agentic_{pdk_key}_extract")
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        os.makedirs(extract_dir, exist_ok=True)
-
-        try:
-            result = subprocess.run(
-                ["tar", "-xzf", archive_path, "-C", extract_dir],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode != 0:
-                console.print(f"[error]Extraction failed:[/error]\n{result.stderr}")
+                head.raise_for_status()
+            except _requests.exceptions.RequestException as e:
+                console.print(f"[error]Cannot reach PDK server: {e}[/error]")
+                console.print("[dim]Check your internet connection.[/dim]")
                 raise typer.Exit(1)
-        except Exception as e:
-            console.print(f"[error]Extraction failed: {e}[/error]")
-            _cleanup_temp(archive_path, extract_dir)
-            raise typer.Exit(1)
+    
+            total_size = int(head.headers.get("content-length", 0))
+            if total_size > 0:
+                size_mb = total_size / (1024 * 1024)
+                if size_mb >= 1:
+                    console.print(f"[info]PDK size: {size_mb:.1f} MB[/info]")
+                else:
+                    console.print(f"[info]PDK size: {total_size / 1024:.0f} KB[/info]")
+            else:
+                console.print("[dim]PDK size: unknown[/dim]")
+    
+            console.print("[accent]Downloading PDK archive...[/accent]")
+            archive_path = os.path.join(tempfile.gettempdir(), f"agentic_{pdk_key}.tar.gz")
+    
+            try:
+                with _requests.get(download_url, stream=True, timeout=300) as resp:
+                    resp.raise_for_status()
+                    downloaded = 0
+                    with open(archive_path, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                pct = min(100, downloaded * 100 // total_size)
+                                bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+                                console.print(f"\r  [{bar}] {pct}%", end="")
+                    if total_size > 0:
+                        console.print()  # newline after progress bar
+                console.print(f"[success]Download complete ({downloaded / (1024*1024):.1f} MB)[/success]")
+            except Exception as e:
+                console.print(f"\n[error]Download failed: {e}[/error]")
+                raise typer.Exit(1)
 
-        # Find the extracted directory (handle archives with README/LICENSE at top level)
-        extracted_entries = os.listdir(extract_dir)
-        dirs = [e for e in extracted_entries if os.path.isdir(os.path.join(extract_dir, e))]
-        if not dirs:
-            console.print("[error]Archive contains no directories — cannot install PDK.[/error]")
-            _cleanup_temp(archive_path, extract_dir)
-            raise typer.Exit(1)
-        extracted_path = os.path.join(extract_dir, dirs[0])
-        # If the first dir is a wrapper (github archives produce  repo-tag/), use it
-        if len(dirs) == 1:
-            pass  # Standard single-directory extraction
-        else:
-            # Multiple top-level dirs — pick the most PDK-looking one
-            pdk_looking = [d for d in dirs if d.lower().startswith(("pdk", "lib", "asap", "nangate", "osu", "freepdk"))]
-            extracted_path = os.path.join(extract_dir, pdk_looking[0]) if pdk_looking else os.path.join(extract_dir, dirs[0])
+            console.print("[accent]Extracting archive...[/accent]")
+            extract_dir = os.path.join(tempfile.gettempdir(), f"agentic_{pdk_key}_extract")
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            os.makedirs(extract_dir, exist_ok=True)
+    
+            try:
+                result = subprocess.run(
+                    ["tar", "-xzf", archive_path, "-C", extract_dir],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if result.returncode != 0:
+                    console.print(f"[error]Extraction failed:[/error]\n{result.stderr}")
+                    raise typer.Exit(1)
+            except Exception as e:
+                console.print(f"[error]Extraction failed: {e}[/error]")
+                _cleanup_temp(archive_path, extract_dir)
+                raise typer.Exit(1)
+    
+        if not git_url:
+            # Find the extracted directory (handle archives with README/LICENSE at top level)
+            extracted_entries = os.listdir(extract_dir)
+            dirs = [e for e in extracted_entries if os.path.isdir(os.path.join(extract_dir, e))]
+            if not dirs:
+                console.print("[error]Archive contains no directories — cannot install PDK.[/error]")
+                _cleanup_temp(archive_path, extract_dir)
+                raise typer.Exit(1)
+            extracted_path = os.path.join(extract_dir, dirs[0])
+            # If the first dir is a wrapper (github archives produce  repo-tag/), use it
+            if len(dirs) == 1:
+                pass  # Standard single-directory extraction
+            else:
+                # Multiple top-level dirs — pick the most PDK-looking one
+                pdk_looking = [d for d in dirs if d.lower().startswith(("pdk", "lib", "asap", "nangate", "osu", "freepdk"))]
+                extracted_path = os.path.join(extract_dir, pdk_looking[0]) if pdk_looking else os.path.join(extract_dir, dirs[0])
 
         target_path = os.path.join(install_dir, cfg["pdk_dir"])
         os.makedirs(install_dir, exist_ok=True)
@@ -3327,7 +3777,8 @@ def install_pdk(
         if os.path.exists(target_path):
             shutil.rmtree(target_path)
         shutil.move(extracted_path, target_path)
-        _cleanup_temp(archive_path, extract_dir)
+        if not git_url:
+            _cleanup_temp(archive_path, extract_dir)
 
         # ── Auto-restructure for OpenLane compatibility ──
         _auto_restructure_pdk(target_path, cfg, pdk_key)
@@ -3822,6 +4273,25 @@ def _apply_harden_fix(
         new_die = die_size if attempt == 0 else int(die_size * (1.15 + attempt * 0.10))
         return new_die, new_util, clock_period, f"Reduce util to {new_util}%, expand to {new_die}um"
 
+    elif primary == "global_route_uncovered":
+        new_die = int(die_size * 0.67) if die_size >= 2400 else die_size
+        new_die = max(400, new_die)
+        return (
+            new_die,
+            max(20, min(35, util)),
+            clock_period,
+            "Macro/pin routing recovery: scale floorplan from current design, lower density, add routing halo/blockage guidance",
+        )
+
+    elif primary == "detail_route_resource":
+        new_die = int(die_size * 0.67) if die_size >= 2400 else die_size
+        new_die = max(400, new_die)
+        return new_die, max(20, min(35, util)), clock_period, "Compact oversized floorplan proportionally to reduce TritonRoute memory/filler load"
+
+    elif primary == "detail_route_short":
+        new_util = max(25, util - 5)
+        return die_size, new_util, clock_period, "Detailed-route shorts: reduce density and preserve routing whitespace"
+
     elif primary in ("drc_violation", "placement_failure"):
         new_util = max(25, util - 10)
         new_die = int(die_size * (1.10 + attempt * 0.10))
@@ -4060,7 +4530,7 @@ def build(
     flow_profile: str = typer.Option(
         "",
         "--flow-profile",
-        help="Executable flow profile: sky130_oss_executable, oss_with_optional_gls, or commercial_signoff",
+        help="Executable flow profile: sky130_oss_executable, oss_with_optional_gls, sky130_oss_experimental_complete, or commercial_signoff",
     ),
     pdk_path: str = typer.Option(
         "", "--pdk-path", help="Path to a custom PDK directory to use for this build"

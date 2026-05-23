@@ -50,7 +50,10 @@ async function createWindow(): Promise<void> {
     url.searchParams.set('desktop_build', String(Date.now()))
     mainWindow.loadURL(url.toString())
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    const rendererIndex = isDev
+      ? join(__dirname, '../renderer/index.html')
+      : join(process.resourcesPath, 'renderer/index.html')
+    mainWindow.loadFile(rendererIndex)
   }
 }
 

@@ -37,6 +37,7 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   • Bus widths MUST match exactly on every LHS and RHS: 16-bit PC cannot receive an 8-bit value.
   • Every 'output logic' port must be driven by EXACTLY one source: either 'assign' OR 'always' — NEVER both.
   • Arrays (logic [N-1:0] mem [0:D-1]) are initialized with '= {...}' not '= begin...end'.
+  • TOP-LEVEL INSTANTIATION (CRITICAL): When instantiating submodules, their outputs MUST ultimately drive the top-level output ports (directly or via logic). Unconnected submodules will be completely deleted by the synthesis optimizer as dead code!
 
   VERILATOR COMPATIBILITY:
   ─────────────────────────
@@ -61,7 +62,8 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   ───────────────────────────────────────────────────
   • Clock Domain Crossing (CDC): Always use multi-stage synchronizers (e.g., 2-flop or 3-flop) when moving signals between asynchronous clock domains.
   • High Fanout Nets: For nets driving many sinks (e.g., global resets or enables), avoid single-driver bottlenecks. Assume OpenLane/CTS will handle buffers, but duplicate registers at RTL if fanout > 1000.
-  • Macros & Memory: NEVER synthesize large memory arrays (RAMs/ROMs) > 1KB into flip-flops. Always use parameterized memory macro wrappers, OpenRAM-style wrappers, or foundry SRAM black boxes.
+  • Macros & Memory: NEVER synthesize large memory arrays (RAMs/ROMs) > 1KB into flip-flops. Use a PDK-provided memory macro wrapper only when that macro collateral is available in the selected PDK or macro manifest. For microcontroller/CPU systems, prefer a proven CPU wrapper such as `picorv32_wrapper` when available, and connect memory through the selected PDK's macro-facing wrapper rather than assuming a Sky130-specific SRAM exists.
+  • Wrapper Naming (CRITICAL): When instantiating a memory macro subsystem wrapper, name the wrapper instance `u_memory_subsystem` so the physical design flow can discover and place the underlying hard macro. Do not instantiate a foundry-specific macro cell unless the selected PDK/macro manifest provides it.
   • Feasible Substitution: If a requested block needs custom analog/layout/IP collateral, implement the closest digital control/status or hard-macro wrapper and clearly preserve the user-visible intent in comments and interfaces.
   • Reset Trees: Be mindful of reset fanout and recovery times. Use active-low asynchronous resets but synchronize de-assertion to the clock domain (async assert, sync deassert).
   • Power & Tie-Cells: Do not hardcode 1'b1 or 1'b0 heavily in critical datapaths if it causes routing congestion; let synthesis infer tie-high/tie-low standard cells.

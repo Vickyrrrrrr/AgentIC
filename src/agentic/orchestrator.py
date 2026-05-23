@@ -62,6 +62,7 @@ from .core.incremental_fixer import IncrementalFixEngine, ErrorAnalysis, ErrorTy
 from .core.hardware_knowledge import HardwareKnowledgeBase
 from .core.vlsi_rag import VLSIKnowledgeBase
 from .core.macro_registry import (
+    MacroPlacement,
     MacroManifest,
     discover_macro_manifest,
     macro_openlane_tcl,
@@ -953,7 +954,12 @@ class BuildOrchestrator:
             "AGENTIC_ENFORCE_MAX_ROUTING_LAYER", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
         grt_adjustment = float(caps.get("grt_adjustment", 0.20) or 0.20)
-        density = min(0.85, max(0.25, util / 100 + (0.08 if caps.get("advanced_node") else 0.05)))
+        density_override = self.artifacts.get("target_density_override")
+        density = (
+            float(density_override)
+            if density_override is not None
+            else min(0.85, max(0.25, util / 100 + (0.08 if caps.get("advanced_node") else 0.05)))
+        )
         lines = [
             "# Node-aware routing and placement",
             f"set ::env(PL_TARGET_DENSITY) {density:.2f}",
@@ -972,6 +978,92 @@ class BuildOrchestrator:
                 ]
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _coerce_die_dimensions(value: Any, fallback: int = 500) -> Tuple[int, int]:
+        """Normalize OpenLane die overrides into width/height microns."""
+        if isinstance(value, dict):
+            width = value.get("width") or value.get("x") or value.get("die_width")
+            height = value.get("height") or value.get("y") or value.get("die_height")
+            if width and height:
+                return max(1, int(float(width))), max(1, int(float(height)))
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2:
+                return max(1, int(float(value[-2]))), max(1, int(float(value[-1])))
+            if len(value) == 1:
+                dim = max(1, int(float(value[0])))
+                return dim, dim
+        if isinstance(value, str):
+            nums = re.findall(r"[-+]?\d+(?:\.\d+)?", value)
+            if len(nums) >= 4:
+                return max(1, int(float(nums[2]))), max(1, int(float(nums[3])))
+            if len(nums) >= 2:
+                return max(1, int(float(nums[0]))), max(1, int(float(nums[1])))
+            if len(nums) == 1:
+                dim = max(1, int(float(nums[0])))
+                return dim, dim
+        try:
+            dim = max(1, int(float(value)))
+        except (TypeError, ValueError):
+            dim = max(1, int(float(fallback)))
+        return dim, dim
+
+    def _write_macro_placement_cfg(self, manifest: MacroManifest) -> str:
+        placement_text = macro_placement_cfg(manifest)
+        if not placement_text:
+            return ""
+        src_dir = f"{OPENLANE_ROOT}/designs/{self.name}/src"
+        os.makedirs(src_dir, exist_ok=True)
+        placement_path = os.path.join(src_dir, "macro_placement.cfg")
+        with open(placement_path, "w") as f:
+            f.write(placement_text)
+        self.artifacts["macro_placement_cfg"] = placement_path
+        return placement_path
+
+    def _nudge_macro_placements(self, delta_x: float = 600.0) -> bool:
+        manifest = self._get_macro_manifest()
+        if not manifest.macros:
+            return False
+
+        die_w, _die_h = self._coerce_die_dimensions(
+            self.artifacts.get("die_area_override")
+            or self.artifacts.get("floorplan_meta", {}).get("die_area", 500),
+            fallback=500,
+        )
+        changed = False
+        for macro in manifest.macros:
+            if not macro.placement:
+                continue
+            macro.placement = MacroPlacement(
+                x=min(max(40.0, macro.placement.x + delta_x), max(40.0, die_w - 900.0)),
+                y=max(40.0, macro.placement.y),
+                orient=macro.placement.orient,
+            )
+            changed = True
+            break
+
+        if changed:
+            self.artifacts["macro_manifest"] = manifest.to_dict()
+            self._macro_manifest = manifest
+            self._write_macro_placement_cfg(manifest)
+            self.log(f"Macro placement nudged by {delta_x:g}um for routing recovery.", refined=True)
+        return changed
+
+    def _macro_routing_repair_tcl(self, manifest: MacroManifest) -> str:
+        if not manifest.macros and not self.artifacts.get("macro_floorplan_repair"):
+            return ""
+        lines = ["# Macro-aware routing repair"]
+        halo = self.artifacts.get("macro_halo_override", [40, 40])
+        channel = self.artifacts.get("macro_channel_override", [80, 80])
+        lines.append(f"set ::env(PL_MACRO_HALO) {{{int(halo[0])} {int(halo[1])}}}")
+        lines.append(f"set ::env(PL_MACRO_CHANNEL) {{{int(channel[0])} {int(channel[1])}}}")
+        if str(self.pdk_profile.get("pdk", PDK)).lower().startswith("sky130"):
+            blockages = self.artifacts.get(
+                "macro_blockages_layer_override",
+                "li1 met1 met2 met3 met4 met5",
+            )
+            lines.append(f'set ::env(MACRO_BLOCKAGES_LAYER) "{blockages}"')
+        return "\n".join(lines) + "\n"
 
     def _require_artifact(self, key: str, *, consumer: str, message: str) -> Any:
         if key in self.artifacts and self.artifacts[key] not in (None, "", {}):
@@ -1748,9 +1840,7 @@ class BuildOrchestrator:
         latest = self.checkpoint_manager.load_latest()
         if latest:
             self.log(f"Auto-resuming from checkpoint: {latest.timestamp} | Stage: {latest.state_name}", refined=True)
-            self.state = latest.state
-            self.global_step_count = latest.global_step_count
-            self.artifacts = latest.artifacts
+            self.checkpoint_manager.restore(latest, self)
             self.artifacts["root"] = f"{OPENLANE_ROOT}/designs/{self.name}"
             return
 
@@ -3716,7 +3806,7 @@ endclass
         if not spec_text:
             spec_text = f"Sub-module {design_name} of design {self.name}. Generate complete Verilog implementation."
 
-        deps = [d.name for d in node.dependencies]
+        deps = [str(d) for d in node.dependencies]
         dep_context = ""
         if deps:
             dep_rtls = []
@@ -4207,9 +4297,64 @@ endmodule
                     rf"{self.name} dut",
                     tb_code,
                 )
-                # Rename parameter/port connections referencing original module name
                 tb_code = re.sub(rf"\b({re.escape(original_name)})\s*#", rf"{self.name} #", tb_code)
                 self.artifacts["golden_tb"] = tb_code
+            
+            # --- VLSI EXPERTISE UPGRADE: Auto-Download & Macro Injection ---
+            if "requires_download" in template:
+                url = template["requires_download"]
+                target_file = os.path.join(self.artifacts["src_dir"], os.path.basename(url))
+                if not os.path.exists(target_file):
+                    self.log(f"VLSI Agent: Automatically downloading external IP from {url}...", refined=True)
+                    try:
+                        import urllib.request
+                        urllib.request.urlretrieve(url, target_file)
+                        self.log(f"Successfully injected {os.path.basename(url)} into design.", refined=True)
+                    except Exception as e:
+                        self.log(f"Failed to download external IP: {e}", refined=True)
+            
+            if "requires_macro" in template:
+                macro_name = template["requires_macro"]
+                self.log(f"VLSI Agent: Injecting physical macro {macro_name}...", refined=True)
+                manifest_path = os.path.join(self.artifacts["root"], "macro_manifest.json")
+                manifest_data = {"macros": []}
+                if os.path.exists(manifest_path):
+                    try:
+                        with open(manifest_path, "r") as f:
+                            manifest_data = json.load(f)
+                    except:
+                        pass
+                
+                # Check if macro already exists to prevent duplicates
+                if not any(m.get("name") == macro_name for m in manifest_data["macros"]):
+                    manifest_data["macros"].append({
+                        "name": macro_name,
+                        "module": macro_name,
+                        "instance": "u_memory_subsystem.u_sram_macro",
+                        "lefs": [f"/home/vickynishad/.ciel/sky130A/libs.ref/sky130_sram_macros/lef/{macro_name}.lef"],
+                        "gds": [f"/home/vickynishad/.ciel/sky130A/libs.ref/sky130_sram_macros/gds/{macro_name}.gds"],
+                        "placement": {"x": 500, "y": 500, "orient": "N"}
+                    })
+                    with open(manifest_path, "w") as f:
+                        json.dump(manifest_data, f, indent=4)
+                
+                # Keep hard macros away from die edges without creating a huge filler-heavy floorplan.
+                # Size this from the macro placement and PDK minimums instead of hard-coding
+                # a single design's recovered dimensions.
+                macro_place = manifest_data["macros"][-1].get("placement", {})
+                caps = self._flow_caps()
+                min_die = int(caps.get("min_die_um", 250) or 250)
+                die_w = max(min_die, 1200, int(float(macro_place.get("x", 500))) + 1500)
+                die_h = max(min_die, 1000, int(float(macro_place.get("y", 500))) + 1300)
+                self.artifacts["die_area_override"] = (die_w, die_h)
+                self.artifacts["core_util_override"] = 25
+                self.artifacts["target_density_override"] = 0.25
+                self.artifacts["macro_floorplan_repair"] = True
+                self.artifacts["macro_halo_override"] = [40, 40]
+                self.artifacts["macro_channel_override"] = [80, 80]
+                self.artifacts["macro_blockages_layer_override"] = "li1 met1 met2 met3 met4 met5"
+                self.log(f"Prepared bounded {die_w}x{die_h} macro floorplan with routing halo/channel.", refined=True)
+            # ---------------------------------------------------------------
         else:
             # No template match — pure LLM generation
             self.log("No golden template match. Generating from scratch.", refined=True)
@@ -4237,7 +4382,6 @@ undriven outputs, and Verilator-incompatible constructs. You verify that:
 You return the FINAL corrected code in ```verilog``` fences.""",
                 llm=self.get_llm_for_role("designer"),
                 verbose=False,
-                tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search],
                 allow_delegation=False,
             )
 
@@ -8017,11 +8161,18 @@ REASONING: <1-line explanation>""",
             clock_period = heuristic_clk
 
         area_scale = self.artifacts.get("area_scale", 1.0)
-        die = int(base_die * area_scale)
+        die_override = self.artifacts.get("die_area_override")
+        if die_override:
+            die_w, die_h = self._coerce_die_dimensions(die_override, fallback=base_die)
+            die = max(die_w, die_h)
+        else:
+            die = int(base_die * area_scale)
+            die_w, die_h = die, die
         util = max(25, min(int(flow_caps.get("max_core_util", 50)), int(util)))
 
         macro_manifest = self._get_macro_manifest()
         macro_tcl = macro_openlane_tcl(macro_manifest)
+        macro_repair_tcl = self._macro_routing_repair_tcl(macro_manifest)
         macro_placement_text = macro_placement_cfg(macro_manifest)
         if macro_placement_text:
             macro_placement_cfg_path = os.path.join(src_dir, "macro_placement.cfg")
@@ -8034,7 +8185,7 @@ REASONING: <1-line explanation>""",
             if macro_placement_text:
                 f.write(
                     "# Auto-generated macro placement summary\n"
-                    f"# die_area={die}x{die} cell_count_est={cell_count_est}\n"
+                    f"# die_area={die_w}x{die_h} cell_count_est={cell_count_est}\n"
                     f"# OpenLane placement cfg: {self.artifacts['macro_placement_cfg']}\n"
                 )
                 for macro in macro_manifest.macros:
@@ -8047,7 +8198,7 @@ REASONING: <1-line explanation>""",
             else:
                 f.write(
                     "# Auto-generated macro placement skeleton\n"
-                    f"# die_area={die}x{die} cell_count_est={cell_count_est}\n"
+                    f"# die_area={die_w}x{die_h} cell_count_est={cell_count_est}\n"
                     "# Declare macros in macro_manifest.json to generate macro_placement.cfg\n"
                     "set macros {}\n"
                     "foreach m $macros {\n"
@@ -8069,12 +8220,13 @@ REASONING: <1-line explanation>""",
                 f'set ::env(STD_CELL_LIBRARY) "{self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")}"\n'
                 f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]\n"
                 f"{macro_tcl}"
+                f"{macro_repair_tcl}"
                 f"{sdc_injection}"
                 'set ::env(SYNTH_STRATEGY) "AREA 0"\n'
                 "set ::env(SYNTH_SIZING) 1\n"
                 "set ::env(MAGIC_DRC_USE_GDS) 1\n"
                 'set ::env(FP_SIZING) "absolute"\n'
-                f'set ::env(DIE_AREA) "0 0 {die} {die}"\n'
+                f'set ::env(DIE_AREA) "0 0 {die_w} {die_h}"\n'
                 f"set ::env(FP_CORE_UTIL) {util}\n"
                 f'set ::env(CLOCK_PERIOD) "{clock_period}"\n'
                 f'set ::env(CLOCK_PORT) "clk"\n'
@@ -8085,6 +8237,8 @@ REASONING: <1-line explanation>""",
         self.artifacts["floorplan_tcl"] = floorplan_tcl
         self.artifacts["floorplan_meta"] = {
             "die_area": die,
+            "die_width": die_w,
+            "die_height": die_h,
             "cell_count_est": cell_count_est,
             "clock_period": clock_period,
             "utilization": util,
@@ -8536,10 +8690,16 @@ REASONING: <1-line explanation>""",
             or self.pdk_profile.get("default_clock_period", "10.0")
         )
         synth_strategy = self.artifacts.get("synth_strategy_override", "AREA 0")
-        macro_tcl = self._macro_openlane_tcl()
+        macro_manifest = self._get_macro_manifest()
+        macro_tcl = macro_openlane_tcl(macro_manifest)
+        self._write_macro_placement_cfg(macro_manifest)
+        macro_repair_tcl = self._macro_routing_repair_tcl(macro_manifest)
 
         floor_meta = self.artifacts.get("floorplan_meta", {})
-        die = self.artifacts.get("die_area_override") or int(floor_meta.get("die_area", 500))
+        die_w, die_h = self._coerce_die_dimensions(
+            self.artifacts.get("die_area_override") or floor_meta.get("die_area", 500),
+            fallback=500,
+        )
         default_util = int(flow_caps.get("default_core_util", 40) or 40)
         max_util = int(flow_caps.get("max_core_util", 50) or 50)
         util = int(self.artifacts.get("core_util_override") or floor_meta.get("utilization", default_util))
@@ -8563,6 +8723,7 @@ set ::env(STD_CELL_LIBRARY) "{std_cell_lib}"
 # Verilog Files (glob all .v files — supports multi-module designs)
 set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]
 {macro_tcl}
+{macro_repair_tcl}
 
 # Clock Configuration
 set ::env(CLOCK_PORT) "{clock_port}"
@@ -8574,7 +8735,7 @@ set ::env(SYNTH_SIZING) 1
 
 # Floorplanning
 set ::env(FP_SIZING) "absolute"
-set ::env(DIE_AREA) "0 0 {die} {die}"
+set ::env(DIE_AREA) "0 0 {die_w} {die_h}"
 set ::env(FP_CORE_UTIL) {util}
 
 {self._openlane_node_tcl(util)}
@@ -8632,16 +8793,22 @@ set ::env(MAGIC_DRC_USE_GDS) 1
 
         # Collect current physical design parameters for recovery
         floor_meta = self.artifacts.get("floorplan_meta", {})
+        die_w, die_h = self._coerce_die_dimensions(
+            self.artifacts.get("die_area_override") or floor_meta.get("die_area", 500),
+            fallback=500,
+        )
         stage_params = {
             "clock_period": float(
                 self.artifacts.get("clock_period_override",
                 self.artifacts.get("sdc_clock_period_ns",
                 self.pdk_profile.get("default_clock_period", 10.0)))
             ),
-            "die_area": int(self.artifacts.get("die_area_override",
-                            floor_meta.get("die_area", 500))),
+            "die_area": max(die_w, die_h),
+            "die_width": die_w,
+            "die_height": die_h,
             "core_util": int(self.artifacts.get("core_util_override", 40)),
             "synth_strategy": self.artifacts.get("synth_strategy_override", "AREA 0"),
+            "run_tag": run_tag,
         }
 
         # Step 1: Try deterministic OpenLane error fix (fast, no LLM)

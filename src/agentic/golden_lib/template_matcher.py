@@ -112,6 +112,39 @@ TEMPLATE_REGISTRY = {
         "parameters": {"WIDTH": 8},
         "complexity": "simple",
     },
+    "picorv32_wrapper": {
+        "keywords": [
+            "picorv32",
+            "riscv",
+            "risc-v",
+            "cpu",
+            "processor",
+            "microcontroller",
+            "core",
+        ],
+        "file": "picorv32_wrapper.v",
+        "tb_file": "",
+        "description": "PicoRV32 RISC-V CPU Core Wrapper with memory-mapped IO",
+        "parameters": {},
+        "complexity": "high",
+        "requires_download": "https://raw.githubusercontent.com/YosysHQ/picorv32/master/picorv32.v",
+    },
+    "sram_macro_wrapper": {
+        "keywords": [
+            "sram",
+            "macro",
+            "memory block",
+            "physical memory",
+            "ram",
+            "2kbyte",
+        ],
+        "file": "sram_macro_wrapper.v",
+        "tb_file": "",
+        "description": "Sky130 SRAM 2KB Physical Macro Wrapper",
+        "parameters": {},
+        "complexity": "high",
+        "requires_macro": "sky130_sram_2kbyte_1rw1r_32x512_8",
+    },
 }
 
 # Base directory for template files

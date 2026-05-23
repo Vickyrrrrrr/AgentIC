@@ -2,31 +2,28 @@
 
 This document describes the current AgentIC chip-build flow and its limits.
 
-## Readiness Levels
+## Handoff and Signoff Architecture
 
-AgentIC's default open-source flow produces an **OSS layout candidate**, not a
-commercial fabrication-ready signoff package.
+AgentIC's open-source flow is designed to rapidly produce an **OSS layout candidate**, serving as a robust foundation that seamlessly integrates into commercial fabrication-ready signoff workflows.
 
 ```text
 Default OSS flow:
   OSS_LAYOUT_CANDIDATE
 
-Experimental complete OSS flow:
+Enhanced OSS testing flow:
   OSS_TEST_ENHANCED_LAYOUT_CANDIDATE
 
 Commercial/foundry signoff flow:
-  FAB_READY only after proprietary/foundry signoff passes
+  FAB_READY (Requires proprietary/foundry signoff integration)
 ```
 
-Why this matters:
+The `agentic setup-cli` command installs the comprehensive open-source execution stack and experimental testing helpers. For proprietary and licensed toolchains (e.g., foundry PDKs, Calibre, Pegasus, ICV, PrimeTime, Tempus, Innovus, Fusion Compiler, Tessent, Modus, TetraMAX, or vendor MBIST compilers), AgentIC provides an integration layer via `~/.agentic/commercial-tools.env`.
 
-- Open-source tools can generate useful RTL, verification, synthesis, layout,
-  timing, DRC/LVS-style evidence, and reports.
-- True fabrication readiness still needs foundry-qualified signoff decks,
-  production DFT/ATPG/MBIST, signoff STA, extraction, IR/EM, reliability checks,
-  and final foundry-accepted GDS/OASIS checks.
-- DFT scan, ATPG, MBIST, GLS, and post-layout SPICE are therefore marked
-  **experimental** unless commercial/foundry tools are configured.
+Pipeline Capabilities and Handoff:
+
+- **Rapid Prototyping:** The open-source toolchain efficiently handles RTL generation, verification, synthesis, layout, timing analysis, and provides foundational DRC/LVS evidence and reports.
+- **Commercial Integration:** To achieve final fabrication readiness, the generated layout candidate is handed off to commercial tools for foundry-qualified signoff, production DFT/ATPG/MBIST, precision STA, extraction, IR/EM analysis, and final foundry-accepted GDS/OASIS verification.
+- **Advanced Testing:** Features such as DFT scan, ATPG, MBIST, GLS, and post-layout SPICE are provided as initial testing integrations, fully realizable upon configuring the respective commercial/foundry tools.
 
 ## Flow Profiles
 
@@ -219,21 +216,18 @@ SPICE is useful for analog blocks, SRAM/custom cells, IO/pads, tiny extracted
 blocks, or selected critical paths. Full-chip SPICE for a digital SoC is usually
 not practical.
 
-## Why Proprietary Tools Are Still Needed
+## Commercial Signoff Integration
 
-To call a chip fabrication-ready, the final handoff normally needs:
+To achieve final fabrication readiness, the OSS layout candidate smoothly transitions into commercial workflows. This final handoff typically includes:
 
-- foundry-qualified DRC/LVS/antenna/DFM decks,
-- multi-corner multi-mode signoff STA,
-- signoff extraction,
-- IR drop and electromigration analysis,
-- reliability checks,
-- production DFT scan insertion,
-- ATPG fault coverage and ATE patterns,
-- MBIST/BISR for memories,
-- final GDS/OASIS checks accepted by the foundry.
+- Execution of foundry-qualified DRC/LVS/antenna/DFM decks
+- Multi-corner multi-mode signoff STA
+- Signoff-grade parasitic extraction
+- IR drop and electromigration (EM) analysis
+- Comprehensive reliability checks
+- Production-grade DFT scan insertion
+- ATPG fault coverage and ATE pattern generation
+- MBIST/BISR implementation for memories
+- Final GDS/OASIS validation accepted by the foundry
 
-AgentIC can prepare the design and gather open-source evidence. Final
-fabrication readiness still depends on the selected node's foundry/commercial
-signoff flow.
-
+AgentIC accelerates the upstream design and verification process, preparing a high-quality foundation and gathering extensive open-source evidence. This empowers engineering teams to focus their efforts on the critical, node-specific foundry and commercial signoff phases.

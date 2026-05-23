@@ -321,6 +321,9 @@ def _sync_job_to_db(job_id: str):
             db_job.design_name = job_data.get("design_name", "")
             db_job.status = job_data.get("status", "pending")
             db_job.build_status = job_data.get("build_status", "pending")
+            created_at = _normalize_epoch_seconds(job_data.get("created_at"))
+            if created_at:
+                db_job.created_at = datetime.fromtimestamp(created_at)
             db_job.human_in_loop = job_data.get("human_in_loop", False)
             db_job.waiting_approval = job_data.get("waiting_approval", False)
             db_job.waiting_stage = job_data.get("waiting_stage", "")
@@ -422,6 +425,35 @@ def _mark_stale_running_job_failed(job_id: str, job: Dict[str, Any]) -> bool:
     job["status"] = "failed"
     job["build_status"] = "failed"
     job.setdefault("result", {})["error"] = "worker_time_limit_exceeded"
+    job.setdefault("result", {})["failure_explanation"] = message
+    job.setdefault("events", []).append(
+        {
+            "type": "error",
+            "state": state,
+            "message": message,
+            "step": 0,
+            "total_steps": TOTAL_STEPS,
+            "timestamp": int(time.time()),
+        }
+    )
+    _sync_job_to_db(job_id)
+    return True
+
+
+def _mark_orphaned_local_job_failed(job_id: str, job: Dict[str, Any]) -> bool:
+    if os.getenv("RUN_CELERY", "false").lower() == "true":
+        return False
+    if job.get("status") not in ("queued", "running", "cancelling"):
+        return False
+
+    message = (
+        "Local backend restarted before the in-process build completed. "
+        "Start the build again from the UI."
+    )
+    state = job.get("current_state") or _job_current_state(job)
+    job["status"] = "failed"
+    job["build_status"] = "failed"
+    job.setdefault("result", {})["error"] = "local_backend_restarted"
     job.setdefault("result", {})["failure_explanation"] = message
     job.setdefault("events", []).append(
         {
@@ -544,11 +576,20 @@ def _hydrate_job_store_from_db(limit: int = 250) -> None:
         return
     try:
         with SessionLocal() as db:
-            rows = db.query(DBJob).order_by(DBJob.created_at.desc()).limit(limit).all()
-            for row in rows:
-                _pull_job_from_db(row.id)
+            row_ids = [
+                row.id
+                for row in db.query(DBJob)
+                .order_by(DBJob.created_at.desc())
+                .limit(limit)
+                .all()
+            ]
+        for row_id in row_ids:
+            _pull_job_from_db(row_id)
+            job = JOB_STORE.get(row_id)
+            if job:
+                _mark_orphaned_local_job_failed(row_id, job)
         logger.info(
-            "Hydrated %s persisted jobs into memory on startup.", min(len(rows), limit)
+            "Hydrated %s persisted jobs into memory on startup.", min(len(row_ids), limit)
         )
     except Exception as exc:
         logger.error("Failed to hydrate persisted jobs on startup: %s", exc)
@@ -1323,6 +1364,8 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     plan_type: str = "byok"
     api_key: Optional[str] = None
+    pdk_profile: Optional[str] = None
+    pdk_options: Optional[List[Dict[str, Any]]] = None
 
 def _looks_like_chip_build_request(description: str) -> bool:
     text = re.sub(r"\s+", " ", (description or "").strip().lower())
@@ -2735,6 +2778,15 @@ async def chat_converse(
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
+    # Add context about current PDK and options if provided
+    pdk_context = ""
+    if req.pdk_profile and req.pdk_options:
+        available_pdks = [p["key"] for p in req.pdk_options if p.get("gds_ready")]
+        pdk_context = (
+            f"\nThe user's current selected PDK is '{req.pdk_profile}'. "
+            f"The PDKs currently available that can yield a fabrication-ready chip (gds_ready) are: {', '.join(available_pdks)}.\n"
+        )
+
     system_prompt = (
         "You are AgentIC Infinite, a calm, state-of-the-art silicon copilot for autonomous chip creation.\n"
         "You help the user turn plain-English hardware intent into a buildable digital chip specification, "
@@ -2743,19 +2795,14 @@ async def chat_converse(
         "How to answer:\n"
         "- Sound like a premium coding assistant: concise, direct, warm, technically sharp.\n"
         "- Prefer structured Markdown with short sections only when structure helps.\n"
-        "- Ask for missing high-impact chip details only when needed: interface, clock/reset, registers, bit widths, timing target, verification expectations, and whether GDSII is required.\n"
-        "- If the user sends a greeting, vague idea, or non-chip question, answer conversationally and help them shape a better chip prompt instead of implying a build should start.\n"
-        "- Be VLSI-aware and PDK-aware. Explain what is feasible as synthesizable digital RTL and what needs a hard macro, wrapper, or user-supplied asset.\n"
-        "- You may propose safe spec substitutions for PDK/tool limits: analog/ADC/DAC/PLL/TRNG become digital wrappers or macro-facing interfaces, large memories use macro wrappers, internal tri-states become input/output/output-enable signals, and unrealistic frequencies should be lowered with an explanation.\n"
-        "- For each proposed substitution, state the original request, the constraint, the chosen substitute, and why it is the closest feasible implementation.\n"
-        "- Do not over-explain basic concepts unless the user asks.\n"
+        "- BE VLSI AWARE AND CURIOUS: If the user provides a vague idea about a chip, proactively ask clarifying questions about their intentions (e.g. 'Do you want to fabricate this chip? What are your power/area constraints? What clock speed do you need?').\n"
+        "- ASK ABOUT PDK: Make sure you understand which PDK the user wants to target. "
+        f"{pdk_context}"
+        "- If the user sends a greeting or non-chip question, answer conversationally and guide them toward building a chip.\n"
+        "- Explain what is feasible as synthesizable digital RTL and what needs a hard macro, wrapper, or user-supplied asset.\n"
+        "- You may propose safe spec substitutions for PDK/tool limits.\n"
         "- Never pretend a build has run from chat alone. Chat refines the spec; the Run pipeline action executes AgentIC.\n"
-        "- When the spec is good enough, say it is ready to run and summarize what AgentIC will generate.\n\n"
-        "AgentIC pipeline underneath Run:\n"
-        "specification -> architecture validation -> RTL generation -> RTL repair -> lint/CDC when enabled -> "
-        "testbench/simulation -> formal/coverage when enabled -> synthesis -> floorplan/place-route -> "
-        "timing/power/physical verification -> reports and package.\n\n"
-        "Keep responses useful for chip creation, not generic chatbot chatter."
+        "- When the spec is good enough, say it is ready to run and summarize what AgentIC will generate.\n"
     )
 
     messages_payload = [{"role": "system", "content": system_prompt}]

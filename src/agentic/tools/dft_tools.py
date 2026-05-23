@@ -103,6 +103,32 @@ def _find_liberty_and_cell_models(pdk: str = "sky130", pdk_root: Optional[str] =
     return liberty, cell_model
 
 
+def _fault_command(args: List[str], mounted_paths: List[str], work_dir: str) -> Optional[List[str]]:
+    fault_bin = shutil.which("fault")
+    if fault_bin:
+        return [fault_bin, *args]
+
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        return None
+
+    mount_dirs = []
+    for path in [work_dir, *mounted_paths]:
+        if not path:
+            continue
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        mount_dir = abs_path if os.path.isdir(abs_path) else os.path.dirname(abs_path)
+        if mount_dir and mount_dir not in mount_dirs:
+            mount_dirs.append(mount_dir)
+
+    image = os.getenv("AGENTIC_FAULT_DOCKER_IMAGE", "ghcr.io/aucohl/fault:latest")
+    cmd = [docker_bin, "run", "--rm"]
+    for mount_dir in mount_dirs:
+        cmd.extend(["-v", f"{mount_dir}:{mount_dir}"])
+    cmd.extend(["-w", os.path.abspath(work_dir), image, "fault", *args])
+    return cmd
+
+
 def _run_fault_chain(
     netlist: str,
     output_netlist: str,
@@ -110,15 +136,11 @@ def _run_fault_chain(
     pdk_root: Optional[str],
     timeout: int,
 ) -> Optional[Tuple[bool, str, str, str]]:
-    fault_bin = shutil.which("fault")
-    if not fault_bin:
-        return None
     liberty, cell_model = _find_liberty_and_cell_models(pdk, pdk_root)
     if not liberty or not cell_model:
         return False, "", "", "Fault found, but Liberty/cell-model Verilog could not be resolved."
     clock, reset, active_low = _infer_clock_reset(netlist)
-    cmd = [
-        fault_bin,
+    args = [
         "chain",
         "--clock",
         clock,
@@ -133,7 +155,14 @@ def _run_fault_chain(
         netlist,
     ]
     if active_low:
-        cmd.insert(cmd.index("-l"), "--activeLow")
+        args.insert(args.index("-l"), "--activeLow")
+    cmd = _fault_command(
+        args,
+        [netlist, output_netlist, liberty, cell_model, pdk_root or ""],
+        os.path.dirname(os.path.abspath(output_netlist)) or os.getcwd(),
+    )
+    if not cmd:
+        return None
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return proc.returncode == 0 and os.path.exists(output_netlist), proc.stdout, proc.stderr, " ".join(cmd)
 
@@ -147,23 +176,26 @@ def _run_fault_atpg(
     max_patterns: int,
     timeout: int,
 ) -> Optional[Tuple[bool, str, str, str, str]]:
-    fault_bin = shutil.which("fault")
-    if not fault_bin:
-        return None
     _liberty, cell_model = _find_liberty_and_cell_models(pdk, pdk_root)
     if not cell_model:
         return False, "", "", "", "Fault found, but cell-model Verilog could not be resolved."
     clock, reset, active_low = _infer_clock_reset(netlist)
     cut_netlist = os.path.join(output_dir, os.path.basename(netlist).replace(".v", ".cut.v"))
-    cut_cmd = [fault_bin, "cut", "-o", cut_netlist, netlist, "--clock", clock, "--reset", reset]
+    cut_args = ["cut", "-o", cut_netlist, netlist, "--clock", clock, "--reset", reset]
     if active_low:
-        cut_cmd.append("--activeLow")
+        cut_args.append("--activeLow")
+    cut_cmd = _fault_command(
+        cut_args,
+        [netlist, cut_netlist, cell_model, pdk_root or ""],
+        os.path.abspath(output_dir),
+    )
+    if not cut_cmd:
+        return None
     cut_proc = subprocess.run(cut_cmd, capture_output=True, text=True, timeout=timeout)
     if cut_proc.returncode != 0 or not os.path.exists(cut_netlist):
         return False, cut_proc.stdout, cut_proc.stderr, "", " ".join(cut_cmd)
 
-    atpg_cmd = [
-        fault_bin,
+    atpg_args = [
         "-c",
         cell_model,
         "-v",
@@ -181,7 +213,14 @@ def _run_fault_atpg(
         reset,
     ]
     if active_low:
-        atpg_cmd.append("--activeLow")
+        atpg_args.append("--activeLow")
+    atpg_cmd = _fault_command(
+        atpg_args,
+        [netlist, cut_netlist, cell_model, pdk_root or ""],
+        os.path.abspath(output_dir),
+    )
+    if not atpg_cmd:
+        return None
     proc = subprocess.run(atpg_cmd, capture_output=True, text=True, timeout=timeout)
     return proc.returncode == 0, proc.stdout, proc.stderr, cut_netlist, " ".join(atpg_cmd)
 
@@ -343,7 +382,8 @@ def run_scan_insertion(
         return _error_dft_result(errors, scan_netlist)
 
     errors.append(
-        "Fault CLI not found on PATH. Install AUCOHL/Fault or use nix run .#fault; "
+        "Fault was not available as a local binary or Docker image. "
+        "Run agentic install-experimental-tools, install AUCOHL/Fault, or use nix run .#fault; "
         "AgentIC will not run fake Yosys scan insertion."
     )
     return _error_dft_result(errors, scan_netlist)
@@ -597,7 +637,10 @@ def run_atpg(
             errors=[] if ok else [stderr[-2000:] or stdout[-2000:] or "Fault ATPG failed"],
         )
 
-    errors.append("Fault CLI not found on PATH. Install AUCOHL/Fault for experimental OSS ATPG.")
+    errors.append(
+        "Fault was not available as a local binary or Docker image. "
+        "Run agentic install-experimental-tools or install AUCOHL/Fault for experimental OSS ATPG."
+    )
     return _error_atpg_result(errors, pattern_file, fault_file)
 
     commands = [

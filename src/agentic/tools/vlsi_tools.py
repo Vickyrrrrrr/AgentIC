@@ -20,6 +20,9 @@ from ..config import (
     SBY_BIN,
     YOSYS_BIN,
     EQY_BIN,
+    VERILATOR_BIN,
+    IVERILOG_BIN,
+    VVP_BIN,
     MAGIC_BIN,
     NETGEN_BIN,
     NGSPICE_BIN,
@@ -237,21 +240,41 @@ def startup_self_check() -> Dict[str, Any]:
     """Validate required tooling and environment before running the flow."""
     checks: List[Dict[str, Any]] = []
     required_bins = {
-        "verilator": "verilator",
-        "iverilog": "iverilog",
-        "vvp": "vvp",
+        "verilator": VERILATOR_BIN,
+        "iverilog": IVERILOG_BIN,
+        "vvp": VVP_BIN,
         "yosys": YOSYS_BIN,
         "sby": SBY_BIN,
-        "ngspice": NGSPICE_BIN,
     }
+    require_spice = os.getenv("AGENTIC_REQUIRE_SPICE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } or os.getenv("AGENTIC_FLOW_PROFILE", "").strip().lower() in {
+        "sky130_oss_experimental_complete",
+        "experimental_complete",
+        "oss_experimental_complete",
+    }
+    if require_spice:
+        required_bins["ngspice"] = NGSPICE_BIN
+    verilator_coverage_hint = "verilator_coverage"
+    if os.path.isabs(VERILATOR_BIN):
+        verilator_coverage_hint = os.path.join(
+            os.path.dirname(VERILATOR_BIN),
+            "verilator_coverage",
+        )
     optional_bins = {
         "docker": "docker",
         "eqy": EQY_BIN,
         "magic": MAGIC_BIN,
         "netgen": NETGEN_BIN,
         "opensta": OPENSTA_BIN,
-        "verilator_coverage": "verilator_coverage",
+        "ngspice": NGSPICE_BIN,
+        "verilator_coverage": verilator_coverage_hint,
     }
+    if require_spice:
+        optional_bins.pop("ngspice", None)
     all_pass = True
 
     for name, hint in required_bins.items():

@@ -73,6 +73,21 @@ class OpenLaneErrorFixer:
             r"GRT.*overflow",
             r"routing.*(?:fail|error).*capacity",
         ],
+        "global_route_uncovered": [
+            r"GRT-0076",
+            r"net\s+\S+\s+not\s+properly\s+covered",
+            r"not\s+properly\s+covered",
+        ],
+        "detail_route_resource": [
+            r"child\s+killed:\s+kill\s+signal",
+            r"detailed\s+routing.*(?:killed|out\s+of\s+memory|oom)",
+            r"TritonRoute.*(?:killed|out\s+of\s+memory|oom)",
+        ],
+        "detail_route_short": [
+            r"violations\s+in\s+the\s+design\s+after\s+detailed\s+routing",
+            r"Viol/Layer\s+.*Short",
+            r"violation\s+type:\s+Short",
+        ],
         "drc_violation": [
             r"total\s+violations?:\s*(\d+)",
             r"DRC\s+(?:violation|error)s?:\s*(\d+)",
@@ -163,6 +178,12 @@ class OpenLaneErrorFixer:
             return self._fix_timing(current_params, attempt)
         elif primary == "routing_congestion":
             return self._fix_congestion(current_params, attempt)
+        elif primary == "global_route_uncovered":
+            return self._fix_macro_pin_access(current_params, attempt)
+        elif primary == "detail_route_resource":
+            return self._fix_detail_route_resource(current_params, attempt)
+        elif primary == "detail_route_short":
+            return self._fix_detail_route_short(current_params, attempt)
         elif primary == "drc_violation":
             return self._fix_drc(current_params, attempt)
         elif primary == "lvs_mismatch":
@@ -182,6 +203,60 @@ class OpenLaneErrorFixer:
         return RecoveryResult(action, f"Escalated recovery: {action.value}")
 
     # ── Individual fix generators ──
+
+    @staticmethod
+    def _to_int(value: Any, default: int) -> int:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _current_die_dimensions(self, params: Dict[str, Any], default: int = 800) -> Tuple[int, int]:
+        """Return the failing design's current die dimensions without assuming a chip size."""
+        die = self._to_int(params.get("die_area"), default)
+        width = self._to_int(params.get("die_width"), die)
+        height = self._to_int(params.get("die_height"), die)
+        return max(1, width), max(1, height)
+
+    def _route_recovery_dimensions(
+        self,
+        params: Dict[str, Any],
+        *,
+        compact_large_floorplan: bool,
+    ) -> Tuple[int, int]:
+        """Scale routing-recovery dimensions from the current design.
+
+        Oversized sparse floorplans can make routing failures worse, but forcing
+        every design into one known-good die size would overfit to a single chip.
+        This keeps small designs unchanged and proportionally compacts only large
+        floorplans.
+        """
+        width, height = self._current_die_dimensions(params)
+        if compact_large_floorplan and max(width, height) >= 2400:
+            scale = float(params.get("route_recovery_compact_scale", 0.67) or 0.67)
+            width = max(400, int(width * scale))
+            height = max(400, int(height * scale))
+        if abs(width - height) <= 1 and max(width, height) >= 1600:
+            height = max(400, int(width * 0.90))
+        return width, height
+
+    def _macro_repair_knobs(self, width: int, height: int, util: int) -> Dict[str, Any]:
+        span = max(width, height)
+        halo = max(20, min(80, int(round(span * 0.02))))
+        channel = max(40, min(160, halo * 2))
+        density = max(0.20, min(0.45, util / 100.0))
+        return {
+            "target_density": density,
+            "macro_halo": [halo, halo],
+            "macro_channel": [channel, channel],
+            "macro_blockages_layer": "li1 met1 met2 met3 met4 met5",
+        }
+
+    @staticmethod
+    def _macro_nudge(width: int, attempt: int) -> int:
+        if attempt <= 0:
+            return 0
+        return max(80, min(600, int(width * 0.30)))
 
     def _fix_timing(self, params: Dict[str, Any], attempt: int) -> RecoveryResult:
         current_clk = params.get("clock_period", 10.0)
@@ -238,6 +313,61 @@ class OpenLaneErrorFixer:
                 {"die_area": new_area, "core_util": new_util},
                 confidence=0.60,
             )
+
+    def _fix_macro_pin_access(self, params: Dict[str, Any], attempt: int) -> RecoveryResult:
+        """Repair GRT-0076/net-not-covered failures, commonly macro pin access."""
+        width, height = self._route_recovery_dimensions(params, compact_large_floorplan=True)
+        util = max(20, min(35, self._to_int(params.get("core_util"), 35)))
+        nudge = self._macro_nudge(width, attempt)
+        return RecoveryResult(
+            RecoveryAction.REGEN_CONFIG,
+            "Global route left a net/pin uncovered; enable macro-aware placement, halo, and routing blockages.",
+            {
+                "macro_floorplan_repair": True,
+                "macro_placement_nudge_x": nudge,
+                "die_width": width,
+                "die_height": height,
+                "core_util": util,
+                **self._macro_repair_knobs(width, height, util),
+            },
+            confidence=0.82,
+        )
+
+    def _fix_detail_route_resource(self, params: Dict[str, Any], attempt: int) -> RecoveryResult:
+        """Repair TritonRoute kill/OOM caused by oversized sparse floorplans."""
+        width, height = self._route_recovery_dimensions(params, compact_large_floorplan=True)
+        util = max(20, min(35, self._to_int(params.get("core_util"), 35)))
+        return RecoveryResult(
+            RecoveryAction.REGEN_CONFIG,
+            "Detailed routing was killed; compact the floorplan and reduce filler/router load.",
+            {
+                "die_width": width,
+                "die_height": height,
+                "core_util": util,
+                "macro_floorplan_repair": True,
+                **self._macro_repair_knobs(width, height, util),
+            },
+            confidence=0.78,
+        )
+
+    def _fix_detail_route_short(self, params: Dict[str, Any], attempt: int) -> RecoveryResult:
+        """Repair detailed-route shorts, especially macro top-metal/power shorts."""
+        width, height = self._route_recovery_dimensions(params, compact_large_floorplan=False)
+        util = max(20, self._to_int(params.get("core_util"), 35) - 5)
+        nudge = max(80, min(600, int(width * (0.30 if attempt == 0 else 0.15))))
+        return RecoveryResult(
+            RecoveryAction.REGEN_CONFIG,
+            "Detailed routing produced shorts; move hard macros out of congested corridors and preserve macro blockages.",
+            {
+                "macro_floorplan_repair": True,
+                "macro_placement_nudge_x": nudge,
+                "die_width": width,
+                "die_height": height,
+                "core_util": util,
+                **self._macro_repair_knobs(width, height, util),
+            },
+            confidence=0.72,
+        )
 
     def _fix_drc(self, params: Dict[str, Any], attempt: int) -> RecoveryResult:
         current_util = params.get("core_util", 40)
@@ -516,6 +646,34 @@ def apply_recovery_result(
         orch.log("SDC regeneration requested", refined=True)
 
     elif result.action == RecoveryAction.REGEN_CONFIG:
+        if result.params.get("die_width") and result.params.get("die_height"):
+            width = int(result.params["die_width"])
+            height = int(result.params["die_height"])
+            params["die_width"] = width
+            params["die_height"] = height
+            params["die_area"] = max(width, height)
+            orch.artifacts["die_area_override"] = (width, height)
+            orch.log(f"Die area adjusted to {width}x{height}um", refined=True)
+        if result.params.get("core_util"):
+            new_util = int(result.params["core_util"])
+            params["core_util"] = new_util
+            orch.artifacts["core_util_override"] = new_util
+        if result.params.get("target_density"):
+            orch.artifacts["target_density_override"] = float(result.params["target_density"])
+        if result.params.get("macro_floorplan_repair"):
+            orch.artifacts["macro_floorplan_repair"] = True
+            orch.artifacts["macro_halo_override"] = result.params.get("macro_halo", [40, 40])
+            orch.artifacts["macro_channel_override"] = result.params.get("macro_channel", [80, 80])
+            orch.artifacts["macro_blockages_layer_override"] = result.params.get(
+                "macro_blockages_layer",
+                "li1 met1 met2 met3 met4 met5",
+            )
+        nudge_x = result.params.get("macro_placement_nudge_x")
+        if nudge_x and hasattr(orch, "_nudge_macro_placements"):
+            try:
+                orch._nudge_macro_placements(float(nudge_x))
+            except Exception as exc:
+                orch.log(f"Macro placement nudge skipped: {exc}", refined=True)
         orch.log("Config regeneration requested", refined=True)
 
     elif result.action == RecoveryAction.RETRY_SAME:

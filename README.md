@@ -4,13 +4,13 @@
 
 **AgentIC** is a CLI-first AI hardware design system that turns a natural-language chip request into RTL, verification artifacts, timing constraints, and, when Docker/OpenLane plus an open PDK are installed, a hardening run that can produce GDSII.
 
-The current package is strongest for digital RTL blocks, peripherals, accelerators, small SoCs, and open-PDK experiments. It is not a magic guarantee that any arbitrary chip on any arbitrary node will close timing, DRC, LVS, power, and manufacturability without engineering review. The design goal is autonomous iteration with fail-closed gates and correction loops that follow a real VLSI flow: spec, RTL, lint/syntax, testbench, simulation, formal/coverage/regression, SDC, synthesis, DFT/power/STA, floorplan, hardening, DRC/LVS, post-layout checks, and signoff reporting.
+The package is optimized for designing digital RTL blocks, peripherals, accelerators, small SoCs, and conducting open-PDK experiments. It accelerates the hardware development lifecycle by automating autonomous iteration, fail-closed gates, and correction loops that follow industry-standard VLSI flows. This includes spec generation, RTL creation, lint/syntax checking, testbench generation, simulation, formal verification, coverage/regression, SDC, synthesis, DFT/power/STA, floorplanning, hardening, DRC/LVS, post-layout checks, and signoff reporting.
 
-## Current CLI Status
+## Overview
 
-AgentIC is ready to be used as an autonomous open-source VLSI CLI for supported designs and installed open PDKs. With a complete OSS CAD Suite, Docker/OpenLane, and PDK setup, it can attempt RTL-to-GDSII hardening and produce a GDSII file for open PDK targets.
+AgentIC serves as an autonomous open-source VLSI CLI, enabling rapid RTL-to-GDSII hardening for supported designs and installed open PDKs. By integrating the OSS CAD Suite, Docker/OpenLane, and standard PDK setups, it streamlines the complex process of producing GDSII files for open PDK targets.
 
-It should be treated as **engineering-assist automation**, not a universal one-stop shop that can guarantee every chip on every node autonomously. Advanced analog/mixed-signal designs, full custom layout, complex memories, proprietary nodes, package/IO planning, foundry-specific signoff, and true fabrication release still require human review and foundry-qualified collateral.
+Designed as an **advanced engineering assistant**, AgentIC significantly reduces the manual overhead of the chip design process. While it automates the standard digital flow, complex analog/mixed-signal designs, full custom layouts, advanced memories, proprietary node optimizations, and final foundry-specific signoff are seamlessly handed off for professional engineering review and integration with foundry-qualified collateral.
 
 ### CLI Correction Loops
 
@@ -62,6 +62,25 @@ Install the default CLI stack:
 agentic setup-cli
 ```
 
+By default this installs/checks the full open AgentIC stack:
+
+- OSS CAD Suite for RTL, simulation, synthesis, formal, and coverage
+- Magic, Netgen, and OpenSTA for independent physical/timing checks
+- Docker/OpenLane for RTL-to-GDSII hardening
+- Open experimental helpers for the extended research flow: ngspice, KLayout, GTKWave, Xschem, cocotb helpers, and the Fault Docker image for experimental scan/ATPG
+- Volare plus requested open PDKs
+- A commercial/foundry tool registration template at `~/.agentic/commercial-tools.env`
+
+Setup places stable tool links under `~/.agentic/tools/bin` and exports absolute
+`MAGIC_BIN`, `NETGEN_BIN`, `OPENSTA_BIN`, and `NGSPICE_BIN` values so AgentIC's
+runtime resolves the same tools that setup installed.
+
+Commercial/foundry PDKs and tools such as Calibre, Pegasus, IC Validator,
+PrimeTime/Tempus, Innovus/Fusion Compiler, Tessent/Modus/TetraMAX, and MBIST
+compilers cannot be auto-installed by AgentIC. Install them through your
+licensed vendor flow, then source the generated registration template and run
+`agentic doctor`.
+
 Install each layer separately:
 
 ```bash
@@ -70,6 +89,9 @@ agentic install-oss
 
 # Direct physical signoff tools: newer Magic, Netgen, OpenSTA
 agentic install-signoff-tools
+
+# Open experimental helpers: ngspice, KLayout, GTKWave, Xschem, Fault Docker
+agentic install-experimental-tools
 
 # OpenLane hardening backend used for RTL-to-GDSII
 agentic install-openlane
@@ -391,6 +413,7 @@ agentic build \
 | `agentic setup-cli` | Install OSS CAD Suite, physical signoff tools, Docker/OpenLane image, volare, PDKs, and shell exports |
 | `agentic install-oss` | Install only OSS CAD Suite for RTL/sim/synth tools |
 | `agentic install-signoff-tools` | Install Magic 8.3.411+, Netgen, and OpenSTA for direct `drc`/`lvs`/`sta` checks |
+| `agentic install-experimental-tools` | Install open research helpers for experimental DFT/ATPG, GLS, SPICE, waveform, and layout inspection |
 | `agentic install-openlane` | Pull the Docker/OpenLane hardening image |
 | `agentic install-pdk <name>` | Install a PDK (sky130, gf180mcu, etc.) |
 | `agentic install-pdk list` | Show all available PDKs |

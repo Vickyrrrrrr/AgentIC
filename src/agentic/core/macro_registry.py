@@ -91,6 +91,46 @@ class MacroCollateral:
         module = str(data.get("module") or data.get("cell") or data.get("blackbox") or "").strip()
         instance = str(data.get("instance") or data.get("inst") or "").strip()
         kind = str(data.get("kind") or data.get("type") or data.get("category") or "custom").strip()
+        metadata = {
+            k: v
+            for k, v in data.items()
+            if k
+            not in {
+                "name",
+                "id",
+                "module",
+                "cell",
+                "blackbox",
+                "instance",
+                "inst",
+                "kind",
+                "type",
+                "category",
+                "files",
+                "lef",
+                "lefs",
+                "gds",
+                "gds_files",
+                "lib",
+                "libs",
+                "liberty",
+                "liberties",
+                "verilog",
+                "verilogs",
+                "blackbox_verilog",
+                "blackbox_verilogs",
+                "spice",
+                "spices",
+                "spice_model",
+                "spice_models",
+                "cdl",
+                "cdls",
+                "placement",
+                "metadata",
+            }
+        }
+        if isinstance(data.get("metadata"), dict):
+            metadata.update(data["metadata"])
 
         return cls(
             name=name,
@@ -111,43 +151,7 @@ class MacroCollateral:
             spice=_collect_paths(data, base_dir, "spice", "spices", "spice_model", "spice_models"),
             cdl=_collect_paths(data, base_dir, "cdl", "cdls"),
             placement=MacroPlacement.from_dict(data.get("placement")),
-            metadata={
-                k: v
-                for k, v in data.items()
-                if k
-                not in {
-                    "name",
-                    "id",
-                    "module",
-                    "cell",
-                    "blackbox",
-                    "instance",
-                    "inst",
-                    "kind",
-                    "type",
-                    "category",
-                    "files",
-                    "lef",
-                    "lefs",
-                    "gds",
-                    "gds_files",
-                    "lib",
-                    "libs",
-                    "liberty",
-                    "liberties",
-                    "verilog",
-                    "verilogs",
-                    "blackbox_verilog",
-                    "blackbox_verilogs",
-                    "spice",
-                    "spices",
-                    "spice_model",
-                    "spice_models",
-                    "cdl",
-                    "cdls",
-                    "placement",
-                }
-            },
+            metadata=metadata,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -290,6 +294,40 @@ def macro_openlane_tcl(manifest: MacroManifest) -> str:
         lines.append(f'set ::env(VERILOG_FILES_BLACKBOX) "{" ".join(blackboxes)}"')
     if manifest.has_placements():
         lines.append('set ::env(MACRO_PLACEMENT_CFG) "$::env(DESIGN_DIR)/src/macro_placement.cfg"')
+
+    # Automatically generate Power Delivery Network (PDN) hooks for macros
+    # when the macro manifest tells us the power pins. Do not assume one PDK's
+    # pin names for every process node.
+    pdn_hooks = []
+    for macro in manifest.macros:
+        if not macro.instance:
+            continue
+        metadata = macro.metadata or {}
+        hook = str(metadata.get("pdn_hook") or "").strip()
+        if hook:
+            pdn_hooks.append(hook)
+            continue
+
+        vdd_net = str(metadata.get("vdd_net") or metadata.get("power_net") or "").strip()
+        gnd_net = str(metadata.get("gnd_net") or metadata.get("ground_net") or "").strip()
+        vdd_pin = str(metadata.get("vdd_pin") or metadata.get("power_pin") or vdd_net).strip()
+        gnd_pin = str(metadata.get("gnd_pin") or metadata.get("ground_pin") or gnd_net).strip()
+
+        if not (vdd_net and gnd_net):
+            macro_hint = " ".join([macro.name, macro.module, " ".join(macro.lefs)]).lower()
+            if "sky130" in macro_hint:
+                vdd_net = vdd_pin = "vccd1"
+                gnd_net = gnd_pin = "vssd1"
+
+        if vdd_net and gnd_net and vdd_pin and gnd_pin:
+            pdn_hooks.append(f"{macro.instance} {vdd_net} {gnd_net} {vdd_pin} {gnd_pin}")
+    
+    if pdn_hooks:
+        vdd_nets = _dedupe(hook.split()[1] for hook in pdn_hooks if len(hook.split()) >= 3)
+        gnd_nets = _dedupe(hook.split()[2] for hook in pdn_hooks if len(hook.split()) >= 3)
+        lines.append(f'set ::env(VDD_NETS) [list {" ".join(vdd_nets)}]')
+        lines.append(f'set ::env(GND_NETS) [list {" ".join(gnd_nets)}]')
+        lines.append(f'set ::env(FP_PDN_MACRO_HOOKS) "{" ".join(pdn_hooks)}"')
 
     spice = _dedupe(path for macro in manifest.macros for path in macro.spice)
     cdl = _dedupe(path for macro in manifest.macros for path in macro.cdl)

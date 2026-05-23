@@ -9,6 +9,14 @@ from rich.console import Console
 
 console = Console()
 
+OSS_CAD_SUITE_REQUIRED_BINS = (
+    "yosys",
+    "sby",
+    "verilator",
+    "iverilog",
+    "vvp",
+)
+
 def get_platform_info():
     sys_os = platform.system().lower()
     machine = platform.machine().lower()
@@ -55,6 +63,19 @@ def _move_tree_contents(source: str, destination: str) -> None:
         elif os.path.exists(dst):
             os.remove(dst)
         shutil.move(src, dst)
+
+
+def _missing_oss_cad_suite_bins(target_dir: str) -> list[str]:
+    """Return required OSS CAD Suite binaries missing from target_dir/bin."""
+    bin_dir = os.path.join(os.path.abspath(os.path.expanduser(str(target_dir))), "bin")
+    missing = []
+    for name in OSS_CAD_SUITE_REQUIRED_BINS:
+        candidates = [os.path.join(bin_dir, name)]
+        if platform.system().lower() == "windows":
+            candidates.append(os.path.join(bin_dir, f"{name}.exe"))
+        if not any(os.path.exists(path) for path in candidates):
+            missing.append(name)
+    return missing
 
 
 def install_oss_cad_suite(target_dir):
@@ -120,10 +141,15 @@ def install_oss_cad_suite(target_dir):
     console.print(f"[yellow]Downloading {filename} (this may take a while)...[/yellow]")
     
     target_dir = os.path.abspath(os.path.expanduser(str(target_dir)))
-    expected_yosys = os.path.join(target_dir, "bin", "yosys")
-    if os.path.exists(expected_yosys):
+    missing_before = _missing_oss_cad_suite_bins(target_dir)
+    if not missing_before:
         console.print(f"[green]OSS CAD Suite already present at {target_dir}[/green]")
         return True
+    if os.path.isdir(target_dir):
+        console.print(
+            f"[yellow]OSS CAD Suite at {target_dir} is incomplete; repairing missing tools: "
+            f"{', '.join(missing_before)}[/yellow]"
+        )
 
     ext = ".exe" if os_name == "windows" else ".tgz"
     fd, temp_path = tempfile.mkstemp(suffix=ext)
@@ -170,8 +196,13 @@ def install_oss_cad_suite(target_dir):
                 return False
 
             _move_tree_contents(extracted_suite, target_dir)
-            if not os.path.exists(expected_yosys):
-                console.print(f"[red]Install verification failed: {expected_yosys} not found.[/red]")
+            missing_after = _missing_oss_cad_suite_bins(target_dir)
+            if missing_after:
+                console.print(
+                    "[red]Install verification failed. Missing required OSS CAD Suite tools: "
+                    + ", ".join(missing_after)
+                    + "[/red]"
+                )
                 return False
 
             console.print(f"[green]Successfully installed to {target_dir}[/green]")
