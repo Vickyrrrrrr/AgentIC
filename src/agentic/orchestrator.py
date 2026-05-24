@@ -70,6 +70,7 @@ from .core.macro_registry import (
     macro_prompt_guidance,
     validate_macro_manifest,
 )
+from .core.soc_lint import lint_soc_rtl
 from .tools.retrieval_tool import vlsi_search, vlsi_ask, pdk_rule_lookup, expand_abbr
 from .core.context_evolution import MultiAgentContextEvolver
 from .core.eda_capabilities import detect_eda_capabilities
@@ -128,6 +129,7 @@ from .tools.vlsi_tools import (
     repair_tb_for_verilator,
     get_coverage_thresholds,
     run_gls_simulation,
+    validate_yosys_sby_check,
 )
 
 from .tools.rate_limiter import (
@@ -520,6 +522,7 @@ class BuildOrchestrator:
         self._thinking = ThinkingDisplay(level=self.thinking_level)
 
         self.state = BuildState.INIT
+        self.state_history: List[BuildState] = [self.state]
         self.strategy = BuildStrategy.SV_MODULAR
         self.retry_count = 0
         self.global_retry_count = 0  # Added for Bug 2
@@ -750,6 +753,9 @@ class BuildOrchestrator:
         if hasattr(self, "_thinking"):
             self._thinking.show_state(new_state.name, subtitle=new_state.value)
         self.state = new_state
+        if not hasattr(self, "state_history"):
+            self.state_history = []
+        self.state_history.append(new_state)
         if not preserve_retries:
             self.retry_count = 0
             self.state_retry_counts[new_state.name] = 0
@@ -798,6 +804,12 @@ class BuildOrchestrator:
         if self._flow_has_stage(BuildState.POST_LAYOUT_SPICE) and not self.skip_spice:
             return BuildState.POST_LAYOUT_SPICE
         return self._next_flow_state(BuildState.PHYSICAL_VERIFY)
+
+    def _readiness_label(self, evidence_passed: bool) -> str:
+        """Return the strongest honest readiness claim for the selected flow."""
+        if not evidence_passed:
+            return "NOT_READY"
+        return getattr(self.flow_profile, "readiness_ceiling", "") or "OSS_LAYOUT_CANDIDATE"
 
     def _bump_state_retry(self) -> int:
         count = self.state_retry_counts.get(self.state.name, 0) + 1
@@ -1064,6 +1076,58 @@ class BuildOrchestrator:
             )
             lines.append(f'set ::env(MACRO_BLOCKAGES_LAYER) "{blockages}"')
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _tcl_env_value(value: Any) -> str:
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, (int, float)):
+            return str(value)
+        text = str(value)
+        if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text):
+            return text
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    def _openlane_config_overrides_tcl(self) -> str:
+        overrides = self.artifacts.get("openlane_config_overrides") or {}
+        if not isinstance(overrides, dict) or not overrides:
+            return ""
+        lines = ["# Recovery-tuned OpenLane overrides"]
+        for key in sorted(overrides):
+            env_key = re.sub(r"[^A-Za-z0-9_]", "", str(key).upper())
+            if not env_key:
+                continue
+            lines.append(f"set ::env({env_key}) {self._tcl_env_value(overrides[key])}")
+        return "\n".join(lines) + "\n"
+
+    def _collect_design_rtl_text(self) -> str:
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir:
+            src_dir = os.path.join(OPENLANE_ROOT, "designs", self.name, "src")
+        chunks = []
+        for path in sorted(glob.glob(os.path.join(src_dir, "*.v")) + glob.glob(os.path.join(src_dir, "*.sv"))):
+            base = os.path.basename(path).lower()
+            if base.endswith("_tb.v") or base.endswith("_tb.sv"):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    chunks.append(f"// --- {base} ---\n{f.read()}\n")
+            except OSError:
+                continue
+        return "\n".join(chunks) or self.artifacts.get("rtl_code", "")
+
+    def _run_soc_lint_gate(self) -> bool:
+        issues = lint_soc_rtl(self._collect_design_rtl_text())
+        error_issues = [issue for issue in issues if issue.severity == "error"]
+        self.artifacts["soc_lint_issues"] = [asdict(issue) for issue in issues]
+        if not error_issues:
+            return True
+        summary = "; ".join(f"{issue.rule}: {issue.message}" for issue in error_issues[:4])
+        self.artifacts["backend_error_stage"] = "soc_lint"
+        self.artifacts["backend_error_analysis"] = {"issues": [asdict(issue) for issue in error_issues]}
+        self.log(f"SoC structural lint blocked RTL: {summary}", refined=True)
+        return False
 
     def _require_artifact(self, key: str, *, consumer: str, message: str) -> Any:
         if key in self.artifacts and self.artifacts[key] not in (None, "", {}):
@@ -4605,6 +4669,7 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             self.artifacts["rtl_code"] = f.read()
         self._evaluate_hierarchy(self.artifacts["rtl_code"])
         self._emit_hierarchical_block_artifacts()
+        self._run_soc_lint_gate()
         self.transition(BuildState.RTL_FIX)
 
     def _validate_and_fix_macro_files(self) -> bool:
@@ -8046,6 +8111,9 @@ REQUIREMENTS:
         os.makedirs(src_dir, exist_ok=True)
 
         rtl_code = self.artifacts.get("rtl_code", "")
+        if not self._run_soc_lint_gate():
+            self.transition(BuildState.RTL_FIX, preserve_retries=True)
+            return
         line_count = max(1, len([l for l in rtl_code.splitlines() if l.strip()]))
         cell_count_est = max(100, line_count * 4)
         flow_caps = self._flow_caps()
@@ -8231,6 +8299,7 @@ REASONING: <1-line explanation>""",
                 f'set ::env(CLOCK_PERIOD) "{clock_period}"\n'
                 f'set ::env(CLOCK_PORT) "clk"\n'
                 f"{self._openlane_node_tcl(util)}\n"
+                f"{self._openlane_config_overrides_tcl()}"
             )
 
         self.artifacts["macro_placement_tcl"] = macro_placement_tcl
@@ -8622,6 +8691,16 @@ REASONING: <1-line explanation>""",
           When physical design re-synthesizes, DFT must be re-inserted post-layout.
           (IEEE Std 1149.1-2013, "Standard DFT for Scan-Based Testing")
         """
+        if not self._flow_has_stage(BuildState.DFT_SCAN):
+            self.artifacts["dft_post_openlane"] = "not_enabled_for_flow"
+            self.log("Post-OpenLane DFT skipped; selected flow does not enable DFT_SCAN.", refined=True)
+            return
+
+        self.artifacts["dft_layout_integrated"] = False
+        self.artifacts["dft_layout_note"] = (
+            "Experimental post-OpenLane DFT is advisory unless the scan netlist is "
+            "fed back through physical implementation and re-verified against GDS."
+        )
         openlane_netlist = f"{OPENLANE_ROOT}/designs/{self.name}/runs/{run_tag}/results/final/verilog/gl/{self.name}.v"
         if not os.path.exists(openlane_netlist):
             self.log("No OpenLane gate netlist for post-DFT; skipping.", refined=True)
@@ -8739,6 +8818,7 @@ set ::env(DIE_AREA) "0 0 {die_w} {die_h}"
 set ::env(FP_CORE_UTIL) {util}
 
 {self._openlane_node_tcl(util)}
+{self._openlane_config_overrides_tcl()}
 
 # Magic
 set ::env(MAGIC_DRC_USE_GDS) 1
@@ -8790,6 +8870,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # ── OpenLane failed — activate self-healing recovery ──
         self.log(f"OpenLane hardening failed. Activating self-healing recovery...", refined=True)
         self.hardening_recovery_attempts += 1
+        self.global_retry_count += 1
 
         # Collect current physical design parameters for recovery
         floor_meta = self.artifacts.get("floorplan_meta", {})
@@ -8862,6 +8943,28 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             )
             # Loop back — do_hardening will re-run with updated params
             return
+
+        deterministic_hardening_actions = {
+            RecoveryAction.RELAX_CLOCK,
+            RecoveryAction.EXPAND_AREA,
+            RecoveryAction.REDUCE_UTIL,
+            RecoveryAction.REGEN_CONFIG,
+            RecoveryAction.REGEN_SDC,
+            RecoveryAction.SWITCH_STRATEGY,
+        }
+        if recovery.action in deterministic_hardening_actions:
+            if self.hardening_recovery_attempts < self.hardening_recovery_attempts_max:
+                self.log(
+                    f"Retrying OpenLane with deterministic recovery "
+                    f"({self.hardening_recovery_attempts}/{self.hardening_recovery_attempts_max}).",
+                    refined=True,
+                )
+                self.transition(BuildState.HARDENING, preserve_retries=True)
+                return
+            self.log(
+                "Deterministic hardening recovery budget exhausted; escalating to self-reflection.",
+                refined=True,
+            )
 
         # Last resort: use SelfReflectPipeline for complex analysis
         self.log("Deterministic fixes applied. Running SelfReflect for deeper analysis.", refined=True)
@@ -9173,6 +9276,13 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             f"{power['total_power_w'] * 1000:.3f} mW" if power["total_power_w"] > 0 else "N/A"
         )
         irdrop_status = "OK" if power.get("power_ok") else "FAIL (>5% VDD)"
+        readiness_label = self._readiness_label(fab_ready)
+        self.artifacts["readiness_level"] = readiness_label
+        self.artifacts["readiness_ceiling"] = getattr(
+            self.flow_profile,
+            "readiness_ceiling",
+            "OSS_LAYOUT_CANDIDATE",
+        )
 
         console.print()
         console.print(
@@ -9191,14 +9301,18 @@ set ::env(MAGIC_DRC_USE_GDS) 1
                 f"toggle={self.artifacts.get('coverage', {}).get('toggle_pct', 'N/A')}% "
                 f"func={self.artifacts.get('coverage', {}).get('functional_pct', 'N/A')}% "
                 f"[{self.artifacts.get('coverage', {}).get('backend', 'N/A')}/{self.artifacts.get('coverage', {}).get('coverage_mode', 'N/A')}]\n"
-                f"Formal:     {self.artifacts.get('formal_result', 'SKIPPED')}\n\n"
-                f"{'[success]FABRICATION READY ✓[/]' if fab_ready else '[error]NOT FABRICATION READY ✗[/]'}",
+                f"Formal:     {self.artifacts.get('formal_result', 'SKIPPED')}\n"
+                f"Flow:       {self.flow_profile.name}\n\n"
+                f"{'[success]' + readiness_label + '[/]' if fab_ready else '[error]NOT_READY[/]'}",
                 title="📋 Signoff Report",
             )
         )
 
         if fab_ready:
-            self.log("✅ SIGNOFF PASSED (Timing Closed, DRC Clean)", refined=True)
+            self.log(
+                f"Signoff evidence passed; readiness level: {readiness_label}.",
+                refined=True,
+            )
             self.artifacts["signoff_result"] = "PASS"
             self.transition(BuildState.IP_PACKAGE)
         else:

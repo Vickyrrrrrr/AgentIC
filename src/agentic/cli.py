@@ -65,6 +65,9 @@ _suppress_external_logging()
 from .config import (
     OPENLANE_ROOT,
     OPENLANE_IMAGE,
+    OPENLANE2_IMAGE,
+    OPENLANE_BACKEND_DEFAULT,
+    ORFS_ROOT,
     LLM_MODEL,
     LLM_BASE_URL,
     LLM_API_KEY,
@@ -493,6 +496,17 @@ def _is_toolchain_present() -> bool:
         return bool(shutil.which(binary))
 
     return all(_present(b) for b in (YOSYS_BIN, VERILATOR_BIN, IVERILOG_BIN, VVP_BIN))
+
+
+def _is_oss_cad_suite_present_at(target_dir: str) -> bool:
+    """Check whether the requested OSS CAD Suite target has the required tools."""
+    try:
+        from .install_tools import _missing_oss_cad_suite_bins
+
+        return not _missing_oss_cad_suite_bins(target_dir)
+    except Exception:
+        bin_dir = os.path.join(os.path.abspath(os.path.expanduser(str(target_dir))), "bin")
+        return all(os.path.exists(os.path.join(bin_dir, name)) for name in ("yosys", "verilator", "iverilog", "vvp"))
 
 
 def _prompt_toolchain_install() -> bool:
@@ -1592,8 +1606,8 @@ PDK_INSTALL_CONFIGS = {
         "volare_target": "gf180mcuC",
         "download_url": "",
         "requires_volare": True,
-        "versions": ["latest", "120b0bd69c745825a0b8b76f364043a1cd08bb6a"],
-        "default_version": "120b0bd69c745825a0b8b76f364043a1cd08bb6a",
+        "versions": ["latest", "c6d73a35f524070e85faff4a6a9eef49553ebc2b"],
+        "default_version": "c6d73a35f524070e85faff4a6a9eef49553ebc2b",
     },
     "asap7": {
         "name": "ASAP7 Predictive PDK",
@@ -1889,8 +1903,11 @@ PDK_INSTALL_ALIASES = {
     "sky130a": "sky130",
     "sky130": "sky130",
     "asap7": "asap7",
+    "7nm": "asap7",
     "asap5": "asap5",
+    "5nm": "asap5",
     "asap2": "asap2",
+    "2nm": "asap2",
     "nangate45": "nangate45",
     "freepdk45": "freepdk45",
     "open28": "open28",
@@ -1916,15 +1933,19 @@ PDK_INSTALL_ALIASES = {
 
 def _check_volare_available() -> tuple[bool, str]:
     """Check if volare is installed and return version."""
+    import importlib.util
     import shutil
     import subprocess
 
     volare_path = shutil.which("volare")
-    if not volare_path:
+    command = ["volare", "--version"] if volare_path else []
+    if not command and importlib.util.find_spec("volare") is not None:
+        command = [sys.executable, "-m", "volare", "--version"]
+    if not command:
         return False, ""
     try:
         result = subprocess.run(
-            ["volare", "--version"],
+            command,
             capture_output=True,
             text=True,
             timeout=10,
@@ -1950,11 +1971,15 @@ def _cleanup_temp(archive_path: str, extract_dir: str) -> None:
 
 def _run_volare_install(pdk: str, version: str, target_dir: str) -> bool:
     """Install PDK via volare. Returns True on success, False on failure."""
+    import importlib.util
     import shutil
     import subprocess
 
     volare_path = shutil.which("volare")
-    if not volare_path:
+    volare_cmd = ["volare"] if volare_path else []
+    if not volare_cmd and importlib.util.find_spec("volare") is not None:
+        volare_cmd = [sys.executable, "-m", "volare"]
+    if not volare_cmd:
         return False
 
     cfg = PDK_INSTALL_CONFIGS.get(pdk, {})
@@ -1965,8 +1990,8 @@ def _run_volare_install(pdk: str, version: str, target_dir: str) -> bool:
     # Volare has used both family-based and target-positional CLIs over time.
     # Try the documented family form first, then fall back for older installs.
     commands = [
-        ["volare", "enable", "--pdk", family, "--pdk-root", target_dir],
-        ["volare", "enable", "--pdk-root", target_dir, target],
+        volare_cmd + ["enable", "--pdk", family, "--pdk-root", target_dir],
+        volare_cmd + ["enable", "--pdk-root", target_dir, target],
     ]
     if requested_version:
         commands = [cmd + [requested_version] for cmd in commands]
@@ -2247,6 +2272,14 @@ def _install_volare_if_missing() -> bool:
 
 def _write_cli_shell_exports(target_dir: str, pdk_root: str, include_oss: bool = True) -> None:
     """Append AgentIC CLI environment exports to common shell rc files."""
+    import shlex
+
+    def _export_var(name: str, value: str) -> str:
+        return f"export {name}={shlex.quote(str(value))}"
+
+    def _prepend_path(path: str) -> str:
+        return f"export PATH={shlex.quote(str(path))}:$PATH"
+
     rc_files = [os.path.expanduser("~/.bashrc")]
     zshrc = os.path.expanduser("~/.zshrc")
     if os.path.exists(zshrc):
@@ -2254,9 +2287,9 @@ def _write_cli_shell_exports(target_dir: str, pdk_root: str, include_oss: bool =
 
     exports = []
     if include_oss:
-        exports.append((f"export OSS_CAD_SUITE_HOME={target_dir}", f"export OSS_CAD_SUITE_HOME={target_dir}"))
-        exports.append((f"export PATH=\"{target_dir}/bin:$PATH\"", f"export PATH=\"{target_dir}/bin:$PATH\""))
-    exports.append((f"export PDK_ROOT={pdk_root}", f"export PDK_ROOT={pdk_root}"))
+        exports.append((_export_var("OSS_CAD_SUITE_HOME", target_dir), _export_var("OSS_CAD_SUITE_HOME", target_dir)))
+        exports.append((_prepend_path(os.path.join(target_dir, "bin")), _prepend_path(os.path.join(target_dir, "bin"))))
+    exports.append((_export_var("PDK_ROOT", pdk_root), _export_var("PDK_ROOT", pdk_root)))
 
     for rcfile in rc_files:
         existing = ""
@@ -2372,7 +2405,7 @@ def _refresh_runtime_external_tool_paths() -> None:
 
 
 def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = False) -> bool:
-    """Ensure the Docker OpenLane image used for hardening is available."""
+    """Ensure the legacy OpenLane v1 Docker image used for hardening is available."""
     import shutil
     import subprocess
 
@@ -2419,6 +2452,168 @@ def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = Fa
 
     console.print(f"[success]OpenLane Docker image installed:[/success] {image}")
     return True
+
+
+def _install_openlane2_backend(image: str = OPENLANE2_IMAGE, force: bool = False, smoke_test: bool = False) -> bool:
+    """Ensure OpenLane 2's Python package and Docker image are available."""
+    import importlib.util
+    import subprocess
+
+    changed = False
+    if importlib.util.find_spec("openlane") is None or force:
+        console.print("[accent]Installing OpenLane 2 Python package...[/accent]")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "openlane"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            console.print(f"[error]Failed to install OpenLane 2 package:[/error]\n{result.stderr}")
+            raise typer.Exit(1)
+        changed = True
+
+    _install_openlane_docker_image(image=image, force=force)
+
+    version = "unknown"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "openlane", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        version = (result.stdout or result.stderr or "unknown").strip().splitlines()[0]
+    except Exception:
+        pass
+
+    console.print(f"[success]OpenLane 2 backend ready:[/success] {version}")
+    console.print("[info]AgentIC default backend:[/info] [accent]openlane2[/accent]")
+
+    if smoke_test:
+        console.print("[accent]Running OpenLane 2 Dockerized smoke test...[/accent]")
+        smoke = subprocess.run(
+            [sys.executable, "-m", "openlane", "--docker-no-tty", "--dockerized", "--smoke-test"],
+            text=True,
+            timeout=1800,
+        )
+        if smoke.returncode != 0:
+            console.print("[error]OpenLane 2 smoke test failed.[/error]")
+            raise typer.Exit(1)
+        console.print("[success]OpenLane 2 smoke test passed.[/success]")
+        changed = True
+
+    return changed
+
+
+def _install_orfs(root: str = ORFS_ROOT, setup_asap7: bool = False, force: bool = False) -> bool:
+    """Install OpenROAD-flow-scripts for research-node flows such as ASAP7."""
+    import subprocess
+
+    root = os.path.abspath(os.path.expanduser(root))
+    repo_url = "https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git"
+    changed = False
+
+    if force and os.path.isdir(root):
+        console.print(
+            f"[warning]ORFS already exists at {root}; refusing destructive reinstall. "
+            "Move it aside manually or use a different --root.[/warning]"
+        )
+        raise typer.Exit(1)
+
+    if not os.path.isdir(os.path.join(root, ".git")):
+        os.makedirs(os.path.dirname(root), exist_ok=True)
+        console.print(f"[accent]Cloning OpenROAD-flow-scripts:[/accent] {root}")
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, root],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        if result.returncode != 0:
+            console.print(f"[error]ORFS clone failed:[/error]\n{result.stderr or result.stdout}")
+            raise typer.Exit(1)
+        changed = True
+    else:
+        console.print(f"[success]OpenROAD-flow-scripts already present:[/success] {root}")
+
+    if setup_asap7:
+        asap7_cfg = os.path.join(root, "flow", "platforms", "asap7", "config.mk")
+        if os.path.exists(asap7_cfg):
+            console.print("[success]ORFS ASAP7 platform collateral already present.[/success]")
+        else:
+            console.print("[accent]Setting up ORFS ASAP7 platform collateral...[/accent]")
+            result = subprocess.run(
+                ["make", "setup-asap7"],
+                cwd=root,
+                text=True,
+                timeout=3600,
+            )
+            if result.returncode != 0:
+                console.print("[error]ORFS make setup-asap7 failed and ASAP7 platform files were not found.[/error]")
+                raise typer.Exit(1)
+            changed = True
+
+    console.print(f"[success]ORFS ready:[/success] {root}")
+    console.print("[info]7nm research run example:[/info] [accent]agentic run-orfs --platform asap7 --design gcd[/accent]")
+    return changed
+
+
+def _orfs_design_config(orfs_root: str, platform: str, design: str) -> str:
+    return os.path.join(orfs_root, "flow", "designs", platform, design, "config.mk")
+
+
+def _prepare_orfs_agentic_design(orfs_root: str, platform: str, design: str, clock_period: float) -> str:
+    """Create a minimal ORFS design wrapper from an AgentIC design directory."""
+    src_root = os.path.join(OPENLANE_ROOT, "designs", design, "src")
+    if not os.path.isdir(src_root):
+        raise typer.BadParameter(f"AgentIC design source directory not found: {src_root}")
+
+    rtl_files = []
+    for ext in ("*.v", "*.sv"):
+        rtl_files.extend(sorted(Path(src_root).glob(ext)))
+    rtl_files = [
+        path
+        for path in rtl_files
+        if not path.name.lower().endswith(("_tb.v", "_testbench.v", "_coverage.sv", "_sva.sv", "_formal.sv"))
+    ]
+    if not rtl_files:
+        raise typer.BadParameter(f"No RTL files found in {src_root}")
+
+    design_cfg_dir = Path(orfs_root) / "flow" / "designs" / platform / design
+    design_src_dir = Path(orfs_root) / "flow" / "designs" / "src" / design
+    design_cfg_dir.mkdir(parents=True, exist_ok=True)
+    design_src_dir.mkdir(parents=True, exist_ok=True)
+
+    for rtl in rtl_files:
+        target = design_src_dir / rtl.name
+        if not target.exists() or target.read_bytes() != rtl.read_bytes():
+            target.write_bytes(rtl.read_bytes())
+
+    sdc_path = design_cfg_dir / "constraint.sdc"
+    sdc_path.write_text(
+        f"create_clock -name clk -period {clock_period:g} [get_ports clk]\n",
+        encoding="utf-8",
+    )
+
+    rel_rtl = " ".join(f"$(DESIGN_HOME)/src/{design}/{path.name}" for path in rtl_files)
+    config_path = design_cfg_dir / "config.mk"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"export DESIGN_NICKNAME = {design}",
+                f"export DESIGN_NAME = {design}",
+                f"export PLATFORM = {platform}",
+                f"export VERILOG_FILES = {rel_rtl}",
+                f"export SDC_FILE = $(DESIGN_HOME)/{platform}/{design}/constraint.sdc",
+                f"export CLOCK_PERIOD = {clock_period:g}",
+                "export CORE_UTILIZATION ?= 30",
+                "export PLACE_DENSITY ?= 0.55",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return str(config_path)
 
 
 def _agentic_tools_bin() -> str:
@@ -2993,9 +3188,14 @@ def install_oss(
 
     target = os.path.abspath(os.path.expanduser(target_dir))
     pdk_root_abs = os.path.abspath(os.path.expanduser(pdk_root))
-    if _is_toolchain_present():
-        console.print("[success]OSS CAD Suite already detected.[/success]")
+    if _is_oss_cad_suite_present_at(target):
+        console.print(f"[success]OSS CAD Suite already present at target:[/success] {target}")
     else:
+        if _is_toolchain_present():
+            console.print(
+                "[warning]EDA tools exist elsewhere on PATH, but the requested "
+                f"target is incomplete. Installing/repairing {target}.[/warning]"
+            )
         os.makedirs(target, exist_ok=True)
         if not install_oss_cad_suite(target):
             raise typer.Exit(1)
@@ -3008,15 +3208,310 @@ def install_oss(
 
 @app.command("install-openlane")
 def install_openlane(
+    backend: str = typer.Option(
+        OPENLANE_BACKEND_DEFAULT,
+        "--backend",
+        help="Backend to install: openlane2 (default) or openlane1",
+    ),
     image: str = typer.Option(
-        OPENLANE_IMAGE,
+        "",
         "--image",
         help="Docker image used for AgentIC OpenLane hardening",
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Pull even if the image exists"),
+    smoke_test: bool = typer.Option(False, "--smoke-test", help="Run OpenLane 2 smoke test after install"),
 ):
-    """Install/pull the Docker OpenLane backend used for RTL-to-GDSII hardening."""
-    _install_openlane_docker_image(image=image, force=force)
+    """Install/pull the OpenLane backend used for RTL-to-GDSII hardening."""
+    selected = backend.strip().lower()
+    if selected in {"openlane2", "v2"}:
+        _install_openlane2_backend(image=image or OPENLANE2_IMAGE, force=force, smoke_test=smoke_test)
+    elif selected in {"openlane1", "v1", "docker"}:
+        _install_openlane_docker_image(image=image or OPENLANE_IMAGE, force=force)
+    else:
+        raise typer.BadParameter("--backend must be one of: openlane2, openlane1")
+
+
+@app.command("install-orfs")
+def install_orfs(
+    root: str = typer.Option(
+        ORFS_ROOT,
+        "--root",
+        help="OpenROAD-flow-scripts install directory",
+    ),
+    setup_asap7: bool = typer.Option(
+        False,
+        "--setup-asap7",
+        help="Run make setup-asap7 after cloning ORFS",
+    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Fail if root exists instead of reusing it"),
+):
+    """Install OpenROAD-flow-scripts for research-node flows such as ASAP7."""
+    _install_orfs(root=root, setup_asap7=setup_asap7, force=force)
+
+
+@app.command("setup-7nm")
+def setup_7nm(
+    root: str = typer.Option(
+        ORFS_ROOT,
+        "--root",
+        help="OpenROAD-flow-scripts install directory",
+    ),
+    skip_asap7_setup: bool = typer.Option(
+        False,
+        "--skip-asap7-setup",
+        help="Clone ORFS only; do not run make setup-asap7",
+    ),
+):
+    """One-command setup for ASAP7/7nm research flows through ORFS."""
+    _install_orfs(root=root, setup_asap7=not skip_asap7_setup, force=False)
+
+
+@app.command("run-orfs")
+def run_orfs(
+    platform: str = typer.Option("asap7", "--platform", help="ORFS platform, e.g. asap7 or sky130hd"),
+    design: str = typer.Option("gcd", "--design", help="ORFS design name or AgentIC design name"),
+    root: str = typer.Option(ORFS_ROOT, "--root", help="OpenROAD-flow-scripts install directory"),
+    clock_period: float = typer.Option(10.0, "--clock-period", help="Clock period for generated AgentIC ORFS designs"),
+    recovery_attempts: int = typer.Option(0, "--recovery-attempts", "-r", min=0, max=10, help="Max auto-recovery attempts on failure"),
+    setup_missing: bool = typer.Option(False, "--setup-missing", help="Install ORFS/ASAP7 if missing before running"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the ORFS command without running make"),
+):
+    """Run a research-node ORFS flow, defaulting to ASAP7/gcd."""
+    if platform.lower() in ("sky130", "sky130a"):
+        platform = "sky130hd"
+        
+    root = os.path.abspath(os.path.expanduser(root))
+    if setup_missing and not os.path.isdir(os.path.join(root, ".git")):
+        _install_orfs(root=root, setup_asap7=(platform == "asap7"), force=False)
+    if not os.path.isdir(os.path.join(root, "flow")):
+        console.print(f"[error]ORFS not found at {root}. Run: agentic setup-7nm[/error]")
+        raise typer.Exit(1)
+
+    config_path = _orfs_design_config(root, platform, design)
+    if not os.path.exists(config_path):
+        try:
+            config_path = _prepare_orfs_agentic_design(root, platform, design, clock_period)
+            console.print(f"[success]Generated ORFS design config:[/success] {config_path}")
+        except typer.BadParameter as exc:
+            console.print(
+                f"[error]ORFS design config not found:[/error] {config_path}\n"
+                f"[dim]{exc}[/dim]\n"
+                "For built-in ORFS examples, use an existing design such as --design gcd after setup."
+            )
+            raise typer.Exit(1)
+
+    rel_config = os.path.relpath(config_path, os.path.join(root, "flow"))
+    cmd = [
+        "docker", "run", "--rm",
+        "-u", f"{os.getuid()}:{os.getgid()}",
+        "-v", f"{os.path.join(root, 'flow')}:/OpenROAD-flow-scripts/flow:Z",
+        "-w", "/OpenROAD-flow-scripts/flow",
+        "openroad/orfs:latest",
+        "make", f"DESIGN_CONFIG=./{rel_config}"
+    ]
+
+    if dry_run:
+        console.print(f"[accent]ORFS command:[/accent] {' '.join(cmd)}")
+        return
+
+    import subprocess
+    from .core.pipeline_recovery import OpenLaneErrorFixer, RecoveryAction
+    import re
+    
+    ol_fixer = OpenLaneErrorFixer()
+    orfs_log_path = os.path.join(os.path.dirname(config_path), "harden_orfs.log")
+
+    MAX_RTL_FIXES = 3
+    rtl_fixes = 0
+
+    while True:
+        physical_success = False
+        fix_rtl_requested = False
+        
+        for attempt in range(recovery_attempts + 1):
+            if attempt > 0:
+                console.print(f"\n[warning]── ORFS Recovery attempt {attempt}/{recovery_attempts} ──[/warning]")
+                
+            console.print(f"[accent]Running ORFS:[/accent] cd {os.path.join(root, 'flow')} && {' '.join(cmd)}")
+            console.print(f"[dim]Logging output to: {orfs_log_path}[/dim]")
+            
+            with open(orfs_log_path, "w") as log_f:
+                result = subprocess.run(
+                    cmd,
+                    cwd=os.path.join(root, "flow"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=7200,
+                )
+                log_f.write(result.stdout)
+                
+                # Also stream a bit to the console for the user to see it isn't hanging
+                if result.returncode != 0:
+                    tail = "\n".join(result.stdout.splitlines()[-20:])
+                    console.print(f"[dim]{tail}[/dim]")
+                    
+            if result.returncode == 0:
+                console.print("[success]ORFS run completed successfully![/success]")
+                physical_success = True
+                break
+                
+            console.print(f"[error]ORFS run failed with exit code {result.returncode}.[/error]")
+            
+            if attempt < recovery_attempts:
+                # Parse current parameters from config.mk
+                with open(config_path, "r") as f:
+                    config_content = f.read()
+                
+                current_params = {}
+                util_match = re.search(r"export\s+CORE_UTILIZATION\s*[?=]+\s*([\d.]+)", config_content)
+                if util_match:
+                    current_params["core_util"] = float(util_match.group(1))
+                else:
+                    current_params["core_util"] = 30  # ORFS default
+                    
+                density_match = re.search(r"export\s+PLACE_DENSITY\s*[?=]+\s*([\d.]+)", config_content)
+                if density_match:
+                    current_params["target_density"] = float(density_match.group(1))
+                    
+                clk_match = re.search(r"export\s+CLOCK_PERIOD\s*[?=]+\s*([\d.]+)", config_content)
+                if clk_match:
+                    current_params["clock_period"] = float(clk_match.group(1))
+    
+                categories = ol_fixer.classify(result.stdout)
+                console.print(f"[dim]Detected error categories: {categories}[/dim]")
+                
+                recovery = ol_fixer.get_fix(categories, current_params, attempt)
+                console.print(f"[accent]Proposed Fix:[/accent] {recovery.description}")
+                
+                if recovery.action == RecoveryAction.FAIL:
+                    console.print("[error]Unrecoverable error. Giving up.[/error]")
+                    raise typer.Exit(result.returncode)
+                
+                if recovery.action == RecoveryAction.FIX_RTL:
+                    fix_rtl_requested = True
+                    break
+                
+                # Apply fix to config.mk
+                new_content = config_content
+                if "core_util" in recovery.params:
+                    new_util = recovery.params["core_util"]
+                    if util_match:
+                        new_content = re.sub(r"(export\s+CORE_UTILIZATION\s*[?=]+\s*)[\d.]+", f"\\g<1>{new_util}", new_content)
+                    else:
+                        new_content += f"\nexport CORE_UTILIZATION = {new_util}\n"
+                        
+                if "target_density" in recovery.params:
+                    # AgentIC util is 0-100, target_density is 0.0-1.0
+                    new_density = recovery.params["target_density"]
+                    if density_match:
+                        new_content = re.sub(r"(export\s+PLACE_DENSITY\s*[?=]+\s*)[\d.]+", f"\\g<1>{new_density}", new_content)
+                    else:
+                        new_content += f"\nexport PLACE_DENSITY = {new_density}\n"
+                elif "core_util" in recovery.params:
+                    # If util was reduced, proportionally reduce density to give placer room
+                    new_density = min(0.65, (recovery.params["core_util"] / 100.0) + 0.15)
+                    if density_match:
+                        new_content = re.sub(r"(export\s+PLACE_DENSITY\s*[?=]+\s*)[\d.]+", f"\\g<1>{new_density}", new_content)
+                    else:
+                        new_content += f"\nexport PLACE_DENSITY = {new_density}\n"
+                        
+                if "clock_period" in recovery.params:
+                    new_clk = recovery.params["clock_period"]
+                    if clk_match:
+                        new_content = re.sub(r"(export\s+CLOCK_PERIOD\s*[?=]+\s*)[\d.]+", f"\\g<1>{new_clk}", new_content)
+                    else:
+                        new_content += f"\nexport CLOCK_PERIOD = {new_clk}\n"
+                
+                with open(config_path, "w") as f:
+                    f.write(new_content)
+                
+                console.print(f"[success]Updated ORFS config.mk parameters! Retrying...[/success]")
+                
+        if physical_success:
+            return
+            
+        if not fix_rtl_requested:
+            console.print(f"[error]ORFS run failed after {recovery_attempts} recovery attempts.[/error]")
+            raise typer.Exit(1)
+            
+        if rtl_fixes >= MAX_RTL_FIXES:
+            console.print("[error]Max autonomous RTL fixes reached. Giving up.[/error]")
+            raise typer.Exit(1)
+            
+        rtl_fixes += 1
+        console.print(f"\n[warning]── Autonomous RTL Fix Attempt {rtl_fixes}/{MAX_RTL_FIXES} ──[/warning]")
+        
+        # We need to invoke AgentIC to fix the logic bug!
+        from .core.react_agent import ReActAgent
+        from .tools.vlsi_tools import run_syntax_check, OPENLANE_ROOT
+        import glob
+        
+        console.print("[accent]Initializing AgentIC LLM to autonomously rewrite the Verilog code...[/accent]")
+        llm = get_llm()
+        
+        src_dir = os.path.join(OPENLANE_ROOT, "designs", design, "src")
+        all_rtl_code = ""
+        v_files = glob.glob(os.path.join(src_dir, "*.v"))
+        for v_file in v_files:
+            try:
+                with open(v_file, "r") as f:
+                    all_rtl_code += f"// --- File: {os.path.basename(v_file)} ---\n{f.read()}\n\n"
+            except OSError:
+                pass
+                
+        react_agent = ReActAgent(
+            llm=llm,
+            role="RTL Synthesis Fixer",
+            max_steps=6,
+            verbose=False,
+        )
+        react_agent.register_tool(
+            "syntax_check",
+            "Run Verilator syntax check on an absolute .v file path. Returns error text.",
+            lambda p: str(run_syntax_check(p.strip().strip('"\''))),
+        )
+        react_agent.register_tool(
+            "read_file",
+            "Read contents of an absolute file path.",
+            lambda p: open(p.strip().strip('"\'')).read() if os.path.exists(p.strip().strip('"\'')) else f"Not found: {p}",
+        )
+        
+        errors_for_llm = "\n".join(result.stdout.splitlines()[-200:])
+        _react_context = (
+            f"RTL directory: {src_dir}\n\n"
+            f"Synthesis Errors:\n{errors_for_llm}\n\n"
+            f"Current RTL (All Modules):\n```verilog\n{all_rtl_code}\n```"
+        )
+        _react_trace = react_agent.run(
+            task=(
+                f"Fix all synthesis and logic errors in the Verilog code for design '{design}'. "
+                f"The errors may be in the top module or in any of the sub-modules provided in the context. "
+                f"Use syntax_check tool to verify your fix compiles clean. "
+                f"Final Answer must contain ONLY the corrected Verilog inside ```verilog fences. "
+                f"YOU MUST OUTPUT THE FULL CODE FOR ALL MODULES THAT YOU MODIFY so they can be saved to disk. "
+                f"Ensure the filename comment is EXACTLY like this on the first line inside each fence: // --- File: filename.v ---"
+            ),
+            context=_react_context,
+        )
+        console.print(f"[success]LLM RTL Fix Reasoning:[/success] {_react_trace.final_answer[:500]}...")
+        
+        # Parse the output code blocks and save them
+        code_blocks = re.findall(r"```verilog\n(.*?)\n```", _react_trace.final_answer, re.DOTALL)
+        for block in code_blocks:
+            file_match = re.search(r"//\s*---\s*File:\s*([a-zA-Z0-9_]+\.v)\s*---", block)
+            if file_match:
+                filename = file_match.group(1)
+                filepath = os.path.join(src_dir, filename)
+                with open(filepath, "w") as f:
+                    f.write(block)
+                console.print(f"[dim]Saved fixed RTL to {filepath}[/dim]")
+        
+        # Sync the new RTL files from AgentIC back into the ORFS workspace!
+        console.print("[dim]Syncing repaired RTL into ORFS workspace...[/dim]")
+        _prepare_orfs_agentic_design(root, platform, design, clock_period)
+        
+        console.print(f"[success]Restarting ORFS Make with repaired RTL...[/success]")
 
 
 @app.command("install-experimental-tools")
@@ -3069,7 +3564,7 @@ def setup_cli(
     ),
     skip_pdk: bool = typer.Option(False, "--skip-pdk", help="Skip PDK installation"),
     openlane_image: str = typer.Option(
-        OPENLANE_IMAGE,
+        OPENLANE2_IMAGE,
         "--openlane-image",
         help="Docker image used for OpenLane hardening",
     ),
@@ -3139,7 +3634,7 @@ def install_tools(
         help="Comma-separated PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs.",
     ),
     openlane_image: str = typer.Option(
-        OPENLANE_IMAGE,
+        OPENLANE2_IMAGE,
         "--openlane-image",
         help="Docker image to pull for OpenLane hardening",
     ),
@@ -3193,9 +3688,14 @@ def install_tools(
                 title="🔧 Installing EDA Tools",
             )
         )
-        if _is_toolchain_present():
-            console.print("[success]OSS CAD Suite already detected — skipping.[/success]")
+        if _is_oss_cad_suite_present_at(target_dir):
+            console.print(f"[success]OSS CAD Suite already present at target:[/success] {target_dir}")
         else:
+            if _is_toolchain_present():
+                console.print(
+                    "[warning]EDA tools exist elsewhere on PATH, but the requested "
+                    f"target is incomplete. Installing/repairing {target_dir}.[/warning]"
+                )
             os.makedirs(target_dir, exist_ok=True)
             ok = install_oss_cad_suite(target_dir)
             if ok:
@@ -3248,44 +3748,44 @@ def install_tools(
         console.print(
             Panel(
                 f"[accent]Step {hardening_step}/{total_steps}: Docker/OpenLane Hardening Backend[/accent]\n"
-                f"Image: {openlane_image}",
+                f"Backend: OpenLane 2\nImage: {openlane_image}",
                 title="Installing OpenLane",
             )
         )
-        _install_openlane_docker_image(image=openlane_image, force=False)
+        _install_openlane2_backend(image=openlane_image, force=False, smoke_test=False)
     else:
         console.print("[dim]Skipped Docker/OpenLane setup (--skip-hardening).[/dim]")
 
-    # ── 2. Volare ─────────────────────────────────────────────────────────
-    volare_step = 5
-    if skip_signoff_tools:
-        volare_step -= 1
-    if skip_experimental_tools:
-        volare_step -= 1
-    console.print(
-        Panel(
-            f"[accent]Step {volare_step}/{total_steps}: Volare PDK Manager[/accent]",
-            title="📦 Installing Volare",
-        )
-    )
-    volare_ok, volare_version = _check_volare_available()
-    if volare_ok:
-        console.print(f"[success]Volare already installed ({volare_version}) — skipping.[/success]")
-    else:
-        console.print("[warning]Volare not found. Installing via pip...[/warning]")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "volare"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            console.print(f"[error]Failed to install volare:[/error]\n{result.stderr}")
-            raise typer.Exit(1)
-        console.print("[success]Volare installed successfully.[/success]")
-        changed = True
-
-    # ── 3. PDK ────────────────────────────────────────────────────────────
     if not skip_pdk:
+        # ── 2. Volare ─────────────────────────────────────────────────────
+        volare_step = 5
+        if skip_signoff_tools:
+            volare_step -= 1
+        if skip_experimental_tools:
+            volare_step -= 1
+        console.print(
+            Panel(
+                f"[accent]Step {volare_step}/{total_steps}: Volare PDK Manager[/accent]",
+                title="📦 Installing Volare",
+            )
+        )
+        volare_ok, volare_version = _check_volare_available()
+        if volare_ok:
+            console.print(f"[success]Volare already installed ({volare_version}) — skipping.[/success]")
+        else:
+            console.print("[warning]Volare not found. Installing via pip...[/warning]")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "volare"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                console.print(f"[error]Failed to install volare:[/error]\n{result.stderr}")
+                raise typer.Exit(1)
+            console.print("[success]Volare installed successfully.[/success]")
+            changed = True
+
+        # ── 3. PDK ────────────────────────────────────────────────────────
         pdk_step = 6
         if skip_signoff_tools:
             pdk_step -= 1
@@ -3324,6 +3824,7 @@ def install_tools(
             )
             changed = True
     else:
+        console.print("[dim]Skipped Volare PDK manager (--skip-pdk).[/dim]")
         console.print("[dim]Skipped PDK installation (--skip-pdk).[/dim]")
 
     _write_commercial_tool_template(commercial_template)
@@ -3336,36 +3837,7 @@ def install_tools(
         )
     )
 
-    rc_files = [os.path.expanduser("~/.bashrc")]
-    zshrc = os.path.expanduser("~/.zshrc")
-    if os.path.exists(zshrc):
-        rc_files.append(zshrc)
-
-    exports = []
-    if not skip_oss:
-        exports.append((f"export OSS_CAD_SUITE_HOME={target_dir}", f"export OSS_CAD_SUITE_HOME={target_dir}"))
-        exports.append((f"export PATH=\"{target_dir}/bin:$PATH\"", f"export PATH=\"{target_dir}/bin:$PATH\""))
-    exports.append((f"export PDK_ROOT={pdk_root}", f"export PDK_ROOT={pdk_root}"))
-
-    for rcfile in rc_files:
-        existing = ""
-        if os.path.exists(rcfile):
-            with open(rcfile, "r", encoding="utf-8") as f:
-                existing = f.read()
-
-        added = 0
-        for marker, line in exports:
-            if marker not in existing:
-                with open(rcfile, "a", encoding="utf-8") as f:
-                    if not existing.endswith("\n"):
-                        f.write("\n")
-                    f.write(f"# AgentIC auto-config\n{line}\n")
-                added += 1
-
-        if added:
-            console.print(f"[success]Updated {rcfile} ({added} lines added).[/success]")
-        else:
-            console.print(f"[dim]{rcfile} already up to date.[/dim]")
+    _write_cli_shell_exports(target_dir, pdk_root, include_oss=not skip_oss)
 
     # Apply to current process so doctor works immediately
     if not skip_oss:
@@ -5180,7 +5652,6 @@ def sta(
             corners=["ss", "tt", "ff"],
             min_period_ns=min_period_ns,
             pdk=effective_pdk,
-            pdk_root=effective_pdk_root,
         )
         for key, report in result.corners.items():
             icon = "✓" if report.ok else "✗"
@@ -5208,7 +5679,6 @@ def sta(
             corner=corner,
             min_period_ns=min_period_ns,
             pdk=effective_pdk,
-            pdk_root=effective_pdk_root,
         )
         if result.ok:
             console.print(f"  [success]✓ STA PASS [{corner}][/success]")
@@ -5325,6 +5795,7 @@ def dft(
         console.print(f"  [error]✗ DFT FAILED[/error]")
         for e in result.errors:
             console.print(f"    {e}")
+        raise typer.Exit(1)
 
 
 @app.command("power")

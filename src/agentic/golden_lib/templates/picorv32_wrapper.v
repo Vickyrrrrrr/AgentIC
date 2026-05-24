@@ -1,34 +1,15 @@
 module picorv32_wrapper (
-    input wire clk,               // Clock signal
-    input wire rst_n,             // Active-low reset signal
-    input wire [31:0] instr_in,   // Not used by PicoRV32 (fetches its own)
-    input wire [31:0] data_in,    // Data from memory/peripherals
-    output wire [31:0] data_out,  // Address/Data requested by CPU
-    output reg interrupt_flag     // Interrupt flag output
+    input  wire        clk,
+    input  wire        rst_n,
+    output wire        mem_valid,
+    output wire        mem_instr,
+    input  wire        mem_ready,
+    output wire [31:0] mem_addr,
+    output wire [31:0] mem_wdata,
+    output wire [3:0]  mem_wstrb,
+    input  wire [31:0] mem_rdata,
+    output wire        interrupt_flag
 );
-
-    wire        mem_valid;
-    wire        mem_instr;
-    reg         mem_ready;
-    wire [31:0] mem_addr;
-    wire [31:0] mem_wdata;
-    wire [ 3:0] mem_wstrb;
-    wire [31:0] mem_rdata;
-
-    // We feed external data_in back as mem_rdata
-    assign mem_rdata = data_in;
-
-    // We output the requested address/data combo to the top-level
-    // so the top-level can route it to SRAM or Peripherals
-    assign data_out = mem_wstrb ? mem_wdata : mem_addr;
-
-    // Simple 1-cycle memory readiness
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            mem_ready <= 0;
-        else
-            mem_ready <= mem_valid && !mem_ready;
-    end
 
     // Instantiate the PicoRV32 Core
     picorv32 #(

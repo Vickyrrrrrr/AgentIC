@@ -854,8 +854,11 @@ _PDK_ALIASES = {
     "gf180": "gf180mcu",
     "gf180mcuc": "gf180mcu",
     "asap7": "asap7",
+    "7nm": "asap7",
     "asap5": "asap5",
+    "5nm": "asap5",
     "asap2": "asap2",
+    "2nm": "asap2",
     "nangate45": "nangate45",
     "freepdk45": "freepdk45",
     "open28": "open28",
@@ -892,6 +895,22 @@ PDK = os.environ.get("PDK", PDK_PROFILES[DEFAULT_PDK_PROFILE]["pdk"])
 OPENLANE_IMAGE = os.environ.get(
     "OPENLANE_IMAGE",
     "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69",
+)
+OPENLANE2_IMAGE = os.environ.get("OPENLANE2_IMAGE", "ghcr.io/efabless/openlane2:2.3.10")
+OPENLANE_BACKEND_DEFAULT = os.environ.get("AGENTIC_OPENLANE_BACKEND", "openlane2").strip().lower()
+if OPENLANE_BACKEND_DEFAULT in {"docker", "openlane1", "v1"}:
+    OPENLANE_BACKEND_DEFAULT = "openlane1"
+elif OPENLANE_BACKEND_DEFAULT in {"native", "openlane2", "v2"}:
+    OPENLANE_BACKEND_DEFAULT = OPENLANE_BACKEND_DEFAULT
+else:
+    OPENLANE_BACKEND_DEFAULT = "openlane2"
+ORFS_ROOT = os.path.abspath(
+    os.path.expanduser(
+        os.environ.get(
+            "ORFS_ROOT",
+            os.path.join("~", ".agentic", "tools", "OpenROAD-flow-scripts"),
+        )
+    )
 )
 
 # Simulation/Coverage adapter defaults

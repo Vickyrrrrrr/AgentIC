@@ -800,6 +800,8 @@ class ArchitectModule:
             
             if "asap7" in pdk_name or "asap5" in pdk_name or "asap2" in pdk_name or "open28" in pdk_name:
                 sections.append(f"Advanced FinFET/GAAFET Node Warning: Expect severe wire RC delays and routing congestion. Heavily pipeline your datapaths. Do not synthesize large RAMs to flip-flops.")
+                if "asap7" in pdk_name:
+                    sections.append("Flow rule: ASAP7 is a predictive research node. Prefer the OpenROAD-flow-scripts backend (`agentic setup-7nm`, then `agentic run-orfs --platform asap7`) instead of treating it as a Sky130/OpenLane tapeout target.")
             elif "gf180" in pdk_name or "osu" in pdk_name:
                 sections.append(f"Legacy Node Warning: Logic delays dominate wire delays. Optimize logic depth.")
             

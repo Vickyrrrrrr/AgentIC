@@ -296,9 +296,10 @@ _BUILTIN_CHUNKS: List[Chunk] = [
     Chunk(
         text="ASAP7 is a 7nm predictive FinFET PDK intended for academic research, benchmarking, "
         "and advanced-node flow learning. It is not manufacturable. In AgentIC, use the asap7 "
-        "profile for OpenROAD-style research comparisons, keep the standard-cell library as "
-        "asap7sc7p5t, use low supply-voltage timing assumptions around 0.7V, and clearly label "
-        "results as predictive rather than foundry signoff.",
+        "profile for OpenROAD-style research comparisons through OpenROAD-flow-scripts: run "
+        "`agentic setup-7nm`, then `agentic run-orfs --platform asap7 --design <name>`. Keep "
+        "the standard-cell library as asap7sc7p5t, use low supply-voltage timing assumptions "
+        "around 0.7V, and clearly label results as predictive rather than foundry signoff.",
         metadata=ChunkMetadata(
             title="ASAP7 Advanced-Node Guidance",
             tags=["asap7", "7nm", "finfet", "predictive-pdk", "advanced-node"],

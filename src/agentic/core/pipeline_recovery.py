@@ -88,6 +88,17 @@ class OpenLaneErrorFixer:
             r"Viol/Layer\s+.*Short",
             r"violation\s+type:\s+Short",
         ],
+        "antenna_overrepair": [
+            r"DPL-0036[\s\S]{0,3000}ANTENNA_",
+            r"ANTENNA_[A-Za-z0-9_]+[\s\S]{0,3000}DPL-0036",
+            r"Inserted\s+(?:[1-9]\d{4,}|[\d,]{6,})\s+diodes",
+            r"diode.*(?:legaliz|placement|dpl).*fail",
+        ],
+        "detailed_placement_failure": [
+            r"DPL-0036",
+            r"Detailed\s+placement\s+failed",
+            r"detailed\s+placement.*(?:fail|error)",
+        ],
         "drc_violation": [
             r"total\s+violations?:\s*(\d+)",
             r"DRC\s+(?:violation|error)s?:\s*(\d+)",
@@ -112,6 +123,8 @@ class OpenLaneErrorFixer:
         "antenna_violation": [
             r"antenna.*violation",
             r"(?:gate|oxide)\s+(?:area|ratio).*exceed",
+            r"(?:pin|net)\s+antenna\s+violations?:\s*[1-9]\d*",
+            r"pin\s+violations?:\s*[1-9]\d*.*net\s+violations?:\s*[1-9]\d*",
         ],
         "max_transition": [
             r"max\s+transition.*violat",
@@ -171,6 +184,18 @@ class OpenLaneErrorFixer:
                 return RecoveryResult(RecoveryAction.FAIL, "Unclassified error after 2 attempts")
             return RecoveryResult(RecoveryAction.RETRY_SAME, "Retrying unclassified failure")
 
+        # Cross-category failures first: antenna repair can over-insert diodes
+        # until detailed placement fails, which should not be treated as a
+        # plain area expansion problem.
+        category_set = set(categories)
+        if "antenna_overrepair" in category_set:
+            return self._fix_antenna_overrepair(current_params, attempt)
+        if (
+            "detailed_placement_failure" in category_set
+            and "antenna_violation" in category_set
+        ):
+            return self._fix_antenna_overrepair(current_params, attempt)
+
         # Determine the dominant issue and apply fix
         primary = categories[0]
         
@@ -192,7 +217,11 @@ class OpenLaneErrorFixer:
             return self._fix_synthesis(current_params, attempt)
         elif primary == "placement_failure":
             return self._fix_placement(current_params, attempt)
-        elif primary in ("antenna_violation", "max_transition", "max_capacitance"):
+        elif primary == "detailed_placement_failure":
+            return self._fix_placement(current_params, attempt)
+        elif primary == "antenna_violation":
+            return self._fix_antenna(current_params, attempt)
+        elif primary in ("max_transition", "max_capacitance"):
             return self._fix_physical(current_params, attempt, primary)
         
         # Escalate through the action hierarchy
@@ -257,6 +286,44 @@ class OpenLaneErrorFixer:
         if attempt <= 0:
             return 0
         return max(80, min(600, int(width * 0.30)))
+
+    def _wirelength_limit(self, width: int, height: int) -> int:
+        span = max(width, height)
+        return max(250, min(800, int(span * 0.30)))
+
+    def _antenna_config_overrides(
+        self,
+        width: int,
+        height: int,
+        *,
+        margin: int,
+        max_iters: int,
+        heuristic: bool,
+        threshold: int = 60,
+    ) -> Dict[str, Any]:
+        """Return bounded OpenLane antenna-repair knobs.
+
+        These are intentionally conservative. Unbounded heuristic diode
+        insertion can fix antenna ratios while destroying detailed placement.
+        """
+        wire_limit = self._wirelength_limit(width, height)
+        overrides: Dict[str, Any] = {
+            "GRT_REPAIR_ANTENNAS": 1,
+            "GRT_ANT_ITERS": 30,
+            "GRT_ANT_MARGIN": margin,
+            "GRT_MAX_DIODE_INS_ITERS": max_iters,
+            "RUN_HEURISTIC_DIODE_INSERTION": 1 if heuristic else 0,
+            "DIODE_ON_PORTS": "in",
+            "DIODE_PADDING": 2,
+            "GLB_RESIZER_DESIGN_OPTIMIZATIONS": 1,
+            "GLB_RESIZER_TIMING_OPTIMIZATIONS": 0,
+            "GLB_RESIZER_MAX_WIRE_LENGTH": wire_limit,
+            "PL_RESIZER_MAX_WIRE_LENGTH": wire_limit,
+        }
+        if heuristic:
+            overrides["HEURISTIC_ANTENNA_THRESHOLD"] = threshold
+            overrides["HEURISTIC_ANTENNA_INSERTION_MODE"] = "balanced"
+        return overrides
 
     def _fix_timing(self, params: Dict[str, Any], attempt: int) -> RecoveryResult:
         current_clk = params.get("clock_period", 10.0)
@@ -420,6 +487,79 @@ class OpenLaneErrorFixer:
             f"Placement failed — expand die to {new_area}um",
             {"die_area": new_area},
             confidence=0.70,
+        )
+
+    def _fix_antenna(self, params: Dict[str, Any], attempt: int) -> RecoveryResult:
+        """Repair signoff antenna violations without overfitting to one layout."""
+        width, height = self._route_recovery_dimensions(params, compact_large_floorplan=False)
+        current_util = self._to_int(params.get("core_util"), 40)
+        util = max(20, min(35, current_util - (5 if attempt else 0)))
+
+        if attempt <= 0:
+            margin = 20
+            max_iters = 4
+            heuristic = False
+        elif attempt == 1:
+            margin = 30
+            max_iters = 4
+            heuristic = True
+        else:
+            # Persistent antenna usually means long nets or sparse placement.
+            # Compact very large floorplans proportionally, keep diode insertion bounded.
+            width, height = self._route_recovery_dimensions(params, compact_large_floorplan=True)
+            margin = 30
+            max_iters = 6
+            heuristic = True
+            util = max(20, min(32, util))
+
+        return RecoveryResult(
+            RecoveryAction.REGEN_CONFIG,
+            "Antenna violations detected; enable bounded antenna repair and limit long wires.",
+            {
+                "die_width": width,
+                "die_height": height,
+                "core_util": util,
+                "target_density": max(0.20, min(0.42, util / 100.0)),
+                "openlane_config_overrides": self._antenna_config_overrides(
+                    width,
+                    height,
+                    margin=margin,
+                    max_iters=max_iters,
+                    heuristic=heuristic,
+                ),
+            },
+            confidence=0.74,
+        )
+
+    def _fix_antenna_overrepair(
+        self, params: Dict[str, Any], attempt: int
+    ) -> RecoveryResult:
+        """Back off when antenna diode insertion causes placement collapse."""
+        width, height = self._route_recovery_dimensions(params, compact_large_floorplan=False)
+        if attempt > 0:
+            width = int(width * 1.08)
+            height = int(height * 1.08)
+        current_util = self._to_int(params.get("core_util"), 40)
+        util = max(20, min(32, current_util - 8))
+
+        return RecoveryResult(
+            RecoveryAction.REGEN_CONFIG,
+            "Antenna repair over-inserted diodes; disable heuristic insertion and reopen placement density.",
+            {
+                "die_width": width,
+                "die_height": height,
+                "core_util": util,
+                "target_density": max(0.20, min(0.36, util / 100.0)),
+                "antenna_overrepair": True,
+                "openlane_config_overrides": self._antenna_config_overrides(
+                    width,
+                    height,
+                    margin=10 if attempt == 0 else 15,
+                    max_iters=2 if attempt == 0 else 3,
+                    heuristic=False,
+                ),
+            },
+            confidence=0.80,
         )
 
     def _fix_physical(
@@ -660,6 +800,16 @@ def apply_recovery_result(
             orch.artifacts["core_util_override"] = new_util
         if result.params.get("target_density"):
             orch.artifacts["target_density_override"] = float(result.params["target_density"])
+        config_overrides = result.params.get("openlane_config_overrides")
+        if isinstance(config_overrides, dict) and config_overrides:
+            merged = dict(orch.artifacts.get("openlane_config_overrides") or {})
+            merged.update(config_overrides)
+            orch.artifacts["openlane_config_overrides"] = merged
+            orch.log(
+                "OpenLane config overrides staged: "
+                + ", ".join(sorted(str(k) for k in config_overrides.keys())),
+                refined=True,
+            )
         if result.params.get("macro_floorplan_repair"):
             orch.artifacts["macro_floorplan_repair"] = True
             orch.artifacts["macro_halo_override"] = result.params.get("macro_halo", [40, 40])
