@@ -18,19 +18,43 @@ class DependencyGraph:
         self._build_graph(sid)
 
     def _build_graph(self, sid: dict):
-        sub_modules = sid.get("sub_modules", [])
-        top_name = sid.get("top_module", "top")
+        # Handle both flat and deep representations
+        sub_modules = sid.get("submodules", sid.get("sub_modules", []))
         
-        for mod in sub_modules:
-            name = mod.get("name")
-            desc = mod.get("description", "")
-            # Basic naive dependency tracking
-            deps = []
-            for other in sub_modules:
-                if other.get("name") != name and other.get("name") in mod.get("functional_logic", ""):
-                    deps.append(other.get("name"))
-            self.nodes[name] = GraphNode(name=name, description=desc, dependencies=deps)
-            
+        # Helper to recursively flatten and link dependencies
+        def flatten_and_link(modules: List[dict], parent_name: Optional[str] = None):
+            for mod in modules:
+                name = mod.get("name")
+                desc = mod.get("description", "")
+                
+                # Check if this module requires expansion and has a nested spec
+                nested_spec = mod.get("nested_spec")
+                children_names = []
+                
+                if nested_spec and isinstance(nested_spec, dict):
+                    nested_subs = nested_spec.get("submodules", nested_spec.get("sub_modules", []))
+                    if nested_subs:
+                        children_names = [child.get("name") for child in nested_subs if child.get("name")]
+                        # Recursively process children
+                        flatten_and_link(nested_subs, parent_name=name)
+
+                # Add to graph
+                if name not in self.nodes:
+                    # Dependencies: 
+                    # 1. Parent MUST wait for its explicit nested children to compile
+                    # 2. Textual heuristic dependencies from description (fallback)
+                    deps = list(children_names)
+                    
+                    for other in modules:
+                        other_name = other.get("name")
+                        if other_name and other_name != name and other_name in desc:
+                            if other_name not in deps:
+                                deps.append(other_name)
+                                
+                    self.nodes[name] = GraphNode(name=name, description=desc, dependencies=deps)
+
+        flatten_and_link(sub_modules)
+
     def get_leaves(self) -> List[GraphNode]:
         return [n for n in self.nodes.values() if not n.dependencies and not n.locked]
         

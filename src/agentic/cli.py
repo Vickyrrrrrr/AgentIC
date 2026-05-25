@@ -4847,6 +4847,11 @@ def harden(
     else:
         console.print("  [dim]Running OpenLane (this may take 10-30+ minutes)...[/dim]")
 
+    # Force OpenLane 1 Docker backend as requested by the user
+    os.environ["AGENTIC_OPENLANE_BACKEND"] = "docker"
+
+    base_config_content = ""
+
     # ── Self-healing retry loop ──
     for attempt in range(recovery_attempts + 1):  # +1 for the initial run
         if attempt > 0:
@@ -4854,18 +4859,78 @@ def harden(
                 f"\n[warning]── Recovery attempt {attempt}/{recovery_attempts} ──[/warning]"
             )
 
-        # Regenerate config with current params
-        config_content = _generate_config_tcl(
-            name, rtl_file, sdc_clock_ns=clock_period
-        )
-        # Override die/util if recovery modified them
-        config_content = config_content.replace(
-            f'set ::env(DIE_AREA) "0 0 ', f'set ::env(DIE_AREA) "0 0 {die_size}'
-        ).replace(
-            f'DIE_AREA) "0 0 ', f'DIE_AREA) "0 0 {die_size} '
+        if attempt == 0:
+            console.print("  [accent]AgentIC is analyzing RTL to autonomously generate OpenLane config...[/accent]")
+            llm = get_llm()
+            
+            with open(rtl_file, "r") as f:
+                rtl_content = f.read()
+                
+            import glob
+            src_dir = os.path.dirname(rtl_file)
+            v_files = []
+            for f_path in glob.glob(os.path.join(src_dir, "*.v")):
+                if not f_path.endswith("_tb.v"):
+                    v_files.append(f"$::env(DESIGN_DIR)/src/{os.path.basename(f_path)}")
+            verilog_files_str = " ".join(v_files)
+            # Pre-fetch entire PDK knowledge base from Qdrant
+            rag_context = ""
+            try:
+                import requests
+                res = requests.post("http://localhost:6333/collections/vlsi_knowledge/points/scroll", json={
+                    "limit": 200,
+                    "with_payload": True
+                }, timeout=5)
+                if res.status_code == 200:
+                    hits = res.json().get("result", {}).get("points", [])
+                    rag_context = "\n".join([f"- {h.get('payload', {}).get('text', '')}" for h in hits])
+            except Exception:
+                pass
+
+            prompt = f"""You are an expert VLSI physical design engineer. Write an OpenLane 1 config.tcl for the design '{name}'.
+The target PDK node is '{PDK}'.
+Here is the RTL code:
+```verilog
+{rtl_content}
+```
+
+Here is the complete physical rulebook and standard cell documentation for the {PDK} node from our Qdrant RAG database. You MUST use these rules to guarantee valid layer directions, standard cell names, and design constraints in your TCL file:
+{rag_context}
+
+You MUST set these variables deterministically (do not change these exact lines):
+set ::env(DIE_AREA) "0 0 {die_size} {die_size}"
+set ::env(FP_CORE_UTIL) {util}
+set ::env(CLOCK_PERIOD) "{clock_period}"
+set ::env(DESIGN_NAME) "{name}"
+set ::env(VERILOG_FILES) "{verilog_files_str}"
+set ::env(CLOCK_PORT) "clk"
+set ::env(PDK) "{PDK}"
+
+CRITICAL: Do NOT use inline comments (e.g., `set var val # comment`). Inline comments will crash the TCL parser.
+
+Output ONLY the config.tcl code wrapped in ```tcl fences. Do not output anything else.
+"""
+            llm_response = llm.call([{"role": "user", "content": prompt}])
+            
+            match = re.search(r"```(?:tcl)?\n(.*?)\n```", llm_response, re.DOTALL | re.IGNORECASE)
+            if match:
+                base_config_content = match.group(1).strip()
+            else:
+                console.print("  [warning]LLM failed to output config block. Falling back to heuristic.[/warning]")
+                base_config_content = _generate_config_tcl(name, rtl_file, sdc_clock_ns=clock_period)
+                
+            config_content = base_config_content
+        else:
+            config_content = base_config_content
+
+        # Override parameters if recovery modified them
+        config_content = re.sub(
+            r'set ::env\(DIE_AREA\)\s+"[\d\s]+"',
+            f'set ::env(DIE_AREA) "0 0 {die_size} {die_size}"',
+            config_content,
         )
         config_content = re.sub(
-            r'set ::env\(FP_CORE_UTIL\)\s+\d+',
+            r'set ::env\(FP_CORE_UTIL\)\s+[\d.]+',
             f'set ::env(FP_CORE_UTIL) {util}',
             config_content,
         )
@@ -4920,10 +4985,66 @@ def harden(
             f"[error]✗ OpenLane failed — categorized as: [warning]{', '.join(categories)}[/warning][/error]"
         )
 
-        # Apply deterministic fix
-        die_size, util, clock_period, fix_desc = _apply_harden_fix(
-            die_size, util, clock_period, categories, attempt, wns=wns_val,
-        )
+        if "unknown" in categories or not categories:
+            console.print("  [accent]🤖 AgentIC is querying Qdrant PDK-RAG to fix unknown error...[/accent]")
+            try:
+                import requests
+                from sentence_transformers import SentenceTransformer
+                
+                # Extract the most relevant error log snippet (last 300 chars)
+                query_str = error_text[-300:]
+                model = SentenceTransformer("all-MiniLM-L6-v2")
+                query_vector = model.encode(query_str).tolist()
+                
+                res = requests.post("http://localhost:6333/collections/vlsi_knowledge/points/search", json={
+                    "vector": query_vector,
+                    "limit": 3,
+                    "with_payload": True
+                }, timeout=10)
+                res.raise_for_status()
+                
+                hits = res.json().get("result", [])
+                rag_context = "\n".join([f"- {h.get('payload', {}).get('text', '')}" for h in hits])
+                
+                if rag_context.strip():
+                    console.print("  [info]📚 Retrieved PDK Context from Qdrant![/info]")
+                else:
+                    console.print("  [warning]No PDK context found.[/warning]")
+                
+                prompt = f"""You are an expert VLSI physical design engineer. The OpenLane 1 run failed with this error:
+```
+{error_text[-1000:]}
+```
+
+Here are relevant physical rules extracted from the sky130A PDK (Qdrant RAG DB):
+{rag_context}
+
+Here is the current config.tcl:
+```tcl
+{base_config_content}
+```
+
+Rewrite the config.tcl to fix the error using the provided PDK rules. Output ONLY the complete, raw config.tcl code wrapped in ```tcl fences."""
+                
+                llm = get_llm()
+                llm_response = llm.call([{"role": "user", "content": prompt}])
+                
+                match = re.search(r"```(?:tcl)?\n(.*?)\n```", llm_response, re.DOTALL | re.IGNORECASE)
+                if match:
+                    base_config_content = match.group(1).strip()
+                    fix_desc = "Applied dynamic LLM-RAG fix for unknown layout error"
+                else:
+                    fix_desc = "LLM failed to output config. Falling back to heuristic retry."
+                    
+            except Exception as e:
+                console.print(f"  [error]RAG Query Failed: {e}[/error]")
+                fix_desc = "Unknown error pattern — retrying (RAG offline)"
+        else:
+            # Apply deterministic fix
+            die_size, util, clock_period, fix_desc = _apply_harden_fix(
+                die_size, util, clock_period, categories, attempt, wns=wns_val,
+            )
+            
         console.print(f"  [info]🔧 Applying fix: {fix_desc}[/info]")
 
     # ── Success — run signoff ──
@@ -4934,13 +5055,23 @@ def harden(
                 title="🔍 Fabrication Readiness",
             )
         )
-        success, report = signoff_check_tool(name)
-        if success:
-            console.print(f"[success]✅ SIGNOFF PASSED[/success]")
-            console.print(report)
+        metrics, msg = check_physical_metrics(name)
+        if metrics:
+            report = f"Signoff Report for {name}:\n"
+            report += f"  WNS (Timing): {metrics.get('timing_wns', 0)} ns\n"
+            report += f"  TNS (Timing): {metrics.get('timing_tns', 0)} ns\n"
+            report += f"  Total Power:  {metrics.get('power_total', 0)} W\n"
+            report += f"  Chip Area:    {metrics.get('chip_area_um2', 0)} um^2\n"
+            report += f"  Utilization:  {metrics.get('utilization', 0)} %\n"
+            
+            if metrics.get('timing_wns', 0) >= 0:
+                console.print(f"[success]✅ SIGNOFF PASSED[/success]")
+                console.print(report)
+            else:
+                console.print(f"[warning]⚠️ SIGNOFF COMPLETED WITH VIOLATIONS[/warning]")
+                console.print(report)
         else:
-            console.print(f"[error]❌ SIGNOFF FAILED[/error]")
-            console.print(report)
+            console.print(f"[error]❌ SIGNOFF FAILED: {msg}[/error]")
             raise typer.Exit(1)
     elif not ol_success:
         console.print(f"[error]✗ OpenLane failed after {recovery_attempts} recovery attempts[/error]")

@@ -4197,8 +4197,11 @@ Requirements:
         from crewai import Agent, Task, Crew
 
         spec = self.artifacts.get("spec", "")
+        spec_str = json.dumps(spec) if isinstance(spec, dict) else str(spec)
+        
         rtl_code = self.artifacts.get("rtl_code", "")
         verification_plan = self.artifacts.get("verification_plan", "")
+        vp_str = json.dumps(verification_plan) if isinstance(verification_plan, dict) else str(verification_plan)
 
         agent = Agent(
             role="Functional Coverage Architect",
@@ -4216,10 +4219,10 @@ Requirements:
             description=f"""Generate a SystemVerilog covergroup model for this design.
 
 SPECIFICATION:
-{spec[:3000]}
+{spec_str[:3000]}
 
 VERIFICATION PLAN:
-{verification_plan[:2000]}
+{vp_str[:2000]}
 
 RTL (first 2000 lines):
 {rtl_code[:2000]}
@@ -4264,10 +4267,21 @@ endmodule
         return str(result) if result else ""
 
     def do_rtl_gen(self):
+        sid_dict = {}
+        
+        # 1. Prefer deep hierarchy if available (Output of HierarchyExpander)
+        hierarchy_json = self.artifacts.get("hierarchy_result_json")
         sid_raw = self.artifacts.get("sid")
-        if sid_raw:
-            try:
+        
+        try:
+            if hierarchy_json:
+                sid_dict = json.loads(hierarchy_json)
+                self.log("RTL_GEN using expanded deep architecture hierarchy.", refined=True)
+            elif sid_raw:
                 sid_dict = json.loads(sid_raw)
+                self.log("RTL_GEN using base SID architecture.", refined=True)
+            
+            if sid_dict:
                 graph = DependencyGraph(sid_dict)
                 self.log(
                     f"Recursive Graph Execution Enabled! Found {len(graph.nodes)} node(s).",
@@ -4307,8 +4321,9 @@ endmodule
                     if sub_nodes:
                         self._generate_sub_modules_parallel(sub_nodes, graph)
 
-            except Exception as e:
-                self.log(f"Graph Builder parsing warning: {e}", refined=True)
+        except Exception as e:
+            self.log(f"Graph Builder parsing warning: {e}", refined=True)
+            
         # Check Golden Reference Library for a matching template
         from .golden_lib import get_best_template
 
@@ -4966,8 +4981,8 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 task=(
                     f"Fix all syntax and lint errors in the Verilog code for design '{self.name}'. "
                     f"The errors may be in the top module or in any of the sub-modules provided in the context. "
-                    f"CRITICAL: Do not rename the top module. The top-module interface MUST remain exactly the same. "
-                    f"Internal sub-module ports may be changed only when required by the RTL contract. "
+                    f"CRITICAL: The top module's external input/output ports MUST remain exactly the same, but you MUST fix the structural instantiation/wiring INSIDE the top module if there are PINMISSING or PINNOTFOUND errors. "
+                    f"Do NOT rewrite the sub-modules to match broken top-level wiring; fix the top-level wiring to match the correct sub-modules instead! "
                     f"Universal ASIC contract repairs: required macro modules must be black boxes with no reg-array storage; "
                     f"large SRAM/RAM/ROM/register-file storage must become a macro wrapper; "
                     f"internal inout/tri-state ports must be split into input/output/output-enable signals, "

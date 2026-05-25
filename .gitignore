@@ -23,7 +23,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+qdrant_storage
 # Virtual environments
 .venv/
 .venv-agentic/
@@ -171,3 +171,4 @@ agentic_jobs.db-wal
 synth_out/
 lvs_out/
 drc_out/
+scratch_combine.py

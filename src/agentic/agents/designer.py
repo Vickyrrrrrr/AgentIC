@@ -37,7 +37,7 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   • Bus widths MUST match exactly on every LHS and RHS: 16-bit PC cannot receive an 8-bit value.
   • Every 'output logic' port must be driven by EXACTLY one source: either 'assign' OR 'always' — NEVER both.
   • Arrays (logic [N-1:0] mem [0:D-1]) are initialized with '= {...}' not '= begin...end'.
-  • TOP-LEVEL INSTANTIATION (CRITICAL): When instantiating submodules, their outputs MUST ultimately drive the top-level output ports (directly or via logic). Unconnected submodules will be completely deleted by the synthesis optimizer as dead code!
+  • HIERARCHY & WIRING (CRITICAL): The top-level module MUST be a structural wrapper that instantiates and wires together ALL sub-blocks/peripherals in the design. Do NOT leave sub-blocks isolated in the folder. Do NOT write dummy logic in the top module if sub-blocks exist. All submodule outputs MUST ultimately drive the top-level output ports. Unconnected submodules will be completely deleted by the synthesis optimizer as dead code!
 
   VERILATOR COMPATIBILITY:
   ─────────────────────────

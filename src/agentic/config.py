@@ -894,7 +894,7 @@ PDK = os.environ.get("PDK", PDK_PROFILES[DEFAULT_PDK_PROFILE]["pdk"])
 # OpenLane image used by the default Docker hardening backend.
 OPENLANE_IMAGE = os.environ.get(
     "OPENLANE_IMAGE",
-    "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69",
+    "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-amd64",
 )
 OPENLANE2_IMAGE = os.environ.get("OPENLANE2_IMAGE", "ghcr.io/efabless/openlane2:2.3.10")
 OPENLANE_BACKEND_DEFAULT = os.environ.get("AGENTIC_OPENLANE_BACKEND", "openlane2").strip().lower()
