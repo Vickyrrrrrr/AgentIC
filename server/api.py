@@ -754,10 +754,10 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
         gds_ready = is_available and not proprietary
         if proprietary and not is_available:
             status = "requires_foundry_pdk"
-            reason = "Proprietary node. Install licensed PDK, timing libs, LEF/tech files, and OpenLane/OpenROAD integration on the VPS."
+            reason = "Proprietary node. Licensed PDK, timing libraries, LEF/tech files, and OpenLane/OpenROAD integration are required."
         elif gds_ready:
             status = "ready"
-            reason = "Installed on this VPS and available for full GDSII runs."
+            reason = "Available for full GDSII runs in this workspace."
         else:
             status = "not_installed"
             reason = "Install this PDK under PDK_ROOT or OPENLANE_PDK_ROOT before enabling GDSII for users."
@@ -791,7 +791,7 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
                 "pdk": detected.get("pdk", key),
                 "std_cell_library": detected.get("std_cell_library", ""),
                 "description": detected.get(
-                    "description", "Custom user-provided PDK detected on this VPS"
+                    "description", "Custom user-provided PDK detected for this workspace"
                 ),
                 "maturity": detected.get("maturity", "custom"),
                 "fabrication_ready": bool(detected.get("fabrication_ready", True)),
@@ -801,7 +801,7 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
                 "proprietary": False,
                 "root_path": detected.get("root_path", ""),
                 "status": "ready",
-                "reason": "Custom PDK detected on this VPS.",
+                "reason": "Custom PDK detected for this workspace.",
             }
         )
 
@@ -841,6 +841,14 @@ _KNOWN_MODEL_PREFIXES = (
     "together_ai/",
     "mistral/",
     "deepseek/",
+    "openrouter/",
+    "xai/",
+    "gemini/",
+    "cohere/",
+    "perplexity/",
+    "replicate/",
+    "bedrock/",
+    "vertex_ai/",
 )
 
 BYOK_DEFAULT_MODEL = (
@@ -1024,8 +1032,7 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
 
         if not VERILOG_CODEGEN_ENABLED:
             raise RuntimeError(
-                "AgentIC-paid builds are not enabled on this server. "
-                "Set VERILOG_CODEGEN_ENABLED=1 in your environment."
+                "Managed AgentIC model access is not enabled for this workspace."
             )
         cfg = VERILOG_CODEGEN_CONFIG
         model = cfg.get("model", "").strip() or "infinity"
@@ -1034,7 +1041,7 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
         model = _normalize_model_name(model, base_url)
         if not api_key:
             raise RuntimeError(
-                "AgentIC-paid mode requires VERILOG_CODEGEN_API_KEY to be set on the server."
+                "Managed AgentIC model access is not fully configured for this workspace."
             )
         try:
             llm_kwargs = dict(
@@ -1049,7 +1056,7 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
             llm = LLM(**llm_kwargs)
             return llm, f"AgentIC ({model})"
         except Exception as e:
-            raise RuntimeError(f"AgentIC Compute Engine Failed: {e}")
+            raise RuntimeError(f"Managed model connection failed: {e}")
 
     # Path 2: BYOK — use user's provided keys
     if not byok_config:
@@ -1095,7 +1102,7 @@ def _get_llm(byok_config: Optional[dict] = None, is_agentic_paid: bool = False):
         llm = LLM(**llm_kwargs)
         return llm, f"BYOK ({model})"
     except Exception as e:
-        raise RuntimeError(f"BYOK Compute Engine Failed: {e}")
+        raise RuntimeError(f"Model provider connection failed: {e}")
 
 
 def _get_role_llm_map(
@@ -1184,6 +1191,9 @@ def _get_role_llm_map(
 async def debug_llm_routing(
     request: Request, profile: dict = Depends(get_current_user)
 ):
+    if os.getenv("AGENTIC_ENABLE_DEBUG_ROUTES", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise HTTPException(status_code=404, detail="Not found")
+
     byok_config, byok_source = _load_request_byok_config(request, profile)
     roles = [
         "architect",
@@ -1213,7 +1223,7 @@ async def debug_llm_routing(
 
     return {
         "byok_source": byok_source,
-        "backend_env_fallback_allowed": ALLOW_BACKEND_LLM_FALLBACK,
+        "managed_fallback_allowed": ALLOW_BACKEND_LLM_FALLBACK,
         "primary_llm": (
             {
                 "group": primary["group"],
@@ -2670,7 +2680,7 @@ def get_build_options_contract():
                         "default": pdk_catalog["default"],
                         "values": pdk_values,
                         "gds_ready_values": pdk_ready_values,
-                        "description": "PDK profile. Full GDSII runs require the selected PDK to be installed on this VPS.",
+                        "description": "PDK profile. Full GDSII runs require the selected PDK to be available in this workspace.",
                     },
                     {
                         "key": "max_pivots",
@@ -2790,7 +2800,7 @@ async def chat_converse(
     system_prompt = (
         "You are AgentIC Infinite, a calm, state-of-the-art silicon copilot for autonomous chip creation.\n"
         "You help the user turn plain-English hardware intent into a buildable digital chip specification, "
-        "then the AgentIC backend pipeline can execute that spec into RTL, testbench, formal collateral, "
+        "then the AgentIC build pipeline can execute that spec into RTL, testbench, formal collateral, "
         "synthesis/layout artifacts, reports, and GDSII when physical flow is enabled.\n\n"
         "How to answer:\n"
         "- Sound like a premium coding assistant: concise, direct, warm, technically sharp.\n"
@@ -2906,7 +2916,7 @@ async def trigger_build(
                 detail={
                     "error": "pdk_not_ready",
                     "message": (
-                        f"PDK '{req.pdk_profile}' is not installed or not usable for GDSII on this VPS."
+                        f"PDK '{req.pdk_profile}' is not available for GDSII in this workspace."
                     ),
                     "messages": pdk_messages,
                     "pdks": _pdk_catalog_payload(),
@@ -3522,6 +3532,10 @@ class SetByokConfigRequest(BaseModel):
     group3: Optional[ByokGroupRequest] = None
 
 
+class ByokConnectionTestRequest(SetByokConfigRequest):
+    group: str = "group2"
+
+
 def _normalize_byok_config(raw: Optional[dict]) -> dict:
     source = raw if isinstance(raw, dict) else {}
     first_api_key = ""
@@ -3604,6 +3618,79 @@ async def set_profile_byok(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     return {"success": True, "message": "BYOK configuration saved"}
+
+
+@app.post("/profile/byok/test")
+@limiter.limit("10/minute")
+async def test_profile_byok(
+    req: ByokConnectionTestRequest, request: Request, profile: dict = Depends(get_current_user)
+):
+    """Validate a BYOK model connection with a tiny provider call."""
+    requested_group = req.group if req.group in {"group1", "group2", "group3"} else "group2"
+    payload = _normalize_byok_config(req.model_dump(exclude={"group"}))
+
+    group_order = [requested_group, "group2", "group1", "group3"]
+    seen: set[str] = set()
+    for group_name in group_order:
+        if group_name in seen:
+            continue
+        seen.add(group_name)
+        group = payload.get(group_name, {})
+        api_key = (group.get("api_key") or "").strip()
+        if not _has_real_api_key(api_key):
+            continue
+
+        model = _normalize_model_name(group.get("model", ""), group.get("base_url", ""))
+        base_url = (group.get("base_url") or "").strip()
+        try:
+            import litellm
+
+            kwargs: Dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "api_key": api_key,
+                "max_tokens": 8,
+                "timeout": 20,
+            }
+            if base_url:
+                kwargs["api_base"] = base_url
+            if "deepseek" in model.lower():
+                kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
+
+            response = litellm.completion(**kwargs)
+            text = ""
+            try:
+                text = response.choices[0].message.content or ""
+            except Exception:
+                text = ""
+            return {
+                "success": True,
+                "group": group_name,
+                "model": model,
+                "base_url": base_url,
+                "message": "Model connection verified.",
+                "preview": text[:40],
+            }
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "model_connection_failed",
+                    "message": "Model connection failed. Check the model name, base URL, and API key.",
+                    "group": group_name,
+                    "model": model,
+                    "base_url": base_url,
+                    "provider_error": str(exc)[:500],
+                },
+            ) from exc
+
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": "missing_model_key",
+            "message": "Add a valid model API key before testing the connection.",
+        },
+    )
 
 
 @app.post("/profile/api-key")

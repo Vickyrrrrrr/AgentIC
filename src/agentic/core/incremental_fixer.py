@@ -63,6 +63,7 @@ class ErrorType(Enum):
     LVS_ERROR = "lvs"
     FLOORPLAN_ERROR = "floorplan"
     UNKNOWN_TOOL_ERROR = "unknown_tool"
+    MISSING_SUBMODULE = "missing_submodule"
     UNKNOWN = "unknown"
 
 
@@ -180,13 +181,19 @@ class IncrementalFixEngine:
             r"setup.*hold",
         ],
         ErrorType.SYNTHESIS_ERROR: [
-            r"error.*module.*not.*found",
             r"error.*syntax.*in.*module",
-            r"unknown.*cell.*type",
             r"unsupported.*syntax.*in.*context",
             r"yosys.*error",
             r"synthesis.*failed",
             r"failed.*elaborat",
+        ],
+        ErrorType.MISSING_SUBMODULE: [
+            r"error.*module.*not.*found",
+            r"unknown.*cell.*type",
+            r"unknown module",
+            r"failed to elaborate.*module",
+            r"instantiated.*but.*not defined",
+            r"not elaborated",
         ],
         ErrorType.TIMING_ERROR: [
             r"setup.*violation",
@@ -247,6 +254,7 @@ class IncrementalFixEngine:
         ErrorType.WIDTH_MISMATCH: True,  # Usually straightforward
         ErrorType.PORT_CONNECTION: True,
         ErrorType.SYNTHESIS_ERROR: False,
+        ErrorType.MISSING_SUBMODULE: False,
         ErrorType.TIMING_ERROR: False,
         ErrorType.DRC_ERROR: False,
         ErrorType.LVS_ERROR: False,
@@ -501,6 +509,16 @@ class IncrementalFixEngine:
             )
             analysis.fix_confidence = 0.68
 
+        elif analysis.error_type == ErrorType.MISSING_SUBMODULE:
+            risks.extend(
+                [
+                    "Sub-module definitions may not be complete",
+                    "Port mappings or parameter mismatches might be introduced",
+                    "Nested structural hierarchies can fail elaboration if ports differ",
+                ]
+            )
+            analysis.fix_confidence = 0.72
+
         elif analysis.error_type in (ErrorType.TIMING_ERROR, ErrorType.TIMING_VIOLATION):
             risks.extend(
                 [
@@ -572,6 +590,8 @@ class IncrementalFixEngine:
             confidence += 0.15
         elif analysis.error_type in (ErrorType.SYNTHESIS_ERROR, ErrorType.PORT_CONNECTION):
             confidence += 0.18
+        elif analysis.error_type == ErrorType.MISSING_SUBMODULE:
+            confidence += 0.22
         elif analysis.error_type in (ErrorType.TIMING_ERROR, ErrorType.TIMING_VIOLATION):
             confidence += 0.08
         elif analysis.error_type in (ErrorType.POWER_ERROR, ErrorType.FLOORPLAN_ERROR):
@@ -701,6 +721,16 @@ Confidence: {confidence}%
         spec_section = ""
         if spec:
             spec_section = f"\n## SPECIFICATION CONTEXT\n```\n{spec[:2000]}\n```"
+
+        if analysis.error_type == ErrorType.MISSING_SUBMODULE:
+            template = template.replace(
+                "## INSTRUCTIONS",
+                "## INSTRUCTIONS\n\n"
+                "**CRITICAL WARNING ON MISSING SUBMODULES:**\n"
+                "- The linter reported a missing sub-module / unknown cell type. This means you instantiated a module (e.g. memory_block, converter_block, etc.) but failed to define its module body.\n"
+                "- You MUST write and append the full Verilog implementation code (`module ... endmodule`) for all instantiated sub-modules at the end of the fixed file.\n"
+                "- NEVER instantiate any sub-module without providing its complete synthesizable definition."
+            )
 
         return template.format(
             error=analysis.raw_error,

@@ -314,7 +314,7 @@ async def ai_assist(req: AIFixPayload, request: Request, profile: dict = Depends
                 "success": False,
                 "response": (
                     "BYOK is required on this deployment for AI lab actions. Configure Group 1 "
-                    "for Fixer/Debugger in Workspace BYOK, or enable backend fallback only for private local usage."
+                    "for Fixer/Debugger in Workspace model settings."
                 ),
                 "fixed_code": None,
                 "line_changes": [],

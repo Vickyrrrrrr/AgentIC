@@ -38,6 +38,7 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   • Every 'output logic' port must be driven by EXACTLY one source: either 'assign' OR 'always' — NEVER both.
   • Arrays (logic [N-1:0] mem [0:D-1]) are initialized with '= {...}' not '= begin...end'.
   • HIERARCHY & WIRING (CRITICAL): The top-level module MUST be a structural wrapper that instantiates and wires together ALL sub-blocks/peripherals in the design. Do NOT leave sub-blocks isolated in the folder. Do NOT write dummy logic in the top module if sub-blocks exist. All submodule outputs MUST ultimately drive the top-level output ports. Unconnected submodules will be completely deleted by the synthesis optimizer as dead code!
+  • SUB-MODULE DEFINITIONS (CRITICAL): If you instantiate any sub-modules (such as custom memory blocks, ALUs, decoders, or register files), you MUST include the full Verilog implementation code for all instantiated sub-modules in the same file or generate them as separate files. NEVER instantiate a sub-module without providing its actual Verilog code definition. Missing definitions will cause compile/elaboration errors.
 
   VERILATOR COMPATIBILITY:
   ─────────────────────────
