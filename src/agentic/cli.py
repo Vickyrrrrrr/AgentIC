@@ -65,8 +65,8 @@ _suppress_external_logging()
 from .config import (
     OPENLANE_ROOT,
     OPENLANE_IMAGE,
-    OPENLANE2_IMAGE,
     OPENLANE_BACKEND_DEFAULT,
+    ORFS_IMAGE,
     ORFS_ROOT,
     LLM_MODEL,
     LLM_BASE_URL,
@@ -461,12 +461,12 @@ CREDENTIALS_FILE = os.path.expanduser("~/.agentic/credentials.json")
 __version__ = "3.0.4"
 
 BANNER = """[bold orange1]
-  ██╗   ██╗ ██████╗ ██╗  ██╗    ███████╗ ██████╗  ███╗   ███╗
-  ██║   ██║██╔═████╗██║  ██║    ██╔════╝██╔═══██╗ ████╗ ████║
-  ██║   ██║██║  ████║███████║    █████╗  ██║   ██║ ██╔████╔██║
-  ╚██╗ ██╔╝██║  ████║██╔══██║    ██╔══╝  ██║   ██║ ██║╚██╔╝██║
-   ╚████╔╝ ██║  ████║██║  ██║    ███████╗╚██████╔╝ ██║ ╚═╝ ██║
-    ╚═══╝  ╚═╝  ╚══╝╚═╝  ╚═╝    ╚══════╝ ╚═════╝  ╚═╝     ╚═╝
+  █████╗  ██████╗ ███████╗███╗   ██╗████████╗██╗ ██████╗ 
+ ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██║██╔════╝ 
+ ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ██║██║      
+ ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██║██║      
+ ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ██║╚██████╗ 
+ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝ ╚═════╝ 
  [/bold orange1]"""
 
 
@@ -1582,6 +1582,8 @@ PDK_INSTALL_CONFIGS = {
         "pdk_dir": "sky130A",
         "support_level": "recommended",
         "auto_installable": True,
+        "display_by_default": True,
+        "hardening_backend": "openlane1",
         "flow_status": "full digital RTL-to-GDS target via volare/OpenLane",
         "description": "SkyWater 130nm — most mature open PDK",
         "install_method": "volare",
@@ -1598,6 +1600,8 @@ PDK_INSTALL_CONFIGS = {
         "pdk_dir": "gf180mcuC",
         "support_level": "recommended",
         "auto_installable": True,
+        "display_by_default": True,
+        "hardening_backend": "openlane1",
         "flow_status": "full digital RTL-to-GDS target via volare/OpenLane; validate project-specific signoff",
         "description": "GlobalFoundries 180nm — automotive grade",
         "install_method": "volare",
@@ -1614,21 +1618,24 @@ PDK_INSTALL_CONFIGS = {
         "pdk_dir": "asap7",
         "support_level": "research",
         "auto_installable": False,
-        "flow_status": "research/predictive; not guaranteed as an AgentIC one-command hardening target",
-        "description": "ASAP 7nm — cutting-edge predictive PDK",
-        "install_method": "download",
+        "display_by_default": True,
+        "hardening_backend": "orfs",
+        "orfs_platform": "asap7",
+        "flow_status": "ORFS research hardening platform; predictive 7nm, not foundry signoff",
+        "description": "ASAP 7nm predictive PDK/cell libraries for ORFS research flows",
+        "install_method": "orfs",
         "volare_repo": "",
         "volare_target": "",
-        "git_url": "https://github.com/The-OpenROAD-Project/asap7.git",
+        "source_url": "https://github.com/The-OpenROAD-Project/asap7",
         "download_url": "",
         "requires_volare": False,
         "versions": ["main"],
         "default_version": "main",
-        "docker_steps": [
-            "docker pull ghcr.io/the-openroad-project/openroad:latest",
-            "git clone https://github.com/The-OpenROAD-Project/asap7.git",
-            "export PDK_ROOT=$HOME/.ciel",
-            "mkdir -p $PDK_ROOT && cp -R asap7 $PDK_ROOT/asap7",
+        "manual_steps": [
+            "Install ORFS with: agentic install-orfs --setup-asap7",
+            "Use the ORFS platform at $ORFS_ROOT/flow/platforms/asap7.",
+            "Run a smoke test with: agentic run-orfs --platform asap7 --design gcd",
+            "Do not treat ASAP7 as an OpenLane/Volare PDK; AgentIC routes it through ORFS.",
         ],
     },
     "asap5": {
@@ -1696,15 +1703,24 @@ PDK_INSTALL_CONFIGS = {
         "pdk_dir": "nangate45",
         "support_level": "research",
         "auto_installable": False,
-        "flow_status": "research cell library; may require OpenROAD-flow-scripts/platform collateral",
-        "description": "NanGate 45nm — academic/research",
-        "install_method": "download",
+        "display_by_default": True,
+        "hardening_backend": "orfs",
+        "orfs_platform": "nangate45",
+        "flow_status": "ORFS bundled research hardening platform",
+        "description": "NanGate 45nm standard-cell research platform bundled with ORFS",
+        "install_method": "orfs",
         "volare_repo": "",
         "volare_target": "",
-        "download_url": "https://github.com/The-OpenROAD-Project/FreePDK45/archive/main.tar.gz",
+        "download_url": "",
         "requires_volare": False,
         "versions": ["main"],
         "default_version": "main",
+        "manual_steps": [
+            "Install ORFS with: agentic install-orfs",
+            "Use the bundled ORFS platform at $ORFS_ROOT/flow/platforms/nangate45.",
+            "Run a smoke test with: agentic run-orfs --platform nangate45 --design gcd",
+            "For AgentIC auto-hardening, select a non-OpenLane PDK and AgentIC will route the design through the ORFS Docker backend.",
+        ],
     },
     "osu018": {
         "name": "Oklahoma State 180nm",
@@ -1713,13 +1729,18 @@ PDK_INSTALL_CONFIGS = {
         "auto_installable": False,
         "flow_status": "educational library; not guaranteed for OpenLane signoff/hardening",
         "description": "Oklahoma State 180nm — educational/research",
-        "install_method": "download",
+        "install_method": "manual",
         "volare_repo": "",
         "volare_target": "",
-        "download_url": "https://github.com/The-OpenROAD-Project/osu018/archive/main.tar.gz",
+        "download_url": "",
         "requires_volare": False,
         "versions": ["main"],
         "default_version": "main",
+        "manual_steps": [
+            "Bring your OSU018 Liberty/LEF/tech collateral from an authorized source.",
+            "Place it at $PDK_ROOT/osu018/ using libs.ref/osu018_stdcells/ and libs.tech/ when possible.",
+            "Run agentic install-pdk osu018 --check before hardening.",
+        ],
     },
     "osu035": {
         "name": "Oklahoma State 350nm",
@@ -1728,13 +1749,18 @@ PDK_INSTALL_CONFIGS = {
         "auto_installable": False,
         "flow_status": "educational library; not guaranteed for OpenLane signoff/hardening",
         "description": "Oklahoma State 350nm — high voltage, easy to probe",
-        "install_method": "download",
+        "install_method": "manual",
         "volare_repo": "",
         "volare_target": "",
-        "download_url": "https://github.com/The-OpenROAD-Project/osu035/archive/main.tar.gz",
+        "download_url": "",
         "requires_volare": False,
         "versions": ["main"],
         "default_version": "main",
+        "manual_steps": [
+            "Bring your OSU035 Liberty/LEF/tech collateral from an authorized source.",
+            "Place it at $PDK_ROOT/osu035/ using libs.ref/osu035_stdcells/ and libs.tech/ when possible.",
+            "Run agentic install-pdk osu035 --check before hardening.",
+        ],
     },
     "freepdk45": {
         "name": "FreePDK45",
@@ -2030,6 +2056,9 @@ def _install_method_label(cfg: dict) -> str:
         return "proprietary"
     if cfg.get("requires_volare"):
         return "volare"
+    if cfg.get("install_method") == "orfs":
+        platform = cfg.get("orfs_platform")
+        return f"ORFS:{platform}" if platform else "ORFS"
     return cfg.get("install_method") or ("download" if cfg.get("download_url") else "manual")
 
 
@@ -2048,6 +2077,15 @@ def _auto_installable_pdks() -> list[str]:
     return [key for key, cfg in PDK_INSTALL_CONFIGS.items() if cfg.get("auto_installable")]
 
 
+def _default_visible_pdks() -> list[str]:
+    """PDKs/platforms that are real AgentIC hardening targets without custom collateral."""
+    return [key for key, cfg in PDK_INSTALL_CONFIGS.items() if cfg.get("display_by_default")]
+
+
+def _orfs_ready_pdks() -> list[str]:
+    return [key for key, cfg in PDK_INSTALL_CONFIGS.items() if cfg.get("install_method") == "orfs"]
+
+
 def _print_manual_pdk_steps(pdk_key: str, cfg: dict) -> None:
     steps = cfg.get("manual_steps") or [
         f"Place the PDK at $PDK_ROOT/{cfg.get('pdk_dir', pdk_key)}/.",
@@ -2060,7 +2098,8 @@ def _print_manual_pdk_steps(pdk_key: str, cfg: dict) -> None:
         body = (
             f"[warning]{cfg['name']} is proprietary and cannot be auto-installed.[/warning]\n\n"
             f"{body}\n\n"
-            "Open-source alternatives: sky130, gf180mcu, asap7, nangate45, freepdk45, osu018, osu035"
+            "Open-source hardening targets: sky130, gf180mcu. "
+            "ORFS research platforms: asap7, nangate45."
         )
     console.print(Panel(body, title=title, border_style="warning"))
 
@@ -2404,8 +2443,8 @@ def _refresh_runtime_external_tool_paths() -> None:
         pass
 
 
-def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = False) -> bool:
-    """Ensure the legacy OpenLane v1 Docker image used for hardening is available."""
+def _install_docker_image(image: str, *, label: str, force: bool = False) -> bool:
+    """Ensure a Docker image used by AgentIC hardening is available."""
     import shutil
     import subprocess
 
@@ -2413,7 +2452,7 @@ def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = Fa
     if not docker:
         console.print(
             Panel(
-                "Docker is required for AgentIC's default RTL-to-GDSII hardening backend.\n"
+                f"Docker is required for AgentIC's {label} hardening backend.\n"
                 "Install Docker, start the daemon, then run:\n\n"
                 f"  agentic install-openlane --image {image}",
                 title="Docker Not Found",
@@ -2441,71 +2480,35 @@ def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = Fa
             timeout=30,
         )
         if inspect.returncode == 0:
-            console.print(f"[success]OpenLane Docker image already present:[/success] {image}")
+            console.print(f"[success]{label} Docker image already present:[/success] {image}")
             return False
 
-    console.print(f"[accent]Pulling OpenLane Docker image:[/accent] {image}")
+    console.print(f"[accent]Pulling {label} Docker image:[/accent] {image}")
     pull = subprocess.run([docker, "pull", image], text=True)
     if pull.returncode != 0:
-        console.print(f"[error]Failed to pull OpenLane image:[/error] {image}")
+        console.print(f"[error]Failed to pull {label} image:[/error] {image}")
         raise typer.Exit(1)
 
-    console.print(f"[success]OpenLane Docker image installed:[/success] {image}")
+    console.print(f"[success]{label} Docker image installed:[/success] {image}")
     return True
 
 
-def _install_openlane2_backend(image: str = OPENLANE2_IMAGE, force: bool = False, smoke_test: bool = False) -> bool:
-    """Ensure OpenLane 2's Python package and Docker image are available."""
-    import importlib.util
-    import subprocess
-
-    changed = False
-    if importlib.util.find_spec("openlane") is None or force:
-        console.print("[accent]Installing OpenLane 2 Python package...[/accent]")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "openlane"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            console.print(f"[error]Failed to install OpenLane 2 package:[/error]\n{result.stderr}")
-            raise typer.Exit(1)
-        changed = True
-
-    _install_openlane_docker_image(image=image, force=force)
-
-    version = "unknown"
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "openlane", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        version = (result.stdout or result.stderr or "unknown").strip().splitlines()[0]
-    except Exception:
-        pass
-
-    console.print(f"[success]OpenLane 2 backend ready:[/success] {version}")
-    console.print("[info]AgentIC default backend:[/info] [accent]openlane2[/accent]")
-
-    if smoke_test:
-        console.print("[accent]Running OpenLane 2 Dockerized smoke test...[/accent]")
-        smoke = subprocess.run(
-            [sys.executable, "-m", "openlane", "--docker-no-tty", "--dockerized", "--smoke-test"],
-            text=True,
-            timeout=1800,
-        )
-        if smoke.returncode != 0:
-            console.print("[error]OpenLane 2 smoke test failed.[/error]")
-            raise typer.Exit(1)
-        console.print("[success]OpenLane 2 smoke test passed.[/success]")
-        changed = True
-
-    return changed
+def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = False) -> bool:
+    """Ensure the OpenLane v1 Docker image used for hardening is available."""
+    return _install_docker_image(image, label="OpenLane 1", force=force)
 
 
-def _install_orfs(root: str = ORFS_ROOT, setup_asap7: bool = False, force: bool = False) -> bool:
+def _install_orfs_docker_image(image: str = ORFS_IMAGE, force: bool = False) -> bool:
+    """Ensure the ORFS Docker image used for non-OpenLane PDKs is available."""
+    return _install_docker_image(image, label="ORFS", force=force)
+
+
+def _install_orfs(
+    root: str = ORFS_ROOT,
+    setup_asap7: bool = False,
+    force: bool = False,
+    pull_image: bool = True,
+) -> bool:
     """Install OpenROAD-flow-scripts for research-node flows such as ASAP7."""
     import subprocess
 
@@ -2551,6 +2554,10 @@ def _install_orfs(root: str = ORFS_ROOT, setup_asap7: bool = False, force: bool 
             if result.returncode != 0:
                 console.print("[error]ORFS make setup-asap7 failed and ASAP7 platform files were not found.[/error]")
                 raise typer.Exit(1)
+            changed = True
+
+    if pull_image:
+        if _install_orfs_docker_image(image=ORFS_IMAGE, force=False):
             changed = True
 
     console.print(f"[success]ORFS ready:[/success] {root}")
@@ -3211,7 +3218,7 @@ def install_openlane(
     backend: str = typer.Option(
         OPENLANE_BACKEND_DEFAULT,
         "--backend",
-        help="Backend to install: openlane2 (default) or openlane1",
+        help="Backend to install: openlane1 (default). openlane2 is accepted but mapped to openlane1 for AgentIC hardening.",
     ),
     image: str = typer.Option(
         "",
@@ -3219,16 +3226,22 @@ def install_openlane(
         help="Docker image used for AgentIC OpenLane hardening",
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Pull even if the image exists"),
-    smoke_test: bool = typer.Option(False, "--smoke-test", help="Run OpenLane 2 smoke test after install"),
+    include_orfs: bool = typer.Option(True, "--include-orfs/--no-orfs", help="Also pull the ORFS image used for non-OpenLane PDKs"),
+    smoke_test: bool = typer.Option(False, "--smoke-test", help="Reserved for backend smoke tests; OpenLane1 Docker has no built-in smoke test here"),
 ):
     """Install/pull the OpenLane backend used for RTL-to-GDSII hardening."""
     selected = backend.strip().lower()
     if selected in {"openlane2", "v2"}:
-        _install_openlane2_backend(image=image or OPENLANE2_IMAGE, force=force, smoke_test=smoke_test)
-    elif selected in {"openlane1", "v1", "docker"}:
+        console.print("[warning]AgentIC hardening uses OpenLane 1; mapping requested OpenLane 2 backend to OpenLane 1.[/warning]")
+        selected = "openlane1"
+    if selected in {"openlane1", "v1", "docker"}:
         _install_openlane_docker_image(image=image or OPENLANE_IMAGE, force=force)
+        if include_orfs:
+            _install_orfs_docker_image(image=ORFS_IMAGE, force=force)
+        if smoke_test:
+            console.print("[dim]OpenLane1 Docker image install verified by docker image inspect/pull; no extra smoke test was run.[/dim]")
     else:
-        raise typer.BadParameter("--backend must be one of: openlane2, openlane1")
+        raise typer.BadParameter("--backend must be one of: openlane1, docker")
 
 
 @app.command("install-orfs")
@@ -3244,9 +3257,10 @@ def install_orfs(
         help="Run make setup-asap7 after cloning ORFS",
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Fail if root exists instead of reusing it"),
+    skip_docker_image: bool = typer.Option(False, "--skip-docker-image", help="Do not pull the ORFS Docker image"),
 ):
     """Install OpenROAD-flow-scripts for research-node flows such as ASAP7."""
-    _install_orfs(root=root, setup_asap7=setup_asap7, force=force)
+    _install_orfs(root=root, setup_asap7=setup_asap7, force=force, pull_image=not skip_docker_image)
 
 
 @app.command("setup-7nm")
@@ -3261,9 +3275,15 @@ def setup_7nm(
         "--skip-asap7-setup",
         help="Clone ORFS only; do not run make setup-asap7",
     ),
+    skip_docker_image: bool = typer.Option(False, "--skip-docker-image", help="Do not pull the ORFS Docker image"),
 ):
     """One-command setup for ASAP7/7nm research flows through ORFS."""
-    _install_orfs(root=root, setup_asap7=not skip_asap7_setup, force=False)
+    _install_orfs(
+        root=root,
+        setup_asap7=not skip_asap7_setup,
+        force=False,
+        pull_image=not skip_docker_image,
+    )
 
 
 @app.command("run-orfs")
@@ -3532,6 +3552,7 @@ def install_experimental_tools(
     )
 
 
+@app.command("setup")
 @app.command("setup-cli")
 def setup_cli(
     target_dir: str = typer.Option(
@@ -3548,7 +3569,7 @@ def setup_cli(
     pdks: str = typer.Option(
         "sky130",
         "--pdks",
-        help="Comma-separated PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs",
+        help="Comma-separated Volare/OpenLane PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs",
     ),
     skip_oss: bool = typer.Option(False, "--skip-oss", help="Skip OSS CAD Suite install"),
     skip_openlane: bool = typer.Option(False, "--skip-openlane", help="Skip Docker/OpenLane image pull"),
@@ -3564,9 +3585,14 @@ def setup_cli(
     ),
     skip_pdk: bool = typer.Option(False, "--skip-pdk", help="Skip PDK installation"),
     openlane_image: str = typer.Option(
-        OPENLANE2_IMAGE,
+        OPENLANE_IMAGE,
         "--openlane-image",
-        help="Docker image used for OpenLane hardening",
+        help="OpenLane 1 Docker image used for OpenLane-supported PDK hardening",
+    ),
+    orfs_image: str = typer.Option(
+        ORFS_IMAGE,
+        "--orfs-image",
+        help="ORFS Docker image used for non-OpenLane PDK hardening",
     ),
     commercial_template: str = typer.Option(
         os.path.expanduser("~/.agentic/commercial-tools.env"),
@@ -3586,6 +3612,7 @@ def setup_cli(
         pdks=pdks,
         env_file="",
         openlane_image=openlane_image,
+        orfs_image=orfs_image,
         commercial_template=commercial_template,
     )
 
@@ -3631,12 +3658,17 @@ def install_tools(
     pdks: str = typer.Option(
         "sky130",
         "--pdks",
-        help="Comma-separated PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs.",
+        help="Comma-separated Volare/OpenLane PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs.",
     ),
     openlane_image: str = typer.Option(
-        OPENLANE2_IMAGE,
+        OPENLANE_IMAGE,
         "--openlane-image",
-        help="Docker image to pull for OpenLane hardening",
+        help="OpenLane 1 Docker image to pull for OpenLane-supported PDK hardening",
+    ),
+    orfs_image: str = typer.Option(
+        ORFS_IMAGE,
+        "--orfs-image",
+        help="ORFS Docker image to pull for non-OpenLane PDK hardening",
     ),
     env_file: str = typer.Option(
         "",
@@ -3658,7 +3690,8 @@ def install_tools(
         agentic install-oss
         agentic install-openlane
         agentic install-tools --target /opt/oss-cad-suite --pdk-root /opt/pdks
-        agentic install-tools --pdks sky130,gf180mcu,asap7
+        agentic install-tools --pdks sky130,gf180mcu
+        agentic install-orfs --setup-asap7
         agentic install-tools --pdks all-open-auto
         agentic install-tools --skip-pdk
         agentic install-tools --skip-hardening
@@ -3672,6 +3705,15 @@ def install_tools(
     changed = False
     target_dir = os.path.abspath(os.path.expanduser(target_dir))
     pdk_root = os.path.abspath(os.path.expanduser(pdk_root))
+    requested_pdks = [
+        item.strip().lower()
+        for item in pdks.split(",")
+        if item.strip()
+    ]
+    if not requested_pdks:
+        requested_pdks = ["sky130"]
+    if requested_pdks == ["all-open-auto"]:
+        requested_pdks = _auto_installable_pdks()
 
     total_steps = 6
     if skip_signoff_tools:
@@ -3748,11 +3790,13 @@ def install_tools(
         console.print(
             Panel(
                 f"[accent]Step {hardening_step}/{total_steps}: Docker/OpenLane Hardening Backend[/accent]\n"
-                f"Backend: OpenLane 2\nImage: {openlane_image}",
+                f"OpenLane 1 image: {openlane_image}\n"
+                f"ORFS image: {orfs_image}",
                 title="Installing OpenLane",
             )
         )
-        _install_openlane2_backend(image=openlane_image, force=False, smoke_test=False)
+        _install_openlane_docker_image(image=openlane_image, force=False)
+        _install_orfs_docker_image(image=orfs_image, force=False)
     else:
         console.print("[dim]Skipped Docker/OpenLane setup (--skip-hardening).[/dim]")
 
@@ -3791,16 +3835,6 @@ def install_tools(
             pdk_step -= 1
         if skip_experimental_tools:
             pdk_step -= 1
-        requested_pdks = [
-            item.strip().lower()
-            for item in pdks.split(",")
-            if item.strip()
-        ]
-        if not requested_pdks:
-            requested_pdks = ["sky130"]
-        if requested_pdks == ["all-open-auto"]:
-            requested_pdks = _auto_installable_pdks()
-
         console.print(
             Panel(
                 f"[accent]Step {pdk_step}/{total_steps}: PDK Installation[/accent]\n"
@@ -3847,6 +3881,8 @@ def install_tools(
 
     # ── 5. Optional .env file ─────────────────────────────────────────────
     if env_file:
+        primary_pdk_key = PDK_INSTALL_ALIASES.get(requested_pdks[0], requested_pdks[0])
+        primary_pdk = PDK_INSTALL_CONFIGS.get(primary_pdk_key, {}).get("pdk_dir", primary_pdk_key)
         env_path = os.path.abspath(os.path.expanduser(env_file))
         os.makedirs(os.path.dirname(env_path), exist_ok=True)
         if not os.path.exists(env_path):
@@ -3883,7 +3919,7 @@ def install_tools(
                     'AGENTIC_MODEL_BASE_URL="http://localhost:8000/v1"\n\n'
                     '# --- PDK ---\n'
                     f'PDK_ROOT="{pdk_root}"\n'
-                    'PDK="sky130A"\n\n'
+                    f'PDK="{primary_pdk}"\n\n'
                     '# --- EDA tool overrides ---\n'
                     'NGSPICE_BIN="ngspice"\n'
                 )
@@ -3907,7 +3943,7 @@ def install_tools(
 def install_pdk(
     pdk_name: str = typer.Argument(
         None,
-        help="PDK name (e.g., sky130, gf180mcu). Use 'list' to see all available PDKs.",
+        help="PDK/platform name (e.g., sky130, gf180mcu, asap7, nangate45). Use 'list' to see supported targets.",
     ),
     version: str = typer.Option("", "--version", "-v", help="Specific version to install"),
     check: bool = typer.Option(False, "--check", help="Verify that the PDK is installed correctly"),
@@ -3924,16 +3960,23 @@ def install_pdk(
     ),
     list_installed: bool = typer.Option(False, "--installed", help="List currently installed PDKs"),
     force: bool = typer.Option(False, "--force", "-f", help="Reinstall even if already installed"),
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Show manual/proprietary/custom-collateral PDK entries as well as hardening-ready targets",
+    ),
 ):
-    """Install open-source PDKs for use with AgentIC.
+    """Install or show supported open PDK/platform targets for use with AgentIC.
 
     Examples:
         agentic install-pdk sky130
         agentic install-pdk sky130 --pdk-root ~/.ciel
+        agentic install-orfs --setup-asap7
         agentic install-pdk sky130 --check
         agentic install-pdk sky130 --list-versions
         agentic install-pdk my_custom_pdk --path /path/to/pdk
         agentic install-pdk list
+        agentic install-pdk list --all
         agentic install-pdk list --installed
     """
     from .config import detect_available_pdks, validate_pdk_installation
@@ -3968,6 +4011,8 @@ def install_pdk(
             is_installed = key in installed
             if list_installed and not is_installed:
                 continue
+            if not list_installed and not show_all and not cfg.get("display_by_default"):
+                continue
             status = "[success]Installed[/success]" if is_installed else "[dim]Not installed[/dim]"
             install_method = _install_method_label(cfg)
             table.add_row(
@@ -3985,6 +4030,13 @@ def install_pdk(
             "\n[info]Recommended one-command install targets:[/info] "
             f"[accent]{', '.join(_auto_installable_pdks())}[/accent]"
         )
+        console.print(
+            "[info]ORFS hardening platforms:[/info] "
+            f"[accent]{', '.join(_orfs_ready_pdks())}[/accent] "
+            "([accent]agentic install-orfs[/accent])"
+        )
+        if not show_all and not list_installed:
+            console.print("[dim]Manual/proprietary/custom-collateral entries are hidden. Use: agentic install-pdk list --all[/dim]")
         console.print("[info]To install one:[/info] [accent]agentic install-pdk sky130[/accent]")
         console.print("[info]To install all recommended:[/info] [accent]agentic setup-cli --pdks all-open-auto[/accent]")
         console.print("[info]After install, verify with:[/info] [accent]agentic doctor[/accent]")
@@ -4068,6 +4120,10 @@ def install_pdk(
                 border_style="success",
             )
         )
+        return
+
+    if cfg.get("install_method") == "orfs":
+        _print_manual_pdk_steps(pdk_key, cfg)
         return
 
     target_version = version or cfg.get("default_version", "")
@@ -4654,7 +4710,12 @@ Current RTL:
     console.print("  ✓ Simulation [success]passed[/success]")
 
 
-def _generate_config_tcl(design_name: str, rtl_file: str, sdc_clock_ns: float = 0.0) -> str:
+def _generate_config_tcl(
+    design_name: str,
+    rtl_file: str,
+    sdc_clock_ns: float = 0.0,
+    pdk_name: str = "",
+) -> str:
     """Auto-generate OpenLane config.tcl based on design complexity.
 
     Reads the RTL file to estimate size and generates appropriate
@@ -4705,7 +4766,7 @@ set ::env(MAX_FANOUT_CONSTRAINT) 8
 # Routing
 set ::env(GRT_OVERFLOW_ITERS) 64
 # PDK
-set ::env(PDK) "{PDK}"
+set ::env(PDK) "{pdk_name or PDK}"
 '''
 
 
@@ -4722,6 +4783,49 @@ def _extract_sdc_clock(sdc_path: str) -> float:
     except (IOError, ValueError):
         pass
     return 0.0
+
+
+def _prompt_for_pdk_choice(detected: dict, title: str = "🔧 Select Target PDK") -> str:
+    """Ask the user to choose from detected PDK profiles."""
+    from rich.table import Table
+
+    pdk_options = sorted(detected.keys())
+    table = Table(
+        title=title,
+        show_lines=True,
+        header_style="bold #d97757",
+    )
+    table.add_column("#", style="dim", width=3)
+    table.add_column("PDK", style="#d97757 bold")
+    table.add_column("Technology", style="info")
+    table.add_column("Voltage", style="info")
+    table.add_column("Description", style="dim")
+    table.add_column("Location", style="info")
+
+    for i, pdk_name in enumerate(pdk_options, 1):
+        info = detected[pdk_name]
+        table.add_row(
+            str(i),
+            pdk_name,
+            str(info.get("pdk", pdk_name)),
+            str(info.get("voltage_vdd", "?")) + "V",
+            str(info.get("description", "-")),
+            str(info.get("root_path", "~"))[:40],
+        )
+    console.print(table)
+
+    prompt = f"Select PDK [1-{len(pdk_options)}] (or press Enter for {pdk_options[0]}): "
+    choice = typer.prompt(prompt, default="1").strip()
+    try:
+        idx = int(choice) - 1
+        selected = pdk_options[idx] if 0 <= idx < len(pdk_options) else pdk_options[0]
+    except ValueError:
+        selected = pdk_options[0]
+    console.print(
+        f"[success]Selected: {selected} — "
+        f"{detected[selected].get('description', '')}[/success]"
+    )
+    return selected
 
 
 def _apply_harden_fix(
@@ -4782,6 +4886,7 @@ def _apply_harden_fix(
 @app.command()
 def harden(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
+    pdk: str = typer.Option("", "--pdk", help="Target PDK/profile for hardening; defaults to config.tcl or active PDK"),
     recovery_attempts: int = typer.Option(
         5, "--recovery-attempts", "-r", min=0, max=10,
         help="Max auto-recovery attempts on failure (timing/congestion/DRC)",
@@ -4797,16 +4902,67 @@ def harden(
 
     verify_license()
     check_dependencies(skip_openlane=False)
+    new_config = f"{OPENLANE_ROOT}/designs/{name}/config.tcl"
+    config_pdk = ""
+    if os.path.exists(new_config):
+        try:
+            with open(new_config, "r", encoding="utf-8", errors="replace") as f:
+                match = re.search(r'set\s+::env\(PDK\)\s+"?([^"\n#\s]+)"?', f.read())
+                if match:
+                    config_pdk = match.group(1).strip()
+        except OSError:
+            config_pdk = ""
+
+    if not pdk and not config_pdk:
+        detected = detect_available_pdks()
+        if detected:
+            requested_pdk = _prompt_for_pdk_choice(
+                detected,
+                title="🔧 Select Target PDK for Hardening",
+            )
+        else:
+            console.print(
+                Panel(
+                    "[error]No PDK was specified and no installed PDK was detected.[/error]\n\n"
+                    "Use [accent]--pdk <name>[/accent], set PDK_ROOT, or install one with "
+                    "[accent]agentic install-pdk <name>[/accent].",
+                    title="PDK Required",
+                    border_style="error",
+                )
+            )
+            raise typer.Exit(1)
+    else:
+        requested_pdk = (pdk or config_pdk).strip()
+    selected_pdk = requested_pdk
+    selected_profile = requested_pdk
+    try:
+        from .config import resolve_pdk
+
+        resolved_pdk, resolved_profile, _detected_root = resolve_pdk(
+            requested_pdk,
+            required=False,
+        )
+        req_norm = re.sub(r"[^a-z0-9]", "", requested_pdk.lower())
+        profile_norm = re.sub(r"[^a-z0-9]", "", str(resolved_profile.get("profile", "")).lower())
+        resolved_norm = re.sub(r"[^a-z0-9]", "", str(resolved_pdk).lower())
+        if not (profile_norm == "sky130" and req_norm not in {"sky130", "sky130a", resolved_norm}):
+            selected_pdk = resolved_pdk or requested_pdk
+            selected_profile = str(resolved_profile.get("profile") or selected_pdk)
+    except Exception:
+        selected_pdk = requested_pdk
+        selected_profile = requested_pdk
+
+    os.environ["PDK"] = selected_pdk
     console.print(
         Panel(
             f"[accent]AgentIC: Hardening Mode[/accent]\n"
             f"Design: [warning]{name}[/warning]\n"
+            f"PDK: [info]{selected_profile}[/info] ([info]{selected_pdk}[/info])\n"
             f"Recovery: up to [accent]{recovery_attempts}[/accent] auto-fix attempts",
             title="🚀 Starting OpenLane",
         )
     )
 
-    new_config = f"{OPENLANE_ROOT}/designs/{name}/config.tcl"
     rtl_file = f"{OPENLANE_ROOT}/designs/{name}/src/{name}.v"
     sdc_file = f"{OPENLANE_ROOT}/designs/{name}/src/{name}.sdc"
     sdc_clock_ns = _extract_sdc_clock(sdc_file)
@@ -4883,19 +5039,32 @@ def harden(
                 }, timeout=5)
                 if res.status_code == 200:
                     hits = res.json().get("result", {}).get("points", [])
-                    rag_context = "\n".join([f"- {h.get('payload', {}).get('text', '')}" for h in hits])
+                    pdk_tokens = {
+                        selected_pdk.lower(),
+                        selected_profile.lower(),
+                        requested_pdk.lower(),
+                    }
+                    filtered = []
+                    for h in hits:
+                        payload = h.get("payload", {}) or {}
+                        text = str(payload.get("text", "") or "")
+                        tags = " ".join(str(payload.get(k, "") or "") for k in ("pdk", "node", "profile"))
+                        haystack = f"{text} {tags}".lower()
+                        if any(token and token in haystack for token in pdk_tokens):
+                            filtered.append(f"- {text}")
+                    rag_context = "\n".join(filtered)
             except Exception:
                 pass
 
             prompt = f"""You are an expert VLSI physical design engineer. Write an OpenLane 1 config.tcl for the design '{name}'.
-The target PDK node is '{PDK}'.
+The selected PDK is '{selected_pdk}' (profile '{selected_profile}'). Every physical/timing/library assumption must come from this selected PDK only.
 Here is the RTL code:
 ```verilog
 {rtl_content}
 ```
 
-Here is the complete physical rulebook and standard cell documentation for the {PDK} node from our Qdrant RAG database. You MUST use these rules to guarantee valid layer directions, standard cell names, and design constraints in your TCL file:
-{rag_context}
+PDK-specific retrieved context for '{selected_pdk}' only:
+{rag_context if rag_context.strip() else "No PDK-specific RAG entries were found. Use only generic OpenLane 1 syntax and the selected PDK variable; do not borrow rules from another PDK."}
 
 You MUST set these variables deterministically (do not change these exact lines):
 set ::env(DIE_AREA) "0 0 {die_size} {die_size}"
@@ -4904,7 +5073,7 @@ set ::env(CLOCK_PERIOD) "{clock_period}"
 set ::env(DESIGN_NAME) "{name}"
 set ::env(VERILOG_FILES) "{verilog_files_str}"
 set ::env(CLOCK_PORT) "clk"
-set ::env(PDK) "{PDK}"
+set ::env(PDK) "{selected_pdk}"
 
 CRITICAL: Do NOT use inline comments (e.g., `set var val # comment`). Inline comments will crash the TCL parser.
 
@@ -4917,7 +5086,12 @@ Output ONLY the config.tcl code wrapped in ```tcl fences. Do not output anything
                 base_config_content = match.group(1).strip()
             else:
                 console.print("  [warning]LLM failed to output config block. Falling back to heuristic.[/warning]")
-                base_config_content = _generate_config_tcl(name, rtl_file, sdc_clock_ns=clock_period)
+                base_config_content = _generate_config_tcl(
+                    name,
+                    rtl_file,
+                    sdc_clock_ns=clock_period,
+                    pdk_name=selected_pdk,
+                )
                 
             config_content = base_config_content
         else:
@@ -4939,6 +5113,14 @@ Output ONLY the config.tcl code wrapped in ```tcl fences. Do not output anything
             f'set ::env(CLOCK_PERIOD) "{clock_period}"',
             config_content,
         )
+        if re.search(r"set\s+::env\(PDK\)\s+", config_content):
+            config_content = re.sub(
+                r'set\s+::env\(PDK\)\s+"?[^"\n#\s]+"?',
+                f'set ::env(PDK) "{selected_pdk}"',
+                config_content,
+            )
+        else:
+            config_content += f'\nset ::env(PDK) "{selected_pdk}"\n'
 
         os.makedirs(os.path.dirname(new_config), exist_ok=True)
         with open(new_config, "w") as f:
@@ -4951,7 +5133,7 @@ Output ONLY the config.tcl code wrapped in ```tcl fences. Do not output anything
             )
 
         # Run OpenLane
-        ol_success, ol_result = run_openlane(name, background=run_bg)
+        ol_success, ol_result = run_openlane(name, background=run_bg, pdk_name=selected_pdk)
 
         if ol_success:
             if run_bg:
@@ -5004,7 +5186,20 @@ Output ONLY the config.tcl code wrapped in ```tcl fences. Do not output anything
                 res.raise_for_status()
                 
                 hits = res.json().get("result", [])
-                rag_context = "\n".join([f"- {h.get('payload', {}).get('text', '')}" for h in hits])
+                pdk_tokens = {
+                    selected_pdk.lower(),
+                    selected_profile.lower(),
+                    requested_pdk.lower(),
+                }
+                filtered = []
+                for h in hits:
+                    payload = h.get("payload", {}) or {}
+                    text = str(payload.get("text", "") or "")
+                    tags = " ".join(str(payload.get(k, "") or "") for k in ("pdk", "node", "profile"))
+                    haystack = f"{text} {tags}".lower()
+                    if any(token and token in haystack for token in pdk_tokens):
+                        filtered.append(f"- {text}")
+                rag_context = "\n".join(filtered)
                 
                 if rag_context.strip():
                     console.print("  [info]📚 Retrieved PDK Context from Qdrant![/info]")
@@ -5016,8 +5211,8 @@ Output ONLY the config.tcl code wrapped in ```tcl fences. Do not output anything
 {error_text[-1000:]}
 ```
 
-Here are relevant physical rules extracted from the sky130A PDK (Qdrant RAG DB):
-{rag_context}
+Relevant physical rules extracted for the selected PDK '{selected_pdk}' only:
+{rag_context if rag_context.strip() else "No selected-PDK-specific RAG entries were found. Do not import assumptions from another PDK."}
 
 Here is the current config.tcl:
 ```tcl
@@ -5229,6 +5424,7 @@ def build(
 
     detected = detect_available_pdks()
     pdk_profile: str = ""
+    pdk_is_orfs_platform = False
 
     if pdk:
         # User explicitly specified a PDK — validate or install/guide.
@@ -5244,24 +5440,38 @@ def build(
             if cfg and cfg.get("proprietary"):
                 _print_manual_pdk_steps(pdk_key, cfg)
                 raise typer.Exit(1)
-            if cfg:
+            if cfg and cfg.get("install_method") == "orfs":
+                pdk_profile = pdk_key
+                pdk_is_orfs_platform = True
                 console.print(
-                    f"[warning]PDK '{pdk}' is not installed. Starting automatic install...[/warning]"
+                    Panel(
+                        f"[info]{cfg['name']} is an ORFS platform, not a Volare/OpenLane PDK install.[/info]\n\n"
+                        f"AgentIC will use PDK/profile '{pdk_key}' and route hardening through ORFS.\n"
+                        f"Setup command: [accent]agentic install-orfs"
+                        f"{' --setup-asap7' if pdk_key == 'asap7' else ''}[/accent]",
+                        title="ORFS Platform Selected",
+                        border_style="info",
+                    )
                 )
-                install_pdk(
-                    pdk_key,
-                    version="",
-                    check=False,
-                    list_versions=False,
-                    pdk_path="",
-                    list_installed=False,
-                    force=False,
-                )
-                detected = detect_available_pdks()
-                _resolved_pdk, resolved_profile, _detected_root = resolve_pdk(
-                    requested_pdk=pdk,
-                    required=True,
-                )
+            if cfg:
+                if not pdk_is_orfs_platform:
+                    console.print(
+                        f"[warning]PDK '{pdk}' is not installed. Starting automatic install...[/warning]"
+                    )
+                    install_pdk(
+                        pdk_key,
+                        version="",
+                        check=False,
+                        list_versions=False,
+                        pdk_path="",
+                        list_installed=False,
+                        force=False,
+                    )
+                    detected = detect_available_pdks()
+                    _resolved_pdk, resolved_profile, _detected_root = resolve_pdk(
+                        requested_pdk=pdk,
+                        required=True,
+                    )
             else:
                 console.print(
                     f"[error]PDK '{pdk}' not found.[/error]\n"
@@ -5271,82 +5481,36 @@ def build(
                 )
                 raise typer.Exit(1)
 
-        pdk_profile = resolved_profile.get("profile", pdk_key)
-        ok, validation_messages = validate_pdk_installation(pdk_path or pdk)
-        if not ok:
-            console.print(
-                Panel(
-                    "\n".join(validation_messages),
-                    title=f"PDK Validation Failed: {pdk}",
-                    border_style="error",
+        if not pdk_is_orfs_platform:
+            pdk_profile = resolved_profile.get("profile", pdk_key)
+            ok, validation_messages = validate_pdk_installation(pdk_path or pdk)
+            if not ok:
+                console.print(
+                    Panel(
+                        "\n".join(validation_messages),
+                        title=f"PDK Validation Failed: {pdk}",
+                        border_style="error",
+                    )
                 )
-            )
-            raise typer.Exit(1)
+                raise typer.Exit(1)
     elif detected:
-        # Auto-detected — pick the first available unless there's a preference
-        if len(detected) == 1:
-            pdk_profile = next(iter(detected))
-            # Already shown in header, no need to repeat
-        else:
-            # Multiple PDKs — interactive selection
-            from rich.table import Table
-
-            table = Table(
-                title="🔧 Select Target PDK",
-                show_lines=True,
-                header_style="bold #d97757",
-            )
-            table.add_column("#", style="dim", width=3)
-            table.add_column("PDK", style="#d97757 bold")
-            table.add_column("Technology", style="info")
-            table.add_column("Voltage", style="info")
-            table.add_column("Description", style="dim")
-            table.add_column("Location", style="info")
-
-            pdk_options = sorted(detected.keys())
-            for i, pdk_name in enumerate(pdk_options, 1):
-                info = detected[pdk_name]
-                table.add_row(
-                    str(i),
-                    pdk_name,
-                    info["pdk"],
-                    info.get("voltage_vdd", "?") + "V",
-                    info.get("description", "-"),
-                    info.get("root_path", "~")[:40],
-                )
-            console.print(table)
-
-            prompt = f"Select PDK [1-{len(pdk_options)}] (or press Enter for {pdk_options[0]}): "
-            choice = typer.prompt(prompt, default="1").strip()
-            try:
-                idx = int(choice) - 1
-                if 0 <= idx < len(pdk_options):
-                    pdk_profile = pdk_options[idx]
-                else:
-                    pdk_profile = pdk_options[0]
-            except ValueError:
-                pdk_profile = pdk_options[0]
-            console.print(
-                f"[success]Selected: {pdk_profile} — "
-                f"{detected[pdk_profile].get('description', '')}[/success]"
-            )
+        pdk_profile = _prompt_for_pdk_choice(detected)
     else:
         # No PDK detected anywhere
         console.print(
             Panel(
                 "[error]No Open-Source PDK Detected on This System[/error]\n\n"
                 "AgentIC requires at least one open-source PDK to be installed.\n\n"
-                "Supported PDKs:\n"
-                "  • sky130    — SkyWater 130nm (recommended)\n"
-                "  • gf180mcu  — GlobalFoundries 180nm\n"
-                "  • nangate45 — NanGate 45nm\n"
-                "  • asap7     — ASAP 7nm (predictive)\n"
-                "  • osu018    — Oklahoma State 180nm\n"
-                "  • osu035    — Oklahoma State 350nm\n"
-                "  • openfasoc — OpenFASOC/SKY130 analog generator flow\n"
-                "  • lefdef175 — manual educational placeholder\n\n"
-                "Install with AgentIC (recommended):\n"
+                "OpenLane hardening PDKs:\n"
+                "  • sky130    — SkyWater 130nm via Volare/OpenLane1\n"
+                "  • gf180mcu  — GF180MCU 180nm via Volare/OpenLane1\n\n"
+                "ORFS research hardening platforms:\n"
+                "  • asap7     — ASAP7 predictive 7nm via ORFS\n"
+                "  • nangate45 — NanGate45 bundled ORFS research platform\n\n"
+                "Install OpenLane-ready PDKs with AgentIC:\n"
                 "  [accent]agentic install-pdk sky130[/accent]\n\n"
+                "Install ORFS platforms with:\n"
+                "  [accent]agentic install-orfs --setup-asap7[/accent]\n\n"
                 "Use a custom PDK:\n"
                 "  [accent]agentic build --name ... --pdk-path /path/to/pdk[/accent]\n\n"
                 "Then re-run: [accent]agentic build --name ...[/accent]\n\n"

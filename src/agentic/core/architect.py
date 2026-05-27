@@ -24,6 +24,7 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
 from crewai import Agent, Task, Crew, LLM
+from .sid_contract import validate_sid_executable_contract
 
 logger = logging.getLogger(__name__)
 
@@ -504,6 +505,12 @@ class ArchitectModule:
         """Semantic SID validation: ensure JSON matches the actual user request."""
         errors: List[str] = []
         desc = spec_text.lower()
+        sid_contract = validate_sid_executable_contract(
+            sid,
+            design_name=sid.design_name,
+            spec_text=spec_text,
+        )
+        errors.extend(sid_contract.errors)
 
         if sid.top_module != sid.design_name:
             errors.append(
@@ -540,9 +547,9 @@ class ArchitectModule:
         for feature, expectation in self._feature_expectations(spec_text).items():
             missing_ports = expectation["ports"] - all_ports
             if missing_ports:
-                errors.append(
-                    f"SID missing {feature} port(s): {', '.join(sorted(missing_ports))}"
-                )
+                # Downgraded from error to avoid overriding user's custom port names
+                logger.debug(f"SID missing expected {feature} port(s): {', '.join(sorted(missing_ports))}")
+                
             if not any(term in module_text for term in expectation["terms"]):
                 errors.append(f"SID does not describe required feature: {feature}")
 

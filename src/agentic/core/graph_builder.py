@@ -8,6 +8,7 @@ class GraphNode(BaseModel):
     name: str
     description: str
     dependencies: List[str] = []
+    ports: List[dict] = []
     locked: bool = False
     rtl_path: Optional[str] = None
 
@@ -26,6 +27,7 @@ class DependencyGraph:
             for mod in modules:
                 name = mod.get("name")
                 desc = mod.get("description", "")
+                ports = mod.get("ports", [])
                 
                 # Check if this module requires expansion and has a nested spec
                 nested_spec = mod.get("nested_spec")
@@ -51,7 +53,7 @@ class DependencyGraph:
                             if other_name not in deps:
                                 deps.append(other_name)
                                 
-                    self.nodes[name] = GraphNode(name=name, description=desc, dependencies=deps)
+                    self.nodes[name] = GraphNode(name=name, description=desc, dependencies=deps, ports=ports)
 
         flatten_and_link(sub_modules)
 

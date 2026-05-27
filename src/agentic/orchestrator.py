@@ -85,6 +85,10 @@ from .core import (
     VerificationPlanner,
 )
 from .core.design_intent_reconciler import write_reconciliation_artifacts
+from .core.sid_contract import (
+    validate_rtl_against_sid_contract,
+    validate_sid_executable_contract,
+)
 from .contracts import (
     AgentResult,
     ArtifactRef,
@@ -126,6 +130,7 @@ from .tools.vlsi_tools import (
     apply_eco_patch,
     run_tb_static_contract_check,
     run_tb_compile_gate,
+    validate_rtl_hierarchy_contract,
     repair_tb_for_verilator,
     get_coverage_thresholds,
     run_gls_simulation,
@@ -916,6 +921,19 @@ class BuildOrchestrator:
         self.artifacts["pdk_flow_capabilities"] = dict(caps)
         return caps
 
+    def _selected_pdk_name(self) -> str:
+        return str(self.pdk_profile.get("pdk") or PDK).strip()
+
+    def _selected_pdk_profile_name(self) -> str:
+        return str(self.pdk_profile.get("profile") or self._selected_pdk_name()).strip()
+
+    def _selected_std_cell_library(self) -> str:
+        return str(
+            self.pdk_profile.get("std_cell_library")
+            or self.pdk_tool_config.get("std_cell_library")
+            or f"{self._selected_pdk_profile_name()}_stdcells"
+        ).strip()
+
     def _node_aware_floorplan_defaults(
         self, line_count: int, cell_count_est: int
     ) -> Tuple[int, int, float]:
@@ -1321,20 +1339,49 @@ class BuildOrchestrator:
                     if f.endswith(".v") and f != f"{self.name}.v":
                         known_subs.add(os.path.splitext(f)[0])
             if modules and all(m in known_subs for m in modules):
+                for module_name in modules:
+                    mod_path = os.path.join(src_dir, f"{module_name}.v") if src_dir else ""
+                    if not mod_path or not os.path.exists(mod_path):
+                        continue
+                    try:
+                        with open(mod_path, "r") as f:
+                            existing_module_code = f.read()
+                    except OSError:
+                        continue
+                    prev_iface = self._extract_module_interface(
+                        existing_module_code, module_name=module_name
+                    )
+                    new_iface = self._extract_module_interface(
+                        candidate_code, module_name=module_name
+                    )
+                    if prev_iface and new_iface and prev_iface != new_iface:
+                        issues.append(
+                            f"Sub-module repair changed interface for '{module_name}' "
+                            "(forbidden without top-level rewiring and TB regeneration)."
+                        )
                 # Valid sub-module fix — store which modules were fixed
-                self.artifacts["_sub_module_fix_targets"] = modules
-                return issues  # No issues — it's a valid sub-module patch
-            issues.append(f"RTL candidate is missing top module '{self.name}'.")
+                if not issues:
+                    self.artifacts["_sub_module_fix_targets"] = modules
+                return issues
+            if not modules:
+                issues.append("RTL candidate does not contain any valid 'module ... endmodule' blocks. Do NOT output snippets, you must output the full module.")
+            else:
+                issues.append(f"RTL candidate is missing top module '{self.name}'. (Found modules: {', '.join(modules)})")
         prev_modules = self._extract_module_names(previous_code)
         if prev_modules and len(prev_modules) > 1:
             if sorted(prev_modules) != sorted(modules):
                 issues.append(
                     "Hierarchical RTL repair changed the module inventory; module-scoped preservation failed."
                 )
-        prev_ports = self._extract_module_interface(previous_code)
-        new_ports = self._extract_module_interface(candidate_code)
+        prev_ports = self._extract_module_interface(previous_code, module_name=self.name)
+        new_ports = self._extract_module_interface(candidate_code, module_name=self.name)
+        
+        # If the interface changed, we only reject it if the testbench has already been generated.
+        # If the testbench hasn't been generated yet, the LLM is allowed to refine the interface
+        # to better match the spec (e.g. fixing hallucinated ports from RTL_GEN).
         if prev_ports and new_ports and prev_ports != new_ports:
-            issues.append("RTL candidate changed the top-module interface.")
+            if self.artifacts.get("tb_code"):
+                issues.append("RTL candidate changed the top-module interface (forbidden because testbench is already generated).")
         return issues
 
     def _validate_tb_candidate(self, tb_code: str) -> List[str]:
@@ -1383,6 +1430,84 @@ class BuildOrchestrator:
             "trace_enabled": trace_enabled,
             "waveform_generated": waveform_generated,
         }
+
+    @staticmethod
+    def _classify_sim_failure_vlsi(sim_output: str, tb_code: str) -> Dict[str, Any]:
+        """Apply deterministic verification triage before asking an LLM to repair RTL.
+
+        A VLSI debug flow first separates reference-model/TB latency errors from
+        genuine DUT bugs. This classifier is pattern-based but not design-specific:
+        it looks for coherent expected/actual offsets and boundary checks that were
+        asserted without corresponding setup stimulus.
+        """
+        text = sim_output or ""
+        tb = tb_code or ""
+        mismatches = []
+        for match in re.finditer(
+            r"ERROR:\s*(?P<label>.*?Mismatch.*?)Expected\s+(?P<expected>-?\d+),\s*Got\s+(?P<actual>-?\d+)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            expected = int(match.group("expected"))
+            actual = int(match.group("actual"))
+            mismatches.append(
+                {
+                    "label": match.group("label").strip(),
+                    "expected": expected,
+                    "actual": actual,
+                    "delta": actual - expected,
+                }
+            )
+
+        if len(mismatches) >= 3:
+            deltas = {m["delta"] for m in mismatches}
+            if len(deltas) == 1 and 0 not in deltas:
+                delta = deltas.pop()
+                return {
+                    "class": "A",
+                    "failing_output": mismatches[0]["label"],
+                    "failing_signals": [],
+                    "expected_vs_actual": (
+                        f"All numeric mismatches have constant actual-expected delta {delta}; "
+                        "this is characteristic of a scoreboard/sample latency error."
+                    ),
+                    "responsible_construct": "testbench reference model / output sampling",
+                    "root_cause": "Testbench expected model is misaligned with the DUT clock latency.",
+                    "fix_hint": (
+                        "Regenerate or repair the TB with an independent reference model that updates "
+                        "on the same clock boundary as the DUT and compares after a delta/settle point."
+                    ),
+                    "deterministic_triage": "scoreboard_latency_offset",
+                }
+
+        boundary_errors = [
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r"(overflow|underflow|full|empty|wrap|saturat).*not detected", line, re.I)
+        ]
+        if boundary_errors:
+            has_boundary_setup = bool(
+                re.search(
+                    r"(8'h[fF]+|255|all_ones|max_|min_|depth\s*-|capacity|almost_full|almost_empty)",
+                    tb,
+                )
+            )
+            if not has_boundary_setup:
+                return {
+                    "class": "A",
+                    "failing_output": boundary_errors[0],
+                    "failing_signals": [],
+                    "expected_vs_actual": "Boundary flag was checked without visible boundary-state setup in the TB.",
+                    "responsible_construct": "testbench boundary-condition stimulus",
+                    "root_cause": "Testbench expects a boundary event without first driving the DUT to that boundary state.",
+                    "fix_hint": (
+                        "Create explicit setup cycles to reach the boundary condition before checking "
+                        "the status flag, and document same-cycle versus next-cycle flag latency."
+                    ),
+                    "deterministic_triage": "missing_boundary_setup",
+                }
+
+        return {}
 
     def _normalize_react_result(self, trace: Any) -> AgentResult:
         final_answer = getattr(trace, "final_answer", "") or ""
@@ -1571,7 +1696,7 @@ class BuildOrchestrator:
         rtl = self.artifacts.get("rtl_code", "") if include_rtl else ""
         error = self.artifacts.get("last_error", "")
         history = [h.message for h in self.build_history[-10:]]
-        target_pdk = self.pdk_profile.get("profile", self.pdk_profile.get("pdk", "sky130"))
+        target_pdk = self._selected_pdk_profile_name()
 
         budgeted = self.token_budget.budget_context(
             spec=spec,
@@ -1934,7 +2059,39 @@ class BuildOrchestrator:
                 design_name=self.name,
                 spec_text=self.desc,
             )
+            sid_contract = validate_sid_executable_contract(
+                sid,
+                design_name=self.name,
+                spec_text=self.desc,
+            )
+            if not sid_contract.ok:
+                self.logger.warning(
+                    "Executable SID contract failed; attempting deterministic SID fallback: "
+                    + "; ".join(sid_contract.errors[:6])
+                )
+                fallback_sid = architect._fallback_sid(self.name, self.desc)
+                fallback_contract = validate_sid_executable_contract(
+                    fallback_sid,
+                    design_name=self.name,
+                    spec_text=self.desc,
+                )
+                if fallback_contract.ok:
+                    sid = fallback_sid
+                    sid_contract = fallback_contract
+                    self.log("Executable SID contract repaired with deterministic fallback.", refined=True)
+                else:
+                    self.artifacts["sid_contract_report"] = fallback_contract.to_dict()
+                    self.logger.error(
+                        "Executable SID fallback also failed: "
+                        + "; ".join(fallback_contract.errors[:8])
+                    )
+                    raise RuntimeError(
+                        "SID executable contract failed: "
+                        + "; ".join(fallback_contract.errors[:5])
+                    )
             self.artifacts["sid"] = sid.to_json()
+            self.artifacts["sid_contract"] = sid_contract.contract
+            self.artifacts["sid_contract_report"] = sid_contract.to_dict()
             # Convert SID → detailed RTL prompt for the coder agent
             self.artifacts["spec"] = architect.sid_to_rtl_prompt(sid, target_pdk_profile=self.pdk_profile)
             self.log(
@@ -1979,7 +2136,7 @@ REQUIREMENT     : {self.desc}
 CRITICAL RULES:
 1. RTL module name MUST be exactly: {self.name}  (starts with a letter — enforced).
 2. Identify the chip family (counter / ALU / FIFO / FSM / UART / SPI / AXI / CPU / DSP / crypto / SoC).
-3. List ALL I/O ports with direction, bit-width, and purpose. Always include clk and rst_n.
+3. List ALL I/O ports with direction, bit-width, and purpose. For sequential designs, include the clock/reset ports required by the design intent; if the user did not name them, use clk/rst_n and state that choice explicitly.
 4. Define all parameters with default values (DATA_WIDTH, ADDR_WIDTH, DEPTH, etc.).
 5. For sequential designs: specify reset style (sync/async) and reset values for every register.
 6. For FSMs: enumerate all states, transitions, and output conditions.
@@ -2024,7 +2181,7 @@ SPECIFICATION SECTIONS (Markdown):
             hw_spec, issues = spec_gen.generate(
                 design_name=self.name,
                 description=self.desc,
-                target_pdk=self.pdk_profile.get("profile", "sky130"),
+                target_pdk=self._selected_pdk_profile_name(),
                 base_sid=self.artifacts.get("sid"),
             )
 
@@ -2032,6 +2189,27 @@ SPECIFICATION SECTIONS (Markdown):
             self.artifacts["hw_spec"] = hw_spec.to_dict()
             self.artifacts["hw_spec_json"] = hw_spec.to_json()
             self.artifacts["hw_spec_object"] = hw_spec
+
+            sid_hw_contract = validate_sid_executable_contract(
+                self.artifacts.get("sid"),
+                design_name=self.name,
+                spec_text=self.desc,
+                hw_spec=hw_spec,
+            )
+            self.artifacts["sid_hw_contract_report"] = sid_hw_contract.to_dict()
+            self.artifacts["sid_contract"] = sid_hw_contract.contract
+            if not sid_hw_contract.ok:
+                self.log("SID/HardwareSpec contract mismatch. Failing before RTL generation.", refined=True)
+                self.logger.error(
+                    "SID/HW_SPEC CONTRACT VIOLATIONS:\n"
+                    + "\n".join(f"- {e}" for e in sid_hw_contract.errors)
+                )
+                self.errors.extend(sid_hw_contract.errors)
+                self.state = BuildState.FAIL
+                return
+            if sid_hw_contract.warnings:
+                for warning in sid_hw_contract.warnings[:5]:
+                    self.log(f"  SID warning: {warning}", refined=True)
 
             # Log classification and stats
             self.log(f"Design classified as: {hw_spec.design_category}", refined=True)
@@ -2287,7 +2465,7 @@ SPECIFICATION SECTIONS (Markdown):
             self.artifacts["hw_spec"] = {
                 "design_category": "CONTROL",
                 "top_module_name": self.name,
-                "target_pdk": self.pdk_profile.get("profile", "sky130"),
+                "target_pdk": self._selected_pdk_profile_name(),
                 "target_frequency_mhz": 50,
                 "ports": [],
                 "submodules": [],
@@ -2354,7 +2532,7 @@ SPECIFICATION SECTIONS (Markdown):
     def do_feasibility_check(self):
         """Stage: Check physical realizability and reconcile infeasible intent."""
         self.log(
-            f"Running FeasibilityChecker (frequency → memory → arithmetic → area → {self.pdk_profile.get('profile', 'sky130').upper()} rules)...",
+            f"Running FeasibilityChecker (frequency → memory → arithmetic → area → {self._selected_pdk_profile_name().upper()} rules)...",
             refined=True,
         )
 
@@ -2362,7 +2540,7 @@ SPECIFICATION SECTIONS (Markdown):
         hierarchy_result_dict = self.artifacts.get("hierarchy_result", None)
 
         try:
-            checker = FeasibilityChecker(pdk=self.pdk_profile.get("profile", "sky130"))
+            checker = FeasibilityChecker(pdk=self._selected_pdk_profile_name())
             result = checker.check(hw_spec_dict, hierarchy_result_dict)
 
             self.artifacts["feasibility_result"] = result.to_dict()
@@ -2757,7 +2935,7 @@ SPECIFICATION SECTIONS (Markdown):
             - Simple, linear test flow."""
 
     @staticmethod
-    def _extract_module_interface(rtl_code: str) -> str:
+    def _extract_module_interface(rtl_code: str, module_name: str = None) -> str:
         """Extract module port signature from RTL for testbench generation.
 
         Returns a clean, structured port list like:
@@ -2766,6 +2944,11 @@ SPECIFICATION SECTIONS (Markdown):
             Outputs: data_out [7:0], valid, ready
         """
         import re
+
+        if module_name:
+            module_match = re.search(r"\bmodule\s+" + re.escape(module_name) + r"\b[\s\S]*?\bendmodule\b", rtl_code)
+            if module_match:
+                rtl_code = module_match.group(0)
 
         lines = []
 
@@ -3870,6 +4053,16 @@ endclass
         if not spec_text:
             spec_text = f"Sub-module {design_name} of design {self.name}. Generate complete Verilog implementation."
 
+        ports = getattr(node, "ports", [])
+        port_contract = ""
+        if ports:
+            port_contract = (
+                "\nCRITICAL INTERFACE CONTRACT:\n"
+                "YOU MUST EXACTLY MATCH THIS JSON INTERFACE CONTRACT FOR YOUR PORTS. "
+                "DO NOT ADD OR REMOVE PORTS. DO NOT CHANGE BIT-WIDTHS.\n"
+                f"{json.dumps(ports, indent=2)}\n"
+            )
+
         deps = [str(d) for d in node.dependencies]
         dep_context = ""
         if deps:
@@ -3902,9 +4095,9 @@ Specification:
 
 Requirements:
 - Module name MUST be exactly: {design_name}
-- Include clk and rst_n ports
+- Use the exact SID/HWSpec port contract for this sub-module. Include clock/reset only when that contract requires them.
 - NEVER use Verilog reserved words as port or signal names: config, supply0, supply1, table, library, design, instance, cell, use
-- Output ONLY raw Verilog in a ```verilog fence. No explanation text.
+{port_contract}- Output ONLY raw Verilog in a ```verilog fence. No explanation text.
 """,
             expected_output=f"Valid Verilog RTL for {design_name} in a ```verilog fence",
             agent=agent,
@@ -4406,12 +4599,34 @@ endmodule
                 
                 # Check if macro already exists to prevent duplicates
                 if not any(m.get("name") == macro_name for m in manifest_data["macros"]):
+                    pdk_name = self._selected_pdk_name()
+                    pdk_root = os.environ.get("PDK_ROOT", PDK_ROOT)
+                    macro_search_roots = [
+                        os.path.join(pdk_root, pdk_name, "libs.ref"),
+                        os.path.join(pdk_root, pdk_name, "libs.tech"),
+                        self.artifacts.get("src_dir", ""),
+                    ]
+                    lef_candidates: List[str] = []
+                    gds_candidates: List[str] = []
+                    for root in macro_search_roots:
+                        if not root or not os.path.isdir(root):
+                            continue
+                        for pattern in (
+                            os.path.join(root, "**", f"{macro_name}.lef"),
+                            os.path.join(root, "**", f"{macro_name}*.lef"),
+                        ):
+                            lef_candidates.extend(sorted(glob.glob(pattern, recursive=True)))
+                        for pattern in (
+                            os.path.join(root, "**", f"{macro_name}.gds"),
+                            os.path.join(root, "**", f"{macro_name}*.gds"),
+                        ):
+                            gds_candidates.extend(sorted(glob.glob(pattern, recursive=True)))
                     manifest_data["macros"].append({
                         "name": macro_name,
                         "module": macro_name,
                         "instance": "u_memory_subsystem.u_sram_macro",
-                        "lefs": [f"/home/vickynishad/.ciel/sky130A/libs.ref/sky130_sram_macros/lef/{macro_name}.lef"],
-                        "gds": [f"/home/vickynishad/.ciel/sky130A/libs.ref/sky130_sram_macros/gds/{macro_name}.gds"],
+                        "lefs": list(dict.fromkeys(lef_candidates)),
+                        "gds": list(dict.fromkeys(gds_candidates)),
                         "placement": {"x": 500, "y": 500, "orient": "N"}
                     })
                     with open(manifest_path, "w") as f:
@@ -4431,7 +4646,9 @@ endmodule
                 self.artifacts["macro_floorplan_repair"] = True
                 self.artifacts["macro_halo_override"] = [40, 40]
                 self.artifacts["macro_channel_override"] = [80, 80]
-                self.artifacts["macro_blockages_layer_override"] = "li1 met1 met2 met3 met4 met5"
+                max_layer = str(caps.get("max_routing_layer", "") or "").strip()
+                if max_layer:
+                    self.artifacts["macro_blockages_layer_override"] = max_layer
                 self.log(f"Prepared bounded {die_w}x{die_h} macro floorplan with routing halo/channel.", refined=True)
             # ---------------------------------------------------------------
         else:
@@ -4490,6 +4707,9 @@ SPECIFICATION:
 RECONCILED HARDWARE SPEC JSON (authoritative for macro/interface constraints):
 {json.dumps(self.artifacts.get("hw_spec", {}) or {}, indent=2)[:9000]}
 
+EXECUTABLE SID CONTRACT (absolute interface/reset authority):
+{json.dumps(self.artifacts.get("sid_contract", {}) or {}, indent=2)[:9000]}
+
 STRATEGY GUIDELINES:
 {strategy_prompt}
 
@@ -4507,8 +4727,9 @@ RETRIEVED HARDWARE KNOWLEDGE AND EVOLVED BUILD CONTEXT:
 
 CRITICAL RULES:
 1. Top-level module name MUST be "{self.name}"
-2. Async active-low reset `rst_n`
-3. Flatten ports on the TOP module (no multi-dim arrays on top-level ports). Internal modules can use them.
+2. The top-level ports, directions, widths, clock, and reset MUST match the EXECUTABLE SID CONTRACT exactly. Do not add, remove, rename, or resize top ports.
+3. Implement reset exactly as specified by the EXECUTABLE SID CONTRACT.
+3a. Flatten ports on the TOP module (no multi-dim arrays on top-level ports). Internal modules can use them.
 4. **IMPLEMENT EVERYTHING**: Do not leave any logic as "to be implemented" or "simplified".
 4a. **HARD MACRO CONTRACT**: Any submodule with `requires_macro=true` or `macro_kind` in the reconciled spec MUST be instantiated as a wrapper/black box only. Do not implement SRAM/ROM/register-array storage, ADC/DAC/PLL/TRNG internals, or custom-layout internals in synthesizable RTL.
 4b. **NEVER** use Verilog reserved words as port or signal names. Banned names include: config, supply0, supply1, table, library, design, instance, cell, use, endconfig, liblist
@@ -4522,13 +4743,17 @@ CRITICAL RULES:
             review_task = Task(
                 description=f"""Review the RTL code generated by the designer for module "{self.name}".
 
+EXECUTABLE SID CONTRACT:
+{json.dumps(self.artifacts.get("sid_contract", {}) or {}, indent=2)[:9000]}
+
 Check for these common issues:
 1. Module name must be exactly "{self.name}"
-2. All always_comb blocks must assign ALL variables in ALL branches (no latches)
-3. Width mismatches (e.g., 2-bit signal assigned to 3-bit variable)
-4. All outputs must be driven
-5. All registers must be reset in the reset branch
-6. No placeholders, TODOs, or simplified logic
+2. Top-level ports, directions, widths, clock, and reset must match the SID contract exactly
+3. All always_comb blocks must assign ALL variables in ALL branches (no latches)
+4. Width mismatches (e.g., 2-bit signal assigned to 3-bit variable)
+5. All outputs must be driven
+6. All registers must be reset in the reset branch
+7. No placeholders, TODOs, or simplified logic
 
 If you find issues, FIX them and output the corrected code.
 If the code is correct, output it unchanged.
@@ -4769,6 +4994,41 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             if lint_success:
                 self.log("Lint Check Passed (Verilator)", refined=True)
 
+                hierarchy_ok, hierarchy_report = validate_rtl_hierarchy_contract(
+                    self.name, path
+                )
+                self.artifacts["rtl_hierarchy_contract"] = hierarchy_report
+                self.logger.info(f"RTL HIERARCHY CONTRACT: {hierarchy_report}")
+                if not hierarchy_ok:
+                    errors = "RTL HIERARCHY CONTRACT VIOLATIONS:\n" + "\n".join(
+                        f"- {issue.get('message', issue)}"
+                        for issue in hierarchy_report.get("issues", [])
+                    )
+                    self.log("RTL hierarchy contract gate failed; routing to fixer.", refined=True)
+                    self.logger.info(errors)
+                else:
+                    errors = ""
+
+                sid_raw = self.artifacts.get("sid")
+                if sid_raw:
+                    try:
+                        with open(path, "r") as f:
+                            rtl_for_sid_gate = f.read()
+                    except OSError:
+                        rtl_for_sid_gate = self.artifacts.get("rtl_code", "")
+                    rtl_sid_report = validate_rtl_against_sid_contract(
+                        sid_raw, rtl_for_sid_gate
+                    )
+                    self.artifacts["rtl_sid_contract_report"] = rtl_sid_report.to_dict()
+                    self.logger.info(f"RTL/SID CONTRACT: {rtl_sid_report.to_dict()}")
+                    if not rtl_sid_report.ok:
+                        sid_contract_errors = "RTL/SID CONTRACT VIOLATIONS:\n" + "\n".join(
+                            f"- {e}" for e in rtl_sid_report.errors
+                        )
+                        errors = (errors + "\n" + sid_contract_errors).strip()
+                        self.log("RTL/SID contract gate failed; routing to fixer.", refined=True)
+                        self.logger.info(sid_contract_errors)
+
                 contract_fixed, contract_violations = self._enforce_reconciled_rtl_contract()
                 if contract_fixed:
                     with open(path, "r") as f:
@@ -4776,12 +5036,11 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                     return
                 if contract_violations:
                     self.log("RTL contract gate failed; routing to fixer.", refined=True)
-                    errors = "RTL CONTRACT VIOLATIONS:\n" + "\n".join(
+                    contract_errors = "RTL CONTRACT VIOLATIONS:\n" + "\n".join(
                         f"- {v}" for v in contract_violations
                     )
-                    self.logger.info(errors)
-                else:
-                    errors = ""
+                    errors = (errors + "\n" + contract_errors).strip()
+                    self.logger.info(contract_errors)
 
                 # --- PRE-SYNTHESIS VALIDATION ---
                 # Catch undriven signals that would fail Yosys synthesis
@@ -5043,6 +5302,8 @@ Internal sub-module ports may be changed only when required by the universal ASI
 Fix Syntax/Lint Errors in the following files: {', '.join(self._parse_error_files(errors_for_llm)) or self.name}.
 IMPORTANT: If the error is in a sub-module (not {self.name}), output ONLY the fixed sub-module(s).
 Do NOT output the top-level module unless it also has errors.
+CRITICAL: Do NOT output snippets! You MUST output the complete, fully-compilable 'module ... endmodule' block for ANY module you modify.
+
 
 ## UNIVERSAL ASIC RTL CONTRACT
 - Treat `reconciled_spec` as authoritative for hard macros and physical feasibility.
@@ -5337,7 +5598,7 @@ RULES:
   WARNING: `always` is a module-level construct. Placing it inside `initial begin...end` causes a Verilator compile error.
 - All variable declarations (integer, int, reg, logic) MUST appear at the TOP of a begin...end block,
   BEFORE any procedural statements (#delay, assignments, if/for). Verilator rejects mid-block declarations.
-- Assert rst_n low for 50ns, then release
+- If the DUT has a reset, assert/deassert it according to the MODULE INTERFACE and SID reset contract. Do not assume a reset name or polarity.
 - Print "TEST PASSED" on success, "TEST FAILED" on failure
 - End with $finish
 - Do NOT invent ports that aren't in the MODULE INTERFACE above
@@ -5349,6 +5610,14 @@ always wait for at least one complete clock cycle (`@(posedge clk);` or
 `repeat(N) @(posedge clk);`) before sampling or comparing any DUT output.
 Never sample a DUT output in the same time step that stimulus is applied.
 Failure to observe this rule causes off-by-one timing mismatches.
+
+REFERENCE MODEL RULE (mandatory for functional checks):
+Every functional output comparison must use an independent expected/model/scoreboard
+variable. Do not compare registered outputs directly to raw loop indices or stimulus
+values unless those values were first transformed through the same cycle latency and
+protocol rules as the DUT. For boundary flags such as overflow/underflow/full/empty,
+first drive the DUT to the boundary state, then check the flag at the specified
+same-cycle or next-cycle latency.
 
 SELF-CHECK (do this before returning code):
 Before returning any testbench code, mentally simulate the entire testbench execution against the DUT. Ask yourself: if this DUT had a bug, would this testbench catch it? If the testbench would pass even with a broken DUT, it is not a valid testbench — rewrite it. Every checking statement must compare the DUT output against a value that was computed independently of the DUT.
@@ -5693,6 +5962,54 @@ Before returning any testbench code, mentally compile it with strict SystemVeril
                     f"size={_vcd_size}, rtl_exists={os.path.exists(_rtl_path)}"
                 )
 
+            deterministic_triage = self._classify_sim_failure_vlsi(output, tb_code)
+            if deterministic_triage:
+                self.logger.info(
+                    "DETERMINISTIC VERIFICATION TRIAGE:\n"
+                    + json.dumps(deterministic_triage, indent=2, default=str)
+                )
+                self._set_artifact(
+                    "verification_analysis",
+                    deterministic_triage,
+                    producer="orchestrator_vlsi_triage",
+                    consumer="VERIFICATION",
+                )
+                self._set_artifact(
+                    "tb_regen_context",
+                    json.dumps(
+                        {
+                            "reason": "deterministic_vlsi_triage",
+                            "analysis": deterministic_triage,
+                            "required_tb_style": (
+                                "Use an independent reference model/scoreboard. "
+                                "Declare expected/model state explicitly, update it on the "
+                                "same clock boundary as the DUT, and compare after output settle. "
+                                "Boundary flag tests must first drive the DUT to the boundary state."
+                            ),
+                        },
+                        indent=2,
+                        default=str,
+                    )[:5000],
+                    producer="orchestrator_vlsi_triage",
+                    consumer="VERIFICATION",
+                    required=True,
+                    blocking=True,
+                )
+                tb_path = self.artifacts.get("tb_path")
+                if tb_path and os.path.exists(tb_path):
+                    try:
+                        os.remove(tb_path)
+                    except OSError:
+                        pass
+                self.artifacts.pop("tb_path", None)
+                self._clear_tb_fingerprints()
+                self.log(
+                    "Deterministic VLSI triage identified a TB/reference-model issue. "
+                    "Regenerating the testbench instead of rewriting RTL.",
+                    refined=True,
+                )
+                return
+
             # --- LLM ERROR ANALYSIS + FIX: Collaborative 2-agent Crew ---
             analyst = get_error_analyst_agent(self.get_llm_for_role("fixer"))
             analysis_task = Task(
@@ -6033,6 +6350,18 @@ CRITICAL RULES:
 
             if fixed_code and fixed_code != "None":
                 self.logger.info(f"FIXED CODE:\n{fixed_code[:500]}...")
+            else:
+                self._record_non_consumable_output(
+                    "agent_fix_generation",
+                    str(fixed_code),
+                    ["Fix generation returned no Verilog after retries; refusing to write empty code."],
+                )
+                self.log(
+                    "Fix generation failed after retries. Failing closed instead of writing invalid RTL/TB.",
+                    refined=True,
+                )
+                self.state = BuildState.FAIL
+                return
 
             if not is_tb_issue:
                 # RTL Fix — diff check to reject full rewrites
@@ -6106,7 +6435,21 @@ Return the complete module with ONLY the minimal fix applied.
                         self.logger.info(f"SURGICAL RETRY CODE:\n{fixed_code}")
 
                 # Write cleaned code and read it back
-                path = write_verilog(self.name, fixed_code)
+                src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+                modules_in_code = re.findall(
+                    r'(\bmodule\s+([a-zA-Z_]\w*)\s*(?:#|\(|;)[\s\S]*?\bendmodule\b)',
+                    fixed_code
+                )
+                if len(modules_in_code) > 1 or (len(modules_in_code) == 1 and modules_in_code[0][1] != self.name):
+                    for mod_code, mod_name in modules_in_code:
+                        mod_path = os.path.join(src_dir, f"{mod_name}.v")
+                        with open(mod_path, "w") as f:
+                            f.write(mod_code + "\n")
+                        self.log(f"Sub-module fix written: {mod_name}.v", refined=True)
+                    path = os.path.join(src_dir, f"{self.name}.v")
+                else:
+                    path = write_verilog(self.name, fixed_code)
+                
                 if isinstance(path, str) and path.startswith("Error:"):
                     self.log(f"File Write Error when fixing RTL logic: {path}", refined=True)
                     self.state = BuildState.FAIL
@@ -6497,9 +6840,67 @@ Generate SVA assertions that are compatible with the Yosys formal verification e
 
                 self.artifacts["formal_result"] = "FAIL"
                 if self.strict_gates:
-                    self.log("Formal verification failed under strict mode.", refined=True)
-                    self.state = BuildState.FAIL
-                    return
+                    self.log("Formal verification failed. Attempting autonomous fix.", refined=True)
+                    if _verdict is not None and _verdict.root_cause_signal:
+                        self.log("Formal Verification bug diagnosed. Handing to RTL Fixer.", refined=True)
+                        fixer = get_designer_agent(
+                            self.get_llm_for_role("fixer"),
+                            f"Fix Formal Bug for {self.name}",
+                            strategy=self.strategy.name,
+                        )
+                        fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. No explanation.
+                        
+A formal verification assertion failed. The prover mathematically proved a bug in your RTL.
+
+DIAGNOSIS FROM FORMAL EXPERT:
+Signal: {_verdict.root_cause_signal} (line {_verdict.root_cause_line})
+Fix: {_verdict.fix_description}
+Analysis: {_verdict.balanced_analysis_log}
+
+Current RTL:
+```verilog
+{self.artifacts.get("rtl_code", "")}
+```
+
+CRITICAL RULES:
+- Make the minimum possible change to fix the specific formal bug.
+- Return ONLY the fixed {self.strategy.name} code in ```verilog fences.
+- Return the full code for ALL modules you modify so they can be saved to disk.
+"""
+                        fix_task = Task(description=fix_prompt, expected_output="Fixed Verilog Code", agent=fixer)
+                        with console.status("[warning]AI Implementing Formal Fix...[/warning]"):
+                            result = self._crew_kickoff(Crew(verbose=False, agents=[fixer], tasks=[fix_task]))
+                            
+                        fixed_code = str(result)
+                        is_valid, extracted = extract_and_validate_llm_code(fixed_code)
+                        if is_valid or extracted:
+                            fixed_code = extracted or fixed_code
+                            
+                        # Save it properly
+                        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+                        modules_in_code = re.findall(r'(\bmodule\s+([a-zA-Z_]\w*)\s*(?:#|\(|;)[\s\S]*?\bendmodule\b)', fixed_code)
+                        if len(modules_in_code) >= 1:
+                            for mod_code, mod_name in modules_in_code:
+                                mod_path = os.path.join(src_dir, f"{mod_name}.v")
+                                with open(mod_path, "w") as f:
+                                    f.write(mod_code + "\n")
+                                self.log(f"Sub-module formal fix written: {mod_name}.v", refined=True)
+                            path = os.path.join(src_dir, f"{self.name}.v")
+                        else:
+                            path = write_verilog(self.name, fixed_code)
+                            
+                        self.artifacts["rtl_path"] = path
+                        if os.path.exists(path):
+                            with open(path, "r") as f:
+                                self.artifacts["rtl_code"] = f.read()
+                        
+                        self.log("Formal bug fixed. Transitioning to RTL_FIX to verify syntax.", refined=True)
+                        self.transition(BuildState.RTL_FIX, preserve_retries=True)
+                        return
+                    else:
+                        self.log("Formal verification failed under strict mode (no autonomous fix available).", refined=True)
+                        self.state = BuildState.FAIL
+                        return
         except Exception as e:
             self.log(f"Formal verification error: {str(e)}.", refined=True)
             self.artifacts["formal_result"] = f"ERROR: {str(e)}"
@@ -7130,7 +7531,7 @@ REQUIREMENTS:
                 rtl_files=rtl_files,
                 top_module=self.name,
                 output_dir=synth_dir,
-                pdk=self.pdk_profile.get("pdk", PDK),
+                pdk=self._selected_pdk_name(),
                 pdk_root=os.environ.get("PDK_ROOT"),
                 clk_constraint=clk_constraint_ns,
                 ungroup_cells=True,
@@ -7464,7 +7865,7 @@ REQUIREMENTS:
                     os.environ.get("PDK_ROOT", ""),
                     self.pdk_profile.get("pdk", PDK),
                     "libs.ref",
-                    self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd"),
+                    self._selected_std_cell_library(),
                 )
                 if os.path.isdir(pdk_lib_dir):
                     lib_files = [
@@ -7557,7 +7958,7 @@ REQUIREMENTS:
             pdk_root,
             pdk_name,
             "libs.ref",
-            self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd"),
+            self._selected_std_cell_library(),
         )
         if os.path.isdir(lib_base):
             lib_files = [
@@ -7640,7 +8041,7 @@ REQUIREMENTS:
             pdk_root,
             pdk_name,
             "libs.ref",
-            self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd"),
+            self._selected_std_cell_library(),
         )
         lib_files = []
         if os.path.isdir(lib_base):
@@ -8158,7 +8559,7 @@ REQUIREMENTS:
 
 DESIGN METRICS:
 - RTL: {line_count} non-blank lines, {module_count} modules, ~{cell_count_est} estimated cells
-- PDK: {self.pdk_profile.get("profile", "sky130")} ({self.pdk_profile.get("pdk", "sky130A")})
+- PDK: {self._selected_pdk_profile_name()} ({self._selected_pdk_name()})
 - Node class: {flow_caps.get("node_class")} | metal layers: {flow_caps.get("metal_layers")} | lc_area_um2: {flow_caps.get("lc_area_um2")}
 - Utilization guidance: default {flow_caps.get("default_core_util")}% / max {flow_caps.get("max_core_util")}%
 - Routing guidance: max layer {flow_caps.get("max_routing_layer") or "PDK default"} / GRT adjustment {flow_caps.get("grt_adjustment")}
@@ -8299,8 +8700,8 @@ REASONING: <1-line explanation>""",
         with open(floorplan_tcl, "w") as f:
             f.write(
                 f'set ::env(DESIGN_NAME) "{self.name}"\n'
-                f'set ::env(PDK) "{self.pdk_profile.get("pdk", PDK)}"\n'
-                f'set ::env(STD_CELL_LIBRARY) "{self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")}"\n'
+                f'set ::env(PDK) "{self._selected_pdk_name()}"\n'
+                f'set ::env(STD_CELL_LIBRARY) "{self._selected_std_cell_library()}"\n'
                 f"set ::env(VERILOG_FILES) [glob $::env(DESIGN_DIR)/src/*.v]\n"
                 f"{macro_tcl}"
                 f"{macro_repair_tcl}"
@@ -8773,8 +9174,8 @@ REASONING: <1-line explanation>""",
             clock_port = clk_match.group(1)
             self.log(f"Detected Clock Port: {clock_port}", refined=True)
 
-        std_cell_lib = self.pdk_profile.get("std_cell_library", "sky130_fd_sc_hd")
-        pdk_name = self.pdk_profile.get("pdk", PDK)
+        std_cell_lib = self._selected_std_cell_library()
+        pdk_name = self._selected_pdk_name()
         flow_caps = self._flow_caps()
 
         # Priority: recovery override > SDC extracted > PDK default
@@ -8858,7 +9259,7 @@ set ::env(MAGIC_DRC_USE_GDS) 1
         # 2. Run OpenLane
         run_tag = f"agentrun_{self.global_step_count}"
         floorplan_tcl = self.artifacts.get("floorplan_tcl", "")
-        pdk_name = self.pdk_profile.get("pdk", PDK)
+        pdk_name = self._selected_pdk_name()
         with console.status("[info]Hardening Layout (OpenLane)...[/info]"):
             success, result = run_openlane(
                 self.name,

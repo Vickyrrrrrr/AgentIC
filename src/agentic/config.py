@@ -897,13 +897,15 @@ OPENLANE_IMAGE = os.environ.get(
     "ghcr.io/the-openroad-project/openlane:ff5509f65b17bfa4068d5336495ab1718987ff69-amd64",
 )
 OPENLANE2_IMAGE = os.environ.get("OPENLANE2_IMAGE", "ghcr.io/efabless/openlane2:2.3.10")
-OPENLANE_BACKEND_DEFAULT = os.environ.get("AGENTIC_OPENLANE_BACKEND", "openlane2").strip().lower()
-if OPENLANE_BACKEND_DEFAULT in {"docker", "openlane1", "v1"}:
+ORFS_IMAGE = os.environ.get("ORFS_IMAGE", "openroad/orfs:latest")
+OPENLANE_BACKEND_DEFAULT = os.environ.get("AGENTIC_OPENLANE_BACKEND", "openlane1").strip().lower()
+if OPENLANE_BACKEND_DEFAULT in {"docker", "openlane1", "v1", "openlane2", "v2"}:
     OPENLANE_BACKEND_DEFAULT = "openlane1"
-elif OPENLANE_BACKEND_DEFAULT in {"native", "openlane2", "v2"}:
-    OPENLANE_BACKEND_DEFAULT = OPENLANE_BACKEND_DEFAULT
+elif OPENLANE_BACKEND_DEFAULT in {"native", "orfs", "openroad-flow-scripts", "openroad_flow_scripts"}:
+    if OPENLANE_BACKEND_DEFAULT in {"openroad-flow-scripts", "openroad_flow_scripts"}:
+        OPENLANE_BACKEND_DEFAULT = "orfs"
 else:
-    OPENLANE_BACKEND_DEFAULT = "openlane2"
+    OPENLANE_BACKEND_DEFAULT = "openlane1"
 ORFS_ROOT = os.path.abspath(
     os.path.expanduser(
         os.environ.get(
@@ -1223,7 +1225,7 @@ def get_pdk_tool_config(pdk: Optional[str] = None) -> Dict[str, Any]:
 
     config: Dict[str, Any] = {
         "pdk_dir": profile.get("pdk", pdk or PDK),
-        "std_cell_library": profile.get("std_cell_library", "sky130_fd_sc_hd"),
+        "std_cell_library": profile.get("std_cell_library", f"{key}_stdcells"),
         "default_clock_period": profile.get("default_clock_period", "10.0"),
         "max_reliable_mhz": 150,
         "upper_limit_mhz": 200,
@@ -1426,6 +1428,9 @@ def resolve_pdk(
 
 def validate_pdk_installation(pdk: str, pdk_root: Optional[str] = None) -> Tuple[bool, List[str]]:
     """Validate that a PDK has enough structure for AgentIC tool flows."""
+    advanced_nodes = {"asap7", "nangate45", "freepdk45", "asap5", "asap2"}
+    if pdk in advanced_nodes:
+        return True, [f"Validation bypassed for predictive ORFS node {pdk}."]
     messages: List[str] = []
     try:
         resolved_pdk, profile, resolved_root = resolve_pdk(

@@ -953,10 +953,29 @@ class FeasibilityChecker:
         return warnings
 
     def _recommend_floorplan(self, total_ge: int) -> str:
-        for threshold, description, _size in FLOORPLAN_TIERS:
-            if total_ge <= threshold:
-                return description
-        return f"Very large design ({total_ge} GE) — manual floorplan required"
+        # Dynamically calculate the required area based on the PDK's Logic Cell size
+        tool_config = get_pdk_tool_config(self.pdk)
+        lc_area = tool_config.get("lc_area_um2", 0.054)
+        util = tool_config.get("default_core_util", 40)
+        
+        # Total cell area = logic gates * area per gate
+        cell_area_um2 = total_ge * lc_area
+        # Floorplan area = cell area / utilization factor
+        total_area_um2 = cell_area_um2 * (100.0 / util)
+        
+        # Assuming a square floorplan
+        side_length_um = math.sqrt(total_area_um2)
+        
+        if side_length_um < 1.0:
+            return f"Micro-cell ({side_length_um:.2f}×{side_length_um:.2f} μm)"
+        elif side_length_um < 50.0:
+            return f"Small macro ({side_length_um:.1f}×{side_length_um:.1f} μm)"
+        elif side_length_um < 500.0:
+            return f"Medium block ({side_length_um:.0f}×{side_length_um:.0f} μm)"
+        elif side_length_um < 2000.0:
+            return f"Large core ({side_length_um:.0f}×{side_length_um:.0f} μm)"
+        else:
+            return f"Very large SoC ({side_length_um:.0f}×{side_length_um:.0f} μm) — manual partitioning recommended"
 
     # ── Step 5: PDK / ASIC Flow Rules ────────────────────────────────
 

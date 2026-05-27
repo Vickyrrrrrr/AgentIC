@@ -110,13 +110,191 @@ def _collect_design_rtl(src_dir: str, include_sv: bool = True) -> List[str]:
     seen = set()
     ordered = []
     for path in sorted(rtl_files):
-        if path.endswith("_tb.v") or "regression" in path:
+        if path.endswith("_tb.v") or path.endswith("_tb.sv") or "regression" in path or path.endswith("_coverage.sv") or path.endswith("_sva.sv") or path.endswith("_formal.sv"):
             continue
         if path in seen:
             continue
         seen.add(path)
         ordered.append(path)
     return ordered
+
+
+def _strip_sv_comments(text: str) -> str:
+    text = re.sub(r"/\*[\s\S]*?\*/", "", text or "")
+    return re.sub(r"//.*", "", text)
+
+
+def _extract_sv_module_blocks(code: str) -> Dict[str, str]:
+    blocks: Dict[str, str] = {}
+    for match in re.finditer(
+        r"\bmodule\s+([A-Za-z_]\w*)\b[\s\S]*?\bendmodule\b",
+        code or "",
+        flags=re.MULTILINE,
+    ):
+        blocks[match.group(1)] = match.group(0)
+    return blocks
+
+
+def _extract_sv_module_ports(module_code: str) -> set[str]:
+    clean = _strip_sv_comments(module_code)
+    header = ""
+    header_match = re.search(
+        r"\bmodule\s+[A-Za-z_]\w*\s*(?:#\s*\([\s\S]*?\)\s*)?\(([\s\S]*?)\)\s*;",
+        clean,
+    )
+    if header_match:
+        header = header_match.group(1)
+    ports: set[str] = set()
+    for direction, decl in re.findall(
+        r"\b(input|output|inout)\b([^;]*)",
+        header + "\n" + clean,
+        flags=re.IGNORECASE,
+    ):
+        _ = direction
+        decl = re.sub(r"\b(?:wire|reg|logic|signed|unsigned)\b", " ", decl)
+        decl = re.sub(r"\[[^\]]+\]", " ", decl)
+        for item in decl.split(","):
+            name_match = re.search(r"\b([A-Za-z_]\w*)\b\s*(?:=.*)?$", item.strip())
+            if name_match:
+                ports.add(name_match.group(1))
+    if not ports and header:
+        for item in header.split(","):
+            name_match = re.search(r"\b([A-Za-z_]\w*)\b\s*(?:=.*)?$", item.strip())
+            if name_match:
+                ports.add(name_match.group(1))
+    return ports
+
+
+def validate_rtl_hierarchy_contract(
+    design_name: str, rtl_path: str
+) -> Tuple[bool, Dict[str, Any]]:
+    """Check hierarchy/module-interface consistency before handing RTL to repair.
+
+    This is intentionally structural and node-agnostic: it catches missing top modules,
+    undefined local submodules, and named-port connections that do not exist on the
+    target module. Those are design-contract violations, not things an LLM should
+    paper over by rewriting unrelated RTL.
+    """
+    report: Dict[str, Any] = {
+        "ok": False,
+        "design_name": design_name,
+        "rtl_path": rtl_path,
+        "modules": [],
+        "issues": [],
+        "issue_codes": [],
+        "instantiations": [],
+    }
+    if not rtl_path or not os.path.exists(rtl_path):
+        report["issues"].append(
+            {"code": "missing_rtl", "message": f"RTL file not found: {rtl_path}"}
+        )
+        report["issue_codes"] = ["missing_rtl"]
+        return False, report
+
+    src_dir = os.path.dirname(rtl_path)
+    rtl_files = _collect_design_rtl(src_dir)
+    if rtl_path not in rtl_files:
+        rtl_files.append(rtl_path)
+
+    combined_parts: List[str] = []
+    for path in rtl_files:
+        try:
+            with open(path, "r") as f:
+                combined_parts.append(f.read())
+        except OSError as exc:
+            report["issues"].append(
+                {"code": "read_error", "file": path, "message": str(exc)}
+            )
+
+    combined = "\n".join(combined_parts)
+    module_blocks = _extract_sv_module_blocks(combined)
+    module_ports = {
+        name: _extract_sv_module_ports(block) for name, block in module_blocks.items()
+    }
+    report["modules"] = sorted(module_blocks)
+
+    if design_name not in module_blocks:
+        report["issues"].append(
+            {
+                "code": "missing_top",
+                "message": f"Top module '{design_name}' is not defined in RTL inventory.",
+            }
+        )
+
+    primitive_or_keyword = {
+        "assign",
+        "always",
+        "always_comb",
+        "always_ff",
+        "always_latch",
+        "and",
+        "or",
+        "xor",
+        "xnor",
+        "nand",
+        "nor",
+        "not",
+        "buf",
+        "if",
+        "for",
+        "case",
+        "generate",
+        "begin",
+        "endmodule",
+    }
+    inst_re = re.compile(
+        r"^\s*([A-Za-z_]\w*)\s*(?:#\s*\([\s\S]*?\)\s*)?([A-Za-z_]\w*)\s*\(([\s\S]*?)\)\s*;",
+        flags=re.MULTILINE,
+    )
+
+    for parent, block in module_blocks.items():
+        clean = _strip_sv_comments(block)
+        header_end = clean.find(";")
+        body = clean[header_end + 1 :] if header_end >= 0 else clean
+        for inst in inst_re.finditer(body):
+            child, instance, conn_blob = inst.groups()
+            if child in primitive_or_keyword or child == "module":
+                continue
+            if child in {"input", "output", "inout", "wire", "reg", "logic"}:
+                continue
+            named_ports = re.findall(r"\.\s*([A-Za-z_]\w*)\s*\(", conn_blob)
+            inst_record = {
+                "parent": parent,
+                "child": child,
+                "instance": instance,
+                "named_ports": named_ports,
+            }
+            report["instantiations"].append(inst_record)
+            if child not in module_blocks:
+                report["issues"].append(
+                    {
+                        "code": "undefined_submodule",
+                        "parent": parent,
+                        "child": child,
+                        "instance": instance,
+                        "message": f"{parent}.{instance} instantiates undefined module '{child}'.",
+                    }
+                )
+                continue
+            child_ports = module_ports.get(child, set())
+            for port in named_ports:
+                if port not in child_ports:
+                    report["issues"].append(
+                        {
+                            "code": "pin_not_found",
+                            "parent": parent,
+                            "child": child,
+                            "instance": instance,
+                            "port": port,
+                            "message": f"{parent}.{instance}: port '{port}' is not declared on module '{child}'.",
+                        }
+                    )
+
+    report["issue_codes"] = sorted(
+        {issue.get("code", "unknown") for issue in report["issues"]}
+    )
+    report["ok"] = len(report["issues"]) == 0
+    return report["ok"], report
 
 
 def _stage_inputs(tmpdir: str, paths: List[str]) -> Dict[str, str]:
@@ -599,6 +777,7 @@ def write_verilog(
             modules = re.findall(r"(\bmodule\s+([a-zA-Z_]\w*)\s*(?:#|\(|;)[\s\S]*?\bendmodule\b)", clean_code)
             if len(modules) > 1:
                 # If multiple modules exist, write them to separate files
+                src_dir = os.path.dirname(path)
                 for mod_code, mod_name in modules:
                     mod_path = os.path.join(src_dir, f"{mod_name}.v")
                     with open(mod_path, "w") as f:
@@ -676,16 +855,27 @@ def run_syntax_check(file_path: str) -> tuple:
         ]
         try:
             completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            
+            output_text = (completed.stderr or "") + "\n" + (completed.stdout or "")
+            is_ok = completed.returncode == 0
+            
+            # Autonomous Formal Verification Error Healing:
+            # Upgrade critical structural warnings to fatal errors so RTL_FIX catches them.
+            critical_warnings = ["%Warning-WIDTH", "%Warning-PINMISSING", "%Warning-WIDTHTRUNC", "%Warning-WIDTHEXPAND"]
+            if is_ok:
+                for cw in critical_warnings:
+                    if cw in output_text:
+                        is_ok = False
+                        break
+
             tool_result = _build_tool_result(
                 "verilator",
-                ok=completed.returncode == 0,
-                result="PASS" if completed.returncode == 0 else "FAIL",
+                ok=is_ok,
+                result="PASS" if is_ok else "FAIL",
                 returncode=completed.returncode,
                 stdout=completed.stdout,
                 stderr=completed.stderr,
-                diagnostics=_collect_diag_lines(
-                    (completed.stderr or completed.stdout or "").strip()
-                ),
+                diagnostics=_collect_diag_lines(output_text.strip()),
                 metrics={"mode": "syntax_check"},
             )
             tool_result = _rewrite_result_paths(tool_result, staged_map)
@@ -832,7 +1022,7 @@ def run_iverilog_lint(file_path: str) -> tuple:
 
 
 def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
-    """Deterministic semantic preflight for width-safety and port-shadowing."""
+    """Deterministic semantic preflight for elaboration, width-safety, and port-shadowing."""
     report: Dict[str, Any] = {
         "ok": True,
         "tool": "verilator",
@@ -875,7 +1065,7 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
     if shadowing:
         report["port_shadowing"] = sorted(set(shadowing))
 
-    # --- Width mismatch detection via Verilator diagnostics ---
+    # --- Width mismatch and hierarchy elaboration via Verilator diagnostics ---
     width_patterns = (
         "WIDTHTRUNC",
         "WIDTHEXPAND",
@@ -884,23 +1074,28 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
         "signed",
         "truncat",
     )
+    tool_ok = False
+    src_dir = os.path.dirname(file_path)
+    design_files = _collect_design_rtl(src_dir) if src_dir else [file_path]
+    if file_path not in design_files:
+        design_files.append(file_path)
     with tempfile.TemporaryDirectory() as tmpdir:
-        staged_map = _stage_inputs(tmpdir, [file_path])
-        staged_file = _stage_path(file_path, staged_map)
+        staged_map = _stage_inputs(tmpdir, design_files)
         cmd = [
             "verilator",
             "--lint-only",
             "--sv",
             "--timing",
             "-Wall",
-            os.path.basename(staged_file),
+            *[os.path.basename(_stage_path(path, staged_map)) for path in design_files],
         ]
         try:
             completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            tool_ok = completed.returncode == 0
             tool_result = _build_tool_result(
                 "verilator",
-                ok=completed.returncode == 0,
-                result="PASS" if completed.returncode == 0 else "FAIL",
+                ok=tool_ok,
+                result="PASS" if tool_ok else "FAIL",
                 returncode=completed.returncode,
                 stdout=completed.stdout,
                 stderr=completed.stderr,
@@ -922,9 +1117,15 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
                 report["details"] = "\n".join(width_lines[:20])
                 report["tool_result"] = tool_result
         except Exception as exc:
+            tool_ok = False
+            report["ok"] = False
+            report["result"] = "ERROR"
             report["details"] = f"Semantic width scan fallback triggered: {exc}"
 
-    report["ok"] = not report["port_shadowing"] and not report["width_issues"]
+    if not tool_ok and not report["details"]:
+        report["details"] = "Verilator semantic rigor failed; see diagnostics/stderr."
+    report["ok"] = bool(tool_ok) and not report["port_shadowing"] and not report["width_issues"]
+    report["result"] = "PASS" if report["ok"] else report.get("result", "FAIL")
     return report["ok"], report
 
 
@@ -1278,7 +1479,13 @@ def validate_rtl_for_synthesis(file_path: str) -> tuple:
                 except (ValueError, IndexError, ZeroDivisionError):
                     val_str = "1'b1"
             elif width:
-                val_str = f"{width}'d0"
+                try:
+                    msb = int(width.split(":")[0][1:])
+                    lsb = int(width.split(":")[1][:-1])
+                    bits = abs(msb - lsb) + 1
+                    val_str = f"{bits}'d0"
+                except (ValueError, IndexError, ZeroDivisionError):
+                    val_str = "1'b0"
             else:
                 val_str = f"1'b{tie_val_bit}"
 
@@ -2018,15 +2225,46 @@ def run_tb_static_contract_check(
         )
         has_stimulus = bool(re.search(r"\$urandom|\$random|initial\s+begin", text))
         has_checking = bool(re.search(r"if\s*\(|assert\s*\(", text))
+        clocked_tb = bool(
+            re.search(r"always\s*#\s*\d+\s+[A-Za-z_]\w*\s*=\s*~", text)
+            or re.search(r"@\s*\(\s*posedge\s+[A-Za-z_]\w*\s*\)", text)
+        )
+        functional_compares = []
+        for m in re.finditer(r"if\s*\(([^)]*)\)", text, re.IGNORECASE | re.DOTALL):
+            expr = m.group(1)
+            if not re.search(r"!==|!=|===|==", expr):
+                continue
+            # X/Z guards are useful sanity checks but are not a functional scoreboard.
+            if re.search(r"1'b[xz]|1'b[XZ]|\$isunknown|\^\s*\(", expr):
+                continue
+            if re.search(r"\b(?:tb_fail|fail_count|error_count|errors?)\b", expr, re.I):
+                continue
+            functional_compares.append((m.start(), expr.strip()))
+        text_without_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+        has_reference_model = bool(
+            re.search(
+                r"\b(exp(?:ected)?|model|scoreboard|golden|reference|ref_|predict|mirror)\w*\b",
+                text_without_strings,
+                re.IGNORECASE,
+            )
+        )
         report["checks"]["has_dut_instantiation"] = has_dut_inst
         report["checks"]["has_stimulus"] = has_stimulus
         report["checks"]["has_checking"] = has_checking
+        report["checks"]["clocked_tb"] = clocked_tb
+        report["checks"]["has_reference_model"] = has_reference_model
         if not has_dut_inst:
             _add_issue("missing_dut_instantiation", "TB must instantiate the DUT.")
         if not has_stimulus:
             _add_issue(
                 "missing_stimulus",
                 "TB must contain stimulus logic ($urandom, $random, or initial block).",
+            )
+        if clocked_tb and functional_compares and not has_reference_model:
+            _add_issue(
+                "missing_scoreboard_model",
+                "Clocked functional output comparisons must use a reference model/scoreboard with explicit cycle latency.",
+                idx=functional_compares[0][0],
             )
         # Warn about Verilator-incompatible constructs (non-blocking)
         if "class " in text and re.search(r"^\s*class\b", text, re.MULTILINE):
@@ -2995,6 +3233,72 @@ def _find_openlane_gds(design_dir: str, run_tag: str, design_name: str) -> str:
     return ""
 
 
+OPENLANE_SUPPORTED_PDKS = {
+    "sky130",
+    "sky130a",
+    "sky130A",
+    "gf180",
+    "gf180mcu",
+    "gf180mcuC",
+    "gf180mcuc",
+}
+ORFS_PDK_PLATFORM_MAP = {
+    "asap7": "asap7",
+    "7nm": "asap7",
+    "nangate45": "nangate45",
+    "freepdk45": "nangate45",
+}
+
+
+def _normalize_flow_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _is_openlane_supported_pdk(pdk_name: str) -> bool:
+    return _normalize_flow_key(pdk_name) in {
+        _normalize_flow_key(pdk) for pdk in OPENLANE_SUPPORTED_PDKS
+    }
+
+
+def _canonical_openlane_pdk_name(pdk_name: str) -> str:
+    key = _normalize_flow_key(pdk_name)
+    if key in {"sky130", "sky130a"}:
+        return "sky130A"
+    if key in {"gf180", "gf180mcu", "gf180mcuc"}:
+        return "gf180mcuC"
+    return str(pdk_name or "").strip()
+
+
+def _orfs_platform_for_pdk(pdk_name: str) -> str:
+    key = str(pdk_name or "").strip()
+    normalized = _normalize_flow_key(key)
+    for alias, platform in ORFS_PDK_PLATFORM_MAP.items():
+        if normalized == _normalize_flow_key(alias):
+            return platform
+    return key.lower()
+
+
+def _normalize_hardening_backend(value: str) -> str:
+    backend = str(value or "").strip().lower()
+    if backend in {"docker", "openlane1", "v1", "openlane2", "v2"}:
+        return "openlane1"
+    if backend in {"orfs", "openroad-flow-scripts", "openroad_flow_scripts"}:
+        return "orfs"
+    if backend == "native":
+        return "native"
+    return "openlane1"
+
+
+def _backend_support_error(pdk_name: str, backend: str) -> str:
+    return (
+        f"PDK '{pdk_name}' is not supported by backend '{backend}'. "
+        "AgentIC uses OpenLane 1 for OpenLane-supported PDKs such as sky130A/gf180mcuC "
+        "and ORFS Docker for other selected PDKs. "
+        "Set AGENTIC_OPENLANE_BACKEND=openlane1|native for OpenLane 1, "
+        "or AGENTIC_OPENLANE_BACKEND=orfs for ORFS."
+    )
+
+
 def _tcl_env_value(config_tcl: str, key: str, default: str = "") -> str:
     quoted = re.search(
         rf"set\s+::env\({re.escape(key)}\)\s+\"([^\"]*)\"",
@@ -3154,17 +3458,25 @@ def _run_openlane2(
     from ..config import _candidate_pdk_roots as _pdk_roots, get_pdk_tool_config
 
     effective_pdk_root = PDK_ROOT
-    selected_pdk = pdk_name or PDK
+    selected_pdk = _canonical_openlane_pdk_name(pdk_name or PDK)
     for path in [effective_pdk_root, *_pdk_roots()]:
         if path and os.path.exists(path) and os.path.exists(os.path.join(path, selected_pdk)):
             effective_pdk_root = path
             break
     if not effective_pdk_root or not os.path.exists(effective_pdk_root):
         return False, "PDK_ROOT not found. Please set PDK_ROOT or run agentic install-pdk."
+    if not os.path.isdir(os.path.join(effective_pdk_root, selected_pdk)):
+        return False, (
+            f"PDK '{selected_pdk}' not found under PDK_ROOT={effective_pdk_root}. "
+            "Install it with `agentic install-pdk sky130` or `agentic install-pdk gf180mcu`."
+        )
 
     design_dir = f"{OPENLANE_ROOT}/designs/{design_name}"
     if not os.path.exists(design_dir):
         return False, f"Design directory not found: {design_dir}"
+
+    if not _is_openlane_supported_pdk(selected_pdk):
+        return False, _backend_support_error(selected_pdk, "openlane2")
 
     config_tcl_path = floorplan_tcl or os.path.join(design_dir, "config.tcl")
     if not os.path.exists(config_tcl_path):
@@ -3246,6 +3558,123 @@ def _run_openlane2(
     return False, error_text or "OpenLane 2 failed without diagnostic output."
 
 
+def _run_orfs_docker(
+    design_name: str,
+    background: bool,
+    run_tag: str,
+    floorplan_tcl: str,
+    pdk_name: str,
+):
+    """Run OpenROAD Flow Scripts via the official ORFS docker image."""
+    from ..config import ORFS_IMAGE
+
+    platform = _orfs_platform_for_pdk(pdk_name)
+    if not platform:
+        return False, _backend_support_error(pdk_name, "orfs")
+    
+    design_dir = f"{OPENLANE_ROOT}/designs/{design_name}"
+    if not os.path.exists(design_dir):
+        return False, f"Design directory not found: {design_dir}"
+
+    config_tcl_path = floorplan_tcl or os.path.join(design_dir, "config.tcl")
+    config_tcl = ""
+    if os.path.exists(config_tcl_path):
+        with open(config_tcl_path, "r", encoding="utf-8", errors="replace") as f:
+            config_tcl = f.read()
+
+    src_dir = os.path.join(design_dir, "src")
+    rtl_paths = []
+    for pattern in ("*.v", "*.sv"):
+        rtl_paths.extend(sorted(glob.glob(os.path.join(src_dir, pattern))))
+    rtl_paths = [
+        path
+        for path in rtl_paths
+        if not os.path.basename(path).lower().endswith(
+            ("_tb.v", "_testbench.v", "_coverage.sv", "_sva.sv", "_formal.sv")
+        )
+    ]
+    if not rtl_paths:
+        return False, f"No synthesizable RTL files found for ORFS in {src_dir}"
+    verilog_files = " ".join(
+        f"/openroad/designs/{design_name}/src/{os.path.basename(path)}"
+        for path in rtl_paths
+    )
+
+    # Auto-translate OpenLane config.tcl to ORFS config.mk.
+    config_mk_path = os.path.join(design_dir, "config.mk")
+    try:
+        with open(config_mk_path, "w", encoding="utf-8") as f:
+            f.write(f"export DESIGN_NICKNAME = {design_name}\n")
+            f.write(f"export DESIGN_NAME = {design_name}\n")
+            f.write(f"export PLATFORM = {platform}\n")
+            f.write(f"export VERILOG_FILES = {verilog_files}\n")
+            f.write(f"export SDC_FILE = /openroad/designs/{design_name}/constraint.sdc\n")
+            f.write("export CORE_UTILIZATION ?= 30\n")
+            f.write("export PLACE_DENSITY ?= 0.55\n")
+    except Exception as exc:
+        return False, f"Failed to generate ORFS config.mk: {exc}"
+
+    constraint_path = os.path.join(design_dir, "constraint.sdc")
+    if not os.path.exists(constraint_path):
+        try:
+            clock_period = _tcl_env_value(config_tcl, "CLOCK_PERIOD", "10")
+            clock_port = _tcl_env_value(config_tcl, "CLOCK_PORT", "clk")
+            with open(constraint_path, "w", encoding="utf-8") as f:
+                f.write(f"create_clock -name {clock_port} -period {clock_period} [get_ports {clock_port}]\n")
+        except OSError as exc:
+            return False, f"Failed to generate ORFS constraint.sdc: {exc}"
+
+    host_openlane_root = os.environ.get("HOST_OPENLANE_ROOT", OPENLANE_ROOT)
+    host_designs_dir = os.environ.get(
+        "HOST_DESIGNS_DIR", os.path.join(host_openlane_root, "designs")
+    )
+    
+    cmd = [
+        "docker", "run", "--rm", 
+        "-v", f"{host_designs_dir}:/openroad/designs",
+        "-w", "/OpenROAD-flow-scripts/flow",
+        ORFS_IMAGE,
+        "make",
+        f"DESIGN_CONFIG=/openroad/designs/{design_name}/config.mk"
+    ]
+    
+    if background:
+        log_file_path = os.path.join(design_dir, "harden_orfs.log")
+        try:
+            with open(log_file_path, "w") as f:
+                subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+            return True, f"Background ORFS task started. Logs: {log_file_path}"
+        except Exception as e:
+            return False, f"Failed to start ORFS background process: {str(e)}"
+
+    try:
+        process = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except subprocess.TimeoutExpired:
+        return False, "ORFS Hardening Timed Out (Exceeded 60 mins)."
+    except OSError as e:
+        return False, f"ORFS command failed: {str(e)}."
+
+    candidate_gds = [
+        os.path.join(design_dir, f"results/{platform}/{design_name}/base/6_final.gds"),
+        os.path.join(design_dir, f"results/{platform}/{design_name}/6_final.gds"),
+        os.path.join(design_dir, f"results/{platform}/{design_name}", "**", "*.gds"),
+    ]
+    gds_path = ""
+    for pattern in candidate_gds:
+        matches = sorted(glob.glob(pattern, recursive=True))
+        if matches:
+            gds_path = matches[0]
+            break
+    
+    if process.returncode == 0 and gds_path:
+        return True, gds_path
+    if process.returncode == 0:
+        return False, "ORFS completed but no GDS was found in expected result directories."
+    
+    error_text = (process.stdout + "\n" + process.stderr).strip()
+    return False, error_text or "ORFS failed without diagnostic output."
+
+
 def run_openlane(
     design_name: str,
     background: bool = False,
@@ -3255,10 +3684,10 @@ def run_openlane(
 ):
     """Trigger the OpenLane flow.
 
-    OpenLane 2 Dockerized mode is the default hardening backend for both CLI
-    and web builds. The legacy OpenLane v1 Docker path can be selected with
-    AGENTIC_OPENLANE_BACKEND=openlane1, and a native v1/v2 command with
-    AGENTIC_OPENLANE_BACKEND=native.
+    OpenLane 1 Dockerized mode is the default backend for PDKs supported by
+    OpenLane, currently Sky130/GF180 family PDKs. Other selected PDKs are
+    routed to ORFS Docker. AGENTIC_OPENLANE_BACKEND=openlane2 is treated as
+    OpenLane 1 for compatibility; AgentIC does not select OpenLane 2 here.
     """
 
     # --- TEMPORARY HF MAINTENANCE OVERRIDE ---
@@ -3268,28 +3697,49 @@ def run_openlane(
             "OpenLane GDS Layout features are temporarily disabled on the Hugging Face backend due to Docker-in-Docker isolation policies. Please rely on the 'rtl_and_verification_mode'.",
         )
 
-    backend = os.environ.get("AGENTIC_OPENLANE_BACKEND", OPENLANE_BACKEND_DEFAULT).strip().lower()
-    if backend in {"docker", "openlane1", "v1"}:
-        backend = "openlane1"
-    elif backend in {"openlane2", "v2"}:
-        backend = "openlane2"
+    from ..config import PDK
+    selected_pdk = pdk_name or PDK
+    raw_backend = os.environ.get("AGENTIC_OPENLANE_BACKEND", "").strip().lower()
+    backend = _normalize_hardening_backend(raw_backend or OPENLANE_BACKEND_DEFAULT)
+
+    openlane_supported = _is_openlane_supported_pdk(selected_pdk)
+
+    if not openlane_supported:
+        return _run_orfs_docker(
+            design_name=design_name,
+            background=background,
+            run_tag=run_tag,
+            floorplan_tcl=floorplan_tcl,
+            pdk_name=selected_pdk,
+        )
+
+    if backend == "orfs":
+        return _run_orfs_docker(
+            design_name=design_name,
+            background=background,
+            run_tag=run_tag,
+            floorplan_tcl=floorplan_tcl,
+            pdk_name=selected_pdk,
+        )
 
     if backend == "native":
         from ..config import _candidate_pdk_roots as _pdk_roots
 
         effective_pdk_root = PDK_ROOT
-        selected_pdk = pdk_name or PDK
+        selected_pdk = _canonical_openlane_pdk_name(pdk_name or PDK)
         if not effective_pdk_root or not os.path.exists(effective_pdk_root):
             for path in _pdk_roots():
-                if os.path.exists(path) and (
-                    os.path.exists(os.path.join(path, selected_pdk))
-                    or os.path.exists(os.path.join(path, "sky130A"))
-                ):
+                if os.path.exists(path) and os.path.exists(os.path.join(path, selected_pdk)):
                     effective_pdk_root = path
                     break
 
         if not effective_pdk_root or not os.path.exists(effective_pdk_root):
             return False, "PDK_ROOT not found. Please set PDK_ROOT or run agentic install-pdk."
+        if not os.path.isdir(os.path.join(effective_pdk_root, selected_pdk)):
+            return False, (
+                f"PDK '{selected_pdk}' not found under PDK_ROOT={effective_pdk_root}. "
+                "Install it with `agentic install-pdk sky130` or `agentic install-pdk gf180mcu`."
+            )
 
         design_dir = f"{OPENLANE_ROOT}/designs/{design_name}"
         if not os.path.exists(design_dir):
@@ -3379,15 +3829,6 @@ def run_openlane(
             error_text = (process.stdout + "\n" + error_text).strip()
         return False, error_text or "Native OpenLane failed without producing a GDS."
 
-    if backend == "openlane2":
-        return _run_openlane2(
-            design_name=design_name,
-            background=background,
-            run_tag=run_tag,
-            floorplan_tcl=floorplan_tcl,
-            pdk_name=pdk_name,
-        )
-
     # Check Docker availability
     try:
         subprocess.run(
@@ -3419,14 +3860,11 @@ def run_openlane(
     from ..config import _candidate_pdk_roots as _pdk_roots
 
     effective_pdk_root = PDK_ROOT
-    selected_pdk = pdk_name or PDK
+    selected_pdk = _canonical_openlane_pdk_name(pdk_name or PDK)
     if not effective_pdk_root or not os.path.exists(effective_pdk_root):
         found = False
         for path in _pdk_roots():
-            if os.path.exists(path) and (
-                os.path.exists(os.path.join(path, selected_pdk))
-                or os.path.exists(os.path.join(path, "sky130A"))
-            ):
+            if os.path.exists(path) and os.path.exists(os.path.join(path, selected_pdk)):
                 effective_pdk_root = path
                 found = True
                 break
@@ -3436,6 +3874,11 @@ def run_openlane(
                 False,
                 f"PDK_ROOT not found. Please set PDK_ROOT or run agentic install-pdk.",
             )
+    if not os.path.isdir(os.path.join(effective_pdk_root, selected_pdk)):
+        return False, (
+            f"PDK '{selected_pdk}' not found under PDK_ROOT={effective_pdk_root}. "
+            "Install it with `agentic install-pdk sky130` or `agentic install-pdk gf180mcu`."
+        )
 
     # Ensure design dir exists
     design_dir = f"{OPENLANE_ROOT}/designs/{design_name}"
@@ -3586,7 +4029,7 @@ def run_gls_simulation(design_name: str) -> tuple:
     pdk_v_path = None
 
     tool_config = get_pdk_tool_config(PDK)
-    lib_name = tool_config.get("std_cell_library", "sky130_fd_sc_hd")
+    lib_name = tool_config.get("std_cell_library") or f"{_normalize_flow_key(PDK)}_stdcells"
     pdk_dir = tool_config.get("pdk_dir", PDK)
 
     common_pdk_paths = [

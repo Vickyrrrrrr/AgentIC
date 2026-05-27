@@ -428,10 +428,7 @@ class HierarchyExpander:
         """Return True if the submodule is clearly simple (no expansion)."""
         for pat in SIMPLE_PATTERNS:
             if pat in combined_text:
-                # Make sure it isn't disqualified by a complexity keyword
-                has_complex = any(kw in combined_text for kw in COMPLEXITY_KEYWORDS)
-                if not has_complex:
-                    return True
+                return True
 
         # "3 lines of Verilog" heuristic: very short description + trivial name
         if len(combined_text.split()) <= 5:

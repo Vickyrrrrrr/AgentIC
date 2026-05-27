@@ -239,8 +239,13 @@ async def security_headers_middleware(request: Request, call_next):
 # ─── Job Store ───────────────────────────────────────────────────────
 # Structure: { job_id: { status, design_name, events: [], result: {}, cancelled: bool } }
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
+# Build plans are intentionally separate from jobs: a plan is the user's
+# confirmation contract, while a job is only created after explicit approval.
+BUILD_PLAN_STORE: Dict[str, Dict[str, Any]] = {}
 DEFAULT_CELERY_TASK_TIME_LIMIT = 3660
 STALE_JOB_GRACE_SECONDS = 120
+BUILD_PLAN_TTL_SECONDS = _env_int("BUILD_PLAN_TTL_SECONDS", 24 * 60 * 60)
+REQUIRE_BUILD_CONFIRMATION = _env_flag("REQUIRE_BUILD_CONFIRMATION", True)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -490,10 +495,14 @@ def _serialize_job_record(job_id: str, job: Any) -> Dict[str, Any]:
             "job_id": job_id,
             "design_name": job.get("design_name", ""),
             "status": job.get("status", "pending"),
+            "build_status": job.get("build_status", job.get("status", "pending")),
             "current_state": _job_current_state(job),
             "created_at": _normalize_epoch_seconds(job.get("created_at")),
             "event_count": len(events),
             "human_in_loop": bool(job.get("human_in_loop", False)),
+            "waiting_approval": bool(job.get("waiting_approval", False)),
+            "waiting_stage": job.get("waiting_stage", ""),
+            "has_confirmed_plan": bool(job.get("confirmed_plan")),
         }
 
     events = job.events or []
@@ -501,10 +510,14 @@ def _serialize_job_record(job_id: str, job: Any) -> Dict[str, Any]:
         "job_id": job_id,
         "design_name": job.design_name or "",
         "status": job.status or "pending",
+        "build_status": job.build_status or job.status or "pending",
         "current_state": _job_current_state(job),
         "created_at": _normalize_epoch_seconds(job.created_at),
         "event_count": len(events),
         "human_in_loop": bool(getattr(job, "human_in_loop", False)),
+        "waiting_approval": bool(getattr(job, "waiting_approval", False)),
+        "waiting_stage": getattr(job, "waiting_stage", "") or "",
+        "has_confirmed_plan": bool((getattr(job, "request_data", {}) or {}).get("confirmation_token")),
     }
 
 
@@ -736,6 +749,110 @@ def _collect_platform_status(include_llm: bool = False) -> Dict[str, Any]:
     }
 
 
+def _pdk_capability_payload(
+    key: str,
+    profile: Dict[str, Any],
+    detected: Dict[str, Any],
+    *,
+    custom: bool = False,
+) -> Dict[str, Any]:
+    proprietary = bool(profile.get("proprietary", False))
+    is_available = bool(detected.get("available", custom))
+    tech_ok = bool(detected.get("tech_ok", False))
+    fabrication_ready = bool(profile.get("fabrication_ready", False)) and not custom
+    oss_hardening_nodes = {"sky130", "gf180", "gf180mcu"}
+    research_nodes = {
+        "asap2",
+        "asap5",
+        "asap7",
+        "freepdk45",
+        "lefdef175",
+        "nangate45",
+        "open28",
+        "osu018",
+        "osu035",
+    }
+
+    can_synthesize = is_available and not proprietary
+    can_harden = bool(
+        is_available
+        and not proprietary
+        and key in oss_hardening_nodes
+        and fabrication_ready
+    )
+    gds_ready = can_harden
+
+    if custom:
+        explicit_hardening = bool(
+            detected.get("gds_ready")
+            or detected.get("openlane_ready")
+            or detected.get("orfs_ready")
+        )
+        fabrication_ready = bool(detected.get("fabrication_ready", False))
+        can_synthesize = True
+        can_harden = explicit_hardening and fabrication_ready and tech_ok
+        gds_ready = can_harden
+        readiness_tier = "custom_hardening" if can_harden else "custom_research"
+        status = "ready" if can_harden else "needs_flow_profile"
+        flow_backend = detected.get("flow_backend") or ("custom" if can_harden else "none")
+        recommended_flow_profile = detected.get("flow_profile") or "rtl_synthesis_only"
+        reason = (
+            "Custom PDK has explicit hardening metadata and required technology files."
+            if can_harden
+            else "Custom PDK detected. AgentIC can keep RTL and synthesis evidence visible, but hardening is disabled until OpenLane/ORFS metadata is configured."
+        )
+    elif proprietary:
+        readiness_tier = "licensed_foundry"
+        status = "requires_foundry_pdk" if not is_available else "licensed_available"
+        flow_backend = "licensed"
+        recommended_flow_profile = "licensed_flow_required"
+        can_synthesize = is_available
+        reason = (
+            "Licensed foundry PDK detected. Commercial flow integration is required before AgentIC exposes full hardening."
+            if is_available
+            else "Proprietary node. Licensed PDK, timing libraries, LEF/tech files, and OpenLane/OpenROAD integration are required."
+        )
+    elif can_harden:
+        readiness_tier = "tapeout_candidate"
+        status = "ready"
+        flow_backend = "openlane"
+        recommended_flow_profile = "sky130_oss_executable"
+        reason = "Available for the OSS RTL-to-GDS flow in this workspace."
+    elif is_available and key in research_nodes:
+        readiness_tier = "research"
+        status = "research_only"
+        flow_backend = "orfs_required"
+        recommended_flow_profile = "rtl_synthesis_only"
+        reason = "Research PDK detected. AgentIC will run RTL/synthesis evidence, but full OpenROAD/ORFS hardening is disabled until a platform profile is wired."
+    elif is_available:
+        readiness_tier = "rtl_synthesis"
+        status = "synthesis_only"
+        flow_backend = "none"
+        recommended_flow_profile = "rtl_synthesis_only"
+        reason = "PDK files are present, but no verified hardening backend is configured for this profile."
+    else:
+        readiness_tier = "not_installed"
+        status = "not_installed"
+        flow_backend = "none"
+        recommended_flow_profile = "install_pdk_first"
+        reason = "Install this PDK under the configured PDK root before enabling it for builds."
+
+    return {
+        "fabrication_ready": fabrication_ready,
+        "available": is_available,
+        "gds_ready": gds_ready,
+        "can_synthesize": can_synthesize,
+        "can_harden": can_harden,
+        "tech_ok": tech_ok,
+        "proprietary": proprietary,
+        "readiness_tier": readiness_tier,
+        "flow_backend": flow_backend,
+        "recommended_flow_profile": recommended_flow_profile,
+        "status": status,
+        "reason": reason,
+    }
+
+
 def _pdk_catalog_payload() -> Dict[str, Any]:
     from agentic.config import (
         DEFAULT_PDK_PROFILE,
@@ -749,19 +866,7 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
     items: List[Dict[str, Any]] = []
     for key, profile in sorted(profiles.items()):
         detected = available.get(key, {})
-        proprietary = bool(profile.get("proprietary", False))
-        is_available = bool(detected.get("available", False))
-        gds_ready = is_available and not proprietary
-        if proprietary and not is_available:
-            status = "requires_foundry_pdk"
-            reason = "Proprietary node. Licensed PDK, timing libraries, LEF/tech files, and OpenLane/OpenROAD integration are required."
-        elif gds_ready:
-            status = "ready"
-            reason = "Available for full GDSII runs in this workspace."
-        else:
-            status = "not_installed"
-            reason = "Install this PDK under PDK_ROOT or OPENLANE_PDK_ROOT before enabling GDSII for users."
-
+        capability = _pdk_capability_payload(key, profile, detected)
         items.append(
             {
                 "key": key,
@@ -770,20 +875,14 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
                 "std_cell_library": profile.get("std_cell_library", ""),
                 "description": profile.get("description", ""),
                 "maturity": profile.get("maturity", ""),
-                "fabrication_ready": bool(profile.get("fabrication_ready", False)),
-                "available": is_available,
-                "gds_ready": gds_ready,
-                "tech_ok": bool(detected.get("tech_ok", False)),
-                "proprietary": proprietary,
-                "root_path": detected.get("root_path", ""),
-                "status": status,
-                "reason": reason,
+                **capability,
             }
         )
 
     for key, detected in sorted(available.items()):
         if key in profiles:
             continue
+        capability = _pdk_capability_payload(key, detected, detected, custom=True)
         items.append(
             {
                 "key": key,
@@ -794,21 +893,14 @@ def _pdk_catalog_payload() -> Dict[str, Any]:
                     "description", "Custom user-provided PDK detected for this workspace"
                 ),
                 "maturity": detected.get("maturity", "custom"),
-                "fabrication_ready": bool(detected.get("fabrication_ready", True)),
-                "available": True,
-                "gds_ready": True,
-                "tech_ok": bool(detected.get("tech_ok", False)),
-                "proprietary": False,
-                "root_path": detected.get("root_path", ""),
-                "status": "ready",
-                "reason": "Custom PDK detected for this workspace.",
+                **capability,
             }
         )
 
     ready = [item for item in items if item["gds_ready"]]
     return {
         "default": DEFAULT_PDK_PROFILE,
-        "pdk_root": PDK_ROOT,
+        "pdk_root_configured": bool(PDK_ROOT),
         "pdks": items,
         "gds_ready_pdks": ready,
     }
@@ -1328,13 +1420,13 @@ def _emit_stage_complete(job_id: str, payload: dict):
         "message": f"✋ Stage {payload.get('stage_name', '')} complete — awaiting approval",
     }
     JOB_STORE[job_id]["events"].append(event)
-    _sync_job_to_db(job_id)
     JOB_STORE[job_id]["current_state"] = payload.get("stage_name", "UNKNOWN")
     JOB_STORE[job_id]["waiting_approval"] = True
     JOB_STORE[job_id]["waiting_stage"] = payload.get("stage_name", "")
     # Store payload so report endpoints can access it
     stage_name = payload.get("stage_name", "UNKNOWN")
     JOB_STORE[job_id].setdefault("stages", {})[stage_name] = payload
+    _sync_job_to_db(job_id)
 
 
 # ─── Models ──────────────────────────────────────────────────────────
@@ -1360,10 +1452,34 @@ class BuildRequest(BaseModel):
     coverage_backend: str = "auto"
     coverage_fallback_policy: str = "fail_closed"
     coverage_profile: str = "balanced"
-    human_in_loop: bool = False
+    human_in_loop: bool = True
     skip_stages: List[str] = []
     flow_profile: str = ""
     plan_type: str = "byok"
+    confirmation_token: Optional[str] = None
+
+
+class BuildPlanRequest(BaseModel):
+    api_key: Optional[str] = None
+    design_name: Optional[str] = None
+    description: str
+    skip_openlane: bool = False
+    skip_spice: bool = True
+    skip_coverage: bool = False
+    full_signoff: bool = False
+    min_coverage: float = 80.0
+    strict_gates: bool = True
+    pdk_profile: str = "sky130"
+    hierarchical: str = "auto"
+    coverage_backend: str = "auto"
+    coverage_profile: str = "balanced"
+    human_in_loop: bool = True
+    flow_profile: str = ""
+    plan_type: str = "byok"
+
+
+class BuildPlanConfirmRequest(BaseModel):
+    plan_token: str
 
 
 class ChatMessage(BaseModel):
@@ -1376,6 +1492,28 @@ class ChatRequest(BaseModel):
     api_key: Optional[str] = None
     pdk_profile: Optional[str] = None
     pdk_options: Optional[List[Dict[str, Any]]] = None
+
+def _pipeline_capability_reply(pdk_profile: Optional[str] = None) -> str:
+    pdk = _selected_pdk_capability(pdk_profile or "sky130")
+    pdk_key = pdk.get("key") or pdk_profile or "selected PDK"
+    hardening = (
+        f"Physical hardening is enabled when {pdk_key} has verified GDS collateral in the active tool flow."
+        if bool(pdk.get("gds_ready") or pdk.get("can_harden"))
+        else f"{pdk_key} is treated as RTL/synthesis evidence mode until verified hardening collateral is configured."
+    )
+    return (
+        "I can help design synthesizable digital chips and IP blocks through the AgentIC pipeline.\n\n"
+        "**What I can make**\n"
+        "- RTL blocks: counters, FSMs, ALUs, FIFOs, UART/SPI/I2C, timers, PWM, GPIO, DMA, bus peripherals.\n"
+        "- Larger digital systems: simple CPUs, RISC-V-style cores, microcontroller subsystems, DSP/control accelerators.\n"
+        "- Verification collateral: self-checking testbenches, reference models, formal checks, coverage targets, regression evidence.\n"
+        "- Implementation collateral: constraints, synthesis reports, timing/power/layout evidence, and GDSII when the selected PDK flow supports it.\n\n"
+        "**How AgentIC works**\n"
+        "First I turn your request into a VLSI build plan with the selected PDK, interfaces, clock/reset, verification gates, and physical-flow assumptions. "
+        "You confirm that plan, then the backend generates and checks the design through the pipeline. "
+        f"{hardening}\n\n"
+        "Give me the block name, interface, data width, clock/reset style, registers/protocol behavior, target PDK, and whether you want RTL-only or GDS hardening."
+    )
 
 def _looks_like_chip_build_request(description: str) -> bool:
     text = re.sub(r"\s+", " ", (description or "").strip().lower())
@@ -1400,6 +1538,216 @@ def _looks_like_chip_build_request(description: str) -> bool:
         text,
     )
     return bool((detail and len(words) >= 4) or (action and len(words) >= 6) or len(words) >= 10)
+
+
+def _sanitize_design_name(value: Optional[str], description: str = "") -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        words = re.findall(r"[a-z0-9]+", (description or "").lower())
+        stop = {
+            "a",
+            "an",
+            "and",
+            "build",
+            "chip",
+            "create",
+            "design",
+            "for",
+            "generate",
+            "make",
+            "the",
+            "with",
+        }
+        name_words = [w for w in words if w not in stop][:5]
+        raw = "_".join(name_words) or "agentic_chip"
+    design_name = re.sub(r"[^a-z0-9_]", "_", raw)
+    design_name = re.sub(r"_+", "_", design_name).strip("_")
+    if design_name and design_name[0].isdigit():
+        design_name = "chip_" + design_name
+    if not design_name or ".." in design_name or "/" in design_name:
+        raise HTTPException(status_code=400, detail="Invalid design name")
+    return design_name[:64]
+
+
+def _selected_pdk_capability(pdk_profile: str) -> Dict[str, Any]:
+    catalog = _pdk_catalog_payload()
+    selected_key = (pdk_profile or catalog.get("default") or "sky130").strip().lower()
+    selected = next(
+        (item for item in catalog.get("pdks", []) if item.get("key", "").lower() == selected_key),
+        None,
+    )
+    if selected is None:
+        selected = {
+            "key": selected_key,
+            "status": "unknown",
+            "gds_ready": False,
+            "can_harden": False,
+            "reason": "This PDK/profile is not registered in the backend PDK catalog.",
+            "flow_backend": "none",
+            "recommended_flow_profile": "rtl_synthesis_only",
+        }
+    return selected
+
+
+def _infer_design_features(description: str) -> List[str]:
+    text = (description or "").lower()
+    checks = [
+        ("Memory-mapped register interface", r"\b(apb|axi|wishbone|memory[- ]mapped|register map|csr)\b"),
+        ("FIFO or buffering behavior", r"\b(fifo|queue|buffer)\b"),
+        ("UART serial interface", r"\buart\b"),
+        ("SPI serial interface", r"\bspi\b"),
+        ("I2C serial interface", r"\bi2c\b"),
+        ("Interrupt/status handling", r"\b(interrupt|irq|status)\b"),
+        ("Parameterized datapath width", r"\b(\d+[- ]?bit|width|parameter)\b"),
+        ("Clock/reset contract", r"\b(clock|clk|reset|rst)\b"),
+        ("Formal properties", r"\b(formal|assert|sva|property)\b"),
+        ("Physical hardening target", r"\b(gds|layout|harden|openlane|orfs|tapeout)\b"),
+    ]
+    features = [label for label, pattern in checks if re.search(pattern, text)]
+    return features or ["Synthesizable digital RTL block with explicit clock/reset contract"]
+
+
+def _make_vlsi_build_plan(req: BuildPlanRequest, profile: Optional[dict]) -> Dict[str, Any]:
+    description = re.sub(r"\s+", " ", (req.description or "").strip())
+    if not _looks_like_chip_build_request(description):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "not_chip_build_request",
+                "message": "This is not specific enough to plan a chip build yet.",
+                "questions": [
+                    "What block or chip should AgentIC build?",
+                    "What interface, data width, clock/reset, and registers are required?",
+                    "Do you want RTL-only evidence or full GDS hardening?",
+                ],
+            },
+        )
+
+    design_name = _sanitize_design_name(req.design_name, description)
+    pdk = _selected_pdk_capability(req.pdk_profile)
+    gds_requested = not req.skip_openlane
+    can_harden = bool(pdk.get("gds_ready") or pdk.get("can_harden"))
+    physical_flow = "rtl_to_gds" if gds_requested and can_harden else "rtl_evidence_only"
+    if gds_requested and not can_harden:
+        physical_note = (
+            f"PDK '{req.pdk_profile}' is not marked GDS-ready. AgentIC should either ask for a "
+            "different PDK or run RTL/synthesis-only evidence until hardening collateral is configured."
+        )
+    else:
+        physical_note = (
+            f"Use {pdk.get('flow_backend', 'selected flow')} for PDK '{req.pdk_profile}'."
+            if gds_requested
+            else "Physical hardening is disabled for this plan."
+        )
+
+    stages = [
+        "Clarify and freeze the hardware intent/SID",
+        "Generate synthesizable Verilog/SystemVerilog RTL",
+        "Generate self-checking testbench and reference model",
+        "Run static, compile, simulation, semantic, and coverage gates",
+        "Run synthesis/timing evidence",
+    ]
+    if gds_requested and can_harden:
+        stages.append("Run selected-PDK physical hardening and collect layout metrics")
+    stages.append("Generate reports and artifact manifest")
+
+    return {
+        "design_name": design_name,
+        "description": description,
+        "pdk_profile": req.pdk_profile,
+        "pdk_status": {
+            "key": pdk.get("key"),
+            "status": pdk.get("status"),
+            "gds_ready": bool(pdk.get("gds_ready")),
+            "flow_backend": pdk.get("flow_backend"),
+            "reason": pdk.get("reason"),
+        },
+        "flow_profile": req.flow_profile or pdk.get("recommended_flow_profile") or DEFAULT_FLOW_PROFILE.name,
+        "physical_flow": physical_flow,
+        "physical_note": physical_note,
+        "features_detected": _infer_design_features(description),
+        "agentic_will_make": [
+            "SID/design contract grounded in the confirmed user intent",
+            "RTL modules matching the SID ports, reset, clocks, and behavior",
+            "Self-checking verification collateral with scoreboard/reference model",
+            "Gate results, logs, reports, and generated source artifacts",
+        ],
+        "gates": [
+            "PDK-aware prompt/context selection",
+            "SID-to-RTL interface contract check",
+            "RTL semantic compile check over design sources",
+            "Testbench static contract and simulation checks",
+            "Fail-closed recovery when output violates the contract",
+        ],
+        "stages": stages,
+        "questions_before_build": [
+            "Confirm this is the exact chip behavior you want.",
+            "Confirm the selected PDK and whether GDS hardening should run.",
+            "Confirm any missing protocol/register/reset details before approving.",
+        ],
+        "requires_confirmation": True,
+        "created_for_user": profile.get("id") if profile else None,
+    }
+
+
+def _store_build_plan(req: BuildPlanRequest, profile: Optional[dict]) -> Dict[str, Any]:
+    plan = _make_vlsi_build_plan(req, profile)
+    token = str(uuid.uuid4())
+    now = int(time.time())
+    BUILD_PLAN_STORE[token] = {
+        "token": token,
+        "status": "draft",
+        "created_at": now,
+        "expires_at": now + BUILD_PLAN_TTL_SECONDS,
+        "user_id": profile.get("id") if profile else None,
+        "user_email": profile.get("email") if profile else None,
+        "request": req.model_dump(),
+        "plan": plan,
+    }
+    return BUILD_PLAN_STORE[token]
+
+
+def _get_build_plan_or_404(token: str, profile: Optional[dict]) -> Dict[str, Any]:
+    record = BUILD_PLAN_STORE.get((token or "").strip())
+    if not record:
+        raise HTTPException(status_code=404, detail="Build plan not found")
+    if record.get("expires_at", 0) < int(time.time()):
+        record["status"] = "expired"
+        raise HTTPException(status_code=410, detail="Build plan expired")
+    if AUTH_ENABLED and profile is not None and record.get("user_id") != profile.get("id"):
+        raise HTTPException(status_code=404, detail="Build plan not found")
+    return record
+
+
+def _validate_confirmed_build_plan(req: BuildRequest, profile: Optional[dict]) -> Dict[str, Any]:
+    if not REQUIRE_BUILD_CONFIRMATION:
+        return {}
+    if not req.confirmation_token:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "error": "build_confirmation_required",
+                "message": "Create and confirm a VLSI build plan before starting chip generation.",
+                "next_step": "POST /build/plan, show the plan to the user, then POST /build/plan/{token}/confirm before POST /build.",
+            },
+        )
+    record = _get_build_plan_or_404(req.confirmation_token, profile)
+    if record.get("status") != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "build_plan_not_confirmed",
+                "message": "The build plan exists but has not been confirmed by the user.",
+            },
+        )
+    plan = record.get("plan", {})
+    expected_name = plan.get("design_name")
+    expected_desc = plan.get("description")
+    if expected_name and _sanitize_design_name(req.design_name, req.description) != expected_name:
+        raise HTTPException(status_code=409, detail="Build request design_name does not match confirmed plan")
+    if expected_desc and re.sub(r"\s+", " ", req.description.strip()) != expected_desc:
+        raise HTTPException(status_code=409, detail="Build request description does not match confirmed plan")
+    return record
 
 class RagQueryRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=4000)
@@ -2195,6 +2543,7 @@ def _emit_stage_summary(
 
     JOB_STORE[job_id]["waiting_approval"] = False
     JOB_STORE[job_id]["waiting_stage"] = ""
+    _sync_job_to_db(job_id)
 
     if gate.approved:
         return True
@@ -2786,7 +3135,12 @@ async def chat_converse(
     try:
         llm, model_info = _get_llm(byok_config=byok_key, is_agentic_paid=is_agentic_paid)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        logger.warning(f"Chat model route unavailable: {e}")
+        return {
+            "reply": _pipeline_capability_reply(req.pdk_profile),
+            "model": "deterministic_pipeline_fallback",
+            "fallback": True,
+        }
 
     # Add context about current PDK and options if provided
     pdk_context = ""
@@ -2811,13 +3165,32 @@ async def chat_converse(
         "- If the user sends a greeting or non-chip question, answer conversationally and guide them toward building a chip.\n"
         "- Explain what is feasible as synthesizable digital RTL and what needs a hard macro, wrapper, or user-supplied asset.\n"
         "- You may propose safe spec substitutions for PDK/tool limits.\n"
-        "- Never pretend a build has run from chat alone. Chat refines the spec; the Run pipeline action executes AgentIC.\n"
-        "- When the spec is good enough, say it is ready to run and summarize what AgentIC will generate.\n"
+        "- Never pretend a build has run from chat alone. In Studio, concrete hardware requests are handed to the autonomous pipeline automatically.\n"
+        "- When the spec is good enough, say it is ready for the build flow and summarize what AgentIC will generate.\n"
     )
 
     messages_payload = [{"role": "system", "content": system_prompt}]
     for msg in req.messages:
         messages_payload.append({"role": msg.role, "content": msg.content})
+
+    last_user_message = ""
+    for msg in reversed(req.messages):
+        if msg.role == "user":
+            last_user_message = msg.content
+            break
+    tentative_plan = None
+    if _looks_like_chip_build_request(last_user_message):
+        try:
+            plan_req = BuildPlanRequest(
+                description=last_user_message,
+                pdk_profile=req.pdk_profile or "sky130",
+                plan_type=req.plan_type,
+                api_key=req.api_key,
+                human_in_loop=True,
+            )
+            tentative_plan = _make_vlsi_build_plan(plan_req, profile)
+        except Exception:
+            tentative_plan = None
 
     # Direct extraction of LLM properties to prevent attribute errors on wrapper objects
     model_name = "infinity"
@@ -2861,16 +3234,85 @@ async def chat_converse(
         if api_key:
             llm_kwargs["api_key"] = api_key
         if base_url:
-            llm_kwargs["base_url"] = base_url
+            llm_kwargs["api_base"] = base_url
         if api_version:
             llm_kwargs["api_version"] = api_version
             
         response = completion(**llm_kwargs)
         reply = response.choices[0].message.content
-        return {"reply": reply, "model": model_name}
+        payload = {"reply": reply, "model": model_name}
+        if tentative_plan:
+            payload["build_plan_preview"] = tentative_plan
+            payload["requires_confirmation"] = True
+        return payload
     except Exception as e:
         logger.error(f"Chat completion failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Copilot logic failed: {e}")
+        if tentative_plan:
+            return {
+                "reply": (
+                    "The selected model route did not return a chat response, but I can still prepare "
+                    "a deterministic VLSI build plan. Review this plan and confirm before AgentIC starts chip generation."
+                ),
+                "model": model_name,
+                "build_plan_preview": tentative_plan,
+                "requires_confirmation": True,
+                "model_error": str(e),
+            }
+        return {
+            "reply": _pipeline_capability_reply(req.pdk_profile),
+            "model": model_name,
+            "fallback": True,
+        }
+
+
+@app.post("/build/plan")
+@limiter.limit("10/minute")
+async def create_build_plan(
+    req: BuildPlanRequest, request: Request, profile: dict = Depends(get_current_user)
+):
+    """Create a VLSI-aware build plan that must be confirmed before /build starts."""
+    header_key = request.headers.get("X-LLM-API-Key")
+    if header_key:
+        req.api_key = header_key
+    record = _store_build_plan(req, profile)
+    return {
+        "plan_token": record["token"],
+        "status": record["status"],
+        "expires_at": record["expires_at"],
+        "build_plan": record["plan"],
+        "confirmation_required": True,
+    }
+
+
+@app.get("/build/plan/{plan_token}")
+def get_build_plan(plan_token: str, profile: dict = Depends(get_current_user)):
+    """Return a pending or confirmed plan so the UI can restore it after navigation."""
+    record = _get_build_plan_or_404(plan_token, profile)
+    return {
+        "plan_token": record["token"],
+        "status": record["status"],
+        "expires_at": record["expires_at"],
+        "build_plan": record["plan"],
+    }
+
+
+@app.post("/build/plan/{plan_token}/confirm")
+@limiter.limit("15/minute")
+def confirm_build_plan(
+    plan_token: str, request: Request, profile: dict = Depends(get_current_user)
+):
+    """Confirm a VLSI build plan. Only confirmed plans may start /build."""
+    record = _get_build_plan_or_404(plan_token, profile)
+    if record.get("status") == "draft":
+        record["status"] = "confirmed"
+        record["confirmed_at"] = int(time.time())
+        record["confirmed_by"] = profile.get("id") if profile else None
+    return {
+        "ok": True,
+        "confirmation_token": record["token"],
+        "status": record["status"],
+        "build_plan": record["plan"],
+    }
 
 @app.post("/build")
 @limiter.limit("5/minute")
@@ -2886,6 +3328,8 @@ async def trigger_build(
     header_key = request.headers.get("X-LLM-API-Key")
     if header_key:
         req.api_key = header_key
+
+    confirmed_plan = _validate_confirmed_build_plan(req, profile)
 
     if not _looks_like_chip_build_request(req.description):
         raise HTTPException(
@@ -2950,17 +3394,7 @@ async def trigger_build(
             detail=str(e),
         )
 
-    # Sanitize design name — Verilog identifiers cannot start with a digit
-    import re as _re
-
-    design_name = req.design_name.strip().lower()
-    design_name = _re.sub(r"[^a-z0-9_]", "_", design_name)  # keep only safe chars
-    design_name = design_name.strip("_")
-    design_name = _re.sub(r"_+", "_", design_name)  # collapse doubles
-    if design_name and design_name[0].isdigit():
-        design_name = "chip_" + design_name  # e.g. chip_8bit_risc_cpu
-    if not design_name or ".." in design_name or "/" in design_name:
-        raise HTTPException(status_code=400, detail="Invalid design name")
+    design_name = _sanitize_design_name(req.design_name, req.description)
 
     job_id = str(uuid.uuid4())
     JOB_STORE[job_id] = {
@@ -2976,11 +3410,17 @@ async def trigger_build(
         "user_profile": profile,
         "byok_key": byok_key,
         "plan_type": req.plan_type,
+        "confirmed_plan": confirmed_plan.get("plan") if confirmed_plan else None,
+        "request_data": req.model_dump(),
         "human_in_loop": req.human_in_loop,
         "flow_profile": req.flow_profile or DEFAULT_FLOW_PROFILE.name,
         "stages": {},  # stage_name -> stage_complete payload
         "build_status": "running",
     }
+    if confirmed_plan:
+        confirmed_plan["status"] = "consumed"
+        confirmed_plan["job_id"] = job_id
+        confirmed_plan["consumed_at"] = int(time.time())
     BUILDS_STARTED_TOTAL.inc()
 
     req.design_name = design_name
@@ -3204,6 +3644,42 @@ def get_build_result(job_id: str, profile: dict = Depends(get_current_user)):
 def list_jobs(profile: dict = Depends(get_current_user)):
     """List persisted jobs for the active workspace or authenticated user."""
     return {"jobs": _load_jobs_for_profile(profile)}
+
+
+@app.get("/workspace/active")
+def get_active_workspace(profile: dict = Depends(get_current_user)):
+    """Return the active build/plan so page navigation can reattach instead of resetting."""
+    jobs = _load_jobs_for_profile(profile)
+    running_statuses = {"queued", "running", "cancelling"}
+    active_job = next((job for job in jobs if job.get("status") in running_statuses), None)
+
+    active_plan = None
+    now = int(time.time())
+    for record in sorted(
+        BUILD_PLAN_STORE.values(),
+        key=lambda item: item.get("created_at", 0),
+        reverse=True,
+    ):
+        if record.get("expires_at", 0) < now:
+            continue
+        if record.get("status") not in {"draft", "confirmed"}:
+            continue
+        if AUTH_ENABLED and profile is not None and record.get("user_id") != profile.get("id"):
+            continue
+        active_plan = {
+            "plan_token": record["token"],
+            "status": record["status"],
+            "created_at": record["created_at"],
+            "expires_at": record["expires_at"],
+            "build_plan": record["plan"],
+        }
+        break
+
+    return {
+        "active_job": active_job,
+        "active_plan": active_plan,
+        "should_reattach_stream": bool(active_job and active_job.get("status") in running_statuses),
+    }
 
 
 @app.post("/build/cancel/{job_id}")
