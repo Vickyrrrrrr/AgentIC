@@ -1,5 +1,9 @@
 # Python
 __pycache__/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.agentic_cache/
 *.pyc
 *.pyo
 *.pyd
@@ -57,64 +61,17 @@ artifacts/
 *.def
 *.spef
 *.vcd
-rv64_superscalar
-# OSS CAD Suite (large binary toolchain - download separately)
+# OSS CAD Suite
 oss-cad-suite/
 oss-cad-suite-*.tgz
 
-# PLY parser cache (auto-generated, 2+ MB)
+# PLY parser cache
 parser.out
 parsetab.py
 
-# Temporary / test scripts
-*.tmp
-global_reqs.tmp
-venv_reqs.tmp
-nodesource_setup.sh
-test_import.py
-test_signoff.py
-test_signoff2.py
-test_direct_call.py
-test_llm_call.py
-test_tb.v
-benchmark_verieval.py
-fix_recursion.py
-fix_subprocess.py
-fix_*.py
-modify_*.py
-scripts/remote_setup.sh
-video
-skills
-checkpoints
-fix
-scratch
-# Benchmark / leaderboard artifacts
+# Benchmark / logs
 *.jsonl
-leaderboard.md
-verieval_results.json
 src/agentic-workspace
-# PLY parser cache (auto-generated, 2+ MB)
-parser.out
-parsetab.py
-
-# Database
-agentic_jobs.db
-*.sqlite3
-designs/
-archived_dev_scripts/
-docs/
-data 
-benchmark
-# Temporary fix scripts
-fix_*.py
-scripts
-scratch
-sandbox/
-# Security build outputs
-secure_build/
-build_secure_ip.py
-update_readme.py
-test.js
 
 # IDE
 .vscode/
@@ -127,48 +84,5 @@ test.js
 .DS_Store
 Thumbs.db
 
-# PyInstaller
-*.spec
-
 # Logs
 *.log
-harden.log
-
-# Node / Frontend
-node_modules/
-web/node_modules/
-web/dist/
-web/.vite/
-
-# Allow web/src subdirectories
-!web/src/lib/
-!web/src/store/
-!web/src/components/ErrorBoundary.tsx
-.env.example
-README_HF.md
-fix.py
-patch_eda_analyst.py
-src/agentic-workspace/debug/json_fails/20260510_193154_spec_generate.json
-src/agentic-workspace/debug/json_fails/20260510_200808_spec_generate.json
-vlsirag.md
-advanced_vlsi_rag_design.md
-task_grounded_answer_synthesis.md
-eval/benchmark_results.json
-synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth_report.txt
-synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth.v
-synth_out/synth_kogge_stone_adder_64/kogge_stone_adder_64_synth.ys
-workspace_changes.diff
-AGENTIC_ARCHITECTURE.md
-.env.example
-.env.example
-.env.example
-reports/
-NUL
-tests
-agentic_jobs.db-shm
-agentic_jobs.db-wal
-.env.example
-synth_out/
-lvs_out/
-drc_out/
-scratch_combine.py
