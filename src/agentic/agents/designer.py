@@ -1,7 +1,6 @@
 # agents/designer.py
 from crewai import Agent
 from ..tools.vlsi_tools import syntax_check_tool, read_file_tool, write_verilog_tool
-from ..tools.retrieval_tool import vlsi_search
 
 # Universal chip support: complete list of chip families the LLM must handle
 CHIP_FAMILIES = """
@@ -36,9 +35,12 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   • NEVER redeclare a port name as an internal signal (no port shadowing).
   • Bus widths MUST match exactly on every LHS and RHS: 16-bit PC cannot receive an 8-bit value.
   • Every 'output logic' port must be driven by EXACTLY one source: either 'assign' OR 'always' — NEVER both.
+  • Every top-level output must also have EXACTLY one driver across hierarchy. If a submodule computes an output that must be registered/reset in the top, connect the submodule output to an internal wire such as '<name>_comb' and drive the external output only from one always_ff block. If the top is purely combinational, connect the submodule output directly and do not also assign that output in an always block.
   • Arrays (logic [N-1:0] mem [0:D-1]) are initialized with '= {...}' not '= begin...end'.
-  • HIERARCHY & WIRING (CRITICAL): The top-level module MUST be a structural wrapper that instantiates and wires together ALL sub-blocks/peripherals in the design. Do NOT leave sub-blocks isolated in the folder. Do NOT write dummy logic in the top module if sub-blocks exist. All submodule outputs MUST ultimately drive the top-level output ports. Unconnected submodules will be completely deleted by the synthesis optimizer as dead code!
+  • HIERARCHY & WIRING (CRITICAL): The top-level module MUST instantiate and wire together ALL sub-blocks/peripherals in the design. Do NOT leave sub-blocks isolated in the folder. Do NOT write dummy logic in the top module if sub-blocks exist. All submodule outputs MUST ultimately drive the top-level output ports. Unconnected submodules will be completely deleted by the synthesis optimizer as dead code!
+  • HIERARCHICAL TOP RESET RULE: A top-level wrapper may contain output-register reset logic only when required by the interface contract. In that case, submodule outputs MUST connect to internal wires and the external output register MUST be assigned only in one always_ff/always block. Never connect a submodule output directly to an output port that is also assigned procedurally.
   • SUB-MODULE DEFINITIONS (CRITICAL): If you instantiate any sub-modules (such as custom memory blocks, ALUs, decoders, or register files), you MUST include the full Verilog implementation code for all instantiated sub-modules in the same file or generate them as separate files. NEVER instantiate a sub-module without providing its actual Verilog code definition. Missing definitions will cause compile/elaboration errors.
+  • CROSS-MODULE ENCODINGS: If one submodule emits an encoded control signal that another submodule consumes, the semantic mapping MUST match exactly on both sides. Use named localparams/enums where possible, and make comments match the actual operation.
 
   VERILATOR COMPATIBILITY:
   ─────────────────────────
@@ -47,6 +49,9 @@ MANDATORY RTL RULES (violations will cause synthesis errors — never break thes
   • Every variable read in 'always_comb' must be assigned in ALL branches (no latches).
   • Do NOT mix blocking and non-blocking assignments in the same 'always' block.
   • ROM/RAM initialization: use parameter/localparam or $readmemh, not inline '= {}' in 'always_ff'.
+  • CRITICAL: NEVER use non-blocking assignments (<=) to unpacked array elements (e.g. mem[i] <= val) inside for-loops in always_ff blocks. Verilator rejects this (BLKLOOPINIT). Instead, use generate-for loops where each iteration contains its own always_ff block. Or use packed arrays and bit-selects instead of for-loops.
+  • For unpacked array registers, prefer generate blocks over for-loops: `generate for (i = 0; i < N; i++) begin : gen_name always_ff @(posedge clk) reg[i] <= ...; end endgenerate`
+  • Loop variables (integer i, j) must NOT be driven from multiple procedural blocks. Use local loop variables or genvar in generate blocks.
 
   RESET RULES:
   ─────────────
@@ -124,5 +129,5 @@ def get_designer_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         llm=llm,
         verbose=verbose,
         allow_delegation=False,
-        tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search]
+        tools=[syntax_check_tool, read_file_tool, write_verilog_tool]
     )

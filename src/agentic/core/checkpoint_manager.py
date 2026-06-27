@@ -89,6 +89,10 @@ class BuildState:
     # Files created
     generated_files: List[str] = field(default_factory=list)
 
+    # Failure fingerprint history (CRITICAL for detecting repeated failures)
+    failure_fingerprint_history: Dict[str, int] = field(default_factory=dict)
+    failed_code_by_fingerprint: Dict[str, str] = field(default_factory=dict)
+
     # Custom metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -186,6 +190,12 @@ class CheckpointManager:
             last_error=orchestrator.artifacts.get("last_error", ""),
             error_history=list(getattr(orchestrator, "errors", []) or [])[-20:],
             generated_files=list(getattr(orchestrator, "generated_files", []) or [])[-50:],
+            failure_fingerprint_history=dict(
+                getattr(orchestrator, "failure_fingerprint_history", {}) or {}
+            ),
+            failed_code_by_fingerprint=dict(
+                getattr(orchestrator, "failed_code_by_fingerprint", {}) or {}
+            ),
         )
 
         return state
@@ -337,6 +347,20 @@ class CheckpointManager:
             orchestrator.pivot_count = checkpoint.pivot_count
             orchestrator.state_retry_counts = checkpoint.state_retry_counts
 
+            # CRITICAL: Restore strategy — without this, a post-pivot checkpoint
+            # resumes with the wrong strategy (default SV_MODULAR instead of VERILOG_CLASSIC)
+            from ..orchestrator import BuildStrategy
+            if checkpoint.strategy:
+                for bs in BuildStrategy:
+                    if bs.value == checkpoint.strategy:
+                        orchestrator.strategy = bs
+                        break
+
+            if checkpoint.max_pivots:
+                orchestrator.max_pivots = checkpoint.max_pivots
+            if checkpoint.max_retries:
+                orchestrator.max_retries = checkpoint.max_retries
+
             # Restore artifacts
             if checkpoint.rtl_code:
                 orchestrator.artifacts["rtl_code"] = checkpoint.rtl_code
@@ -348,8 +372,33 @@ class CheckpointManager:
                 orchestrator.artifacts["spec"] = checkpoint.spec
             if checkpoint.coverage:
                 orchestrator.artifacts["coverage"] = checkpoint.coverage
+            if checkpoint.last_error:
+                orchestrator.artifacts["last_error"] = checkpoint.last_error
 
-            logger.info(f"Restored checkpoint from {checkpoint.timestamp}")
+            # Restore convergence history (needed for floorplan iteration decisions)
+            if checkpoint.convergence_history:
+                orchestrator.convergence_history = list(checkpoint.convergence_history)
+
+            # Restore error history (for LLM context on what went wrong before)
+            if checkpoint.error_history:
+                orchestrator.errors = list(checkpoint.error_history)
+
+            # CRITICAL: Restore failure fingerprint history.
+            # Without this, the build cannot detect repeated failures after resume
+            # and will retry the same failing approach indefinitely.
+            if checkpoint.failure_fingerprint_history:
+                orchestrator.failure_fingerprint_history = dict(
+                    checkpoint.failure_fingerprint_history
+                )
+            if checkpoint.failed_code_by_fingerprint:
+                orchestrator.failed_code_by_fingerprint = dict(
+                    checkpoint.failed_code_by_fingerprint
+                )
+
+            logger.info(
+                f"Restored checkpoint from {checkpoint.timestamp} | "
+                f"Stage: {checkpoint.state_name} | Strategy: {checkpoint.strategy}"
+            )
             return True
 
         except Exception as e:

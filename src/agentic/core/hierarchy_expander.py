@@ -78,6 +78,10 @@ SIMPLE_PATTERNS: List[str] = [
     "pipeline register",
     "pipe register",
     "combinational",
+    "alu",
+    "decoder",
+    "arithmetic",
+    "logic unit",
 ]
 
 
@@ -159,6 +163,7 @@ class ExpandedSubModule:
     name: str
     description: str = ""
     ports: List[PortSpec] = field(default_factory=list)
+    parameters: List[Dict[str, str]] = field(default_factory=list)
     requires_expansion: bool = False
     nested_spec: Optional[Dict[str, Any]] = None  # Full spec dict if expanded
 
@@ -167,6 +172,7 @@ class ExpandedSubModule:
             "name": self.name,
             "description": self.description,
             "ports": [p.to_dict() for p in self.ports],
+            "parameters": self.parameters,
             "requires_expansion": self.requires_expansion,
             "nested_spec": self.nested_spec,
         }
@@ -307,6 +313,7 @@ class HierarchyExpander:
                 name=sm.name,
                 description=sm.description,
                 ports=[PortSpec(**asdict(p)) for p in sm.ports],
+                parameters=sm.parameters,
                 requires_expansion=needs,
                 nested_spec=None,
             )

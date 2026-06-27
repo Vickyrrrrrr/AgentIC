@@ -69,6 +69,17 @@ def _canonical_width(width: str, params: Optional[Dict[str, str]] = None) -> str
         return params[value]
     if re.fullmatch(r"\d+", value):
         return value
+    # Arithmetic expression using parameters (e.g. "ARRAY_SIZE * DATA_WIDTH")
+    if params and re.fullmatch(r"[\w\s+\-*/()]+", value):
+        substituted = value
+        for name, default in params.items():
+            substituted = re.sub(rf"\b{re.escape(name)}\b", default, substituted)
+        if substituted != value and re.fullmatch(r"[\d\s+\-*/()]+", substituted):
+            try:
+                return str(int(eval(substituted, {"__builtins__": {}}, {})))
+            except Exception:
+                pass
+        return value
     bracket = re.fullmatch(r"\[\s*(.+?)\s*:\s*(.+?)\s*\]", value)
     if bracket:
         hi, lo = bracket.groups()
@@ -228,6 +239,12 @@ def validate_sid_executable_contract(
             errors.append(
                 f"Port '{name}' width mismatch: SID={sid_port['width']} HardwareSpec={hw_port['width']}."
             )
+
+    if hw_spec is not None:
+        hw_names = set(hw_ports)
+        sid_names = set(top_contract_ports)
+        for name in sorted(sid_names - hw_names):
+            errors.append(f"SID top module port '{name}' is missing from HardwareSpec.")
 
     if hw_spec is not None and hasattr(hw_spec, "to_dict"):
         hw_dict = hw_spec.to_dict()

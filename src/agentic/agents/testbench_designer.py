@@ -1,7 +1,6 @@
 # agents/testbench_designer.py
 from crewai import Agent
 from ..tools.vlsi_tools import syntax_check_tool, read_file_tool, write_verilog_tool
-from ..tools.retrieval_tool import vlsi_search
 
 TB_UNIVERSAL_RULES = """
 TESTBENCH UNIVERSAL RULES (must follow for ANY chip type):
@@ -48,6 +47,17 @@ TESTBENCH UNIVERSAL RULES (must follow for ANY chip type):
   • UART/SPI/I2C     : drive byte stream, check start/stop, verify loopback
   • AXI/APB device   : send valid transactions, check ready/resp signals
   • CPU core         : load NOP/ADD/BR instructions, check PC progression
+
+  RTL AWARENESS & CHAIN OF THOUGHT (CRITICAL):
+  ────────────────────────────────────────────
+  Before writing ANY Verilog code, you MUST output a <thought> block analyzing the RTL.
+  In this block, explicitly state:
+  1. The architectural pattern (e.g., ALU, Pipeline, Systolic Array, State Machine).
+  2. Does it require staggered/streaming data across multiple cycles, or static constants?
+  3. The exact timing sequence of how inputs should be driven.
+  Only after closing the </thought> block should you output the testbench code.
+  If the RTL is a complex array (like a Systolic Array), DO NOT use static constants.
+  You MUST write a loop or sequence that streams data in across multiple clock cycles.
 
   DATA INTEGRITY VERIFICATION (CRITICAL):
   ─────────────────────────────────────────
@@ -121,5 +131,5 @@ def get_testbench_agent(llm, goal, verbose=False, strategy="SV_MODULAR"):
         llm=llm,
         verbose=verbose,
         allow_delegation=False,
-        tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search]
+        tools=[syntax_check_tool, read_file_tool, write_verilog_tool]
     )

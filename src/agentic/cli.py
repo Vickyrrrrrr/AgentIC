@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-AgentIC - Natural Language to GDSII Pipeline
-=============================================
-Uses CrewAI + LLM to generate chips from natural language.
+AgentIC — One-Stop Open-Source VLSI EDA Tool Installer & Chip Design Pipeline
+==============================================================================
+Primary focus: Install and manage a complete open-source EDA toolchain
+(Yosys, Verilator, Icarus, Magic, Netgen, KLayout, OpenLane, PDKs, etc.)
+in a safe, isolated path on your system.
+
+Secondary: Natural-language-driven RTL-to-GDSII chip design using CrewAI + LLM.
+
+Quick start:
+    agentic install              # One-command install of all tools
+    agentic install --pdks all   # Install with all PDKs
+    agentic doctor               # Verify everything is set up
+
 Usage:
+    python3 main.py install
     python3 main.py build --name counter --desc "8-bit counter with enable and reset"
 """
 
@@ -122,73 +133,47 @@ from .tools.signoff_reporter import generate_qor_report, SignoffReporter
 app = typer.Typer()
 
 
-@app.command("cache")
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    install: bool = typer.Option(
+        False, "--install", "-i",
+        help="Run the one-stop installer for all open-source EDA tools",
+    ),
+):
+    """AgentIC — One-Stop Installation & Setup for Open-Source VLSI EDA Tools.
+
+    The primary purpose of this CLI is to install and manage a complete
+    open-source EDA toolchain in a safe, isolated path on your system.
+
+    Quick start:
+        agentic install    — Install everything (OSS CAD Suite, Magic, KLayout, PDKs, etc.)
+
+    See commands below grouped by category.
+    """
+    if ctx.invoked_subcommand is None:
+        if install:
+            from .install_tools import install_oss_cad_suite
+            target = os.environ.get("OSS_CAD_SUITE_HOME", os.path.expanduser("~/oss-cad-suite"))
+            install_oss_cad_suite(target)
+        else:
+            _print_banner()
+            console.print("[accent]Run [bold]agentic install[/bold] to install all open-source EDA tools.[/accent]")
+            console.print()
+            console.print(app.get_help(ctx))
+            raise typer.Exit()
+
+
+@app.command("cache", rich_help_panel="⚙️ Configuration & Management")
 def cache(
-    action: str = typer.Argument("stats", help="Action: stats, clear, warmup"),
+    action: str = typer.Argument("stats", help="Action: stats"),
     ttl_hours: int = typer.Option(24, "--ttl", help="Cache TTL in hours"),
 ):
-    """Manage LLM response cache.
-
-    Actions:
-      stats   - Show cache statistics and hit rate
-      clear   - Clear the entire cache
-      warmup  - Pre-populate cache for common patterns
-    """
-    from .core.cache_manager import get_global_cache
-    from .core.usage_tracker import get_usage_tracker
-
-    cache_obj = get_global_cache()
-    tracker = get_usage_tracker()
-
-    if action == "stats":
-        stats = cache_obj.get_stats()
-        stats_dict = (
-            stats.to_dict()
-            if hasattr(stats, "to_dict")
-            else {
-                "total_entries": getattr(stats, "total_entries", 0),
-                "hit_rate": getattr(stats, "hit_rate", 0),
-            }
-        )
-        usage = tracker.get_stats_summary()
-
-        hit_rate = stats_dict.get("hit_rate", 0)
-        if isinstance(hit_rate, str):
-            hit_rate_str = hit_rate
-        else:
-            hit_rate_str = f"{hit_rate:.1f}%"
-
-        console.print(
-            Panel(
-                f"[accent]Cache Statistics[/accent]\n"
-                f"Total entries: {stats_dict.get('total_entries', 0)}\n"
-                f"Hit rate: {hit_rate_str}\n"
-                f"Saved API calls: {stats_dict.get('saved_api_calls', 0)}\n"
-                f"Est. cost saved: {stats_dict.get('estimated_cost_saved', '$0')}\n\n"
-                f"[accent]API Usage[/accent]\n"
-                f"Total calls: {usage.get('total_calls', 0)}\n"
-                f"Cache hits: {usage.get('cache_hits', 0)}\n"
-                f"Cache rate: {usage.get('cache_rate', '0%')}\n"
-                f"Total tokens: {usage.get('total_tokens', 0):,}",
-                title="Cache & Usage",
-            )
-        )
-    elif action == "clear":
-        if typer.confirm("Clear all cached LLM responses?"):
-            cleared = cache_obj.clear()
-            console.print(f"[success]Cleared {cleared} cache entries[/success]")
-        else:
-            console.print("[dim]Cancelled[/dim]")
-
-    elif action == "warmup":
-        console.print("[dim]Warming up cache...[/dim]")
-        console.print("[dim]Warmup not yet implemented (coming soon)[/dim]")
-
-    else:
-        console.print(f"[error]Unknown action: {action}[/error]")
+    """LLM response cache (not available in minimal build)."""
+    console.print("[dim]Cache module not included in this build. Use full AgentIC for cache support.[/dim]")
 
 
-@app.command("checkpoint")
+@app.command("checkpoint", rich_help_panel="⚙️ Configuration & Management")
 def checkpoint(
     design: str = typer.Option(..., "--design", "-d", help="Design name"),
     action: str = typer.Option("list", "--action", "-a", help="Action: list, restore, clear"),
@@ -248,7 +233,7 @@ def checkpoint(
             console.print("[dim]Cancelled[/dim]")
 
 
-@app.command("usage")
+@app.command("usage", rich_help_panel="⚙️ Configuration & Management")
 def usage(
     days: int = typer.Option(7, "--days", "-d", help="Number of days to analyze"),
     build: str = typer.Option(None, "--build", "-b", help="Filter by build name"),
@@ -256,105 +241,32 @@ def usage(
         "summary", "--format", "-f", help="Format: summary, detailed, provider"
     ),
 ):
-    """Show API usage statistics and cost analysis."""
-    from .core.usage_tracker import get_usage_tracker
-
-    tracker = get_usage_tracker()
-
-    if format == "summary":
-        stats = tracker.get_stats_summary()
-        console.print(
-            Panel(
-                f"[accent]API Usage Summary[/accent]\n"
-                f"Total calls: {stats.get('total_calls', 0):,}\n"
-                f"Cache hits: {stats.get('cache_hits', 0):,}\n"
-                f"Cache rate: {stats.get('cache_rate', '0%')}\n"
-                f"Total tokens: {stats.get('total_tokens', 0):,}\n"
-                f"Total builds: {stats.get('total_builds', 0)}",
-                title="Usage Summary",
-            )
-        )
-
-    elif format == "detailed":
-        daily = tracker.get_daily_usage(days)
-        if daily:
-            console.print(
-                Panel(
-                    "\n".join(
-                        f"{d['date']} | calls={d['calls']} | tokens={d['tokens']:,} | hit_rate={d['cache_hit_rate']}"
-                        for d in daily
-                    ),
-                    title=f"Daily Usage (Last {days} Days)",
-                )
-            )
-        else:
-            console.print("[dim]No usage data found[/dim]")
-
-    elif format == "provider":
-        providers = tracker.get_provider_comparison()
-        if providers:
-            console.print(
-                Panel(
-                    "\n".join(
-                        f"[accent]{p['provider']}[/accent] | calls={p['calls']} | "
-                        f"latency={p['avg_latency_ms']}ms | error_rate={p['error_rate']}"
-                        for p in providers
-                    ),
-                    title="Provider Comparison",
-                )
-            )
-        else:
-            console.print("[dim]No provider data found[/dim]")
-
-    else:
-        console.print(f"[error]Unknown format: {format}[/error]")
+    """Show API usage statistics (not available in minimal build)."""
+    console.print("[dim]Usage tracker not included in this build. Use full AgentIC for usage stats.[/dim]")
 
 
-@app.command("knowledge")
+@app.command("knowledge", rich_help_panel="⚙️ Configuration & Management")
 def knowledge(
     query: str = typer.Argument(..., help="Hardware/EDA topic to retrieve context for"),
-    stage: str = typer.Option("", "--stage", help="Pipeline stage hint, e.g. rtl, formal, timing"),
+    stage: str = typer.Option("", "--stage", help="Pipeline stage hint"),
     pdk: str = typer.Option("", "--pdk", help="Target PDK hint"),
-    domain: str = typer.Option("", "--domain", help="VLSI domain filter: rtl, timing, power, physical_design, verification, analog, device_physics"),
+    domain: str = typer.Option("", "--domain", help="VLSI domain filter"),
     limit: int = typer.Option(4, "--limit", min=1, max=12, help="Number of chunks to retrieve"),
-    vector: bool = typer.Option(False, "--vector", "-v", help="Use vector search instead of lexical"),
+    vector: bool = typer.Option(False, "--vector", "-v", help="Use vector search"),
 ):
-    """Query the VLSI knowledge base for chip design information."""
-    if vector:
-        from .core.vlsi_rag import VLSIKnowledgeBase
-        kb = VLSIKnowledgeBase()
-        context = kb.build_context(
-            query=query,
-            stage=stage,
-            target_pdk=pdk,
-            top_k=limit,
-        )
-    else:
-        from .core.hardware_knowledge import HardwareKnowledgeBase
-        kb = HardwareKnowledgeBase()
-        context = kb.build_context(query=query, stage=stage, target_pdk=pdk, limit=limit)
-    if not context:
-        console.print("[warning]No knowledge chunks matched that query.[/warning]")
-        return
-    console.print(Panel(context, title="VLSI Knowledge Retrieval"))
+    """Query VLSI knowledge base (not available in minimal build)."""
+    console.print("[dim]VLSI knowledge base not included in this build. Use full AgentIC for RAG support.[/dim]")
 
 
-@app.command("knowledge-ingest")
+@app.command("knowledge-ingest", rich_help_panel="⚙️ Configuration & Management")
 def knowledge_ingest(
     path: str = typer.Argument(..., help="File or directory to ingest"),
-    source_type: str = typer.Option("auto", "--type", "-t", help="Source type: book, pdk_doc, pdk_spice, pdk_liberty, pdk_verilog, paper, user_doc"),
-    pdk: str = typer.Option("", "--pdk", help="PDK name if ingesting PDK files"),
+    source_type: str = typer.Option("auto", "--type", "-t", help="Source type"),
+    pdk: str = typer.Option("", "--pdk", help="PDK name"),
     recursive: bool = typer.Option(False, "--recursive", "-r", help="Scan directories recursively"),
 ):
-    """Ingest files into the VLSI vector knowledge base."""
-    from .core.vlsi_rag import VLSIKnowledgeBase
-    kb = VLSIKnowledgeBase()
-    path_obj = Path(path)
-    if not path_obj.exists():
-        console.print(f"[error]Path not found: {path}[/error]")
-        raise typer.Exit(1)
-
-    files = []
+    """Ingest files into VLSI knowledge base (not available in minimal build)."""
+    console.print("[dim]Knowledge ingestion not included in this build. Use full AgentIC.[/dim]")
     if path_obj.is_file():
         files = [path_obj]
     elif path_obj.is_dir():
@@ -374,20 +286,10 @@ def knowledge_ingest(
     console.print(f"[success]Ingested {count} file(s) into VLSI knowledge base.[/success]")
 
 
-@app.command("knowledge-stats")
+@app.command("knowledge-stats", rich_help_panel="⚙️ Configuration & Management")
 def knowledge_stats():
-    """Show statistics about the VLSI knowledge base."""
-    from .core.vlsi_rag import VLSIKnowledgeBase
-    kb = VLSIKnowledgeBase()
-    stats = kb.stats()
-    if "error" in stats:
-        console.print(f"[error]{stats['error']}[/error]")
-        return
-    lines = [
-        f"Total chunks: {stats['total_chunks']}",
-        f"Vector dimension: {stats['vector_dim']}",
-        f"Embedding model: {stats['embedding_model']}",
-        f"DB path: {stats['db_path']}",
+    """Show VLSI knowledge base statistics (not available in minimal build)."""
+    console.print("[dim]VLSI knowledge base not included in this build.[/dim]")
     ]
     if stats.get("domains"):
         lines.append(f"\nDomains: {', '.join(f'{k}={v}' for k, v in stats['domains'].items())}")
@@ -398,7 +300,7 @@ def knowledge_stats():
     console.print(Panel("\n".join(lines), title="VLSI Knowledge Base Stats"))
 
 
-@app.command("corpus")
+@app.command("corpus", rich_help_panel="⚙️ Configuration & Management")
 def corpus(
     output: str = typer.Option(
         "training/rtl_corpus.jsonl",
@@ -413,22 +315,12 @@ def corpus(
         help="Additional/specific root to scan. Repeat by running multiple exports if needed.",
     ),
 ):
-    """Build a local RTL JSONL corpus for domain-specific training/evaluation."""
-    from .core.rtl_corpus import RTLCorpusBuilder
-
-    roots = [root] if root else None
-    summary = RTLCorpusBuilder(roots=roots).export_jsonl(output, limit=limit)
-    console.print(
-        Panel(
-            f"Records: [success]{summary['records']}[/success]\n"
-            f"Output: [info]{summary['output']}[/info]\n"
-            f"Roots: {', '.join(summary['roots'])}",
-            title="RTL Corpus Export",
-        )
+    """Build a local RTL JSONL corpus (not available in minimal build)."""
+    console.print("[dim]RTL corpus builder not included in this build.[/dim]")
     )
 
 
-@app.command("capabilities")
+@app.command("capabilities", rich_help_panel="⚙️ Configuration & Management")
 def capabilities(json_output: bool = typer.Option(False, "--json", help="Print JSON")):
     """Show detected GPU and EDA tool capabilities."""
     from .core.eda_capabilities import detect_eda_capabilities
@@ -458,7 +350,7 @@ console = Console(theme=claude_theme, force_terminal=True, color_system="256")
 # Legacy path for license-based credentials (packaged binary)
 CREDENTIALS_FILE = os.path.expanduser("~/.agentic/credentials.json")
 
-__version__ = "3.0.4"
+__version__ = "1.0.0"
 
 BANNER = """[bold orange1]
   █████╗  ██████╗ ███████╗███╗   ██╗████████╗██╗ ██████╗ 
@@ -476,8 +368,9 @@ def _print_banner():
     console.print(BANNER, highlight=False)
     console.print(
         Panel(
-            f"[dim]The Autonomous Silicon Compiler[/dim]\n"
-            f"[accent]v{__version__} | Natural Language to GDSII | Self-Healing Pipeline[/accent]",
+            f"[dim]One-Stop OSS VLSI EDA Tool Installer[/dim]\n"
+            f"[accent]v{__version__} | Install • Build • Verify[/accent]\n\n"
+            f"[info]Run [bold]agentic install[/bold] to set up the complete open-source EDA toolchain.[/info]",
             border_style="#8f8a80",
             padding=(0, 2),
         )
@@ -968,7 +861,7 @@ def verify_license():
     _apply_runtime_keys(data)
 
 
-@app.command()
+@app.command(rich_help_panel="🔧 Installation & Setup")
 def login():
     """Authenticate and configure AgentIC credentials interactively."""
     from .config import (
@@ -1180,7 +1073,7 @@ def login():
     )
 
 
-@app.command()
+@app.command(rich_help_panel="🔧 Installation & Setup")
 def configure():
     """Interactive setup wizard — configure LLM API keys for AgentIC.
 
@@ -1322,7 +1215,7 @@ def configure():
     )
 
 
-@app.command()
+@app.command(rich_help_panel="🔧 Installation & Setup")
 def doctor():
     """Validate local runtime, toolchain, saved credentials, and pipeline recovery for CLI builds."""
     import shutil
@@ -1493,7 +1386,7 @@ def doctor():
     console.print("\n[info]To install a PDK:[/info] [accent]agentic install-pdk list[/accent]")
 
 
-@app.command("node-contract")
+@app.command("node-contract", rich_help_panel="⚙️ Configuration & Management")
 def node_contract(
     pdk: str = typer.Option("", "--pdk", help="PDK profile/name to inspect; defaults to active PDK"),
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
@@ -1551,7 +1444,7 @@ def node_contract(
             console.print(f"  - {note}")
 
 
-@app.command("flow-profiles")
+@app.command("flow-profiles", rich_help_panel="⚙️ Configuration & Management")
 def flow_profiles(
     json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
 ):
@@ -2443,7 +2336,13 @@ def _refresh_runtime_external_tool_paths() -> None:
         pass
 
 
-def _install_docker_image(image: str, *, label: str, force: bool = False) -> bool:
+def _install_docker_image(
+    image: str,
+    *,
+    label: str,
+    force: bool = False,
+    install_command: str = "agentic install-openlane",
+) -> bool:
     """Ensure a Docker image used by AgentIC hardening is available."""
     import shutil
     import subprocess
@@ -2454,7 +2353,7 @@ def _install_docker_image(image: str, *, label: str, force: bool = False) -> boo
             Panel(
                 f"Docker is required for AgentIC's {label} hardening backend.\n"
                 "Install Docker, start the daemon, then run:\n\n"
-                f"  agentic install-openlane --image {image}",
+                f"  {install_command}",
                 title="Docker Not Found",
                 border_style="error",
             )
@@ -2495,12 +2394,22 @@ def _install_docker_image(image: str, *, label: str, force: bool = False) -> boo
 
 def _install_openlane_docker_image(image: str = OPENLANE_IMAGE, force: bool = False) -> bool:
     """Ensure the OpenLane v1 Docker image used for hardening is available."""
-    return _install_docker_image(image, label="OpenLane 1", force=force)
+    return _install_docker_image(
+        image,
+        label="OpenLane 1",
+        force=force,
+        install_command=f"agentic install-openlane --image {image}",
+    )
 
 
 def _install_orfs_docker_image(image: str = ORFS_IMAGE, force: bool = False) -> bool:
     """Ensure the ORFS Docker image used for non-OpenLane PDKs is available."""
-    return _install_docker_image(image, label="ORFS", force=force)
+    return _install_docker_image(
+        image,
+        label="ORFS",
+        force=force,
+        install_command="agentic install-orfs",
+    )
 
 
 def _install_orfs(
@@ -2597,10 +2506,12 @@ def _prepare_orfs_agentic_design(orfs_root: str, platform: str, design: str, clo
             target.write_bytes(rtl.read_bytes())
 
     sdc_path = design_cfg_dir / "constraint.sdc"
-    sdc_path.write_text(
-        f"create_clock -name clk -period {clock_period:g} [get_ports clk]\n",
-        encoding="utf-8",
-    )
+    custom_sdc = Path(OPENLANE_ROOT) / "designs" / design / "constraints.sdc"
+    if custom_sdc.exists():
+        sdc_content = custom_sdc.read_text(encoding="utf-8").replace("{CLOCK_PERIOD}", f"{clock_period:g}")
+    else:
+        sdc_content = f"create_clock -name clk -period {clock_period:g} [get_ports clk]\n"
+    sdc_path.write_text(sdc_content, encoding="utf-8")
 
     rel_rtl = " ".join(f"$(DESIGN_HOME)/src/{design}/{path.name}" for path in rtl_files)
     config_path = design_cfg_dir / "config.mk"
@@ -2918,7 +2829,7 @@ def _magic_version_ok(binary: str, minimum: tuple[int, int, int] = (8, 3, 411)) 
     return version >= minimum
 
 
-@app.command("install-signoff-tools")
+@app.command("install-signoff-tools", rich_help_panel="🔧 Installation & Setup")
 def install_signoff_tools(
     prefix: str = typer.Option(
         os.path.expanduser("~/eda"),
@@ -3171,7 +3082,7 @@ def install_signoff_tools(
     )
 
 
-@app.command("install-oss")
+@app.command("install-oss", rich_help_panel="🔧 Installation & Setup")
 def install_oss(
     target_dir: str = typer.Option(
         os.path.expanduser("~/oss-cad-suite"),
@@ -3213,7 +3124,7 @@ def install_oss(
     console.print("[success]OSS CAD Suite setup complete.[/success]")
 
 
-@app.command("install-openlane")
+@app.command("install-openlane", rich_help_panel="🔧 Installation & Setup")
 def install_openlane(
     backend: str = typer.Option(
         OPENLANE_BACKEND_DEFAULT,
@@ -3244,7 +3155,7 @@ def install_openlane(
         raise typer.BadParameter("--backend must be one of: openlane1, docker")
 
 
-@app.command("install-orfs")
+@app.command("install-orfs", rich_help_panel="🔧 Installation & Setup")
 def install_orfs(
     root: str = typer.Option(
         ORFS_ROOT,
@@ -3263,7 +3174,7 @@ def install_orfs(
     _install_orfs(root=root, setup_asap7=setup_asap7, force=force, pull_image=not skip_docker_image)
 
 
-@app.command("setup-7nm")
+@app.command("setup-7nm", rich_help_panel="🔧 Installation & Setup")
 def setup_7nm(
     root: str = typer.Option(
         ORFS_ROOT,
@@ -3286,7 +3197,7 @@ def setup_7nm(
     )
 
 
-@app.command("run-orfs")
+@app.command("run-orfs", rich_help_panel="🏭 Chip Design & Build")
 def run_orfs(
     platform: str = typer.Option("asap7", "--platform", help="ORFS platform, e.g. asap7 or sky130hd"),
     design: str = typer.Option("gcd", "--design", help="ORFS design name or AgentIC design name"),
@@ -3326,8 +3237,13 @@ def run_orfs(
         "-u", f"{os.getuid()}:{os.getgid()}",
         "-v", f"{os.path.join(root, 'flow')}:/OpenROAD-flow-scripts/flow:Z",
         "-w", "/OpenROAD-flow-scripts/flow",
-        "openroad/orfs:latest",
-        "make", f"DESIGN_CONFIG=./{rel_config}"
+        ORFS_IMAGE,
+        "make", f"DESIGN_CONFIG=./{rel_config}",
+        "YOSYS_EXE=/usr/local/bin/yosys",
+        "OPENROAD_EXE=/OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad",
+        "TCLSH_EXE=/usr/bin/tclsh",
+        "MAGIC_EXE=/usr/bin/magic",
+        "KLAYOUT_EXE=/usr/bin/klayout"
     ]
 
     if dry_run:
@@ -3355,18 +3271,63 @@ def run_orfs(
             console.print(f"[accent]Running ORFS:[/accent] cd {os.path.join(root, 'flow')} && {' '.join(cmd)}")
             console.print(f"[dim]Logging output to: {orfs_log_path}[/dim]")
             
+            from rich.progress import Progress, SpinnerColumn, TextColumn
+            
             with open(orfs_log_path, "w") as log_f:
-                result = subprocess.run(
-                    cmd,
-                    cwd=os.path.join(root, "flow"),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=7200,
-                )
-                log_f.write(result.stdout)
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                    transient=False,
+                ) as progress:
+                    task_id = progress.add_task("[accent]Starting ORFS...[/accent]", total=None)
+                    
+                    process = subprocess.Popen(
+                        cmd,
+                        cwd=os.path.join(root, "flow"),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    
+                    full_output = []
+                    for line in process.stdout:
+                        log_f.write(line)
+                        log_f.flush()
+                        full_output.append(line)
+                        
+                        line_stripped = line.strip()
+                        if not line_stripped or line_stripped.startswith("make["):
+                            continue
+                            
+                        # Update spinner based on ORFS log keywords
+                        lower_line = line_stripped.lower()
+                        if "synth" in lower_line or "yosys" in lower_line:
+                            progress.update(task_id, description=f"[accent]Synthesis[/accent] [dim]{line_stripped[:80]}[/dim]")
+                        elif "floorplan" in lower_line or "tapcell" in lower_line or "pdn" in lower_line:
+                            progress.update(task_id, description=f"[accent]Floorplanning[/accent] [dim]{line_stripped[:80]}[/dim]")
+                        elif "place_gp" in lower_line or "place_dp" in lower_line or "placement" in lower_line:
+                            progress.update(task_id, description=f"[accent]Placement[/accent] [dim]{line_stripped[:80]}[/dim]")
+                        elif "cts" in lower_line or "clock" in lower_line:
+                            progress.update(task_id, description=f"[accent]Clock Tree Synthesis[/accent] [dim]{line_stripped[:80]}[/dim]")
+                        elif "route" in lower_line:
+                            progress.update(task_id, description=f"[accent]Routing[/accent] [dim]{line_stripped[:80]}[/dim]")
+                        elif "signoff" in lower_line or "magic" in lower_line or "drc" in lower_line:
+                            progress.update(task_id, description=f"[accent]Signoff[/accent] [dim]{line_stripped[:80]}[/dim]")
+                        elif not line_stripped.startswith("[INFO"):
+                            progress.update(task_id, description=f"[accent]Running ORFS[/accent] [dim]{line_stripped[:80]}[/dim]")
+                            
+                    process.wait()
+                    
+                    class ORFSResult:
+                        def __init__(self, returncode, stdout):
+                            self.returncode = returncode
+                            self.stdout = stdout
+                            
+                    result = ORFSResult(process.returncode, "".join(full_output))
                 
-                # Also stream a bit to the console for the user to see it isn't hanging
+                # Stream a bit to the console for the user to see the error context
                 if result.returncode != 0:
                     tail = "\n".join(result.stdout.splitlines()[-20:])
                     console.print(f"[dim]{tail}[/dim]")
@@ -3534,7 +3495,7 @@ def run_orfs(
         console.print(f"[success]Restarting ORFS Make with repaired RTL...[/success]")
 
 
-@app.command("install-experimental-tools")
+@app.command("install-experimental-tools", rich_help_panel="🔧 Installation & Setup")
 def install_experimental_tools(
     fault_image: str = typer.Option(
         "ghcr.io/aucohl/fault:latest",
@@ -3552,8 +3513,9 @@ def install_experimental_tools(
     )
 
 
-@app.command("setup")
-@app.command("setup-cli")
+@app.command("setup", rich_help_panel="🔧 Installation & Setup")
+@app.command("setup-cli", rich_help_panel="🔧 Installation & Setup")
+@app.command("install", rich_help_panel="🔧 Installation & Setup")
 def setup_cli(
     target_dir: str = typer.Option(
         os.path.expanduser("~/oss-cad-suite"),
@@ -3572,7 +3534,7 @@ def setup_cli(
         help="Comma-separated Volare/OpenLane PDKs to install, or 'all-open-auto' for recommended auto-installable PDKs",
     ),
     skip_oss: bool = typer.Option(False, "--skip-oss", help="Skip OSS CAD Suite install"),
-    skip_openlane: bool = typer.Option(False, "--skip-openlane", help="Skip Docker/OpenLane image pull"),
+    skip_openlane: bool = typer.Option(False, "--skip-openlane", help="Skip Docker/OpenLane and ORFS image pull"),
     skip_signoff_tools: bool = typer.Option(
         False,
         "--skip-signoff-tools",
@@ -3617,7 +3579,7 @@ def setup_cli(
     )
 
 
-@app.command("install-tools")
+@app.command("install-tools", rich_help_panel="🔧 Installation & Setup")
 def install_tools(
     target_dir: str = typer.Option(
         os.path.expanduser("~/oss-cad-suite"),
@@ -3643,7 +3605,7 @@ def install_tools(
     skip_hardening: bool = typer.Option(
         False,
         "--skip-hardening",
-        help="Skip Docker/OpenLane image setup",
+        help="Skip Docker/OpenLane and ORFS image setup",
     ),
     skip_signoff_tools: bool = typer.Option(
         False,
@@ -3684,6 +3646,7 @@ def install_tools(
     """One-shot setup: install OSS CAD Suite, signoff tools, experimental helpers, Docker/OpenLane, volare, PDKs, and shell env.
 
     Examples:
+        agentic install
         agentic install-tools
         agentic setup-cli --pdks sky130,gf180mcu
         agentic setup-cli --pdks all-open-auto
@@ -3792,7 +3755,7 @@ def install_tools(
                 f"[accent]Step {hardening_step}/{total_steps}: Docker/OpenLane Hardening Backend[/accent]\n"
                 f"OpenLane 1 image: {openlane_image}\n"
                 f"ORFS image: {orfs_image}",
-                title="Installing OpenLane",
+                title="Installing Hardening Images",
             )
         )
         _install_openlane_docker_image(image=openlane_image, force=False)
@@ -3939,7 +3902,7 @@ def install_tools(
     )
 
 
-@app.command("install-pdk")
+@app.command("install-pdk", rich_help_panel="🔧 Installation & Setup")
 def install_pdk(
     pdk_name: str = typer.Argument(
         None,
@@ -4512,14 +4475,14 @@ def run_startup_diagnostics(strict: bool = True):
             raise typer.Exit(1)
 
 
-@app.command()
+@app.command(rich_help_panel="🏭 Chip Design & Build")
 def simulate(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
     max_retries: int = typer.Option(
         5, "--max-retries", "-r", min=0, help="Max auto-fix retries for failures"
     ),
     show_thinking: bool = typer.Option(
-        True, "--show-thinking", help="Print DeepSeek <think> reasoning"
+        False, "--show-thinking", help="Print DeepSeek <think> reasoning"
     ),
 ):
     """Run simulation on an existing design with AUTO-FIX loop and self-healing recovery."""
@@ -4785,11 +4748,52 @@ def _extract_sdc_clock(sdc_path: str) -> float:
     return 0.0
 
 
-def _prompt_for_pdk_choice(detected: dict, title: str = "🔧 Select Target PDK") -> str:
+def _normalize_cli_pdk_key(value: str) -> str:
+    key = os.path.basename(str(value or "").strip()).lower()
+    key = key.replace("_", "-").replace(" ", "-")
+    return PDK_INSTALL_ALIASES.get(key, key)
+
+
+def _preferred_detected_pdk(detected: dict) -> str:
+    """Pick a humane default for interactive prompts without silently selecting it."""
+    if not detected:
+        return ""
+
+    env_candidates = [
+        os.environ.get("PDK_PROFILE", ""),
+        os.environ.get("PDK", ""),
+        PDK,
+        "sky130",
+    ]
+    for raw in env_candidates:
+        raw_key = _normalize_cli_pdk_key(raw)
+        if raw_key in detected:
+            return raw_key
+        for name, info in detected.items():
+            if _normalize_cli_pdk_key(str(info.get("pdk", ""))) == raw_key:
+                return name
+
+    return sorted(detected.keys())[0]
+
+
+def _interactive_stdin_available() -> bool:
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
+def _prompt_for_pdk_choice(
+    detected: dict,
+    title: str = "🔧 Select Target PDK",
+    default_profile: str = "",
+) -> str:
     """Ask the user to choose from detected PDK profiles."""
     from rich.table import Table
 
     pdk_options = sorted(detected.keys())
+    if not pdk_options:
+        raise typer.BadParameter("No detected PDKs are available to choose from.")
+    default_profile = default_profile or _preferred_detected_pdk(detected)
+    default_idx = pdk_options.index(default_profile) if default_profile in pdk_options else 0
+    default_num = default_idx + 1
     table = Table(
         title=title,
         show_lines=True,
@@ -4814,18 +4818,54 @@ def _prompt_for_pdk_choice(detected: dict, title: str = "🔧 Select Target PDK"
         )
     console.print(table)
 
-    prompt = f"Select PDK [1-{len(pdk_options)}] (or press Enter for {pdk_options[0]}): "
-    choice = typer.prompt(prompt, default="1").strip()
+    prompt = (
+        f"Select PDK [1-{len(pdk_options)}] "
+        f"(or press Enter for {pdk_options[default_idx]}): "
+    )
+    choice = typer.prompt(prompt, default=str(default_num)).strip()
     try:
         idx = int(choice) - 1
-        selected = pdk_options[idx] if 0 <= idx < len(pdk_options) else pdk_options[0]
+        selected = pdk_options[idx] if 0 <= idx < len(pdk_options) else pdk_options[default_idx]
     except ValueError:
-        selected = pdk_options[0]
+        selected = pdk_options[default_idx]
     console.print(
         f"[success]Selected: {selected} — "
         f"{detected[selected].get('description', '')}[/success]"
     )
     return selected
+
+
+def _select_detected_pdk_for_build(detected: dict, *, json_output: bool = False) -> str:
+    """Resolve omitted --pdk for build without silent multi-PDK defaults."""
+    if not detected:
+        return ""
+    if len(detected) == 1:
+        selected = next(iter(detected.keys()))
+        if not json_output:
+            console.print(
+                f"[info]Using only detected PDK: {selected} "
+                f"({detected[selected].get('pdk', selected)})[/info]"
+            )
+        return selected
+    if _interactive_stdin_available() and not json_output:
+        return _prompt_for_pdk_choice(
+            detected,
+            title="🔧 Select Target PDK for Build",
+            default_profile=_preferred_detected_pdk(detected),
+        )
+    available = ", ".join(sorted(detected.keys()))
+    console.print(
+        Panel(
+            "[error]Multiple PDKs are installed, but this build is running without an interactive PDK selection prompt.[/error]\n\n"
+            f"Detected PDKs: [info]{available}[/info]\n\n"
+            "Re-run with an explicit target, for example:\n"
+            "  [accent]agentic build --pdk sky130 --name ... --desc ...[/accent]\n\n"
+            "AgentIC will not silently choose one PDK when --pdk is omitted.",
+            title="PDK Selection Required",
+            border_style="error",
+        )
+    )
+    raise typer.Exit(1)
 
 
 def _apply_harden_fix(
@@ -4883,7 +4923,7 @@ def _apply_harden_fix(
         return die_size, util, clock_period, f"Unknown error pattern — retrying"
 
 
-@app.command()
+@app.command(rich_help_panel="🏭 Chip Design & Build")
 def harden(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
     pdk: str = typer.Option("", "--pdk", help="Target PDK/profile for hardening; defaults to config.tcl or active PDK"),
@@ -4971,23 +5011,22 @@ def harden(
         console.print(f"[error]✗ RTL file not found: {rtl_file}[/error]")
         raise typer.Exit(1)
 
-    # Config auto-generate if missing (re-generate if recovery in progress)
-    if True:  # Always regenerate to apply recovery params
-        die_size, util, clock_period = 500, 40, 10.0
-        try:
-            with open(rtl_file, "r") as f:
-                rtl_content = f.read()
-            line_count = len(rtl_content.strip().split("\n"))
-        except IOError:
-            line_count = 100
-        if line_count < 100:
-            die_size, util, clock_period = 300, 50, 10.0
-        elif line_count < 300:
-            die_size, util, clock_period = 500, 40, 15.0
-        else:
-            die_size, util, clock_period = 800, 35, 20.0
-        if sdc_clock_ns > 0:
-            clock_period = sdc_clock_ns
+    config_exists_initially = os.path.exists(new_config)
+    die_size, util, clock_period = 500, 40, 10.0
+    try:
+        with open(rtl_file, "r") as f:
+            rtl_content = f.read()
+        line_count = len(rtl_content.strip().split("\n"))
+    except IOError:
+        line_count = 100
+    if line_count < 100:
+        die_size, util, clock_period = 300, 50, 10.0
+    elif line_count < 300:
+        die_size, util, clock_period = 500, 40, 15.0
+    else:
+        die_size, util, clock_period = 800, 35, 20.0
+    if sdc_clock_ns > 0:
+        clock_period = sdc_clock_ns
 
     # Init error fixer
     ol_fixer = OpenLaneErrorFixer()
@@ -5016,47 +5055,53 @@ def harden(
             )
 
         if attempt == 0:
-            console.print("  [accent]AgentIC is analyzing RTL to autonomously generate OpenLane config...[/accent]")
-            llm = get_llm()
-            
-            with open(rtl_file, "r") as f:
-                rtl_content = f.read()
+            if config_exists_initially:
+                with open(new_config, "r") as f:
+                    base_config_content = f.read()
+                config_content = base_config_content
+                console.print(f"  ✓ Using existing config: [success]{new_config}[/success]")
+            else:
+                console.print("  [accent]AgentIC is analyzing RTL to autonomously generate OpenLane config...[/accent]")
+                llm = get_llm()
                 
-            import glob
-            src_dir = os.path.dirname(rtl_file)
-            v_files = []
-            for f_path in glob.glob(os.path.join(src_dir, "*.v")):
-                if not f_path.endswith("_tb.v"):
-                    v_files.append(f"$::env(DESIGN_DIR)/src/{os.path.basename(f_path)}")
-            verilog_files_str = " ".join(v_files)
-            # Pre-fetch entire PDK knowledge base from Qdrant
-            rag_context = ""
-            try:
-                import requests
-                res = requests.post("http://localhost:6333/collections/vlsi_knowledge/points/scroll", json={
-                    "limit": 200,
-                    "with_payload": True
-                }, timeout=5)
-                if res.status_code == 200:
-                    hits = res.json().get("result", {}).get("points", [])
-                    pdk_tokens = {
-                        selected_pdk.lower(),
-                        selected_profile.lower(),
-                        requested_pdk.lower(),
-                    }
-                    filtered = []
-                    for h in hits:
-                        payload = h.get("payload", {}) or {}
-                        text = str(payload.get("text", "") or "")
-                        tags = " ".join(str(payload.get(k, "") or "") for k in ("pdk", "node", "profile"))
-                        haystack = f"{text} {tags}".lower()
-                        if any(token and token in haystack for token in pdk_tokens):
-                            filtered.append(f"- {text}")
-                    rag_context = "\n".join(filtered)
-            except Exception:
-                pass
-
-            prompt = f"""You are an expert VLSI physical design engineer. Write an OpenLane 1 config.tcl for the design '{name}'.
+                with open(rtl_file, "r") as f:
+                    rtl_content = f.read()
+                    
+                import glob
+                src_dir = os.path.dirname(rtl_file)
+                v_files = []
+                for f_path in glob.glob(os.path.join(src_dir, "*.v")):
+                    if not f_path.endswith("_tb.v"):
+                        v_files.append(f"$::env(DESIGN_DIR)/src/{os.path.basename(f_path)}")
+                verilog_files_str = " ".join(v_files)
+                # Pre-fetch entire PDK knowledge base from Qdrant
+                rag_context = ""
+                try:
+                    import requests
+                    res = requests.post("http://localhost:6333/collections/vlsi_knowledge/points/scroll", json={
+                        "limit": 200,
+                        "with_payload": True
+                    }, timeout=5)
+                    if res.status_code == 200:
+                        hits = res.json().get("result", {}).get("points", [])
+                        pdk_tokens = {
+                            selected_pdk.lower(),
+                            selected_profile.lower(),
+                            requested_pdk.lower(),
+                        }
+                        filtered = []
+                        for h in hits:
+                            payload = h.get("payload", {}) or {}
+                            text = str(payload.get("text", "") or "")
+                            tags = " ".join(str(payload.get(k, "") or "") for k in ("pdk", "node", "profile"))
+                            haystack = f"{text} {tags}".lower()
+                            if any(token and token in haystack for token in pdk_tokens):
+                                filtered.append(f"- {text}")
+                        rag_context = "\n".join(filtered)
+                except Exception:
+                    pass
+    
+                prompt = f"""You are an expert VLSI physical design engineer. Write an OpenLane 1 config.tcl for the design '{name}'.
 The selected PDK is '{selected_pdk}' (profile '{selected_profile}'). Every physical/timing/library assumption must come from this selected PDK only.
 Here is the RTL code:
 ```verilog
@@ -5079,58 +5124,60 @@ CRITICAL: Do NOT use inline comments (e.g., `set var val # comment`). Inline com
 
 Output ONLY the config.tcl code wrapped in ```tcl fences. Do not output anything else.
 """
-            llm_response = llm.call([{"role": "user", "content": prompt}])
-            
-            match = re.search(r"```(?:tcl)?\n(.*?)\n```", llm_response, re.DOTALL | re.IGNORECASE)
-            if match:
-                base_config_content = match.group(1).strip()
-            else:
-                console.print("  [warning]LLM failed to output config block. Falling back to heuristic.[/warning]")
-                base_config_content = _generate_config_tcl(
-                    name,
-                    rtl_file,
-                    sdc_clock_ns=clock_period,
-                    pdk_name=selected_pdk,
-                )
+                llm_response = llm.call([{"role": "user", "content": prompt}])
                 
-            config_content = base_config_content
+                match = re.search(r"```(?:tcl)?\n(.*?)\n```", llm_response, re.DOTALL | re.IGNORECASE)
+                if match:
+                    base_config_content = match.group(1).strip()
+                else:
+                    console.print("  [warning]LLM failed to output config block. Falling back to heuristic.[/warning]")
+                    base_config_content = _generate_config_tcl(
+                        name,
+                        rtl_file,
+                        sdc_clock_ns=clock_period,
+                        pdk_name=selected_pdk,
+                    )
+                    
+                config_content = base_config_content
         else:
             config_content = base_config_content
 
         # Override parameters if recovery modified them
-        config_content = re.sub(
-            r'set ::env\(DIE_AREA\)\s+"[\d\s]+"',
-            f'set ::env(DIE_AREA) "0 0 {die_size} {die_size}"',
-            config_content,
-        )
-        config_content = re.sub(
-            r'set ::env\(FP_CORE_UTIL\)\s+[\d.]+',
-            f'set ::env(FP_CORE_UTIL) {util}',
-            config_content,
-        )
-        config_content = re.sub(
-            r'set ::env\(CLOCK_PERIOD\)\s+"[\d.]+"',
-            f'set ::env(CLOCK_PERIOD) "{clock_period}"',
-            config_content,
-        )
-        if re.search(r"set\s+::env\(PDK\)\s+", config_content):
+        if attempt > 0 or not config_exists_initially:
             config_content = re.sub(
-                r'set\s+::env\(PDK\)\s+"?[^"\n#\s]+"?',
-                f'set ::env(PDK) "{selected_pdk}"',
+                r'set ::env\(DIE_AREA\)\s+"[\d\s]+"',
+                f'set ::env(DIE_AREA) "0 0 {die_size} {die_size}"',
                 config_content,
             )
-        else:
-            config_content += f'\nset ::env(PDK) "{selected_pdk}"\n'
-
-        os.makedirs(os.path.dirname(new_config), exist_ok=True)
-        with open(new_config, "w") as f:
-            f.write(config_content)
-        if attempt == 0:
-            console.print(f"  ✓ Config generated: [success]{new_config}[/success]")
-        else:
-            console.print(
-                f"  ✓ Config regenerated: die={die_size}um, util={util}%, clk={clock_period}ns"
+            config_content = re.sub(
+                r'set ::env\(FP_CORE_UTIL\)\s+[\d.]+',
+                f'set ::env(FP_CORE_UTIL) {util}',
+                config_content,
             )
+            config_content = re.sub(
+                r'set ::env\(CLOCK_PERIOD\)\s+"[\d.]+"',
+                f'set ::env(CLOCK_PERIOD) "{clock_period}"',
+                config_content,
+            )
+            if re.search(r"set\s+::env\(PDK\)\s+", config_content):
+                config_content = re.sub(
+                    r'set\s+::env\(PDK\)\s+"?[^"\n#\s]+"?',
+                    f'set ::env(PDK) "{selected_pdk}"',
+                    config_content,
+                )
+            else:
+                config_content += f'\nset ::env(PDK) "{selected_pdk}"\n'
+    
+            os.makedirs(os.path.dirname(new_config), exist_ok=True)
+            with open(new_config, "w") as f:
+                f.write(config_content)
+                
+            if attempt == 0:
+                console.print(f"  ✓ Config generated: [success]{new_config}[/success]")
+            else:
+                console.print(
+                    f"  ✓ Config regenerated: die={die_size}um, util={util}%, clk={clock_period}ns"
+                )
 
         # Run OpenLane
         ol_success, ol_result = run_openlane(name, background=run_bg, pdk_name=selected_pdk)
@@ -5274,7 +5321,7 @@ Rewrite the config.tcl to fix the error using the provided PDK rules. Output ONL
 
 
 # --- THE BUILD COMMAND ---
-@app.command()
+@app.command(rich_help_panel="🏭 Chip Design & Build")
 def build(
     name: str = typer.Option(..., "--name", "-n", help="Design name (e.g., counter)"),
     desc: str = typer.Option(..., "--desc", "-d", help="Natural language description"),
@@ -5494,7 +5541,7 @@ def build(
                 )
                 raise typer.Exit(1)
     elif detected:
-        pdk_profile = _prompt_for_pdk_choice(detected)
+        pdk_profile = _select_detected_pdk_for_build(detected, json_output=json_output)
     else:
         # No PDK detected anywhere
         console.print(
@@ -5705,7 +5752,7 @@ def build(
         )
 
 
-@app.command("spice")
+@app.command("spice", rich_help_panel="🏭 Chip Design & Build")
 def spice(
     layout_gds: str = typer.Argument(..., help="Existing GDS layout to extract and simulate"),
     output_dir: str = typer.Option("", "--output-dir", "-o", help="Directory for SPICE artifacts"),
@@ -5786,7 +5833,7 @@ def spice(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(rich_help_panel="🏭 Chip Design & Build")
 def verify(name: str = typer.Argument(..., help="Design name to verify")):
     """Run verification on an existing design."""
     verify_license()
@@ -5798,7 +5845,7 @@ def verify(name: str = typer.Argument(..., help="Design name to verify")):
 # --- PRODUCTION CLI COMMANDS ---
 
 
-@app.command("synth")
+@app.command("synth", rich_help_panel="🏭 Chip Design & Build")
 def synth(
     rtl_file: str = typer.Option(
         ...,
@@ -5891,7 +5938,7 @@ def synth(
         )
 
 
-@app.command("sta")
+@app.command("sta", rich_help_panel="🏭 Chip Design & Build")
 def sta(
     netlist: str = typer.Option(
         ..., "--netlist", "-n", help="Gate-level Verilog netlist (must be exact path)"
@@ -6001,7 +6048,7 @@ def sta(
             raise typer.Exit(1)
 
 
-@app.command("dft")
+@app.command("dft", rich_help_panel="🏭 Chip Design & Build")
 def dft(
     rtl_file: str = typer.Option(
         ...,
@@ -6093,7 +6140,7 @@ def dft(
         raise typer.Exit(1)
 
 
-@app.command("power")
+@app.command("power", rich_help_panel="🏭 Chip Design & Build")
 def power(
     netlist: str = typer.Option(
         ..., "--netlist", "-n", help="Gate-level Verilog netlist (must be exact path)"
@@ -6182,7 +6229,7 @@ def power(
         )
 
 
-@app.command("drc")
+@app.command("drc", rich_help_panel="🏭 Chip Design & Build")
 def drc(
     gds: str = typer.Option(..., "--gds", "-g", help="GDSII layout file (must be exact path)"),
     tech: str = typer.Option(
@@ -6255,7 +6302,7 @@ def drc(
         raise typer.Exit(1)
 
 
-@app.command("lvs")
+@app.command("lvs", rich_help_panel="🏭 Chip Design & Build")
 def lvs(
     schematic: str = typer.Option(
         ..., "--sch", "-s", help="Schematic netlist (Verilog) (must be exact path)"
@@ -6336,7 +6383,7 @@ def lvs(
         raise typer.Exit(1)
 
 
-@app.command("report")
+@app.command("report", rich_help_panel="🏭 Chip Design & Build")
 def report(
     design: str = typer.Option(..., "--design", "-d", help="Design name"),
     output_dir: str = typer.Option("./reports", "--out", "-o", help="Output directory"),
@@ -6355,21 +6402,28 @@ def report(
     os.makedirs(output_dir, exist_ok=True)
     import csv
     
-    # Locate metrics.csv
+    # Locate metrics.csv — try specified run_dir, then latest run by mtime
     metrics_path = ""
     if run_dir and os.path.exists(os.path.join(run_dir, "reports", "metrics.csv")):
         metrics_path = os.path.join(run_dir, "reports", "metrics.csv")
     elif run_dir and os.path.exists(os.path.join(run_dir, "metrics.csv")):
         metrics_path = os.path.join(run_dir, "metrics.csv")
-    elif os.path.exists(f"./runs/agentrun/reports/metrics.csv"):
-        metrics_path = f"./runs/agentrun/reports/metrics.csv"
     else:
-        # Fallback to OPENLANE_ROOT
         from .tools.vlsi_tools import OPENLANE_ROOT
-        default_path = f"{OPENLANE_ROOT}/designs/{design}/runs/agentrun/reports/metrics.csv"
-        if os.path.exists(default_path):
-            metrics_path = default_path
-            
+        base_runs = f"{OPENLANE_ROOT}/designs/{design}/runs"
+        if os.path.isdir(base_runs):
+            run_dirs = [
+                d for d in os.listdir(base_runs)
+                if os.path.isdir(os.path.join(base_runs, d))
+            ]
+            if run_dirs:
+                latest = max(
+                    run_dirs,
+                    key=lambda d: os.path.getmtime(os.path.join(base_runs, d)),
+                )
+                candidate = os.path.join(base_runs, latest, "reports", "metrics.csv")
+                if os.path.exists(candidate):
+                    metrics_path = candidate
     if not metrics_path or not os.path.exists(metrics_path):
         console.print(f"[error]Error: metrics.csv not found for design {design}. Specify --run-dir.[/error]")
         raise typer.Exit(1)
@@ -6424,7 +6478,20 @@ def report(
                 actual_gds_path = os.path.join(run_dir, "results", "signoff", f"{design}.gds")
             else:
                 from .tools.vlsi_tools import OPENLANE_ROOT
-                actual_gds_path = os.path.join(OPENLANE_ROOT, "designs", design, "runs", "agentrun", "results", "signoff", f"{design}.gds")
+                base_runs = os.path.join(OPENLANE_ROOT, "designs", design, "runs")
+                if os.path.isdir(base_runs):
+                    run_dirs = [
+                        d for d in os.listdir(base_runs)
+                        if os.path.isdir(os.path.join(base_runs, d))
+                    ]
+                    if run_dirs:
+                        latest = max(
+                            run_dirs,
+                            key=lambda d: os.path.getmtime(os.path.join(base_runs, d)),
+                        )
+                        gds_candidate = os.path.join(base_runs, latest, "results", "signoff", f"{design}.gds")
+                        if os.path.exists(gds_candidate):
+                            actual_gds_path = gds_candidate
                 
             physical_data = {
                 "drc_violations": int(float(data.get("Magic_violations", 0))),

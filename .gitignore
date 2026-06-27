@@ -41,7 +41,7 @@ work/
 transcript
 temp_*.svg
 designs/*/src/sim
-
+spice
 # Databases
 agentic_jobs.db
 *.db
@@ -57,7 +57,7 @@ artifacts/
 *.def
 *.spef
 *.vcd
-
+rv64_superscalar
 # OSS CAD Suite (large binary toolchain - download separately)
 oss-cad-suite/
 oss-cad-suite-*.tgz

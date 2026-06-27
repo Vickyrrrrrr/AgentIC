@@ -57,10 +57,7 @@ from .core import (
 from .core.graceful_degradation import GracefulDegradation, get_degradation_handler
 from .core.context_manager import TokenBudgetManager, DynamicTokenBudget
 from .core.checkpoint_manager import CheckpointManager, AutomaticCheckpointTrigger
-from .core.usage_tracker import UsageTracker, get_usage_tracker
 from .core.incremental_fixer import IncrementalFixEngine, ErrorAnalysis, ErrorType
-from .core.hardware_knowledge import HardwareKnowledgeBase
-from .core.vlsi_rag import VLSIKnowledgeBase
 from .core.macro_registry import (
     MacroPlacement,
     MacroManifest,
@@ -71,7 +68,6 @@ from .core.macro_registry import (
     validate_macro_manifest,
 )
 from .core.soc_lint import lint_soc_rtl
-from .tools.retrieval_tool import vlsi_search, vlsi_ask, pdk_rule_lookup, expand_abbr
 from .core.context_evolution import MultiAgentContextEvolver
 from .core.eda_capabilities import detect_eda_capabilities
 from .core.flow_capabilities import resolve_flow_profile
@@ -131,6 +127,7 @@ from .tools.vlsi_tools import (
     run_tb_static_contract_check,
     run_tb_compile_gate,
     validate_rtl_hierarchy_contract,
+    quarantine_duplicate_top_modules,
     repair_tb_for_verilator,
     get_coverage_thresholds,
     run_gls_simulation,
@@ -281,9 +278,27 @@ def extract_verilog_safely(raw_llm_text: str) -> str:
     return text.strip()
 
 
+def sanitize_verilog_artifact(raw_llm_text: str) -> str:
+    """Clean LLM Verilog artifacts, including incomplete markdown fences."""
+    code = extract_verilog_safely(raw_llm_text)
+    cleaned_lines = []
+    for line in (code or "").splitlines():
+        stripped = line.strip().lower()
+        if stripped in {
+            "```",
+            "```verilog",
+            "```systemverilog",
+            "```sv",
+            "```v",
+        }:
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
 def validate_llm_code_output(raw: str) -> bool:
     """Return True if *raw* looks like valid Verilog/SystemVerilog code."""
-    extracted = extract_verilog_safely(raw)
+    extracted = sanitize_verilog_artifact(raw)
     if not extracted:
         return False
 
@@ -305,7 +320,7 @@ def extract_and_validate_llm_code(raw: str) -> Tuple[bool, str]:
     if raw is None:
         return False, ""
 
-    extracted = extract_verilog_safely(raw)
+    extracted = sanitize_verilog_artifact(raw)
     is_valid = False
 
     if extracted and "module" in extracted and "endmodule" in extracted:
@@ -566,12 +581,9 @@ class BuildOrchestrator:
         self.errors: List[str] = []  # List of error messages
 
         self.degradation = get_degradation_handler()
-        self.usage_tracker = get_usage_tracker()
         self.checkpoint_manager = CheckpointManager(name)
         self.checkpoint_trigger = AutomaticCheckpointTrigger(self.checkpoint_manager)
         self.incremental_fixer = IncrementalFixEngine()
-        self.hardware_kb = HardwareKnowledgeBase()
-        self.vlsi_kb = VLSIKnowledgeBase()
         self.context_evolver = MultiAgentContextEvolver()
         self.eda_capabilities = detect_eda_capabilities()
         self.artifacts["eda_capabilities"] = self.eda_capabilities.to_dict()
@@ -665,16 +677,6 @@ class BuildOrchestrator:
             err = exec_result.error or "Unknown error"
             self.logger.error(f"CrewAI call failed: {err}")
             self.log(f"CrewAI call failed: {err}", refined=True)
-
-        self.usage_tracker.record_call(
-            provider=provider,
-            model=model,
-            cache_hit=exec_result.cache_hit,
-            duration_ms=int(exec_result.total_wait_seconds * 1000),
-            success=exec_result.success,
-            build_name=self.name,
-            stage=self.state.name,
-        )
 
         return result
 
@@ -1202,6 +1204,342 @@ class BuildOrchestrator:
             self.global_retry_count += 1
         return count
 
+    def _stage_recovery_params(self) -> Dict[str, Any]:
+        floor_meta = self.artifacts.get("floorplan_meta", {}) or {}
+        die_w, die_h = self._coerce_die_dimensions(
+            self.artifacts.get("die_area_override") or floor_meta.get("die_area", 500),
+            fallback=500,
+        )
+        return {
+            "clock_period": float(
+                self.artifacts.get(
+                    "clock_period_override",
+                    self.artifacts.get(
+                        "sdc_clock_period_ns",
+                        self.pdk_profile.get("default_clock_period", 10.0),
+                    ),
+                )
+            ),
+            "die_area": max(die_w, die_h),
+            "die_width": die_w,
+            "die_height": die_h,
+            "core_util": int(float(self.artifacts.get("core_util_override") or floor_meta.get("utilization", 40))),
+            "synth_strategy": self.artifacts.get("synth_strategy_override", "AREA 0"),
+            "run_tag": self.artifacts.get("run_tag", "agentrun"),
+        }
+
+    def _recent_design_log_context(self, *, max_files: int = 8, max_chars: int = 12000) -> str:
+        design_root = os.path.join(OPENLANE_ROOT, "designs", self.name)
+        if not os.path.isdir(design_root):
+            return ""
+        candidates: List[Tuple[float, str]] = []
+        for root, _dirs, files in os.walk(design_root):
+            for filename in files:
+                if not filename.lower().endswith((".log", ".rpt", ".txt")):
+                    continue
+                path = os.path.join(root, filename)
+                try:
+                    candidates.append((os.path.getmtime(path), path))
+                except OSError:
+                    continue
+        chunks = []
+        remaining = max_chars
+        for _mtime, path in sorted(candidates, reverse=True)[:max_files]:
+            if remaining <= 0:
+                break
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            excerpt = text[-min(remaining, 2000):]
+            remaining -= len(excerpt)
+            chunks.append(f"--- {path} ---\n{excerpt}")
+        return "\n\n".join(chunks)
+
+    def _stage_from_recovery_action(
+        self,
+        action: RecoveryAction,
+        *,
+        retry_state: BuildState,
+        fallback_state: BuildState,
+    ) -> BuildState:
+        if action in (RecoveryAction.FIX_RTL, RecoveryAction.PIPELINE_CRITICAL):
+            return retry_state
+        if action in (RecoveryAction.REGEN_SDC,):
+            return BuildState.SDC_GEN
+        if action in (
+            RecoveryAction.RELAX_CLOCK,
+            RecoveryAction.EXPAND_AREA,
+            RecoveryAction.REDUCE_UTIL,
+            RecoveryAction.REGEN_CONFIG,
+        ):
+            return BuildState.FLOORPLAN
+        if action == RecoveryAction.SWITCH_STRATEGY:
+            return BuildState.SYNTHESIS
+        if action == RecoveryAction.RETRY_SAME:
+            return self.state
+        return fallback_state
+
+    def _apply_vlsi_recovery(
+        self,
+        *,
+        stage_name: str,
+        error_text: str,
+        retry_state: BuildState,
+        fallback_state: BuildState,
+        structured_errors: Optional[List[Dict[str, Any]]] = None,
+        allow_rtl_fix: bool = True,
+        max_attempts: int = 3,
+    ) -> bool:
+        retry_key = f"{stage_name.lower()}_vlsi_supervisor_recovery"
+        attempts = int(self.retry_metadata.get(retry_key, 0))
+        if attempts >= max_attempts:
+            self.log(
+                f"VLSI supervisor recovery budget exhausted for {stage_name} ({attempts}/{max_attempts}).",
+                refined=True,
+            )
+            return False
+
+        full_error = error_text
+        if structured_errors:
+            full_error += "\n\nSTRUCTURED_ERRORS:\n" + json.dumps(structured_errors[:20], indent=2, default=str)
+
+        stage_params = self._stage_recovery_params()
+        recovery_stage = "TIMING_ANALYSIS" if stage_name == "TIMING" else stage_name
+        recovery = self.pipeline_recovery.handle_error(
+            stage_name=recovery_stage,
+            error_output=full_error,
+            rtl_code=self.artifacts.get("rtl_code", ""),
+            stage_params=stage_params,
+            allow_rtl_fix=allow_rtl_fix,
+        )
+        if not recovery or recovery.action == RecoveryAction.FAIL:
+            return False
+
+        self._record_retry(retry_key, consume_global=False)
+        updated_params = apply_recovery_result(self, recovery, stage_params)
+        self.artifacts["vlsi_supervisor_last_recovery"] = {
+            "stage": stage_name,
+            "attempt": attempts + 1,
+            "action": recovery.action.value,
+            "description": recovery.description,
+            "params": updated_params,
+            "confidence": recovery.confidence,
+        }
+        self._record_stage_contract(
+            StageResult(
+                stage=stage_name,
+                status=StageStatus.RETRY,
+                producer="agent_vlsi_supervisor",
+                failure_class=infer_failure_class(raw_output=full_error),
+                consumable_payload=self.artifacts["vlsi_supervisor_last_recovery"],
+                diagnostics=[recovery.description],
+                artifacts_written=["vlsi_supervisor_last_recovery"],
+                next_action=recovery.action.value,
+            )
+        )
+
+        next_state = self._stage_from_recovery_action(
+            recovery.action,
+            retry_state=retry_state,
+            fallback_state=fallback_state,
+        )
+        self.log(
+            f"VLSI supervisor applied {recovery.action.value}; rerouting to {next_state.name}.",
+            refined=True,
+        )
+        self.transition(next_state, preserve_retries=True)
+        return True
+
+    @staticmethod
+    def _is_eda_tool_invocation_failure(error_text: str) -> bool:
+        text = error_text or ""
+        patterns = (
+            r"Invalid option:",
+            r"Unknown option:",
+            r"unrecognized option",
+            r"unsupported option",
+            r"command not found",
+            r"not found\. Please install",
+            r"No such file or directory.*(?:verilator|yosys|openroad|magic|netgen|sta)",
+            r"Permission denied.*(?:verilator|yosys|openroad|magic|netgen|sta)",
+        )
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+    def _run_pipeline_supervisor_react(self, stage_name: str, error_text: str) -> AgentResult:
+        """Use a VLSI-aware ReAct supervisor to classify the failing layer.
+
+        This supervisor is intentionally read/diagnose/reroute oriented. RTL edits
+        still happen in the dedicated RTL_FIX loop where candidate code is validated.
+        """
+        agent = ReActAgent(
+            llm=self.get_llm_for_role("fixer"),
+            role="Pipeline Failure Supervisor",
+            max_steps=5,
+            verbose=self.verbose,
+        )
+
+        def _stage_context(_: str) -> str:
+            payload = {
+                "design": self.name,
+                "state": self.state.name,
+                "stage": stage_name,
+                "pdk": self._selected_pdk_profile_name(),
+                "flow_profile": getattr(self.flow_profile, "name", None)
+                if hasattr(self, "flow_profile")
+                else None,
+                "last_stage_result": self.artifacts.get("last_stage_result", {}),
+                "backend_error_analysis": self.artifacts.get("backend_error_analysis", {}),
+                "retry_metadata": self.retry_metadata,
+                "rtl_path": self.artifacts.get("rtl_path", ""),
+            }
+            return json.dumps(payload, indent=2, default=str)[:6000]
+
+        def _classify_failure(_: str) -> str:
+            analysis = self.incremental_fixer.analyze_error(
+                error_text=error_text,
+                rtl_code=self.artifacts.get("rtl_code", ""),
+            )
+            payload = {
+                "failure_class": infer_failure_class(raw_output=error_text).value,
+                "incremental_error_type": analysis.error_type.value
+                if hasattr(analysis.error_type, "value")
+                else str(analysis.error_type),
+                "fix_confidence": analysis.fix_confidence,
+                "is_tool_invocation_failure": self._is_eda_tool_invocation_failure(error_text),
+                "signals": analysis.signals_mentioned[:10],
+                "modules": analysis.modules_mentioned[:10],
+                "recommended_strategy": analysis.recommended_strategy,
+            }
+            return json.dumps(payload, indent=2)
+
+        def _syntax_check_current(_: str) -> str:
+            rtl_path = self.artifacts.get("rtl_path", "")
+            if not rtl_path:
+                return "No rtl_path artifact is available."
+            ok, report = run_syntax_check(rtl_path)
+            return json.dumps({"ok": ok, "report": report}, indent=2)
+
+        def _recent_logs(_: str) -> str:
+            return self._recent_design_log_context()
+
+        def _recovery_plan(_: str) -> str:
+            stage_params = self._stage_recovery_params()
+            analysis = self.incremental_fixer.analyze_error(
+                error_text=error_text[:8000],
+                rtl_code=self.artifacts.get("rtl_code", ""),
+            )
+            categories = self.pipeline_recovery.ol_fixer.classify(error_text)
+            attempt = int(self.retry_metadata.get(f"{stage_name.lower()}_vlsi_supervisor_recovery", 0))
+            if stage_name in {"HARDENING", "FLOORPLAN", "SYNTHESIS", "TIMING_ANALYSIS", "TIMING"}:
+                recovery = self.pipeline_recovery.ol_fixer.get_fix(categories, stage_params, attempt)
+            elif analysis.fix_confidence >= 0.45 and not self._is_eda_tool_invocation_failure(error_text):
+                recovery = RecoveryResult(
+                    RecoveryAction.FIX_RTL,
+                    f"RTL-level error ({analysis.error_type}) - route to RTL repair",
+                    {"error_type": str(analysis.error_type), "recommended_strategy": analysis.recommended_strategy},
+                    confidence=analysis.fix_confidence,
+                )
+            else:
+                recovery = RecoveryResult(
+                    RecoveryAction.RETRY_SAME,
+                    "No bounded repair found; rerun or inspect logs.",
+                    {},
+                    confidence=0.35,
+                )
+            if not recovery:
+                return json.dumps({"action": "none", "reason": "unclassified"}, indent=2)
+            payload = {
+                "error_type": analysis.error_type.value if hasattr(analysis.error_type, "value") else str(analysis.error_type),
+                "categories": categories,
+                "action": recovery.action.value,
+                "description": recovery.description,
+                "params": recovery.params,
+                "confidence": recovery.confidence,
+                "needs_rtl_fix": recovery.needs_rtl_fix,
+                "needs_sdc_regen": recovery.needs_sdc_regen,
+                "needs_config_regen": recovery.needs_config_regen,
+            }
+            return json.dumps(payload, indent=2, default=str)
+
+        agent.register_tool(
+            "stage_context",
+            "Return current AgentIC stage, artifacts, retry metadata, PDK, and flow profile.",
+            _stage_context,
+        )
+        agent.register_tool(
+            "classify_failure",
+            "Classify the error as RTL, testbench, EDA tool invocation, PDK/collateral, floorplan, timing, or unknown.",
+            _classify_failure,
+        )
+        agent.register_tool(
+            "syntax_check_current",
+            "Rerun the configured syntax checker on the current RTL artifact and return the raw result.",
+            _syntax_check_current,
+        )
+        agent.register_tool(
+            "recent_logs",
+            "Search and return recent design log/report excerpts from the current AgentIC build directory.",
+            _recent_logs,
+        )
+        agent.register_tool(
+            "recovery_plan",
+            "Ask AgentIC's deterministic VLSI recovery engine for a bounded repair action and parameters.",
+            _recovery_plan,
+        )
+
+        trace = agent.run(
+            task=(
+                "Diagnose this AgentIC pipeline failure as a principal VLSI build supervisor. "
+                "Use the tools to inspect context/logs and request a deterministic recovery plan. "
+                "Find the exact failing layer before recommending any fix. "
+                "If the failure is a tool invocation/configuration problem, do not recommend RTL edits. "
+                "If it is RTL, name the likely file/module/signal and route to RTL_FIX. "
+                "Final Answer must be JSON only with keys: failure_layer, root_cause, "
+                "exact_fix, recommended_next_action, recovery_action, rerun_stage, confidence."
+            ),
+            context=f"STAGE: {stage_name}\nERROR:\n{error_text[:8000]}",
+        )
+
+        payload = extract_json_object(trace.final_answer) or {
+            "failure_layer": "unknown",
+            "root_cause": trace.final_answer[:1000],
+            "exact_fix": "",
+            "recommended_next_action": "inspect_logs",
+            "recovery_action": "",
+            "rerun_stage": stage_name,
+            "confidence": "low",
+        }
+        result = AgentResult(
+            agent="PipelineSupervisorReAct",
+            ok=bool(payload),
+            producer="agent_pipeline_supervisor",
+            payload=payload,
+            diagnostics=[] if payload else ["Pipeline supervisor did not return JSON."],
+            failure_class=infer_failure_class(raw_output=error_text),
+            raw_output=trace.to_json(),
+        )
+        self._set_artifact(
+            "pipeline_supervisor_last_result",
+            result.to_dict(),
+            producer="agent_pipeline_supervisor",
+            consumer=stage_name,
+        )
+        self._record_stage_contract(
+            StageResult(
+                stage=stage_name,
+                status=StageStatus.RETRY,
+                producer="agent_pipeline_supervisor",
+                failure_class=result.failure_class,
+                consumable_payload=payload,
+                diagnostics=[str(payload.get("root_cause", ""))[:500]],
+                artifacts_written=["pipeline_supervisor_last_result"],
+                next_action=str(payload.get("recommended_next_action", "")),
+            )
+        )
+        return result
+
     def _attempt_backend_error_recovery(
         self,
         stage_name: str,
@@ -1239,7 +1577,7 @@ class BuildOrchestrator:
             if hasattr(analysis.error_type, "value")
             else str(analysis.error_type),
             "fix_confidence": analysis.fix_confidence,
-            "is_surgical": analysis.is_surgical,
+            "is_local_fix": analysis.is_local_fix,
             "signals": analysis.signals_mentioned[:10],
             "modules": analysis.modules_mentioned[:10],
             "strategy": analysis.recommended_strategy,
@@ -1247,6 +1585,24 @@ class BuildOrchestrator:
         }
         if structured_errors is not None:
             self.artifacts[f"{stage_name.lower()}_structured_errors"] = structured_errors
+
+        supervisor_result = self._run_pipeline_supervisor_react(stage_name, error_text)
+        supervisor_payload = supervisor_result.payload or {}
+        supervisor_action = str(
+            supervisor_payload.get("recommended_next_action", "")
+        ).lower()
+        supervisor_recovery_action = str(supervisor_payload.get("recovery_action", "")).lower()
+
+        if self._apply_vlsi_recovery(
+            stage_name=stage_name,
+            error_text=error_text,
+            retry_state=retry_state,
+            fallback_state=fallback_state,
+            structured_errors=structured_errors,
+            allow_rtl_fix=True,
+            max_attempts=max_attempts,
+        ):
+            return True
 
         non_rtl_error_types = {ErrorType.UNKNOWN_TOOL_ERROR}
         if retry_state == BuildState.RTL_GEN:
@@ -1258,9 +1614,17 @@ class BuildOrchestrator:
             )
             return False
 
-        if analysis.error_type in non_rtl_error_types:
+        if (
+            analysis.error_type in non_rtl_error_types
+            or self._is_eda_tool_invocation_failure(error_text)
+            or "tool" in supervisor_action
+            or "inspect_logs" in supervisor_action
+            or supervisor_recovery_action in {"retry_same", "fail"}
+        ):
             self.log(
-                f"{stage_name} failure classified as {analysis.error_type.value}; not retrying RTL generation.",
+                f"{stage_name} failure classified outside RTL repair "
+                f"(type={analysis.error_type.value}, supervisor={supervisor_action or 'n/a'}); "
+                f"not retrying RTL generation.",
                 refined=True,
             )
             return False
@@ -1320,8 +1684,45 @@ class BuildOrchestrator:
     def _extract_module_names(code: str) -> List[str]:
         return re.findall(r"\bmodule\s+([A-Za-z_]\w*)", code or "")
 
+    @staticmethod
+    def _extract_instantiated_module_names(code: str) -> List[str]:
+        """Return likely user module names instantiated by RTL code."""
+        primitive_or_keyword = {
+            "assign", "always", "always_comb", "always_ff", "always_latch",
+            "and", "or", "xor", "xnor", "nand", "nor", "not", "buf",
+            "if", "else", "for", "while", "do", "repeat", "forever",
+            "case", "casex", "casez", "generate", "begin", "end", "endcase", "endgenerate",
+            "function", "task", "return", "break", "continue", "initial", "final",
+            "endmodule", "assert", "assume", "cover", "property",
+            "input", "output", "inout", "wire", "reg", "logic",
+        }
+        clean = re.sub(r"/\*[\s\S]*?\*/", "", code or "")
+        clean = re.sub(r"//.*", "", clean)
+        instances = []
+        inst_re = re.compile(
+            r"^\s*([A-Za-z_]\w*)\s*(?:#\s*\([^;]*?\)\s*)?([A-Za-z_]\w*)\s*\(",
+            flags=re.MULTILINE,
+        )
+        for child, _instance in inst_re.findall(clean):
+            if child not in primitive_or_keyword and child != "module":
+                instances.append(child)
+        return sorted(set(instances))
+
     def _is_hierarchical_design(self, code: str) -> bool:
         return len(self._extract_module_names(code)) > 1
+
+    @staticmethod
+    def _artifact_dict(value: Any) -> Dict[str, Any]:
+        """Normalize artifact payloads that may be stored as dicts or JSON strings."""
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
     def _validate_rtl_candidate(self, candidate_code: str, previous_code: str) -> List[str]:
         issues: List[str] = []
@@ -1329,14 +1730,84 @@ class BuildOrchestrator:
             issues.append("RTL candidate is not valid Verilog/SystemVerilog code output.")
             return issues
         modules = self._extract_module_names(candidate_code)
+
+        # CRITICAL: Validate that no hallucinated module names are introduced.
+        # The LLM fixer commonly invents names like "macro_storage", "macro_wrapper",
+        # "memory_macro" etc. which don't exist in the spec and cause undefined_submodule errors.
+        # All modules in the candidate must either be the top-level design, or exist as known
+        # sub-modules (from the SID spec, or already on disk).
+        _hallucinated_blacklist = {
+            "macro_storage", "macro_wrapper", "memory_macro", "sram_wrapper",
+            "rom_wrapper", "black_box", "unknown_macro",
+        }
+        _spec_sub_modules = set()
+        _sid = self._artifact_dict(self.artifacts.get("sid", {}))
+        _sid_submodules = (
+            _sid.get("sub_modules", [])
+            or _sid.get("submodules", [])
+            or []
+        )
+        for sm in _sid_submodules:
+            if isinstance(sm, dict) and sm.get("name"):
+                _spec_sub_modules.add(sm.get("name", ""))
+        _hw_spec = self._artifact_dict(self.artifacts.get("hw_spec", {}))
+        _hw_submodules = (
+            _hw_spec.get("sub_modules", [])
+            or _hw_spec.get("submodules", [])
+            or []
+        )
+        for sm in _hw_submodules:
+            if isinstance(sm, dict) and sm.get("name"):
+                _spec_sub_modules.add(sm.get("name", ""))
+        _known_subs_from_disk = set()
+        src_dir_check = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if src_dir_check and os.path.isdir(src_dir_check):
+            for f in os.listdir(src_dir_check):
+                if f.endswith((".v", ".sv")) and f != f"{self.name}.v":
+                    _known_subs_from_disk.add(os.path.splitext(f)[0])
+        _instantiated_modules = set(self._extract_instantiated_module_names(previous_code))
+        _valid_module_names = (
+            _spec_sub_modules
+            | _known_subs_from_disk
+            | _instantiated_modules
+            | {self.name}
+        )
+        for mod_name in modules:
+            if mod_name.lower() in _hallucinated_blacklist:
+                issues.append(
+                    f"RTL candidate contains hallucinated module '{mod_name}' "
+                    f"which is not a valid design module. The LLM fixer invented this name. "
+                    f"Remove all references to '{mod_name}' and use only modules from the spec."
+                )
+                return issues
+            if mod_name not in _valid_module_names:
+                issues.append(
+                    f"RTL candidate introduces unknown module '{mod_name}' "
+                    f"that is not in the design spec or on disk. "
+                    f"Valid modules: {sorted(_valid_module_names)}"
+                )
+                return issues
+
         # Hierarchy-aware: if fix only contains sub-modules, that's valid
         if self.name not in modules:
+            target_modules = set(self.artifacts.get("_current_rtl_error_modules") or [])
+            if target_modules and not set(modules).issubset(target_modules):
+                issues.append(
+                    "Sub-module repair targeted the wrong file(s). "
+                    f"Current error modules: {sorted(target_modules)}; "
+                    f"candidate modules: {sorted(modules)}."
+                )
+                return issues
             # Check if ALL modules in candidate exist as known sub-modules
-            known_subs = set(self.artifacts.get("sub_module_rtl", {}).keys())
+            known_subs = (
+                set(self.artifacts.get("sub_module_rtl", {}).keys())
+                | _spec_sub_modules
+                | _instantiated_modules
+            )
             src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
             if src_dir and os.path.isdir(src_dir):
                 for f in os.listdir(src_dir):
-                    if f.endswith(".v") and f != f"{self.name}.v":
+                    if f.endswith((".v", ".sv")) and f != f"{self.name}.v":
                         known_subs.add(os.path.splitext(f)[0])
             if modules and all(m in known_subs for m in modules):
                 for module_name in modules:
@@ -1511,30 +1982,51 @@ class BuildOrchestrator:
 
     def _normalize_react_result(self, trace: Any) -> AgentResult:
         final_answer = getattr(trace, "final_answer", "") or ""
+        tool_observations = [
+            getattr(step, "observation", "")
+            for step in getattr(trace, "steps", [])
+            if getattr(step, "observation", "")
+        ]
         code_match = re.search(
             r"```(?:verilog|systemverilog|sv|v)?\s*(.*?)```",
             final_answer,
             re.DOTALL | re.IGNORECASE,
         )
-        code_str = code_match.group(1).strip() if code_match else final_answer.strip()
+        code_str = sanitize_verilog_artifact(
+            code_match.group(1).strip() if code_match else final_answer.strip()
+        )
         has_code = bool(code_match) or ("module " in code_str and "endmodule" in code_str)
+        last_observation = tool_observations[-1] if tool_observations else ""
+        last_tool_failed = bool(
+            last_observation
+            and re.search(
+                r"(Syntax Errors|\"ok\"\s*:\s*false|\(False,|FAIL|Invalid option:|ERROR:)",
+                last_observation,
+                re.IGNORECASE,
+            )
+            and not re.search(r"(Syntax OK|\"ok\"\s*:\s*true|\(True,|PASS)", last_observation)
+        )
+        ok = has_code and getattr(trace, "success", False) and not last_tool_failed
         payload = {
-            "code": code_str if has_code else "",
-            "self_check_status": "verified" if getattr(trace, "success", False) else "unverified",
-            "tool_observations": [
-                getattr(step, "observation", "")
-                for step in getattr(trace, "steps", [])
-                if getattr(step, "observation", "")
-            ],
-            "final_decision": "accept" if has_code else "fallback",
+            "code": code_str if ok else "",
+            "self_check_status": "verified" if ok else "unverified",
+            "tool_observations": tool_observations,
+            "final_decision": "accept" if ok else "fallback",
         }
-        failure_class = FailureClass.UNKNOWN if has_code else FailureClass.LLM_FORMAT_ERROR
+        diagnostics = []
+        if not has_code:
+            diagnostics.append("ReAct did not return valid Verilog code.")
+        if has_code and not getattr(trace, "success", False):
+            diagnostics.append("ReAct produced code without completing the ReAct loop.")
+        if last_tool_failed:
+            diagnostics.append("ReAct's last tool observation still failed; rejecting candidate.")
+        failure_class = FailureClass.UNKNOWN if ok else FailureClass.LLM_FORMAT_ERROR
         return AgentResult(
             agent="ReAct",
-            ok=has_code,
+            ok=ok,
             producer="agent_react",
             payload=payload,
-            diagnostics=[] if has_code else ["ReAct did not return valid Verilog code."],
+            diagnostics=diagnostics,
             failure_class=failure_class,
             raw_output=final_answer,
         )
@@ -1676,10 +2168,15 @@ class BuildOrchestrator:
             "\"confidence\":\"low|medium|high\""
             "}"
         )
-        # Call the configured llm_provider
-        from .core.llm_schemas import OutputParser
-        res = self.llm.execute(sys_prompt, error_log)
-        return OutputParser.parse_physical_analysis(res)
+        from ..contracts import extract_json_object
+        res = self.llm.call(
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": error_log},
+            ]
+        )
+        parsed = extract_json_object(str(res))
+        return parsed or {"class": "C", "root_cause": str(res)[:2000], "confidence": "low"}
 
     def _build_llm_context(self, include_rtl: bool = True, mode: Optional[str] = None) -> str:
         """Build cumulative context string for LLM calls.
@@ -1733,39 +2230,6 @@ class BuildOrchestrator:
         if evolved_context:
             self.artifacts["context_evolution"] = evolved.to_dict()
             sections.append(evolved_context)
-
-        rag_query = " ".join(
-            [
-                self.name,
-                self.desc,
-                self.state.name,
-                target_pdk,
-                str(spec)[:1200],
-                str(error)[:800],
-            ]
-        )
-
-        vlsi_context = ""
-        try:
-            vlsi_context = self.vlsi_kb.build_context(
-                query=rag_query,
-                stage=self.state.name,
-                target_pdk=target_pdk,
-                top_k=4,
-            )
-        except Exception as e:
-            self.logger.warning(f"VLSI RAG context build failed: {e}")
-
-        if vlsi_context:
-            sections.append(vlsi_context)
-        else:
-            hardware_context = self.hardware_kb.build_context(
-                query=rag_query,
-                stage=self.state.name,
-                target_pdk=target_pdk,
-            )
-            if hardware_context:
-                sections.append(hardware_context)
 
         if self.eda_capabilities:
             sections.append(self.eda_capabilities.to_prompt())
@@ -2028,9 +2492,53 @@ class BuildOrchestrator:
         # Auto-resume from latest checkpoint if available
         latest = self.checkpoint_manager.load_latest()
         if latest:
+            # STALE CHECKPOINT DETECTION: If the user deleted the design directory
+            # and recreated it, the src/ subdirectory won't exist or will be empty.
+            # In this case, treat it as a fresh start and clear the checkpoint.
+            _design_root = f"{OPENLANE_ROOT}/designs/{self.name}"
+            _src_dir = os.path.join(_design_root, "src")
+            _is_stale = False
+            if os.path.isdir(_src_dir):
+                _v_files = [f for f in os.listdir(_src_dir) if f.endswith(".v")]
+                if not _v_files:
+                    _is_stale = True
+            else:
+                _is_stale = True
+
+            if _is_stale:
+                self.log(
+                    f"Stale checkpoint detected (src/ directory is missing or empty). "
+                    f"Clearing checkpoint and starting fresh. "
+                    f"Use 'agentic checkpoint list -d {self.name}' to manage checkpoints.",
+                    refined=True,
+                )
+                self.checkpoint_manager.clear()
+                self.artifacts["root"] = _design_root
+                self.artifacts["pdk_profile"] = self.pdk_profile
+                diag = startup_self_check()
+                self.artifacts["startup_check"] = diag
+                if self.strict_gates and not diag.get("ok", False):
+                    self.state = BuildState.FAIL
+                    return
+                self.transition(BuildState.SPEC)
+                return
+
             self.log(f"Auto-resuming from checkpoint: {latest.timestamp} | Stage: {latest.state_name}", refined=True)
             self.checkpoint_manager.restore(latest, self)
             self.artifacts["root"] = f"{OPENLANE_ROOT}/designs/{self.name}"
+
+            # CRITICAL: Write restored RTL back to disk so file-based pipeline stages work.
+            # After a redesign/cleanup, the RTL files may not exist on disk even though
+            # the checkpoint has them in memory. Without this, stages like SYNTHESIS or
+            # VERIFICATION that read RTL from file paths will fail with FileNotFoundError.
+            rtl_path = self.artifacts.get("rtl_path", "")
+            rtl_code = self.artifacts.get("rtl_code", "")
+            if rtl_code and rtl_path:
+                os.makedirs(os.path.dirname(rtl_path), exist_ok=True)
+                with open(rtl_path, "w") as f:
+                    f.write(rtl_code)
+                self.log(f"Restored {len(rtl_code)} bytes of RTL to {rtl_path}", refined=True)
+
             return
 
         self.artifacts["pdk_profile"] = self.pdk_profile
@@ -2190,6 +2698,103 @@ SPECIFICATION SECTIONS (Markdown):
             self.artifacts["hw_spec_json"] = hw_spec.to_json()
             self.artifacts["hw_spec_object"] = hw_spec
 
+            # Repair stale or fallback SIDs whose child module interfaces collapsed to clk/rst only.
+            # This is feature-driven rather than design-name-specific: any child module that
+            # clearly represents a requested feature inherits the corresponding functional ports.
+            try:
+                sid_data = json.loads(self.artifacts.get("sid", "{}"))
+                sub_modules = sid_data.get("sub_modules", []) or sid_data.get("submodules", [])
+                top_name = sid_data.get("top_module") or self.name
+                top_mod = next((m for m in sub_modules if m.get("name") == top_name), None)
+                child_mods = [m for m in sub_modules if m.get("name") != top_name]
+                expectations = ArchitectModule._feature_expectations(self.desc)
+                top_ports_by_name = {
+                    p.get("name"): p
+                    for p in (top_mod or {}).get("ports", [])
+                    if isinstance(p, dict) and p.get("name")
+                }
+                hw_submodules = {s.name: s for s in hw_spec.submodules}
+
+                def _hw_width(data_type: str) -> str:
+                    match = re.search(r"\[(.*)\]", str(data_type or ""))
+                    return match.group(0) if match else "1"
+
+                def _port_record_from_hw(hw_p) -> Dict[str, str]:
+                    return {
+                        "name": hw_p.name,
+                        "direction": hw_p.direction,
+                        "width": _hw_width(hw_p.data_type),
+                        "description": hw_p.description or "VLSI required interface port",
+                        "reset_value": "",
+                    }
+
+                def _port_record_from_sid(port_name: str) -> Optional[Dict[str, str]]:
+                    top_port = top_ports_by_name.get(port_name)
+                    if isinstance(top_port, dict):
+                        record = dict(top_port)
+                        record.setdefault("reset_value", "")
+                        return record
+                    for hw_p in hw_spec.ports:
+                        if hw_p.name == port_name:
+                            return _port_record_from_hw(hw_p)
+                    return None
+
+                def _add_missing_ports(child: Dict[str, Any], records: List[Dict[str, str]]) -> int:
+                    child_ports = child.setdefault("ports", [])
+                    child_names = {p.get("name") for p in child_ports if isinstance(p, dict)}
+                    added = 0
+                    for record in records:
+                        name = record.get("name")
+                        if name and name not in child_names:
+                            child_ports.append(record)
+                            child_names.add(name)
+                            added += 1
+                    return added
+
+                repaired_children: List[str] = []
+                for child in child_mods:
+                    child_name = str(child.get("name", ""))
+                    child_text = f"{child_name} {child.get('description', '')} {child.get('functional_logic', '')}".lower()
+                    child_ports = child.setdefault("ports", [])
+                    child_names = {p.get("name") for p in child_ports if isinstance(p, dict)}
+                    non_clock_names = child_names - {
+                        sid_data.get("clock_name", "clk"),
+                        sid_data.get("reset_name", "rst_n"),
+                    }
+
+                    records: List[Dict[str, str]] = []
+                    hw_child = hw_submodules.get(child_name)
+                    if hw_child and hw_child.ports:
+                        records.extend(_port_record_from_hw(p) for p in hw_child.ports)
+
+                    for feature_name, expectation in expectations.items():
+                        if feature_name in child_text or any(term in child_text for term in expectation["terms"]):
+                            for port_name in sorted(expectation["ports"]):
+                                record = _port_record_from_sid(port_name)
+                                if record:
+                                    records.append(record)
+
+                    # If there is exactly one underspecified child, inherit the top functional
+                    # interface as a final generic fallback.
+                    if not records and len(child_mods) == 1 and not non_clock_names:
+                        records.extend(_port_record_from_hw(p) for p in hw_spec.ports)
+
+                    added = _add_missing_ports(child, records)
+                    if added:
+                        repaired_children.append(f"{child_name} (+{added} ports)")
+
+                if repaired_children:
+                    self.artifacts["sid"] = json.dumps(sid_data, indent=2)
+                    sid_path = os.path.join(self.artifacts["root"], "sid_checkpoint.json")
+                    with open(sid_path, "w") as f:
+                        f.write(self.artifacts["sid"])
+                    self.log(
+                        "Repaired SID child interfaces: " + ", ".join(repaired_children),
+                        refined=True,
+                    )
+            except Exception as ex:
+                self.logger.warning(f"Failed to repair SID child interfaces: {ex}")
+
             sid_hw_contract = validate_sid_executable_contract(
                 self.artifacts.get("sid"),
                 design_name=self.name,
@@ -2198,6 +2803,108 @@ SPECIFICATION SECTIONS (Markdown):
             )
             self.artifacts["sid_hw_contract_report"] = sid_hw_contract.to_dict()
             self.artifacts["sid_contract"] = sid_hw_contract.contract
+
+            # --- AUTO REPAIR SID PORTS ---
+            if not sid_hw_contract.ok:
+                missing_ports = []
+                extra_ports = []
+                width_mismatches = []
+                for e in sid_hw_contract.errors:
+                    m1 = re.match(r"HardwareSpec port '([^']+)' is missing from SID top module", e)
+                    if m1:
+                        missing_ports.append(m1.group(1))
+                    m2 = re.match(r"SID top module port '([^']+)' is missing from HardwareSpec", e)
+                    if m2:
+                        extra_ports.append(m2.group(1))
+                    m3 = re.match(
+                        r"Port '([^']+)' width mismatch: SID=\d+ HardwareSpec=\d+",
+                        e,
+                    )
+                    if m3:
+                        width_mismatches.append(m3.group(1))
+                
+                if missing_ports or extra_ports or width_mismatches:
+                    msg = []
+                    if missing_ports: msg.append(f"added {', '.join(missing_ports)}")
+                    if extra_ports: msg.append(f"removed {', '.join(extra_ports)}")
+                    if width_mismatches: msg.append(f"resized {', '.join(width_mismatches)}")
+                    self.log(f"Auto-repairing SID: {' and '.join(msg)}", refined=True)
+                    try:
+                        sid_data = json.loads(self.artifacts.get("sid", "{}"))
+                        top_name = sid_data.get("top_module") or self.name
+                        sub_modules = sid_data.get("sub_modules", []) or sid_data.get("submodules", [])
+                        top_mod = next((m for m in sub_modules if m.get("name") == top_name), None)
+                        if not top_mod and sub_modules:
+                            top_mod = sub_modules[0]
+                        if top_mod:
+                            # Remove extra ports
+                            if extra_ports:
+                                top_mod["ports"] = [p for p in top_mod.get("ports", []) if p.get("name") not in extra_ports]
+                                if "ports" in sid_data:
+                                    if isinstance(sid_data["ports"], list):
+                                        sid_data["ports"] = [p for p in sid_data["ports"] if p.get("name") not in extra_ports]
+                                    elif isinstance(sid_data["ports"], dict):
+                                        for ep in extra_ports:
+                                            sid_data["ports"].pop(ep, None)
+                                # Fix reset_name and clock_name if they were removed
+                                if sid_data.get("reset_name") in extra_ports:
+                                    for mp in missing_ports:
+                                        if "rst" in mp.lower() or "reset" in mp.lower():
+                                            sid_data["reset_name"] = mp
+                                            break
+                                if sid_data.get("clock_name") in extra_ports:
+                                    for mp in missing_ports:
+                                        if "clk" in mp.lower() or "clock" in mp.lower():
+                                            sid_data["clock_name"] = mp
+                                            break
+
+                            hw_ports = {p.name: p for p in hw_spec.ports}
+                            for p_name in missing_ports:
+                                hw_p = hw_ports.get(p_name)
+                                if hw_p:
+                                    width_str = "1"
+                                    if "[" in hw_p.data_type:
+                                        match = re.search(r"\[(.*)\]", hw_p.data_type)
+                                        if match:
+                                            width_str = match.group(0)
+                                    top_mod.setdefault("ports", []).append({
+                                        "name": hw_p.name,
+                                        "direction": hw_p.direction,
+                                        "width": width_str,
+                                        "description": hw_p.description or "Auto-injected VLSI required port"
+                                    })
+                            for p_name in width_mismatches:
+                                hw_p = hw_ports.get(p_name)
+                                if not hw_p:
+                                    continue
+                                width_str = "1"
+                                if "[" in hw_p.data_type:
+                                    match = re.search(r"\[(.*)\]", hw_p.data_type)
+                                    if match:
+                                        width_str = match.group(0)
+                                for sid_port in top_mod.get("ports", []):
+                                    if sid_port.get("name") == p_name:
+                                        sid_port["width"] = width_str
+                                        sid_port["direction"] = hw_p.direction
+                                        break
+                            
+                            # re-serialize and re-validate
+                            self.artifacts["sid"] = json.dumps(sid_data, indent=2)
+                            sid_path = os.path.join(self.artifacts["root"], "sid_checkpoint.json")
+                            with open(sid_path, "w") as f:
+                                f.write(self.artifacts["sid"])
+                            sid_hw_contract = validate_sid_executable_contract(
+                                self.artifacts.get("sid"),
+                                design_name=self.name,
+                                spec_text=self.desc,
+                                hw_spec=hw_spec,
+                            )
+                            self.artifacts["sid_hw_contract_report"] = sid_hw_contract.to_dict()
+                            self.artifacts["sid_contract"] = sid_hw_contract.contract
+                    except Exception as ex:
+                        self.logger.warning(f"Failed to auto-repair SID: {ex}")
+            # -------------------------------
+
             if not sid_hw_contract.ok:
                 self.log("SID/HardwareSpec contract mismatch. Failing before RTL generation.", refined=True)
                 self.logger.error(
@@ -2279,8 +2986,6 @@ SPECIFICATION SECTIONS (Markdown):
 
                     # Prompt user to choose (only if in a real interactive terminal or HITL)
                     import sys
-                    import os
-                    import time
 
                     choice_str = None
                     is_api_server = os.environ.get("AGENTIC_API_SERVER") == "1" or (
@@ -4054,13 +4759,15 @@ endclass
             spec_text = f"Sub-module {design_name} of design {self.name}. Generate complete Verilog implementation."
 
         ports = getattr(node, "ports", [])
+        parameters = getattr(node, "parameters", [])
         port_contract = ""
-        if ports:
+        if ports or parameters:
             port_contract = (
                 "\nCRITICAL INTERFACE CONTRACT:\n"
-                "YOU MUST EXACTLY MATCH THIS JSON INTERFACE CONTRACT FOR YOUR PORTS. "
-                "DO NOT ADD OR REMOVE PORTS. DO NOT CHANGE BIT-WIDTHS.\n"
-                f"{json.dumps(ports, indent=2)}\n"
+                "YOU MUST EXACTLY MATCH THIS JSON INTERFACE CONTRACT FOR YOUR PORTS AND PARAMETERS. "
+                "DO NOT ADD OR REMOVE PORTS/PARAMETERS. DO NOT CHANGE BIT-WIDTHS.\n"
+                f"PORTS:\n{json.dumps(ports, indent=2) if ports else '[]'}\n"
+                f"PARAMETERS:\n{json.dumps(parameters, indent=2) if parameters else '[]'}\n"
             )
 
         deps = [str(d) for d in node.dependencies]
@@ -4075,6 +4782,27 @@ endclass
             if dep_rtls:
                 dep_context = "\n\nDependent modules (already generated):\n" + "\n".join(dep_rtls)
 
+        sibling_contract = ""
+        try:
+            sibling_summaries = []
+            for other_name, other_node in sorted(graph.nodes.items()):
+                if other_name == design_name:
+                    continue
+                sibling_summaries.append(
+                    {
+                        "name": other_name,
+                        "description": getattr(other_node, "description", "") or getattr(other_node, "spec", ""),
+                        "ports": getattr(other_node, "ports", []),
+                    }
+                )
+            if sibling_summaries:
+                sibling_contract = (
+                    "\nSIBLING MODULE CONTRACTS (use these to keep cross-module encodings and handshakes consistent):\n"
+                    f"{json.dumps(sibling_summaries, indent=2)[:6000]}\n"
+                )
+        except Exception:
+            sibling_contract = ""
+
         agent = Agent(
             role="Sub-Module RTL Designer",
             goal=f"Generate complete, synthesizable Verilog for sub-module {design_name}",
@@ -4086,16 +4814,22 @@ endclass
             verbose=False,
         )
 
+        top_level_rule = ""
+        if design_name == self.name:
+            top_level_rule = "\n- CRITICAL TOP-LEVEL RULE: This is the top-level module. It MUST be purely structural. You are ONLY allowed to declare wires and instantiate sub-modules. DO NOT write any `always` blocks or behavioral logic here."
+
         task = Task(
             description=f"""Generate the Verilog implementation for sub-module '{design_name}'.
 
 Specification:
 {spec_text}
 {dep_context}
+{sibling_contract}
 
 Requirements:
-- Module name MUST be exactly: {design_name}
+- Module name MUST be exactly: {design_name}{top_level_rule}
 - Use the exact SID/HWSpec port contract for this sub-module. Include clock/reset only when that contract requires them.
+- If this module produces or consumes encoded control signals used by another sub-module, its encoding semantics MUST match the sibling contract exactly. Prefer named localparams/enums and keep comments aligned with actual behavior.
 - NEVER use Verilog reserved words as port or signal names: config, supply0, supply1, table, library, design, instance, cell, use
 {port_contract}- Output ONLY raw Verilog in a ```verilog fence. No explanation text.
 """,
@@ -4118,7 +4852,7 @@ Requirements:
         )
 
     def _generate_top_stub_from_spec(self) -> str:
-        spec = self.artifacts.get("hw_spec", {}) or {}
+        spec = self._artifact_dict(self.artifacts.get("hw_spec", {}))
         ports = spec.get("ports", []) or []
         if not ports:
             return self._generate_stub_module(self.name)
@@ -4159,7 +4893,7 @@ Requirements:
 
     def _iter_hw_spec_submodules(self, spec: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Return all submodules from the reconciled hardware spec, including nested specs."""
-        spec = spec or self.artifacts.get("hw_spec", {}) or {}
+        spec = self._artifact_dict(spec if spec is not None else self.artifacts.get("hw_spec", {}))
         found: List[Dict[str, Any]] = []
 
         def visit(item: Dict[str, Any]) -> None:
@@ -4674,7 +5408,8 @@ undriven outputs, and Verilator-incompatible constructs. You verify that:
 3. Width mismatches are flagged
 4. Module name matches the design name
 5. No placeholders or TODO comments remain
-6. NO PROSE: Output ONLY pure Verilog code. Do NOT include any conversational text, explanations, or reasoning inside or outside the Verilog code blocks.
+6. No signal, including top-level outputs, is driven by both a submodule connection and procedural reset/clock logic. If an output is registered, the submodule must drive an internal wire and only the register block may drive the external output.
+7. NO PROSE: Output ONLY pure Verilog code. Do NOT include any conversational text, explanations, or reasoning inside or outside the Verilog code blocks.
 You return the FINAL corrected code in ```verilog``` fences.""",
                 llm=self.get_llm_for_role("designer"),
                 verbose=False,
@@ -4693,7 +5428,12 @@ You return the FINAL corrected code in ```verilog``` fences.""",
                 hierarchy_rule = (
                     f"5. **HIERARCHICAL WRAPPER**: The following sub-modules already exist: {sub_names}. "
                     f"YOU MUST ONLY WRITE THE TOP-LEVEL MODULE '{self.name}' THAT INSTANTIATES THEM. "
-                    f"DO NOT redefine these sub-modules in your code. Here are their exact port definitions:\n{signatures}"
+                    f"DO NOT redefine these sub-modules in your code. "
+                    f"The returned code must contain exactly one module definition: '{self.name}'. "
+                    f"Every external output must have exactly one driver. If reset/clocked behavior is required "
+                    f"at the top, connect submodule outputs to internal wires and register those wires into the "
+                    f"external outputs; never connect a submodule output directly to a port that an always block also assigns. "
+                    f"Here are their exact port definitions:\n{signatures}"
                 )
             else:
                 hierarchy_rule = "5. **MODULAR HIERARCHY**: For complex designs, break them into smaller sub-modules. Output ALL modules in your response."
@@ -4735,6 +5475,7 @@ CRITICAL RULES:
 4b. **NEVER** use Verilog reserved words as port or signal names. Banned names include: config, supply0, supply1, table, library, design, instance, cell, use, endconfig, liblist
 {hierarchy_rule}
 6. Return code in ```verilog fence.
+7. Single-driver hierarchy rule: no output or internal signal may be driven both by a submodule port connection and by an assign/always block. Use internal wires between combinational submodules and registered top outputs.
 """,
                 expected_output="Complete Verilog RTL Code",
                 agent=rtl_agent,
@@ -4754,6 +5495,7 @@ Check for these common issues:
 5. All outputs must be driven
 6. All registers must be reset in the reset branch
 7. No placeholders, TODOs, or simplified logic
+8. In hierarchical RTL, each top-level output must have exactly one driver. If the output is registered/reset in the top, submodule outputs must connect to internal wires, not directly to that output.
 
 If you find issues, FIX them and output the corrected code.
 If the code is correct, output it unchanged.
@@ -4891,12 +5633,20 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 # Extract clean Verilog code from the sub-module artifact
                 _, clean_mod_code = extract_and_validate_llm_code(mod_code)
                 if not clean_mod_code:
-                    clean_mod_code = mod_code  # fallback
+                    clean_mod_code = sanitize_verilog_artifact(mod_code)
                 
                 mod_path = os.path.join(src_dir, f"{mod_name}.v")
                 with open(mod_path, "w") as f:
                     f.write(clean_mod_code + "\n")
             self.log(f"Wrote {len(sub_rtls)} parallel-generated sub-modules to disk (overwriting any hallucinations).", refined=True)
+
+        quarantined = quarantine_duplicate_top_modules(self.name, path)
+        if quarantined:
+            self.log(
+                f"Disabled {len(quarantined)} stale duplicate top-module file(s) before lint.",
+                refined=True,
+            )
+            self.artifacts["rtl_duplicate_top_quarantine"] = quarantined
 
         contract_fixed, contract_violations = self._enforce_reconciled_rtl_contract()
         if contract_violations:
@@ -4924,6 +5674,9 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
             'config', 'library', 'design', 'instance', 'cell', 'use',
             'liblist', 'endconfig', 'supply0', 'supply1', 'table',
             'endtable', 'scalared', 'vectored', 'trireg', 'tri0', 'tri1',
+            'priority', 'unique', 'rand', 'constraint', 'covergroup',
+            'interface', 'modport', 'clocking', 'property', 'sequence',
+            'checker', 'inside', 'matches', 'dist',
         }
         
         any_fixed = False
@@ -4962,20 +5715,570 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         
         return any_fixed
 
+    def _sanitize_implicit_sv_parameters(self) -> bool:
+        """Add default parameters for generated modules that use N/M in packed widths."""
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        any_fixed = False
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                content = f.read()
+
+            symbols = sorted(
+                set(
+                    re.findall(r'\[\s*([NM])\s*-\s*1\s*:\s*0\s*\]', content)
+                    + re.findall(r'\[\s*([NM])\s*:\s*0\s*\]', content)
+                )
+            )
+            if not symbols:
+                continue
+
+            module_match = re.search(r'\bmodule\s+([a-zA-Z_]\w*)\s*(#\s*\(|\(|;)', content)
+            if not module_match or module_match.group(2).startswith("#"):
+                continue
+
+            param_lines = []
+            if "N" in symbols:
+                param_lines.append("    parameter int N = 32")
+            if "M" in symbols:
+                param_lines.append("    parameter int M = 5")
+            if module_match.group(2) == ";":
+                param_block = " #(\n" + ",\n".join(param_lines) + "\n);"
+            else:
+                param_block = " #(\n" + ",\n".join(param_lines) + "\n) ("
+            fixed_content = (
+                content[: module_match.end(1)]
+                + param_block
+                + content[module_match.end(2) :]
+            )
+
+            if fixed_content != content:
+                with open(v_file, "w") as f:
+                    f.write(fixed_content)
+                self.log(
+                    f"Auto-added implicit SV parameter(s) {', '.join(symbols)} in {os.path.basename(v_file)}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
+    def _sanitize_missing_module_aliases(self) -> bool:
+        """Rewrite obvious top-level instantiation aliases to generated module names."""
+        path = self.artifacts.get("rtl_path", "")
+        src_dir = os.path.dirname(path)
+        if not path or not os.path.exists(path) or not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        known_modules = set()
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            try:
+                with open(v_file, "r") as f:
+                    known_modules.update(
+                        re.findall(r'\bmodule\s+([a-zA-Z_]\w*)\s*(?:#|\(|;)', f.read())
+                    )
+            except OSError:
+                continue
+
+        if not known_modules:
+            return False
+
+        alias_preferences = {
+            "reg_decode": ["register_decode", "register_decoder"],
+            "register_decoder": ["register_decode"],
+            "spi_control": ["spi_control_logic", "spi_master", "spi_block"],
+            "pwm_gen": ["pwm_channels", "pwm_generator", "pwm_block"],
+            "gpio": ["gpio_control", "gpio_controller", "gpio_block"],
+        }
+
+        with open(path, "r") as f:
+            content = f.read()
+
+        fixed_content = content
+        replacements: Dict[str, str] = {}
+        instantiations = re.findall(
+            r'(?m)^\s*([a-zA-Z_]\w*)\s+(?:#\s*\([^;]*?\)\s*)?([a-zA-Z_]\w*)\s*\(',
+            content,
+        )
+        sv_keywords = {
+            "if", "else", "for", "while", "case", "assign", "always_ff",
+            "always_comb", "always", "module", "function", "task",
+        }
+        for module_name, instance_name in instantiations:
+            if module_name in sv_keywords or module_name in known_modules:
+                continue
+            if instance_name in sv_keywords:
+                continue
+            candidates = alias_preferences.get(module_name, [])
+            replacement = next((candidate for candidate in candidates if candidate in known_modules), None)
+            if not replacement:
+                close = difflib.get_close_matches(module_name, sorted(known_modules), n=1, cutoff=0.72)
+                replacement = close[0] if close else None
+            if replacement:
+                replacements[module_name] = replacement
+
+        for missing, replacement in replacements.items():
+            fixed_content = re.sub(
+                rf'(?m)^(\s*){re.escape(missing)}(\s+(?:#\s*\([^;]*?\)\s*)?[a-zA-Z_]\w*\s*\()',
+                rf'\1{replacement}\2',
+                fixed_content,
+            )
+
+        if fixed_content != content:
+            with open(path, "w") as f:
+                f.write(fixed_content)
+            self.log(
+                "Auto-fixed missing module aliases: "
+                + ", ".join(f"{old}->{new}" for old, new in sorted(replacements.items())),
+                refined=True,
+            )
+            return True
+
+        return False
+
+    def _sanitize_rtl_placeholders(self) -> bool:
+        """Replace LLM placeholder comments that leave empty Verilog expressions."""
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        fixes = [
+            (re.compile(r'\bif\s*\(\s*/\*[^*]*\*/\s*\)'), "if (1'b0)"),
+            (re.compile(r'\belse\s+if\s*\(\s*/\*[^*]*\*/\s*\)'), "else if (1'b0)"),
+            (re.compile(r'(<=|=)\s*/\*[^*]*\*/\s*;'), r"\1 '0;"),
+            (
+                re.compile(r'\bassign\s+([a-zA-Z_]\w*)\s*=\s*/\*[^*]*\*/\s*;'),
+                r"assign \1 = '0;",
+            ),
+        ]
+
+        any_fixed = False
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                content = f.read()
+
+            fixed_content = content
+            for pattern, replacement in fixes:
+                fixed_content = pattern.sub(replacement, fixed_content)
+
+            if fixed_content != content:
+                with open(v_file, "w") as f:
+                    f.write(fixed_content)
+                self.log(
+                    f"Auto-fixed placeholder expressions in {os.path.basename(v_file)}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
+    def _sanitize_malformed_case_fragments(self) -> bool:
+        """Repair common LLM-damaged case labels and empty assignments."""
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        any_fixed = False
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                content = f.read()
+
+            state_names = set(
+                re.findall(r'\b([A-Z][A-Z0-9_]*)\b\s*=', content)
+            )
+            state_names.update(
+                re.findall(r'^\s*([A-Z][A-Z0-9_]*)\s*,?\s*(?://.*)?$', content, re.MULTILINE)
+            )
+            if not state_names and "<=;" not in content and "=;" not in content:
+                continue
+
+            fixed_lines = []
+            changed_file = False
+            for line in content.splitlines(keepends=True):
+                raw = line.rstrip("\n")
+                stripped = raw.strip()
+                indent = raw[: len(raw) - len(raw.lstrip())]
+
+                state_with_assignment = re.match(
+                    r'^([A-Z][A-Z0-9_]*)\s+([A-Za-z_]\w*(?:\[[^\]]+\])?\s*(?:<=|=))\s*;?\s*\}?\s*(?:ENDBLOCK)?\s*$',
+                    stripped,
+                )
+                if state_with_assignment and state_with_assignment.group(1) in state_names:
+                    fixed_lines.append(f"{indent}{state_with_assignment.group(1)}: begin\n")
+                    fixed_lines.append(f"{indent}    {state_with_assignment.group(2)} '0;\n")
+                    fixed_lines.append(f"{indent}end\n")
+                    changed_file = True
+                    continue
+
+                if stripped in state_names:
+                    fixed_lines.append(f"{indent}{stripped}: begin\n")
+                    changed_file = True
+                    continue
+
+                fixed_line = re.sub(
+                    r'(\b[A-Za-z_]\w*(?:\[[^\]]+\])?\s*(?:<=|=))\s*(?=;|\})',
+                    r"\1 '0",
+                    line,
+                )
+                if re.search(r'(<=|=)\s*\'0\s*;\s*\}', fixed_line):
+                    fixed_line = re.sub(r'\s*\}\s*$', "\n" + indent + "end\n", fixed_line.rstrip("\n"))
+                if fixed_line != line:
+                    changed_file = True
+                fixed_lines.append(fixed_line)
+
+            fixed_content = "".join(fixed_lines)
+            if changed_file and fixed_content != content:
+                with open(v_file, "w") as f:
+                    f.write(fixed_content)
+                self.log(
+                    f"Auto-fixed malformed case/empty assignment fragments in {os.path.basename(v_file)}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
+    def _sanitize_named_port_parentheses(self) -> bool:
+        """Close one-line named port connections such as .uart_tx(uart_tx."""
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        any_fixed = False
+        port_line_re = re.compile(
+            r"^(?P<indent>\s*)\.(?P<pin>[A-Za-z_]\w*)\s*\(\s*"
+            r"(?P<signal>[A-Za-z_]\w*(?:\[[^\]]+\])?)"
+            r"(?P<trailing>\s*,?\s*)(?P<comment>//.*)?$"
+        )
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                lines = f.readlines()
+
+            fixed_lines = []
+            changed_file = False
+            for line in lines:
+                if ")" not in line:
+                    match = port_line_re.match(line.rstrip("\n"))
+                    if match:
+                        comment = match.group("comment") or ""
+                        trailing = match.group("trailing") or ""
+                        comma = "," if "," in trailing else ""
+                        spacing = " " if comment else ""
+                        line = (
+                            f"{match.group('indent')}.{match.group('pin')}("
+                            f"{match.group('signal')}){comma}{spacing}{comment}\n"
+                        )
+                        changed_file = True
+                fixed_lines.append(line)
+
+            if changed_file:
+                with open(v_file, "w") as f:
+                    f.writelines(fixed_lines)
+                self.log(
+                    f"Auto-fixed unclosed named port connection in {os.path.basename(v_file)}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
+    def _sanitize_module_scope_signal_refs(self) -> bool:
+        """Replace accidental module-name.signal references with local signals."""
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        known_modules = set()
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                known_modules.update(
+                    re.findall(r'\bmodule\s+([A-Za-z_]\w*)\s*(?:#|\(|;)', f.read())
+                )
+        if not known_modules:
+            return False
+
+        any_fixed = False
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                content = f.read()
+            declared = self._declared_identifiers(content)
+            if not declared:
+                continue
+
+            def _replace(match: re.Match) -> str:
+                module_name, signal_name = match.group(1), match.group(2)
+                if module_name in known_modules and signal_name in declared:
+                    return signal_name
+                return match.group(0)
+
+            fixed_content = re.sub(
+                r'\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\b',
+                _replace,
+                content,
+            )
+            if fixed_content != content:
+                with open(v_file, "w") as f:
+                    f.write(fixed_content)
+                self.log(
+                    f"Auto-fixed module-scope signal reference in {os.path.basename(v_file)}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
+    def _sanitize_verilator_blocking_array_reset(self, error_text: str) -> bool:
+        """Rewrite Verilator BLKLOOPINIT cases to blocking assignments inside for loops."""
+        if "BLKLOOPINIT" not in (error_text or ""):
+            return False
+
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        error_files = set(self._parse_error_files(error_text))
+        if not error_files:
+            error_files = {os.path.basename(p) for p in glob.glob(os.path.join(src_dir, "*.v"))}
+
+        any_fixed = False
+        for file_name in sorted(error_files):
+            v_file = os.path.join(src_dir, file_name)
+            if not os.path.exists(v_file):
+                continue
+
+            with open(v_file, "r") as f:
+                lines = f.readlines()
+
+            fixed_lines = []
+            for_depth = 0
+            changed_file = False
+            for line in lines:
+                stripped = re.sub(r"//.*", "", line)
+                in_for_loop = for_depth > 0 or bool(re.search(r"\bfor\s*\(", stripped))
+                fixed_line = line
+                if in_for_loop and re.search(r"\b[A-Za-z_]\w*\s*\[[^\]\n]+\]\s*<=", stripped):
+                    fixed_line = re.sub(
+                        r"(\b[A-Za-z_]\w*\s*\[[^\]\n]+\]\s*)<=",
+                        r"\1=",
+                        line,
+                        count=1,
+                    )
+                    changed_file = changed_file or fixed_line != line
+
+                fixed_lines.append(fixed_line)
+
+                if re.search(r"\bfor\s*\(", stripped):
+                    for_depth += max(1, stripped.count("begin"))
+                elif for_depth > 0:
+                    for_depth += stripped.count("begin")
+                if for_depth > 0:
+                    for_depth -= stripped.count("end")
+                    for_depth = max(for_depth, 0)
+
+            if changed_file:
+                with open(v_file, "w") as f:
+                    f.writelines(fixed_lines)
+                self.log(
+                    f"Auto-fixed Verilator BLKLOOPINIT array assignment in {file_name}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
+    def _sanitize_localparam_overrides(self, error_text: str) -> bool:
+        """Promote localparams that generated RTL tries to override as parameters."""
+        if "Instance attempts to override" not in (error_text or ""):
+            return False
+
+        src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
+        if not src_dir or not os.path.isdir(src_dir):
+            return False
+
+        params = sorted(
+            set(
+                re.findall(
+                    r"Instance attempts to override '([A-Za-z_]\w*)' as a parameter",
+                    error_text,
+                )
+            )
+        )
+        if not params:
+            return False
+
+        any_fixed = False
+        for v_file in sorted(glob.glob(os.path.join(src_dir, "*.v"))):
+            with open(v_file, "r") as f:
+                content = f.read()
+            fixed_content = content
+            for param_name in params:
+                fixed_content = re.sub(
+                    rf'\blocalparam(\s+(?:(?!;).)*?\b{re.escape(param_name)}\b\s*=)',
+                    r'parameter\1',
+                    fixed_content,
+                    flags=re.DOTALL,
+                )
+            if fixed_content != content:
+                with open(v_file, "w") as f:
+                    f.write(fixed_content)
+                self.log(
+                    f"Auto-promoted overridden localparam(s) to parameter in {os.path.basename(v_file)}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
+    @staticmethod
+    def _declared_identifiers(verilog_code: str) -> set:
+        decl_re = re.compile(
+            r"\b(?:input|output|inout|wire|reg|logic)\b[^;]*?\b([A-Za-z_]\w*)\s*(?:[,;=)]|$)",
+            re.MULTILINE,
+        )
+        names = set(decl_re.findall(verilog_code or ""))
+        for decl in re.finditer(
+            r"\b(?:input|output|inout|wire|reg|logic)\b(?P<body>[^;]*);",
+            verilog_code or "",
+            re.MULTILINE | re.DOTALL,
+        ):
+            body = re.sub(r"\[[^\]]+\]", " ", decl.group("body"))
+            body = re.sub(r"\b(?:wire|reg|logic|signed|unsigned)\b", " ", body)
+            for token in re.findall(r"\b[A-Za-z_]\w*\b", body):
+                if token not in {"input", "output", "inout"}:
+                    names.add(token)
+        return names
+
+    def _choose_pinmissing_signal(
+        self,
+        pin_name: str,
+        instance_block: str,
+        file_content: str,
+    ) -> str:
+        declared = self._declared_identifiers(file_content)
+        if pin_name in declared:
+            return pin_name
+
+        connected = {
+            conn.group(2)
+            for conn in re.finditer(
+                r"\.\s*([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*)\s*\)",
+                instance_block,
+            )
+        }
+        suffix = pin_name.split("_", 1)[-1] if "_" in pin_name else pin_name
+        for candidate in sorted(declared | connected):
+            if candidate.endswith("_" + suffix) or candidate == suffix:
+                return candidate
+        return pin_name
+
+    def _sanitize_pinmissing_connections(self, error_text: str) -> bool:
+        """Add missing named port connections reported by Verilator PINMISSING."""
+        if "PINMISSING" not in (error_text or ""):
+            return False
+
+        pin_re = re.compile(
+            r"%Warning-PINMISSING:\s*(?P<path>.+?\.(?:v|sv)):\d+(?::\d+)?:\s*"
+            r"Cell has missing pin:\s*'(?P<pin>[A-Za-z_]\w*)'",
+        )
+        cell_re = re.compile(
+            r"\n\s*\d+\s*\|\s*(?P<module>[A-Za-z_]\w*)\s+(?P<instance>[A-Za-z_]\w*)\s*\(",
+        )
+        fixes: List[Tuple[str, str, str, str]] = []
+        search_from = 0
+        for pin_match in pin_re.finditer(error_text):
+            cell_match = cell_re.search(error_text, pin_match.end())
+            if not cell_match:
+                continue
+            if cell_match.start() < search_from:
+                continue
+            search_from = cell_match.end()
+            fixes.append(
+                (
+                    pin_match.group("path").strip(),
+                    cell_match.group("module"),
+                    cell_match.group("instance"),
+                    pin_match.group("pin"),
+                )
+            )
+
+        any_fixed = False
+        for file_path, module_name, instance_name, pin_name in fixes:
+            if not os.path.exists(file_path):
+                continue
+            with open(file_path, "r") as f:
+                content = f.read()
+
+            inst_re = re.compile(
+                rf"(?P<head>\b{re.escape(module_name)}\s+{re.escape(instance_name)}\s*\()"
+                rf"(?P<body>.*?)"
+                rf"(?P<tail>\n\s*\)\s*;)",
+                re.DOTALL,
+            )
+
+            def _fix_instance(match: re.Match) -> str:
+                block = match.group(0)
+                if re.search(rf"\.\s*{re.escape(pin_name)}\s*\(", block):
+                    return block
+                signal_name = self._choose_pinmissing_signal(pin_name, block, content)
+                body = match.group("body").rstrip()
+                if body.endswith(","):
+                    new_body = f"{body}\n        .{pin_name} ({signal_name})"
+                else:
+                    new_body = f"{body},\n        .{pin_name} ({signal_name})"
+                return match.group("head") + new_body + match.group("tail")
+
+            fixed_content, count = inst_re.subn(_fix_instance, content, count=1)
+            if count and fixed_content != content:
+                with open(file_path, "w") as f:
+                    f.write(fixed_content)
+                self.log(
+                    f"Auto-connected missing pin {pin_name} on {instance_name} in {os.path.basename(file_path)}",
+                    refined=True,
+                )
+                any_fixed = True
+
+        return any_fixed
+
     def _parse_error_files(self, error_text: str) -> List[str]:
         """Extract unique file basenames from Verilator error messages."""
         files = set()
-        for match in re.finditer(r'%Error[^:]*:\s*([^:]+\.(?:v|sv)):', error_text):
-            files.add(os.path.basename(match.group(1).strip()))
+        patterns = [
+            r'%Error[^:]*:\s*(.+?\.(?:v|sv)):\d+(?::\d+)?:',
+            r'([A-Za-z]:[\\/][^\s:]+?\.(?:v|sv)|/[^\s:]+?\.(?:v|sv)|[^:\s]+?\.(?:v|sv)):\d+(?::\d+)?:',
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, error_text):
+                files.add(os.path.basename(match.group(1).strip()))
         return sorted(files)
 
     def do_rtl_fix(self):
         # Pre-flight: auto-fix reserved words in ALL files (including macros)
         if self._validate_and_fix_macro_files():
             self.log("Reserved word auto-fix applied to source files. Re-checking syntax.", refined=True)
+        if self._sanitize_implicit_sv_parameters():
+            self.log("Implicit parameter auto-fix applied to source files. Re-checking syntax.", refined=True)
+        if self._sanitize_rtl_placeholders():
+            self.log("Placeholder expression auto-fix applied to source files. Re-checking syntax.", refined=True)
+        if self._sanitize_malformed_case_fragments():
+            self.log("Malformed case/empty assignment auto-fix applied to source files. Re-checking syntax.", refined=True)
+        if self._sanitize_missing_module_aliases():
+            self.log("Missing module alias auto-fix applied to top RTL. Re-checking syntax.", refined=True)
+        if self._sanitize_named_port_parentheses():
+            self.log("Named-port parenthesis auto-fix applied to source files. Re-checking syntax.", refined=True)
+        if self._sanitize_module_scope_signal_refs():
+            self.log("Module-scope signal reference auto-fix applied to source files. Re-checking syntax.", refined=True)
 
         # Check syntax
         path = self.artifacts["rtl_path"]
+        quarantined = quarantine_duplicate_top_modules(self.name, path)
+        if quarantined:
+            self.log(
+                f"Disabled {len(quarantined)} stale duplicate top-module file(s). Re-checking syntax.",
+                refined=True,
+            )
+            self.artifacts["rtl_duplicate_top_quarantine"] = quarantined
         success, errors = run_syntax_check(path)
 
         if success:
@@ -5075,6 +6378,28 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                             )
                             errors = self._format_semantic_rigor_errors(sem_report)
                         else:
+                            # Remove extra ports
+                            if extra_ports:
+                                top_mod["ports"] = [p for p in top_mod.get("ports", []) if p.get("name") not in extra_ports]
+                                if "ports" in sid_data:
+                                    # Also remove from root ports if they exist
+                                    if isinstance(sid_data["ports"], list):
+                                        sid_data["ports"] = [p for p in sid_data["ports"] if p.get("name") not in extra_ports]
+                                    elif isinstance(sid_data["ports"], dict):
+                                        for ep in extra_ports:
+                                            sid_data["ports"].pop(ep, None)
+                                            
+                                # Fix reset_name and clock_name if they were removed
+                                if sid_data.get("reset_name") in extra_ports:
+                                    for mp in missing_ports:
+                                        if "rst" in mp.lower() or "reset" in mp.lower():
+                                            sid_data["reset_name"] = mp
+                                            break
+                                if sid_data.get("clock_name") in extra_ports:
+                                    for mp in missing_ports:
+                                        if "clk" in mp.lower() or "clock" in mp.lower():
+                                            sid_data["clock_name"] = mp
+                                            break
                             # --- Mechanical width auto-fix (no LLM) ---
                             self.log(
                                 "Semantic rigor gate failed. Attempting mechanical width auto-fix.",
@@ -5159,6 +6484,48 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
 
         # Handle Syntax/Lint Errors that need LLM
         self.logger.info(f"SYNTAX/LINT ERRORS:\n{errors}")
+        deterministic_fixed = False
+        if self._sanitize_verilator_blocking_array_reset(str(errors)):
+            deterministic_fixed = True
+        if self._sanitize_pinmissing_connections(str(errors)):
+            deterministic_fixed = True
+        if self._sanitize_localparam_overrides(str(errors)):
+            deterministic_fixed = True
+        if deterministic_fixed:
+            with open(path, "r") as f:
+                self.artifacts["rtl_code"] = f.read()
+            self.log("Deterministic RTL syntax repair applied. Re-checking syntax.", refined=True)
+            return
+        if self._is_eda_tool_invocation_failure(str(errors)):
+            supervisor_result = self._run_pipeline_supervisor_react(
+                self.state.name,
+                str(errors),
+            )
+            retry_key = "rtl_fix_tool_invocation_recovery"
+            attempts = int(self.retry_metadata.get(retry_key, 0))
+            if attempts < 2:
+                self._record_retry(retry_key, consume_global=False)
+                self.log(
+                    "RTL_FIX failure is a tool invocation/configuration error; "
+                    "rerunning the stage after capability-aware tool fallback.",
+                    refined=True,
+                )
+                return
+            self._record_stage_contract(
+                StageResult(
+                    stage=self.state.name,
+                    status=StageStatus.ERROR,
+                    producer="agent_pipeline_supervisor",
+                    failure_class=supervisor_result.failure_class,
+                    diagnostics=[
+                        "Tool invocation/configuration error persisted after supervisor reruns.",
+                    ],
+                    artifacts_written=["pipeline_supervisor_last_result"],
+                    next_action="fail_closed",
+                )
+            )
+            self.state = BuildState.FAIL
+            return
         if self._record_failure_fingerprint(str(errors)):
             self.log(
                 "Detected repeated syntax/lint failure fingerprint. Failing closed.",
@@ -5189,6 +6556,11 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
 
         self.log(f"Fixing Code (Attempt {self.retry_count}/{self.max_retries})", refined=True)
         errors_for_llm = self._condense_failure_log(str(errors), kind="timing")
+        error_files = self._parse_error_files(str(errors)) or self._parse_error_files(errors_for_llm)
+        self.artifacts["_current_rtl_error_files"] = error_files
+        self.artifacts["_current_rtl_error_modules"] = [
+            os.path.splitext(file_name)[0] for file_name in error_files
+        ]
 
         # ── ReAct iterative RTL fix (runs before single-shot CrewAI) ──
         # ReActAgent does Thought→Action→Observation loops using the already-imported
@@ -5213,6 +6585,29 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                 lambda p: (
                     open(p.strip()).read() if os.path.exists(p.strip()) else f"Not found: {p}"
                 ),
+            )
+            # Add write capability so ReAct can persist its own fixes incrementally
+            src_dir_rtl = os.path.dirname(path)
+            def _react_write_file(input_str: str) -> str:
+                """Write content to a file. Input: path\n\ncode"""
+                parts = input_str.split("\n\n", 1)
+                if len(parts) < 2:
+                    return "Error: Expected format: ABSOLUTE_PATH\n\n<code>"
+                file_path = parts[0].strip()
+                content = parts[1]
+                try:
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                    with open(file_path, "w") as f:
+                        f.write(content)
+                    return f"Written: {file_path} ({len(content)} bytes)"
+                except Exception as e:
+                    return f"Error writing {file_path}: {e}"
+            _react_agent.register_tool(
+                "write_file",
+                f"Write Verilog code to a file in the RTL source directory ({src_dir_rtl}). "
+                "Input format: ABSOLUTE_FILE_PATH\n\n<verilog_code>. "
+                "Use read_file first to get the current content, fix it, then write_file to save.",
+                _react_write_file,
             )
             # Load all RTL files in src/ so the fixer sees all sub-modules
             src_dir = os.path.dirname(path)
@@ -5247,6 +6642,8 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
                     f"internal inout/tri-state ports must be split into input/output/output-enable signals, "
                     f"with tri-state kept only at the top-level pad boundary. "
                     f"Use syntax_check tool to verify your fix compiles clean. "
+                    f"Use write_file tool to save fixes to disk. "
+                    f"Read a file, fix it, write it back, then syntax_check to verify. "
                     f"Final Answer must be ONLY corrected Verilog inside ```verilog fences. "
                     f"YOU MUST OUTPUT THE FULL CODE FOR ALL MODULES THAT YOU MODIFY so they can be saved to disk."
                 ),
@@ -5287,13 +6684,13 @@ ALWAYS return the COMPLETE code in ```verilog``` fences.
         if _react_fixed_code:
             new_code = _react_fixed_code
         else:
-            # Use IncrementalFixer for error analysis and surgical fixes
+            # Use IncrementalFixer for error analysis and targeted fixes
             analysis = self.incremental_fixer.analyze_error(
                 error_text=errors_for_llm,
                 rtl_code=all_rtl_code,
             )
 
-            # Build surgical fix prompt with error analysis
+            # Build targeted fix prompt with error analysis
             fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. Your entire response must be the corrected Verilog module inside ```verilog fences. Do not write any explanation, reasoning, thought process, or text outside the fences. Any response that does not start with ```verilog will be rejected and waste a retry attempt.
 
 CRITICAL: Do not rename the top module. The top-module interface MUST remain exactly the same.
@@ -5357,7 +6754,7 @@ You review PREVIOUS FIX ATTEMPTS to avoid repeating ineffective patches.
 You explain what you changed and why.""",
                 llm=self.get_llm_for_role("fixer"),
                 verbose=self.verbose,
-                tools=[syntax_check_tool, read_file_tool, write_verilog_tool, vlsi_search],
+                tools=[syntax_check_tool, read_file_tool, write_verilog_tool],
             )
 
             task = Task(
@@ -5517,6 +6914,18 @@ Original errors to fix:
         # Read back the CLEANED version, not raw LLM output
         with open(new_path, "r") as f:
             self.artifacts["rtl_code"] = f.read()
+
+        # CRITICAL: Re-run reconclied RTL contract enforcement AFTER the LLM fix.
+        # The LLM fixer often introduces hallucinated macro modules or modifies
+        # black-box wrappers. This ensures spec-declared macros are restored to
+        # proper black-box stubs and any contract violations are caught before
+        # the next syntax check iteration.
+        self._enforce_reconciled_rtl_contract()
+        # Also re-read rtl_code after enforcement may have written files
+        if os.path.exists(new_path):
+            with open(new_path, "r") as f:
+                self.artifacts["rtl_code"] = f.read()
+
         # Loop stays in RTL_FIX to re-check syntax
 
     # _try_autonomous_sv_fix removed (Verilator supports SV natively)
@@ -6041,7 +7450,7 @@ Reply with JSON only, no prose, using this exact schema:
   "expected_vs_actual": "expected vs actual or undetermined",
   "responsible_construct": "specific RTL construct and line number",
   "root_cause": "1-line root cause",
-  "fix_hint": "surgical fix hint"
+  "fix_hint": "targeted fix hint"
 }}''',
                 expected_output="JSON object with class, failing_output, failing_signals, expected_vs_actual, responsible_construct, root_cause, and fix_hint",
                 agent=analyst,
@@ -6257,9 +7666,9 @@ Never sample a DUT output in the same time step that stimulus is applied.
                 ]
                 error_summary = "\n".join(error_lines)
 
-                fix_prompt = f"""RESPOND WITH VERILOG CODE ONLY. No explanation, no commentary, no "Thought:" prefixes.
+                fix_prompt = f"""Please return a complete corrected Verilog/SystemVerilog module inside one ```verilog fenced block.
 
-SURGICAL FIX REQUIRED — make the MINIMUM change to fix the specific issue identified.
+Make a focused RTL repair for the specific simulation mismatch identified below.
 
 SIGNAL-LEVEL DIAGNOSIS FROM ERROR ANALYST:
 {structured_diagnosis}
@@ -6283,15 +7692,13 @@ Ref TB:
 PREVIOUS ATTEMPTS:
 {self._format_failure_history()}
 
-CRITICAL RULES:
-- You MUST make the minimum possible change to fix the specific issue identified.
-- Do NOT rewrite the module. Do NOT restructure the design.
-- Identify the exact lines responsible for the failure and change ONLY those lines.
-- Do NOT remove sub-module instantiations or flatten a hierarchical design.
-- Do NOT change port names, port widths, or module interfaces.
-- Return the complete module with only the specific buggy lines changed.
+Repair constraints:
+- Prefer the smallest local edit that fixes the mismatch.
+- Preserve the existing module structure and hierarchy.
+- Preserve all port names, widths, and interfaces.
+- Keep existing sub-module instantiations in hierarchical designs.
+- Return the complete corrected {self.strategy.name} module in a ```verilog fenced block.
 - Use your syntax_check tool to verify the fix compiles before returning it.
-- Return ONLY the fixed {self.strategy.name} code in ```verilog fences.
 """
 
             # Execute Fix — fixer uses analyst's diagnosis as context
@@ -6383,24 +7790,24 @@ CRITICAL RULES:
                     if changed_ratio > 0.30:
                         self.log(
                             f"RTL fix rejected: {changed_ratio:.0%} of lines changed (>30%). "
-                            "Requesting surgical retry.",
+                            "Requesting targeted retry.",
                             refined=True,
                         )
                         # Re-prompt with explicit rejection context
-                        retry_prompt = f"""RESPOND WITH VERILOG CODE ONLY.
+                        retry_prompt = f"""Please return a complete corrected Verilog/SystemVerilog module inside one ```verilog fenced block.
 
-Your previous fix was REJECTED because it changed {changed_ratio:.0%} of the code (>30% threshold).
-You must make a SURGICAL fix — change ONLY the specific lines that cause the bug.
+The previous candidate changed {changed_ratio:.0%} of the code, which is above the local-edit threshold of 30%.
+Please make a smaller targeted repair for the specific bug described in the diagnosis.
 
 DIAGNOSIS:
 {structured_diagnosis}
 
-Original RTL (DO NOT REWRITE — change only the buggy lines):
+Original RTL:
 ```verilog
 {original_code}
 ```
 
-Return the complete module with ONLY the minimal fix applied.
+Return the complete module with the minimal local fix applied while preserving the existing interface and hierarchy.
 """
                         retry_task = Task(
                             description=retry_prompt,
@@ -6408,20 +7815,20 @@ Return the complete module with ONLY the minimal fix applied.
                             agent=fixer,
                         )
                         with console.status(
-                            "[warning]AI Implementing Surgical Fix (retry)...[/warning]"
+                            "[warning]AI Implementing Targeted Fix (retry)...[/warning]"
                         ):
                             result2 = self._crew_kickoff(
                                 Crew(verbose=False, agents=[fixer], tasks=[retry_task])
                             )
                         fixed_code = str(result2)
-                        # --- Universal code output validation (surgical RTL retry) ---
+                        # --- Universal code output validation (targeted RTL retry) ---
                         if not validate_llm_code_output(fixed_code):
                             self.log(
-                                "Surgical RTL retry returned prose instead of code. Retrying once.",
+                                "Targeted RTL retry returned prose instead of code. Retrying once.",
                                 refined=True,
                             )
                             self.logger.warning(
-                                f"SURGICAL RETRY VALIDATION FAIL (prose detected):\n{fixed_code[:500]}"
+                                f"TARGETED RETRY VALIDATION FAIL (prose detected):\n{fixed_code[:500]}"
                             )
                             fixed_code = str(
                                 self._crew_kickoff(
@@ -6432,7 +7839,7 @@ Return the complete module with ONLY the minimal fix applied.
                                     )
                                 )
                             )
-                        self.logger.info(f"SURGICAL RETRY CODE:\n{fixed_code}")
+                        self.logger.info(f"TARGETED RETRY CODE:\n{fixed_code}")
 
                 # Write cleaned code and read it back
                 src_dir = os.path.dirname(self.artifacts.get("rtl_path", ""))
@@ -8475,40 +9882,7 @@ REQUIREMENTS:
             except Exception:
                 hw_spec = {}
 
-        with console.status("[accent]Generating IP-XACT Component...[/accent]"):
-            from .tools.ipxact_packager import (
-                generate_ipxact_component,
-                IPXACTComponent,
-            )
-
-            comp = generate_ipxact_component(
-                design_name=self.name,
-                rtl_files=rtl_files,
-                spec_data=hw_spec,
-                output_dir=ip_dir,
-                bus_interfaces=self.artifacts.get("bus_interfaces", []),
-                memory_maps=self.artifacts.get("memory_maps", []),
-            )
-            self.artifacts["ipxact_xml"] = comp.xml_path
-            self.artifacts["ipxact_catalog"] = comp.catalog_path
-            self.log(f"IP-XACT: {comp.xml_path}", refined=True)
-
-        atpg_pattern = self.artifacts.get("atpg_pattern_file", "")
-        if atpg_pattern and os.path.exists(atpg_pattern):
-            with console.status("[accent]Exporting ATPG Patterns...[/accent]"):
-                from .tools.ipxact_packager import (
-                    export_atpg_patterns,
-                    ATPGExportResult,
-                )
-
-                atpg_result = export_atpg_patterns(
-                    pattern_file=atpg_pattern,
-                    output_dir=ip_dir,
-                    format="stil",
-                    scan_chain_count=self.artifacts.get("scan_chain_count", 4),
-                )
-                if atpg_result.ok:
-                    self.artifacts["atpg_export"] = atpg_result.pattern_file
+        self.log(f"IP packaging skipped — IP-XACT module available separately.", refined=True)
                     self.log(f"ATPG Export: {atpg_result.pattern_file}", refined=True)
                 else:
                     self.log(
@@ -9307,6 +10681,16 @@ set ::env(MAGIC_DRC_USE_GDS) 1
             "synth_strategy": self.artifacts.get("synth_strategy_override", "AREA 0"),
             "run_tag": run_tag,
         }
+
+        if self._apply_vlsi_recovery(
+            stage_name="HARDENING",
+            error_text=str(result),
+            retry_state=BuildState.RTL_GEN,
+            fallback_state=BuildState.FAIL,
+            allow_rtl_fix=(self.hardening_recovery_attempts >= 3),
+            max_attempts=self.hardening_recovery_attempts_max,
+        ):
+            return
 
         # Step 1: Try deterministic OpenLane error fix (fast, no LLM)
         recovery = self.pipeline_recovery.handle_error(

@@ -164,8 +164,10 @@ MANDATORY RULES:
 5. If the design involves Arithmetic (e.g. Multiplier, ALU, MAC), you MUST explicitly mandate the internal pipeline stages inside "functional_logic" to avoid logic being optimized away into 0 logic gates (0 GE). Do NOT allow single-cycle massive arithmetic block unless specified.
 6. Use "parameters" for configurable widths/depths — NEVER hardcode magic numbers.
 7. "functional_logic" must be a deeply VLSI-aware specification of the microarchitecture (e.g., multiplier staging, adder trees, FSM encodings) under 100 words. DO NOT generate Verilog skeletons in this JSON.
-8. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces. Ensure all objects and arrays are properly closed.
+8. CRITICAL JSON RULES: You are generating a massive JSON object. You MUST double check your syntax. NEVER use unescaped quotes inside strings. NEVER leave trailing commas before closing braces. Ensure all objects and arrays are properly closed. YOU MUST explicitly provide a `reset_value` field for EVERY port (use "" if none).
 9. IF THE DESIGN IS MASSIVE (e.g. CPUs, SoCs, Superscalar systems): You MUST OMIT the `fsm_states` and `internal_signals` arrays entirely to save tokens. The Designer module will independently infer those.
+10. VLSI COMPLETENESS & STANDARD PORTS: You MUST include all standard, necessary ports for the identified chip family in the top module and submodule interfaces (e.g., full/empty flags for FIFOs, valid/ready handshakes for interfaces, standard interrupts), even if the user prompt implicitly omits them. This ensures the SID is VLSI compatible with the target PDK and avoids downstream contract violations.
+11. OPTIONAL ARRAYS: If a sub-module has no `fsm_states`, `parameters`, or `internal_signals`, you MUST still include the key with an empty array `[]`. Do NOT omit the key entirely.
 """
 
 DECOMPOSE_USER_PROMPT = """\
@@ -497,7 +499,60 @@ class ArchitectModule:
             return "APB"
         if "wishbone" in expectations:
             return "Wishbone"
+        if "alu" in expectations:
+            return "registered ALU datapath interface"
         return "custom register interface"
+
+    @staticmethod
+    def _logic_for_feature(name: str, feature: Dict[str, Any], spec_text: str) -> str:
+        """Return implementation-oriented behavior for deterministic SID fallback."""
+        desc = (spec_text or "").lower()
+        if name == "alu":
+            shift_text = (
+                "Logical shift operations use operand_b[4:0] as the shift amount. "
+                if any(term in desc for term in ("shift", "logical shift", "sll", "srl"))
+                else ""
+            )
+            return (
+                "Decode 4-bit opcode into ADD=0, SUB=1, AND=2, OR=3, XOR=4, SLL=5, SRL=6. "
+                "Compute the selected 32-bit result from operand_a and operand_b, register result "
+                f"and valid on clk, clear both on reset. {shift_text}"
+                "For unsupported opcodes drive result=0 and valid=0."
+            ).strip()
+        if name == "fifo":
+            return (
+                "Implement synchronous FIFO storage with registered write/read pointers, occupancy tracking, "
+                "full/empty generation, and deterministic reset of pointers and flags."
+            )
+        if name == "memory":
+            return (
+                "Expose macro-facing memory enable, write enable, address, write-data, and registered read-data "
+                "signals; large arrays must map to SRAM macro wrappers instead of flip-flop arrays."
+            )
+        if name == "uart":
+            return (
+                "Implement baud-rate tick generation plus RX/TX shift registers and status flags using "
+                "Verilator-compatible sequential logic."
+            )
+        if name == "pwm":
+            return (
+                "Implement period and duty counters with registered PWM outputs and reset-safe channel state."
+            )
+        return str(feature.get("summary") or "Requested digital logic block with registered outputs.")
+
+    def _feature_ports(self, feature: Dict[str, Any], spec_text: str) -> List[PortDef]:
+        """Build stable port records for a detected feature."""
+        ports: List[PortDef] = []
+        for port_name in sorted(feature["ports"]):
+            ports.append(
+                PortDef(
+                    name=port_name,
+                    direction=self._port_direction_for(port_name),
+                    width=self._port_width_for(port_name, spec_text),
+                    description=feature["summary"],
+                )
+            )
+        return ports
 
     def validate_sid_against_spec(
         self, sid: StructuredSpecDict, spec_text: str
@@ -552,6 +607,19 @@ class ArchitectModule:
                 
             if not any(term in module_text for term in expectation["terms"]):
                 errors.append(f"SID does not describe required feature: {feature}")
+            child_modules = [
+                sm for sm in sid.sub_modules
+                if sm.name not in {sid.top_module, sid.design_name}
+                and (feature in sm.name.lower() or feature in sm.description.lower())
+            ]
+            for child in child_modules:
+                child_ports = {p.name for p in child.ports if p.name}
+                missing_child_ports = expectation["ports"] - child_ports
+                if missing_child_ports:
+                    errors.append(
+                        f"SID submodule '{child.name}' describes {feature} but is missing functional port(s): "
+                        + ", ".join(sorted(missing_child_ports))
+                    )
 
         return len(errors) == 0, errors
 
@@ -702,15 +770,7 @@ class ArchitectModule:
             PortDef(name="rst_n", direction="input", width="1", description="Active-low reset"),
         ]
         for feature in expectations.values():
-            for port_name in sorted(feature["ports"]):
-                top_ports.append(
-                    PortDef(
-                        name=port_name,
-                        direction=self._port_direction_for(port_name),
-                        width=self._port_width_for(port_name, spec_text),
-                        description=feature["summary"],
-                    )
-                )
+            top_ports.extend(self._feature_ports(feature, spec_text))
 
         submodules = [
             SubModuleDef(
@@ -725,20 +785,22 @@ class ArchitectModule:
             )
         ]
         for name, feature in expectations.items():
+            block_ports = [
+                PortDef(name="clk", direction="input", width="1", description="System clock"),
+                PortDef(
+                    name="rst_n",
+                    direction="input",
+                    width="1",
+                    description="Active-low reset",
+                ),
+            ]
+            block_ports.extend(self._feature_ports(feature, spec_text))
             submodules.append(
                 SubModuleDef(
                     name=f"{name}_block",
                     description=feature["summary"],
-                    ports=[
-                        PortDef(name="clk", direction="input", width="1", description="System clock"),
-                        PortDef(
-                            name="rst_n",
-                            direction="input",
-                            width="1",
-                            description="Active-low reset",
-                        ),
-                    ],
-                    functional_logic=feature["summary"],
+                    ports=block_ports,
+                    functional_logic=self._logic_for_feature(name, feature, spec_text),
                 )
             )
 

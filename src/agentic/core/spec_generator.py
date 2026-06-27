@@ -201,6 +201,7 @@ class SubModuleSpec:
     name: str
     description: str = ""
     ports: List[PortSpec] = field(default_factory=list)
+    parameters: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -375,6 +376,8 @@ Define all top-level ports:
 - Every port: name, direction (input/output/inout), data type (logic/logic[N:0])
 - No floating ports — every port must have a defined purpose
 - Justify every bus width
+- CRITICAL: If a PREVIOUS ARCHITECTURE PLAN (SID) is provided, you MUST NOT add new top-level ports that are missing from the SID. The top-level interface must strictly match the SID to avoid contract violations.
+- CRITICAL: If a PREVIOUS ARCHITECTURE PLAN (SID) is provided, you MUST strictly preserve the exact submodule names and their exact parameters. Do NOT rename submodules or drop parameters.
 
 STEP 4 — BEHAVIORAL CONTRACT
 Write precise English statements a testbench engineer can use for assertions.
@@ -411,6 +414,9 @@ Return ONLY this JSON (no markdown fences, no commentary):
       "description": "<one sentence>",
       "ports": [
         {{"name": "<name>", "direction": "input|output", "data_type": "logic|logic [N:0]", "description": "<purpose>"}}
+      ],
+      "parameters": [
+        {{"name": "<name>", "default": "<value>", "description": "<purpose>"}}
       ]
     }}
   ],
@@ -560,6 +566,7 @@ behavioral_contract items: given,when,then,within.
 If ADC/DAC/PLL/TRNG/analog/custom-layout behavior is requested, preserve the user-visible intent but specify a digital control/status or macro-facing interface only.
 If PDK/tool constraints make the literal request infeasible, choose the closest feasible VLSI implementation and add a warning explaining the substitution.
 Preserve requested widths, reset style, timers, watchdogs, buses, muxing, and standard ASIC naming.
+CRITICAL: If a previous architecture plan (SID) is provided, do NOT add new top-level ports that are missing from the SID to avoid contract violations.
 """
 
     def generate(
@@ -1101,6 +1108,7 @@ Return ONLY this JSON (no markdown, no commentary):
                     name=s.get("name", ""),
                     description=s.get("description", ""),
                     ports=sub_ports,
+                    parameters=s.get("parameters", []),
                 )
             )
 
@@ -1187,6 +1195,7 @@ Return ONLY this JSON (no markdown, no commentary):
         ).lower()
 
         required_terms = {
+            "alu": ["alu", "arithmetic logic unit"],
             "gpio": ["gpio"],
             "pwm": ["pwm"],
             "uart": ["uart"],
@@ -1198,7 +1207,7 @@ Return ONLY this JSON (no markdown, no commentary):
             if any(alias in desc for alias in aliases) and not any(alias in searchable for alias in aliases):
                 issues.append(f"Spec missing requested feature semantics: {feature}")
 
-        explicit_ports = ["uart_rx", "uart_tx", "reset_io_n"]
+        explicit_ports = ["uart_rx", "uart_tx", "reset_io_n", "opcode", "operand_a", "operand_b", "result"]
         for port in explicit_ports:
             if port in desc and port not in ports:
                 issues.append(f"Spec missing explicit requested top-level port: {port}")
@@ -1281,6 +1290,88 @@ Return ONLY this JSON (no markdown, no commentary):
                     within="one UART frame",
                 )
             )
+        if "spi" in desc:
+            add_port("spi_sclk", "output", "logic", "SPI serial clock")
+            add_port("spi_mosi", "output", "logic", "SPI master-out slave-in")
+            add_port("spi_miso", "input", "logic", "SPI master-in slave-out")
+            add_port("spi_cs_n", "output", "logic", "SPI chip select active-low")
+            add_submodule("spi_controller", "SPI clocking, chip-select, and shift-register datapath")
+            contracts.append(
+                BehavioralStatement(
+                    given="an SPI transfer is started",
+                    when="the SPI divider advances",
+                    then="spi_cs_n is asserted and MOSI bits shift while MISO bits are sampled",
+                    within="one SPI frame",
+                )
+            )
+        if "i2c" in desc or "i²c" in desc:
+            add_port("i2c_scl", "inout", "logic", "I2C open-drain serial clock")
+            add_port("i2c_sda", "inout", "logic", "I2C open-drain serial data")
+            add_submodule("i2c_controller", "I2C start/stop, open-drain drive, and byte transfer control")
+            contracts.append(
+                BehavioralStatement(
+                    given="an I2C transfer is active",
+                    when="the bit controller advances",
+                    then="SCL/SDA follow open-drain start, data, acknowledge, and stop sequencing",
+                    within="one I2C byte",
+                )
+            )
+        if "fifo" in desc:
+            add_port("data_in", "input", "logic [31:0]", "FIFO write data")
+            add_port("data_out", "output", "logic [31:0]", "FIFO read data")
+            add_port("wr_en", "input", "logic", "FIFO write enable")
+            add_port("rd_en", "input", "logic", "FIFO read enable")
+            add_port("full", "output", "logic", "FIFO full flag")
+            add_port("empty", "output", "logic", "FIFO empty flag")
+            add_submodule("fifo_storage", "Synchronous FIFO storage, pointers, occupancy, and full/empty flags")
+            contracts.extend(
+                [
+                    BehavioralStatement(
+                        given="FIFO is not full and wr_en is high",
+                        when="a clock edge occurs",
+                        then="data_in is stored and empty deasserts",
+                        within="1 cycle",
+                    ),
+                    BehavioralStatement(
+                        given="FIFO is not empty and rd_en is high",
+                        when="a clock edge occurs",
+                        then="data_out presents the oldest stored word and full deasserts",
+                        within="1 cycle",
+                    ),
+                ]
+            )
+        if "sram" in desc or " ram" in desc or "memory" in desc or "scratchpad" in desc:
+            add_port("mem_addr", "input", "logic [15:0]", "Memory address")
+            add_port("mem_wdata", "input", "logic [31:0]", "Memory write data")
+            add_port("mem_rdata", "output", "logic [31:0]", "Memory read data")
+            add_port("mem_we", "input", "logic", "Memory write enable")
+            add_port("mem_en", "input", "logic", "Memory access enable")
+            add_submodule("memory_interface", "Macro-facing memory interface with registered read data")
+            contracts.append(
+                BehavioralStatement(
+                    given="mem_en is high",
+                    when="a clock edge occurs",
+                    then="the memory interface performs the requested read or write transaction",
+                    within="1 cycle",
+                )
+            )
+        if "risc-v" in desc or "riscv" in desc or "rv32" in desc or "processor" in desc or "cpu" in desc:
+            add_port("instr_addr", "output", "logic [31:0]", "Instruction memory address")
+            add_port("instr_rdata", "input", "logic [31:0]", "Instruction memory read data")
+            add_port("data_addr", "output", "logic [31:0]", "Data memory address")
+            add_port("data_wdata", "output", "logic [31:0]", "Data memory write data")
+            add_port("data_rdata", "input", "logic [31:0]", "Data memory read data")
+            add_port("data_we", "output", "logic", "Data memory write enable")
+            add_port("irq", "input", "logic [7:0]", "Interrupt request inputs")
+            add_submodule("processor_core", "Instruction fetch/decode/execute pipeline with memory interfaces")
+            contracts.append(
+                BehavioralStatement(
+                    given="reset is released",
+                    when="instructions are fetched",
+                    then="the processor updates PC, register file, and memory interface according to the selected ISA subset",
+                    within="pipeline latency",
+                )
+            )
         if "watchdog" in desc:
             add_port("watchdog_reset_req", "output", "logic", "Watchdog timeout reset request")
             add_submodule("watchdog_timer", "Configurable watchdog counter with kick and timeout")
@@ -1303,6 +1394,44 @@ Return ONLY this JSON (no markdown, no commentary):
             add_submodule(
                 "converter_controller",
                 "Digital sampled-data converter control/status interface for a hard macro or off-chip converter",
+            )
+        if "alu" in desc or "arithmetic logic unit" in desc:
+            add_port("opcode", "input", "logic [3:0]", "ALU operation selector")
+            add_port("operand_a", "input", "logic [31:0]", "First ALU operand")
+            add_port("operand_b", "input", "logic [31:0]", "Second ALU operand")
+            add_port("result", "output", "logic [31:0]", "Registered ALU result")
+            add_port("valid", "output", "logic", "Result valid for supported opcode")
+            add_submodule(
+                "alu_block",
+                "Opcode-decoded arithmetic/logic datapath with registered result and valid outputs",
+            )
+            contracts.extend(
+                [
+                    BehavioralStatement(
+                        given="opcode is 4'b0000",
+                        when="operands are sampled",
+                        then="result equals operand_a plus operand_b and valid is high",
+                        within="1 cycle",
+                    ),
+                    BehavioralStatement(
+                        given="opcode is 4'b0001",
+                        when="operands are sampled",
+                        then="result equals operand_a minus operand_b and valid is high",
+                        within="1 cycle",
+                    ),
+                    BehavioralStatement(
+                        given="opcode selects AND, OR, XOR, logical left shift, or logical right shift",
+                        when="operands are sampled",
+                        then="result matches the selected operation and valid is high",
+                        within="1 cycle",
+                    ),
+                    BehavioralStatement(
+                        given="opcode is unsupported",
+                        when="operands are sampled",
+                        then="result is zero and valid is low",
+                        within="1 cycle",
+                    ),
+                ]
             )
 
         return HardwareSpec(

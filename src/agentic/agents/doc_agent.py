@@ -1,6 +1,6 @@
 # agents/doc_agent.py
 from crewai import Agent
-from ..tools.retrieval_tool import vlsi_search, vlsi_ask
+from ..tools.vlsi_tools import read_file_tool
 
 
 def get_doc_agent(llm, verbose=False):
@@ -23,5 +23,5 @@ def get_doc_agent(llm, verbose=False):
         llm=llm,
         verbose=verbose,
         allow_delegation=False,
-        tools=[vlsi_search, vlsi_ask]
+        tools=[read_file_tool]
     )

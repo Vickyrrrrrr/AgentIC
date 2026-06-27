@@ -76,6 +76,55 @@ def _resolve_binary(bin_hint: str) -> str:
     return bin_hint
 
 
+_VERILATOR_FLAG_SUPPORT: Dict[str, bool] = {}
+
+
+def _verilator_bin() -> str:
+    return _resolve_binary(VERILATOR_BIN or "verilator")
+
+
+def _verilator_supports_flag(flag: str) -> bool:
+    """Return whether the configured Verilator advertises support for a flag."""
+    if flag in _VERILATOR_FLAG_SUPPORT:
+        return _VERILATOR_FLAG_SUPPORT[flag]
+    try:
+        completed = subprocess.run(
+            [_verilator_bin(), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        help_text = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        supported = flag in help_text
+    except Exception:
+        supported = False
+    _VERILATOR_FLAG_SUPPORT[flag] = supported
+    return supported
+
+
+def _verilator_cmd(*args: str, timing: bool = True) -> List[str]:
+    cmd = [_verilator_bin(), *args]
+    if timing and _verilator_supports_flag("--timing") and "--timing" not in cmd:
+        insert_at = len(cmd)
+        for index, arg in enumerate(cmd):
+            if arg.startswith("-W") or arg.startswith("-I") or arg.endswith((".v", ".sv")):
+                insert_at = index
+                break
+        cmd.insert(insert_at, "--timing")
+    return cmd
+
+
+def _run_verilator(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    """Run Verilator and retry once without --timing if this binary rejects it."""
+    completed = subprocess.run(cmd, **kwargs)
+    output = (completed.stderr or "") + "\n" + (completed.stdout or "")
+    if completed.returncode != 0 and "--timing" in cmd and "Invalid option: --timing" in output:
+        _VERILATOR_FLAG_SUPPORT["--timing"] = False
+        fallback = [arg for arg in cmd if arg != "--timing"]
+        completed = subprocess.run(fallback, **kwargs)
+    return completed
+
+
 def _build_tool_result(
     tool: str,
     *,
@@ -135,6 +184,81 @@ def _extract_sv_module_blocks(code: str) -> Dict[str, str]:
     return blocks
 
 
+def _extract_sv_module_defs_by_file(paths: List[str]) -> Dict[str, List[Dict[str, str]]]:
+    """Return module definitions keyed by module name with source-file context."""
+    defs: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for path in paths:
+        try:
+            with open(path, "r") as f:
+                code = f.read()
+        except OSError:
+            continue
+        for match in re.finditer(
+            r"\bmodule\s+([A-Za-z_]\w*)\b[\s\S]*?\bendmodule\b",
+            code,
+            flags=re.MULTILINE,
+        ):
+            defs[match.group(1)].append(
+                {
+                    "file": path,
+                    "module": match.group(1),
+                    "code": match.group(0),
+                }
+            )
+    return defs
+
+
+def _disabled_duplicate_path(path: str) -> str:
+    base = f"{path}.duplicate_disabled"
+    if not os.path.exists(base):
+        return base
+    counter = 1
+    while True:
+        candidate = f"{base}.{counter}"
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1
+
+
+def quarantine_duplicate_top_modules(design_name: str, rtl_path: str) -> List[str]:
+    """Disable stale alternate files that define the same top module.
+
+    The flow writes one authoritative top RTL file, but generated workspaces can
+    contain older candidates such as ``<design>top.sv`` or combined dumps. Since
+    Verilator compiles every ``.v``/``.sv`` in ``src/``, stale top definitions
+    produce MODDUP before the real RTL can be checked. We quarantine only files
+    that define the top module and are not the current authoritative top file.
+    """
+    if not design_name or not rtl_path:
+        return []
+    src_dir = os.path.dirname(rtl_path)
+    if not src_dir or not os.path.isdir(src_dir):
+        return []
+
+    primary = os.path.abspath(rtl_path)
+    rtl_files = _collect_design_rtl(src_dir)
+    defs_by_module = _extract_sv_module_defs_by_file(rtl_files)
+    top_defs = defs_by_module.get(design_name, [])
+    if len(top_defs) <= 1:
+        return []
+    if not any(os.path.abspath(entry["file"]) == primary for entry in top_defs):
+        return []
+
+    moved: List[str] = []
+    for entry in top_defs:
+        path = os.path.abspath(entry["file"])
+        if path == primary:
+            continue
+        disabled = _disabled_duplicate_path(path)
+        try:
+            os.replace(path, disabled)
+            moved.append(disabled)
+        except OSError:
+            # Leave the file in place; the syntax gate will report MODDUP.
+            continue
+    return moved
+
+
 def _extract_sv_module_ports(module_code: str) -> set[str]:
     clean = _strip_sv_comments(module_code)
     header = ""
@@ -154,12 +278,20 @@ def _extract_sv_module_ports(module_code: str) -> set[str]:
         decl = re.sub(r"\b(?:wire|reg|logic|signed|unsigned)\b", " ", decl)
         decl = re.sub(r"\[[^\]]+\]", " ", decl)
         for item in decl.split(","):
-            name_match = re.search(r"\b([A-Za-z_]\w*)\b\s*(?:=.*)?$", item.strip())
+            item = item.strip()
+            # Strip trailing ) that bleeds in from ANSI module header closing paren
+            # e.g. "output logic [7:0] reg_out_b\n)" -> "output logic [7:0] reg_out_b"
+            # Without this, the last port of every ANSI-style module is silently dropped
+            # because the name-extraction regex cannot match past trailing ).
+            item = item.rstrip(")")
+            name_match = re.search(r"\b([A-Za-z_]\w*)\b\s*(?:=.*)?$", item)
             if name_match:
                 ports.add(name_match.group(1))
     if not ports and header:
         for item in header.split(","):
-            name_match = re.search(r"\b([A-Za-z_]\w*)\b\s*(?:=.*)?$", item.strip())
+            item = item.strip()
+            item = item.rstrip(")")
+            name_match = re.search(r"\b([A-Za-z_]\w*)\b\s*(?:=.*)?$", item)
             if name_match:
                 ports.add(name_match.group(1))
     return ports
@@ -207,6 +339,20 @@ def validate_rtl_hierarchy_contract(
             )
 
     combined = "\n".join(combined_parts)
+    defs_by_module = _extract_sv_module_defs_by_file(rtl_files)
+    for module_name, defs in sorted(defs_by_module.items()):
+        if len(defs) > 1:
+            report["issues"].append(
+                {
+                    "code": "duplicate_module",
+                    "module": module_name,
+                    "files": [item["file"] for item in defs],
+                    "message": (
+                        f"Module '{module_name}' is defined in multiple RTL files: "
+                        + ", ".join(os.path.basename(item["file"]) for item in defs)
+                    ),
+                }
+            )
     module_blocks = _extract_sv_module_blocks(combined)
     module_ports = {
         name: _extract_sv_module_ports(block) for name, block in module_blocks.items()
@@ -222,28 +368,15 @@ def validate_rtl_hierarchy_contract(
         )
 
     primitive_or_keyword = {
-        "assign",
-        "always",
-        "always_comb",
-        "always_ff",
-        "always_latch",
-        "and",
-        "or",
-        "xor",
-        "xnor",
-        "nand",
-        "nor",
-        "not",
-        "buf",
-        "if",
-        "for",
-        "case",
-        "generate",
-        "begin",
-        "endmodule",
+        "assign", "always", "always_comb", "always_ff", "always_latch",
+        "and", "or", "xor", "xnor", "nand", "nor", "not", "buf",
+        "if", "else", "for", "while", "do", "repeat", "forever",
+        "case", "casex", "casez", "generate", "begin", "end", "endcase", "endgenerate",
+        "function", "task", "return", "break", "continue", "initial", "final",
+        "endmodule", "assert", "assume", "cover", "property"
     }
     inst_re = re.compile(
-        r"^\s*([A-Za-z_]\w*)\s*(?:#\s*\([\s\S]*?\)\s*)?([A-Za-z_]\w*)\s*\(([\s\S]*?)\)\s*;",
+        r"^\s*([A-Za-z_]\w*)\s*(?:#\s*\([^;]*?\)\s*)?([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*;",
         flags=re.MULTILINE,
     )
 
@@ -778,15 +911,26 @@ def write_verilog(
             if len(modules) > 1:
                 # If multiple modules exist, write them to separate files
                 src_dir = os.path.dirname(path)
+                top_module_found = False
                 for mod_code, mod_name in modules:
                     mod_path = os.path.join(src_dir, f"{mod_name}.v")
+                    # CRITICAL: Don't let a sub-module accidentally overwrite the top-level file.
+                    # If a sub-module has the same name as the design, direct it to a suffixed file.
+                    if mod_name == design_name and mod_path != path:
+                        # This is NOT the top-level (it would be written to path), so use suffix
+                        mod_path = os.path.join(src_dir, f"{mod_name}_sub.v")
+                    if mod_name == design_name:
+                        top_module_found = True
                     with open(mod_path, "w") as f:
                         f.write(mod_code + "\n")
 
-                # Make sure the requested path exists so syntax check doesn't fail
-                if not os.path.exists(path):
-                    with open(path, "w") as f:
-                        f.write(f"// Main module {design_name} likely defined in other files\n")
+                # CRITICAL: If the fixer's output didn't include the top-level module,
+                # do NOT write a stub file. The existing top-level file on disk is still valid.
+                # Previously this code wrote a comment stub which caused the pipeline to fail
+                # with "missing top module" errors.
+                if not top_module_found and not os.path.exists(path):
+                    # Top module truly missing — keep the existing file if it exists
+                    pass
             else:
                 with open(path, "w") as f:
                     f.write(clean_code)
@@ -847,24 +991,25 @@ def run_syntax_check(file_path: str) -> tuple:
     rtl_files = _collect_design_rtl(src_dir)
     if file_path not in rtl_files:
         rtl_files.append(file_path)
+    top_module = os.path.splitext(os.path.basename(file_path))[0]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, rtl_files)
-        cmd = ["verilator", "--lint-only", "--sv", "--timing", "-Wno-fatal"] + [
+        cmd = _verilator_cmd("--lint-only", "--sv", "-Wno-fatal", "--top-module", top_module) + [
             os.path.basename(_stage_path(path, staged_map)) for path in rtl_files
         ]
         try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            completed = _run_verilator(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
             
             output_text = (completed.stderr or "") + "\n" + (completed.stdout or "")
             is_ok = completed.returncode == 0
             
             # Autonomous Formal Verification Error Healing:
             # Upgrade critical structural warnings to fatal errors so RTL_FIX catches them.
-            critical_warnings = ["%Warning-WIDTH", "%Warning-PINMISSING", "%Warning-WIDTHTRUNC", "%Warning-WIDTHEXPAND"]
+            critical_warnings = ("%Warning-PINMISSING:", "%Warning-WIDTHTRUNC:")
             if is_ok:
-                for cw in critical_warnings:
-                    if cw in output_text:
+                for line in output_text.splitlines():
+                    if line.strip().startswith(critical_warnings):
                         is_ok = False
                         break
 
@@ -902,28 +1047,29 @@ def run_lint_check(file_path: str) -> tuple:
     rtl_files = _collect_design_rtl(src_dir)
     if file_path not in rtl_files:
         rtl_files.append(file_path)
+    top_module = os.path.splitext(os.path.basename(file_path))[0]
 
     # --sv: force SystemVerilog parsing (critical for typedef, logic, always_comb)
     # -Wno-fatal: don't exit on warnings — let us separate real errors from warnings
     # Suppress informational warnings that are not bugs:
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, rtl_files)
-        cmd = [
-            "verilator",
+        cmd = _verilator_cmd(
             "--lint-only",
             "--sv",
-            "--timing",
             "-I" + src_dir,
             "-Wno-fatal",
+            "--top-module",
+            top_module,
             "-Wno-UNUSED",
             "-Wno-PINMISSING",
             "-Wno-CASEINCOMPLETE",
             "-Wno-WIDTHEXPAND",
             "-Wno-WIDTHTRUNC",
-        ] + [os.path.basename(_stage_path(path, staged_map)) for path in rtl_files]
+        ) + [os.path.basename(_stage_path(path, staged_map)) for path in rtl_files]
 
         try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir)
+            completed = _run_verilator(cmd, capture_output=True, text=True, timeout=30, cwd=tmpdir)
             tool_result = _build_tool_result(
                 "verilator",
                 ok=completed.returncode == 0,
@@ -1081,16 +1227,14 @@ def run_semantic_rigor_check(file_path: str) -> Tuple[bool, Dict[str, Any]]:
         design_files.append(file_path)
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, design_files)
-        cmd = [
-            "verilator",
+        cmd = _verilator_cmd(
             "--lint-only",
             "--sv",
-            "--timing",
             "-Wall",
             *[os.path.basename(_stage_path(path, staged_map)) for path in design_files],
-        ]
+        )
         try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            completed = _run_verilator(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
             tool_ok = completed.returncode == 0
             tool_result = _build_tool_result(
                 "verilator",
@@ -1244,16 +1388,14 @@ def _collect_width_warnings(file_path: str) -> List[str]:
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, [file_path])
         staged_file = _stage_path(file_path, staged_map)
-        cmd = [
-            "verilator",
+        cmd = _verilator_cmd(
             "--lint-only",
             "--sv",
-            "--timing",
             "-Wall",
             os.path.basename(staged_file),
-        ]
+        )
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
+            result = _run_verilator(cmd, capture_output=True, text=True, timeout=60, cwd=tmpdir)
             stderr = _rewrite_temp_paths(result.stderr or "", staged_map)
             _assert_no_temp_paths(stderr, staged_map)
         except Exception:
@@ -2394,21 +2536,19 @@ def run_tb_compile_gate(
         all_rtl.append(rtl_path)
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, all_rtl + [tb_path])
-        cmd = [
-            "verilator",
+        cmd = _verilator_cmd(
             "--lint-only",
             "--sv",
-            "--timing",
             "-Wno-fatal",
             *[os.path.basename(_stage_path(path, staged_map)) for path in all_rtl],
             os.path.basename(_stage_path(tb_path, staged_map)),
             "--top-module",
             f"{design_name}_tb",
-        ]
+        )
         report["command"] = cmd
 
         try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=tmpdir)
+            completed = _run_verilator(cmd, capture_output=True, text=True, timeout=120, cwd=tmpdir)
         except subprocess.TimeoutExpired:
             report["timeout"] = True
             report["compile_output"] = "TB compile gate timed out (>120s)."
@@ -3118,13 +3258,11 @@ def run_simulation(design_name: str) -> tuple:
     rtl_files = _collect_design_rtl(src_dir)
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, rtl_files + [tb_file])
-        cmd = [
-            "verilator",
+        cmd = _verilator_cmd(
             "--binary",
             "--sv",
             "-j",
             "0",
-            "--timing",
             "--trace",
             "--assert",
             "-Wno-fatal",
@@ -3136,10 +3274,10 @@ def run_simulation(design_name: str) -> tuple:
             "obj_dir",
             "-o",
             "sim_exec",
-        ]
+        )
 
         try:
-            compile_result = subprocess.run(
+            compile_result = _run_verilator(
                 cmd,
                 capture_output=True,
                 text=True,
@@ -3697,6 +3835,20 @@ def run_openlane(
             "OpenLane GDS Layout features are temporarily disabled on the Hugging Face backend due to Docker-in-Docker isolation policies. Please rely on the 'rtl_and_verification_mode'.",
         )
 
+    # Auto-rotate run tag when the default "agentrun" already exists
+    if run_tag == "agentrun":
+        runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
+        agentrun_path = os.path.join(runs_dir, "agentrun")
+        if os.path.exists(agentrun_path):
+            existing = []
+            if os.path.isdir(runs_dir):
+                for entry in os.listdir(runs_dir):
+                    m = re.match(r"^agentrun_(\d+)$", entry)
+                    if m:
+                        existing.append(int(m.group(1)))
+            next_num = max(existing) + 1 if existing else 1
+            run_tag = f"agentrun_{next_num}"
+
     from ..config import PDK
     selected_pdk = pdk_name or PDK
     raw_backend = os.environ.get("AGENTIC_OPENLANE_BACKEND", "").strip().lower()
@@ -3999,20 +4151,21 @@ def run_gls_simulation(design_name: str) -> tuple:
     src_dir = f"{OPENLANE_ROOT}/designs/{design_name}/src"
     tb_file = f"{src_dir}/{design_name}_tb.v"
 
-    # Locating Netlist
-    run_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs/agentrun"
-    if not os.path.exists(run_dir):
-        # Fallback to latest run
-        runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
-        if os.path.exists(runs_dir):
-            runs_dirs = [
-                d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))
-            ]
-            if runs_dirs:
-                latest_run = max(
-                    runs_dirs, key=lambda d: os.path.getmtime(os.path.join(runs_dir, d))
-                )
-                run_dir = f"{runs_dir}/{latest_run}"
+    # Locating Netlist — prefer latest run by mtime
+    runs_dir = f"{OPENLANE_ROOT}/designs/{design_name}/runs"
+    if os.path.exists(runs_dir):
+        runs_dirs = [
+            d for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))
+        ]
+        if runs_dirs:
+            latest_run = max(
+                runs_dirs, key=lambda d: os.path.getmtime(os.path.join(runs_dir, d))
+            )
+            run_dir = f"{runs_dir}/{latest_run}"
+        else:
+            run_dir = f"{runs_dir}/agentrun"
+    else:
+        run_dir = f"{runs_dir}/agentrun"
 
     gl_netlist = f"{run_dir}/results/final/verilog/gl/{design_name}.v"
     sim_out = f"{src_dir}/gls_sim"
@@ -4062,6 +4215,7 @@ def run_gls_simulation(design_name: str) -> tuple:
                 "iverilog",
                 "-g2012",
                 "-DFUNCTIONAL",
+                "-DUSE_POWER_PINS",
                 "-DUNIT_DELAY=#1",
                 "-o",
                 sim_out,
@@ -4554,13 +4708,11 @@ def run_verilator_coverage(
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, rtl_files + [tb_file])
         cov_dat = os.path.join(tmpdir, "coverage.dat")
-        compile_cmd = [
-            "verilator",
+        compile_cmd = _verilator_cmd(
             "--binary",
             "--coverage",
             "--trace",
             "--sv",
-            "--timing",
             "-Wno-fatal",
             *[os.path.basename(_stage_path(path, staged_map)) for path in rtl_files],
             os.path.basename(_stage_path(tb_file, staged_map)),
@@ -4570,13 +4722,13 @@ def run_verilator_coverage(
             "obj_dir_cov",
             "-o",
             sim_exec,
-        ]
+        )
         run_cmd = [
             os.path.join(tmpdir, "obj_dir_cov", sim_exec),
             f"+verilator+coverage+file+{cov_dat}",
         ]
         try:
-            comp = subprocess.run(
+            comp = _run_verilator(
                 compile_cmd, capture_output=True, text=True, timeout=240, cwd=tmpdir
             )
         except FileNotFoundError:
@@ -5251,17 +5403,15 @@ def run_cdc_check(file_path: str) -> tuple:
     with tempfile.TemporaryDirectory() as tmpdir:
         staged_map = _stage_inputs(tmpdir, [file_path])
         staged_file = _stage_path(file_path, staged_map)
-        cmd = [
-            "verilator",
+        cmd = _verilator_cmd(
             "--lint-only",
-            "--timing",
             "-Wall",
             "-Wwarn-CDCRSTLOGIC",
             os.path.basename(staged_file),
-        ]
+        )
 
         try:
-            completed = subprocess.run(
+            completed = _run_verilator(
                 cmd,
                 capture_output=True,
                 text=True,

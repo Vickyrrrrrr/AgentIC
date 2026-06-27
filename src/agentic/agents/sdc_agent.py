@@ -1,6 +1,6 @@
 # agents/sdc_agent.py
 from crewai import Agent
-from ..tools.retrieval_tool import vlsi_search
+from ..tools.vlsi_tools import read_file_tool
 
 def get_sdc_agent(llm, goal, verbose=False):
     """
@@ -29,5 +29,5 @@ def get_sdc_agent(llm, goal, verbose=False):
         llm=llm,
         verbose=verbose,
         allow_delegation=False,
-        tools=[vlsi_search]
+        tools=[read_file_tool]
     )

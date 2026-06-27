@@ -7,7 +7,7 @@ Features:
 - Error classification and root cause analysis
 - Impact analysis (what could break)
 - Reasoning-first approach (think before fixing)
-- Surgical changes that preserve functionality
+- Local changes that preserve functionality
 
 The key philosophy:
 1. UNDERSTAND the error completely
@@ -88,7 +88,7 @@ class ErrorAnalysis:
     # Risk assessment
     side_effect_risks: List[str] = field(default_factory=list)
     fix_confidence: float = 0.5
-    is_surgical: bool = False
+    is_local_fix: bool = False
 
     # Error context
     error_line: str = ""
@@ -248,7 +248,7 @@ class IncrementalFixEngine:
     }
 
     # High confidence fix patterns
-    SURGICAL_PATTERNS = {
+    LOCAL_FIX_PATTERNS = {
         ErrorType.SYNTAX: True,
         ErrorType.UNDECLARED_SIGNAL: False,  # Need to understand usage
         ErrorType.WIDTH_MISMATCH: True,  # Usually straightforward
@@ -309,7 +309,7 @@ class IncrementalFixEngine:
 
         # Assess confidence
         analysis.fix_confidence = self._assess_fix_confidence(analysis)
-        analysis.is_surgical = self._is_surgical_fix(analysis)
+        analysis.is_local_fix = self._is_local_fix(analysis)
 
         return analysis
 
@@ -571,7 +571,7 @@ class IncrementalFixEngine:
 
         # Determine recommended strategy
         if analysis.fix_confidence > 0.8:
-            analysis.recommended_strategy = "surgical"
+            analysis.recommended_strategy = "local"
         elif analysis.fix_confidence > 0.6:
             analysis.recommended_strategy = "reasoned"
         else:
@@ -611,10 +611,10 @@ class IncrementalFixEngine:
 
         return min(confidence, 0.95)
 
-    def _is_surgical_fix(self, analysis: ErrorAnalysis) -> bool:
-        """Determine if this is a surgical (safe) fix."""
-        if analysis.error_type in self.SURGICAL_PATTERNS:
-            return self.SURGICAL_PATTERNS[analysis.error_type]
+    def _is_local_fix(self, analysis: ErrorAnalysis) -> bool:
+        """Determine if this is a local, low-risk fix."""
+        if analysis.error_type in self.LOCAL_FIX_PATTERNS:
+            return self.LOCAL_FIX_PATTERNS[analysis.error_type]
 
         return len(analysis.modules_affected) <= 1 and len(analysis.signals_affected) <= 2
 
