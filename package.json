@@ -1,0 +1,65 @@
+{
+  "name": "agentic-vlsi",
+  "version": "1.0.0",
+  "description": "AgentIC — Autonomous AI chip design agents as importable TypeScript modules",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types/index.js",
+      "types": "./dist/types/index.d.ts"
+    },
+    "./llm": {
+      "import": "./dist/llm/index.js",
+      "types": "./dist/llm/index.d.ts"
+    },
+    "./eda": {
+      "import": "./dist/eda/index.js",
+      "types": "./dist/eda/index.d.ts"
+    },
+    "./stages": {
+      "import": "./dist/stages/index.js",
+      "types": "./dist/stages/index.d.ts"
+    },
+    "./agents": {
+      "import": "./dist/agents/index.js",
+      "types": "./dist/agents/index.d.ts"
+    },
+    "./orchestrator": {
+      "import": "./dist/orchestrator/index.js",
+      "types": "./dist/orchestrator/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "chip-design",
+    "vlsi",
+    "eda",
+    "ai",
+    "llm",
+    "verilog",
+    "silicon",
+    "rtl",
+    "synthesis",
+    "tscircuit"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "openai": "^4.73.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
