@@ -13,14 +13,8 @@ import {
   runSimulation,
   runSyntaxCheck,
 } from "../eda/index.js";
-import type {
-  BuildContext,
-  HardwareSpec,
-  StageResult,
-  StageStatus,
-  FailureClass,
-  BuildStrategy,
-} from "../types/index.js";
+import { StageStatus, FailureClass, BuildStrategy } from "../types/index.js";
+import type { BuildContext, HardwareSpec, StageResult } from "../types/index.js";
 import { join } from "node:path";
 
 export interface TbGenInput {

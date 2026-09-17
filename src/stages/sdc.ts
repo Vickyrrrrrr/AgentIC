@@ -7,13 +7,8 @@
 import { LlmClient } from "../llm/index.js";
 import { getSdcRole } from "../agents/index.js";
 import { writeVerilog } from "../eda/index.js";
-import type {
-  BuildContext,
-  HardwareSpec,
-  StageResult,
-  StageStatus,
-  FailureClass,
-} from "../types/index.js";
+import { StageStatus, FailureClass } from "../types/index.js";
+import type { BuildContext, HardwareSpec, StageResult } from "../types/index.js";
 import { join } from "node:path";
 
 export interface SdcGenInput {

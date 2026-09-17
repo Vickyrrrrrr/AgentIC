@@ -5,7 +5,7 @@
  * and tool list. An AI harness can use these to configure any LLM client.
  */
 
-import type { BuildStrategy } from "../types/index.js";
+import { BuildStrategy } from "../types/index.js";
 
 export interface AgentRole {
   name: string;

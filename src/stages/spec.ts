@@ -6,6 +6,7 @@
  */
 
 import { LlmClient } from "../llm/index.js";
+import { StageStatus, FailureClass } from "../types/index.js";
 import type {
   BuildContext,
   HardwareSpec,
@@ -13,8 +14,6 @@ import type {
   SubModuleSpec,
   BehavioralStatement,
   StageResult,
-  StageStatus,
-  FailureClass,
   DesignCategory,
 } from "../types/index.js";
 
@@ -111,7 +110,7 @@ Preserve requested widths, reset style, timers, watchdogs, buses, muxing, and st
     };
   }
 
-  const spec = parseSpec(data, input.designName, category, targetPdk, input.description);
+  const spec = parseSpec(data as unknown as Record<string, unknown>, input.designName, category, targetPdk, input.description);
   return { spec, issues };
 }
 
