@@ -1,0 +1,42 @@
+# DeepSeek Harness configuration for AgentIC VLSI Plugin
+# Place this in project root for DSH to discover the VLSI tools
+
+name: agentic-vlsi-harness
+version: 1.0.0
+
+plugins:
+  - name: dsh-plugin-vlsi
+    path: ./plugins/dsh-plugin-vlsi
+    enabled: true
+    config:
+      default_pdk: sky130
+      max_retries: 3
+      workspace: ./workspace
+
+tools:
+  registry:
+    - generate_spec
+    - generate_rtl
+    - generate_testbench
+    - generate_sdc
+    - run_synthesis
+    - run_timing_analysis
+    - run_drc
+    - run_lvs
+    - run_power_analysis
+    - run_signoff
+    - run_full_pipeline
+
+agent:
+  loop: default
+  max_iterations: 50
+  timeout_ms: 300000
+
+sandbox:
+  type: local
+  workspace: ./workspace
+  allow_network: true
+
+web:
+  port: 3080
+  host: 0.0.0.0

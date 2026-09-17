@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #334155 transparent;
+  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+  ::selection {
+    background: rgba(14, 165, 233, 0.3);
+    color: #f1f5f9;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-slate-900/80 backdrop-blur-xl border border-slate-700/50 rounded-xl;
+  }
+  .glass-panel-sm {
+    @apply bg-slate-900/60 backdrop-blur-lg border border-slate-700/40 rounded-lg;
+  }
+  .btn-primary {
+    @apply px-4 py-2 bg-chip-600 hover:bg-chip-500 text-white font-medium rounded-lg
+      transition-all duration-200 active:scale-[0.97] shadow-lg shadow-chip-600/20;
+  }
+  .btn-secondary {
+    @apply px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-lg
+      border border-slate-600/50 transition-all duration-200 active:scale-[0.97];
+  }
+  .btn-ghost {
+    @apply px-3 py-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60
+      rounded-lg transition-all duration-200;
+  }
+  .input-field {
+    @apply w-full px-3 py-2 bg-slate-800/80 border border-slate-700/60 rounded-lg
+      text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2
+      focus:ring-chip-500/40 focus:border-chip-500/60 transition-all duration-200;
+  }
+  .stage-node {
+    @apply px-4 py-3 rounded-xl border-2 font-medium text-sm transition-all duration-300;
+  }
+  .stage-pass {
+    @apply border-emerald-500/60 bg-emerald-500/10 text-emerald-300 shadow-lg shadow-emerald-500/10;
+  }
+  .stage-fail {
+    @apply border-red-500/60 bg-red-500/10 text-red-300 shadow-lg shadow-red-500/10;
+  }
+  .stage-running {
+    @apply border-amber-500/60 bg-amber-500/10 text-amber-300 shadow-lg shadow-amber-500/10 animate-pulse-slow;
+  }
+  .stage-pending {
+    @apply border-slate-600/60 bg-slate-800/40 text-slate-400;
+  }
+  .metric-card {
+    @apply glass-panel-sm p-4 flex flex-col gap-1;
+  }
+}
+
+.react-flow__node {
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+.react-flow__edge-path { stroke: #475569; stroke-width: 2; }
+.react-flow__edge.animated .react-flow__edge-path { stroke: #0ea5e9; }
+.react-flow__background { opacity: 0.4; }
