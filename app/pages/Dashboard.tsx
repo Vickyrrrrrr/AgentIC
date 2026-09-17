@@ -4,10 +4,10 @@ import {
   Cpu, Plus, Clock, CheckCircle2, XCircle, Loader2,
   Layers, Zap, ArrowRight, Trash2,
 } from "lucide-react";
-import { useDesigns, useDashboardStats } from "@app/lib/hooks";
-import { supabase } from "@app/lib/supabase";
-import type { Design } from "@app/lib/types";
-import { PDK_OPTIONS } from "@app/lib/types";
+import { useDesigns, useDashboardStats } from "../lib/hooks";
+import { supabase } from "../lib/supabase";
+import type { Design } from "../lib/types";
+import { PDK_OPTIONS } from "../lib/types";
 
 function timeAgo(date: string) {
   const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);

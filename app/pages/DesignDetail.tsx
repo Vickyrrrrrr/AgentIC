@@ -4,12 +4,12 @@ import {
   ArrowLeft, Play, Loader2, Code2, GitBranch, BarChart3,
   FileText, Terminal, Clock, Cpu, Zap, Layers,
 } from "lucide-react";
-import { useDesign, useAddRun, useUpdateDesign } from "@app/lib/hooks";
-import { PIPELINE_STAGES, type StageStatus } from "@app/lib/types";
-import PipelineGraph from "@app/components/PipelineGraph";
-import CodeEditor from "@app/components/CodeEditor";
-import MetricsPanel from "@app/components/MetricsPanel";
-import LogTerminal from "@app/components/LogTerminal";
+import { useDesign, useAddRun, useUpdateDesign } from "../lib/hooks";
+import { PIPELINE_STAGES, type StageStatus } from "../lib/types";
+import PipelineGraph from "../components/PipelineGraph";
+import CodeEditor from "../components/CodeEditor";
+import MetricsPanel from "../components/MetricsPanel";
+import LogTerminal from "../components/LogTerminal";
 
 const TABS = [
   { id: "rtl", label: "RTL Code", icon: Code2 },

@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Cpu, Zap, Layers, ChevronRight, Sparkles, Settings2, Play } from "lucide-react";
-import { useCreateDesign } from "@app/lib/hooks";
-import { PDK_OPTIONS } from "@app/lib/types";
-import CodeEditor from "@app/components/CodeEditor";
+import { useCreateDesign } from "../lib/hooks";
+import { PDK_OPTIONS } from "../lib/types";
+import CodeEditor from "../components/CodeEditor";
 
 const TEMPLATES = [
   { name: "uart_tx", desc: "UART transmitter with configurable baud rate", pdk: "sky130", clock: 50 },
